@@ -10,8 +10,8 @@
 //! in a single-window partial tail. It intentionally differs from the unpadded
 //! upstream example for non-hop-aligned input. One-sample inputs extend constantly;
 //! other short inputs use repeated reflection rather than PyTorch's rejecting pad.
-use super::AudioOutputs;
 use super::render::{ProgressReporter, check_cancel};
+use super::{AudioOutputs, ModelProvenance};
 use anyhow::{Context, Result, bail, ensure};
 use ort::session::{
     Session,
@@ -22,7 +22,7 @@ use ort::value::Tensor;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex, num_complex::Complex32};
 use rivu_audio as audio;
 use rivu_format::config::{NeuralConfig, NeuralDevice};
-use rivu_protocol::model::{ProcessingOperation, ProcessingPhase, ProcessingTaskStatus};
+use rivu_protocol::model::ProcessingPhase;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -690,13 +690,9 @@ pub(super) fn run(
     budget: Arc<audio::PcmBudget>,
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
-    status: &mut ProcessingTaskStatus,
+    provenance: &mut ModelProvenance,
 ) -> Result<AudioOutputs> {
     check_cancel(cancel)?;
-    ensure!(
-        status.operation == ProcessingOperation::Speech,
-        "Native speech engine cannot perform separation"
-    );
     ensure!(
         config.device == NeuralDevice::Cpu,
         "Native GTCRN/UL-UNAS support CPU only; no device fallback"
@@ -725,8 +721,8 @@ pub(super) fn run(
         .as_ref()
         .context("Missing native speech manifest")?;
     let (manifest, kind, model, hash) = load_bundle(path, cancel)?;
-    status.model_id = Some(manifest.id);
-    status.model_sha256 = Some(hash);
+    provenance.id = Some(manifest.id);
+    provenance.sha256 = Some(hash);
     progress.report(ProcessingPhase::Processing, 0, Some(input.frames()));
     check_cancel(cancel)?;
     if wet == 0.0 {

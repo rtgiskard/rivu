@@ -49,8 +49,8 @@ fn explicit_patch_keeps_backup_and_unrelated_native_items() {
         },
     )
     .unwrap();
-    assert!(report.changed);
-    assert_eq!(fs::read(report.backup_path.unwrap()).unwrap(), original);
+    assert!(report.changed());
+    assert_eq!(fs::read(report.backup_path().unwrap()).unwrap(), original);
     let parsed = Mp4File::read_from(
         &mut BufReader::new(File::open(&path).unwrap()),
         ParseOptions::new().read_properties(false),

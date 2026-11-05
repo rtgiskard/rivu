@@ -18,6 +18,16 @@ rather than maintaining independent authoritative library or playback state.
 Audio output and analysis have their own workers; transport and rendering stay
 outside the audio callback.
 
+Within Core, the playback-session owner keeps occurrence intent, navigation,
+source generations, listening retirement and unsaved selection together. A Load
+already accepted by audio is not undone when saving the selection fails; later
+database projections cannot overwrite that pending selection.
+Runtime preferences keep low-frequency settings, small live controls and the
+last successful save baseline separate. Volume, shuffle, repeat and device
+selection do not copy the processing graph. Apply and persistence materialize a
+complete configuration at the owner boundary; published configuration and
+playback sections are observations, not alternate preference writers.
+
 The root Rust crate is an application library for its own executable, not a
 stable embedding SDK. Storage transactions, mutable analysis publication, and
 frontend implementation modules are crate-internal capabilities. External
@@ -123,6 +133,10 @@ the aggregate of live subscriptions, subject to visualization enablement; comman
 clients cannot override it through a global analysis setter. Shared control changes,
 including first enablement and last-subscriber disconnect, notify disabled clients
 as well so they can retire obsolete capture identities.
+The device callback reads a fixed number of atomic notification hints, not the
+observer's retrying coherent snapshot. Enabling transitions also notify, so a
+concurrent false hint cannot suppress recovery; stable disabled capture does not
+produce continuing cursor wakeups. Observers still validate complete identities.
 Stream identity, applied intent, capture identity and sequence watermarks reject
 obsolete blocks. Missing sequences or explicit gaps break analysis continuity.
 Readers never pin slots: a writer may replace samples during direct observation.
@@ -196,6 +210,15 @@ retention are described in link:22_cache.adoc#window-local-query-retention[Resou
 This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
 
+Each TUI page and Details owns its demand, selection recovery and failed-read
+parking. A foreground coordinator submits only the visible demand, with a new
+ticket for every logical submission, including A→B→A and offset-only changes.
+One private read specification produces the query and borrowed demand in one
+direction; freshness comes from that actual query's stamp. Hidden pages invalidate
+without reading. Layout commits the viewport before input/read planning; drawing
+does not change retention or schedule I/O. Logical cancellation does not release
+the retained worker's physical query slot before its exchange retires.
+
 Processing task metadata is shared immutably across local snapshots; updates use
 copy-on-write, keeping older publications stable. Socket representation remains a
 task value. The TUI drops this unconsumed payload when merging state.
@@ -222,11 +245,11 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The command protocol is
-version 16, defined by `PROTOCOL_VERSION` in
+version 17, defined by `PROTOCOL_VERSION` in
 link:../crates/rivu-protocol/src/wire.rs[the wire contract]. Both peers must use
-matching protocol versions and positional wire schemas. Version 16 adds identified
-query cancellation and a separately selected processing section; restart Core and
-use matching clients after upgrading.
+matching protocol versions and positional wire schemas. Version 17 adds causal
+stopped-source identity and separates requested from resolved graph mode; restart
+Core and use matching clients after upgrading.
 The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema
@@ -449,6 +472,13 @@ Do not automatically repeat a mutation; inspect authoritative state or the outpu
 If startup timed out before its task ID arrived and reconciliation is unavailable,
 keep the result unknown rather than guessing that no task started.
 
+The GUI keeps command outcome and post-command observation separate in
+`CommandDelivery {ack, observation}`. Observation is `Refreshed`, `Unavailable` or
+`NotRequested`; an unavailable refresh never rewrites the owner's Ack or replays
+the command. Draft clearing, rebase, field writeback and undo require both fresh
+observation and the original editing identity. Shutdown needs only its admission
+Ack, not a state read from an already retiring instance.
+
 An acknowledgement's `processing_id` identifies processing work admitted by that
 command, not another active task. Cached graph audition and synchronous audition
 omit it; callers must not infer task creation from the command type alone.
@@ -498,6 +528,10 @@ tokens under one shared-state lock. Omitted sections preserve the client's
 previous values; the client advances tokens only for sections actually read,
 otherwise it could acknowledge an unseen change. Notifications coalesce to the
 latest state. A server restart requires a fresh Hello and state read.
+`ObservedState` binds its private payload and applied tokens to one instance.
+Its single apply operation advances only sections actually present in the response.
+GUI reads and merges are serialized together: a late Watch notification causes
+a fresh read under that same ordering boundary, not a merge of old payload.
 
 Configuration changes advance their own token and wake Watch even when runtime
 System fields are unchanged. Runtime progress does not materialize or transmit
@@ -560,6 +594,12 @@ refresh; rollback and no-op operations advance none. A refresh or worker-retirem
 failure cannot discard confirmed commit facts. Unknown outcomes keep database
 operations and final saves blocked until restart; they authorize neither prepared
 views nor automatic mutation replay.
+Scan saving records queue-selection persistence, library commit and playlist
+creation independently from prepared projections. A confirmed transaction can
+coexist with another transaction's unknown outcome; confirmation does not lift
+that isolation. Only an unconfirmed write interval becomes unknown on worker
+retirement. Failure while preparing a post-commit projection does not turn an
+already confirmed transaction into an unknown write.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
@@ -1215,6 +1255,11 @@ original/denoised/vocals/accompaniment/mix. System state exposes the latest
 unrelated latest-task field, and keep task IDs bound to the Hello instance.
 Settings and source identity are captured with the job; output status reports
 the models actually used. Retained output availability is session-bounded.
+Known model identity and verified provenance remain visible after inference
+failure, including per-node evidence for a multi-model graph. Processing Service
+owns retained availability and audition selection; published task data is a
+projection of those resources. A retained result followed by audition failure
+can have a failed operation receipt while its valid outputs remain available.
 `ProcessingOutputs` exposes boolean stem availability, not paths. Graph outputs
 identify their ports and optional causal `start_frame` context; PCM remains owned
 by the service and is never serialized into status. Only an explicit export
@@ -1235,9 +1280,11 @@ settings snapshot; graph changes use the revision-checked edit command.
 
 `ProcessingGraphRun {track_id, target: {node,port}, mode}` freezes source and graph
 revision. Default `auto` chooses supported realtime, hybrid, or offline execution;
-explicit modes reject unsupported plans. `settings.graph_mode` reports the actual
-mode, `graph_boundary` the actual hybrid prefix, and `graph_plan` native-rate
-latency/tail frames and admission/work estimates, not a deadline guarantee.
+explicit modes reject unsupported plans. `settings.graph_requested_mode` records
+the submitted mode; `settings.graph_mode` is absent until preparation resolves
+the actual mode. `graph_boundary` reports the actual hybrid prefix, and
+`graph_plan` native-rate latency/tail frames and admission/work estimates, not a
+deadline guarantee.
 Preparation runs on the processing worker, not Core or the device callback.
 Realtime tasks are `complete` when live-ready, without retained PCM; a nonplaying
 source opens paused/live-ready and cannot replace newer playback intent. Planning

@@ -2589,6 +2589,7 @@ mod content_menu_keyboard_tests {
                 playlist_id: 1,
                 track_ids: vec![1, 1, 1],
             }))
+            .ack
             .is_success()
         );
         let entries = || {

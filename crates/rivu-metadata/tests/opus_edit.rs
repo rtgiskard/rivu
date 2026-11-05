@@ -110,9 +110,9 @@ fn opus_edit_transaction_updates_tags_and_keeps_audio_and_original_backup() {
         },
     )
     .unwrap();
-    assert!(report.changed);
+    assert!(report.changed());
     assert_eq!(
-        std::fs::read(report.backup_path.unwrap()).unwrap(),
+        std::fs::read(report.backup_path().unwrap()).unwrap(),
         original
     );
     let saved = std::fs::read(&path).unwrap();

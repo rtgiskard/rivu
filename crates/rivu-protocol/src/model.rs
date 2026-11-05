@@ -404,6 +404,9 @@ pub struct PlaybackState {
     pub shuffle: bool,
     pub repeat: RepeatMode,
     pub seek_revision: u64,
+    /// Source physically closed by Core, independent of statistics persistence.
+    /// Absent for an unknown stop outcome; duplicate idle Stop preserves it.
+    pub stopped_source_generation: Option<u64>,
 }
 
 /// Identity of a task whose owner-committed terminal outcome can be awaited.
@@ -546,6 +549,7 @@ impl Default for PlaybackState {
             shuffle: false,
             repeat: RepeatMode::Off,
             seek_revision: 0,
+            stopped_source_generation: None,
         }
     }
 }

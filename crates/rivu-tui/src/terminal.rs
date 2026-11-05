@@ -218,6 +218,11 @@ where
             redraw = true;
             immediate_redraw = true;
         }
+        let size = terminal.size()?;
+        render::commit_layout(
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+            &mut tui.ui,
+        );
         if tui.ui.prepare_local_view(&tui.snapshot) {
             redraw = true;
             immediate_redraw = true;
@@ -237,7 +242,7 @@ where
             }
         }
         let submit = tui.ui.prepare_query_request(&tui.snapshot);
-        match tui.ui.requested.as_ref() {
+        match tui.ui.reads.requested.as_ref() {
             Some(request) if submit => queries.request(request.clone()),
             None => queries.cancel(),
             _ => {}
@@ -272,10 +277,10 @@ where
                             tui.snapshot.clone()
                         }
                         action @ (KeyAction::Command(_) | KeyAction::Shutdown) => {
-                            let command = match action {
-                                KeyAction::Command(command) => command.into(),
-                                KeyAction::Shutdown => rivu_protocol::AppCommand::Shutdown,
-                                _ => unreachable!(),
+                            let command = if let KeyAction::Command(command) = action {
+                                command.into()
+                            } else {
+                                rivu_protocol::AppCommand::Shutdown
                             };
                             let queued = commands
                                 .sender

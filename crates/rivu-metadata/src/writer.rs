@@ -21,10 +21,80 @@ pub struct TagPatch {
     pub album: Option<String>,
 }
 #[derive(Clone, Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EditOutcome {
+    Unchanged,
+    Replaced { backup_path: PathBuf },
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct EditReport {
     pub path: PathBuf,
-    pub backup_path: Option<PathBuf>,
-    pub changed: bool,
+    #[serde(flatten)]
+    pub outcome: EditOutcome,
+}
+
+impl EditReport {
+    pub fn changed(&self) -> bool {
+        matches!(self.outcome, EditOutcome::Replaced { .. })
+    }
+    pub fn backup_path(&self) -> Option<&Path> {
+        match &self.outcome {
+            EditOutcome::Unchanged => None,
+            EditOutcome::Replaced { backup_path } => Some(backup_path),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EditFailureOutcome {
+    BeforeReplace { backup_path: Option<PathBuf> },
+    ReplacedDurabilityUnknown { backup_path: PathBuf },
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditFailure {
+    pub path: PathBuf,
+    #[serde(flatten)]
+    pub outcome: EditFailureOutcome,
+    #[serde(serialize_with = "serialize_edit_error")]
+    error: anyhow::Error,
+}
+
+fn serialize_edit_error<S: serde::Serializer>(
+    error: &anyhow::Error,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&format!("{error:#}"))
+}
+
+impl std::fmt::Display for EditFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {:#}", self.path.display(), self.error)?;
+        match &self.outcome {
+            EditFailureOutcome::BeforeReplace { backup_path } => {
+                write!(f, "; source was not replaced")?;
+                if let Some(path) = backup_path {
+                    write!(f, "; retained original backup: {}", path.display())?;
+                }
+            }
+            EditFailureOutcome::ReplacedDurabilityUnknown { backup_path } => {
+                write!(
+                    f,
+                    "; source was replaced, but crash durability is unknown; original backup: {}; inspect source and backup before any retry or rescan",
+                    backup_path.display()
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for EditFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 enum NativeTag {
@@ -199,7 +269,31 @@ fn validate(path: &Path, file: &File, original: &Metadata) -> Result<()> {
 /// Edit only title/artist/album in a concrete native tag. The source is never
 /// opened for writing: a same-directory temporary copy is edited, synced and
 /// atomically replaced only after an independent, synced backup has been kept.
-pub fn edit_file(path: &Path, patch: &TagPatch) -> Result<EditReport> {
+pub fn edit_file(path: &Path, patch: &TagPatch) -> std::result::Result<EditReport, EditFailure> {
+    edit_file_with_sync(path, patch, |directory| {
+        directory.sync_all().map_err(Into::into)
+    })
+}
+
+pub(crate) fn edit_file_with_sync(
+    path: &Path,
+    patch: &TagPatch,
+    sync_directory: impl Fn(&File) -> Result<()>,
+) -> std::result::Result<EditReport, EditFailure> {
+    let mut outcome = EditFailureOutcome::BeforeReplace { backup_path: None };
+    edit_file_inner(path, patch, &mut outcome, sync_directory).map_err(|error| EditFailure {
+        path: path.to_owned(),
+        outcome,
+        error,
+    })
+}
+
+fn edit_file_inner(
+    path: &Path,
+    patch: &TagPatch,
+    outcome: &mut EditFailureOutcome,
+    sync_directory: impl Fn(&File) -> Result<()>,
+) -> Result<EditReport> {
     let original_path = fs::symlink_metadata(path).context("Inspecting metadata edit source")?;
     ensure!(
         original_path.is_file()
@@ -236,8 +330,7 @@ pub fn edit_file(path: &Path, patch: &TagPatch) -> Result<EditReport> {
         validate(&target, &file, &original)?;
         return Ok(EditReport {
             path: path.to_owned(),
-            backup_path: None,
-            changed: false,
+            outcome: EditOutcome::Unchanged,
         });
     }
     file.rewind()?;
@@ -294,8 +387,11 @@ pub fn edit_file(path: &Path, patch: &TagPatch) -> Result<EditReport> {
     backup.as_file().sync_all()?;
     validate(&target, &file, &original)?;
     let (_, backup_path) = backup.keep().context("Keeping original metadata backup")?;
+    *outcome = EditFailureOutcome::BeforeReplace {
+        backup_path: Some(backup_path.clone()),
+    };
     let directory = File::open(&parent)?;
-    directory.sync_all().with_context(|| {
+    sync_directory(&directory).with_context(|| {
         format!(
             "Syncing original backup before replacement: {}",
             backup_path.display()
@@ -308,7 +404,10 @@ pub fn edit_file(path: &Path, patch: &TagPatch) -> Result<EditReport> {
             backup_path.display()
         )
     })?;
-    directory.sync_all().with_context(|| {
+    *outcome = EditFailureOutcome::ReplacedDurabilityUnknown {
+        backup_path: backup_path.clone(),
+    };
+    sync_directory(&directory).with_context(|| {
         format!(
             "Metadata source replaced but directory sync failed; original backup: {}",
             backup_path.display()
@@ -316,8 +415,7 @@ pub fn edit_file(path: &Path, patch: &TagPatch) -> Result<EditReport> {
     })?;
     Ok(EditReport {
         path: path.to_owned(),
-        backup_path: Some(backup_path),
-        changed: true,
+        outcome: EditOutcome::Replaced { backup_path },
     })
 }
 

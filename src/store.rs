@@ -6,6 +6,7 @@
 mod admission;
 mod albums;
 mod cache;
+mod catalog;
 mod collections;
 mod duplicates;
 mod playlists;
@@ -21,10 +22,11 @@ use rusqlite::Connection;
 use std::cell::RefCell;
 
 pub(crate) use cache::CountDomain;
+pub(crate) use catalog::CatalogChanges;
 pub(crate) use duplicates::PreparedRelocation;
 #[cfg(test)]
 pub(crate) use duplicates::RelocationIdentity;
-pub(crate) use scan::{ScanImpacts, TrackIdentity};
+pub(crate) use scan::TrackIdentity;
 pub(crate) use tracks::PlaybackSource;
 
 pub(crate) struct Store {
@@ -231,7 +233,11 @@ impl Store {
         *self.duplicate_group_count_cache.borrow_mut() = None;
     }
 
-    pub(crate) fn invalidate_scan_caches(&self, impacts: ScanImpacts, playlist_created: bool) {
+    pub(crate) fn invalidate_catalog_caches(
+        &self,
+        impacts: CatalogChanges,
+        playlist_created: bool,
+    ) {
         let dependencies = impacts.dependencies(playlist_created);
         if dependencies.clear_track_cache {
             self.track_cache.borrow_mut().entries.clear();

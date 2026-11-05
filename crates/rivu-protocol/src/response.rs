@@ -86,28 +86,6 @@ impl StateRevisions {
             processing: self.processing != previous.processing,
         }
     }
-
-    /// Advance only sections actually read; other tokens may refer to unseen changes.
-    pub fn apply_sections(&mut self, current: Self, sections: StateSections) {
-        if sections.playback {
-            self.playback = current.playback;
-        }
-        if sections.queue {
-            self.queue = current.queue;
-        }
-        if sections.library {
-            self.library = current.library;
-        }
-        if sections.system {
-            self.system = current.system;
-        }
-        if sections.configuration {
-            self.configuration = current.configuration;
-        }
-        if sections.processing {
-            self.processing = current.processing;
-        }
-    }
 }
 
 /// A playlist's content/lifetime token, independent of the summary catalog.
@@ -332,32 +310,78 @@ impl StateResponse {
             processing: self.processing.is_some(),
         }
     }
+}
 
-    pub fn apply_to(self, state: &mut ClientSnapshot) {
-        if let Some(section) = self.playback {
+/// A client's applied payload and freshness tokens share one instance boundary.
+/// Announced tokens never acknowledge sections that have not actually been read.
+#[derive(Clone, Debug)]
+pub struct ObservedState {
+    instance_id: u32,
+    snapshot: ClientSnapshot,
+    applied: StateRevisions,
+}
+
+impl ObservedState {
+    pub fn new(instance_id: u32) -> Self {
+        Self {
+            instance_id,
+            snapshot: ClientSnapshot::default(),
+            applied: StateRevisions::default(),
+        }
+    }
+
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
+    }
+
+    pub fn snapshot(&self) -> &ClientSnapshot {
+        &self.snapshot
+    }
+
+    pub fn applied(&self) -> StateRevisions {
+        self.applied
+    }
+
+    /// Apply only a response read from this instance. Callers must serialize the
+    /// complete read-and-apply operation; tokens are opaque, not ordered clocks.
+    pub fn apply(&mut self, instance_id: u32, response: StateResponse) -> bool {
+        if self.instance_id != instance_id {
+            return false;
+        }
+        let current = response.revisions;
+        let state = &mut self.snapshot;
+        let applied = &mut self.applied;
+        if let Some(section) = response.playback {
             state.playback = section.playback;
             if state.current_track != section.current_track {
                 state.current_track = section.current_track;
             }
             state.source_generation = section.source_generation;
             state.processing_audition = section.processing_audition;
+            applied.playback = current.playback;
         }
-        if let Some(section) = self.queue {
+        if let Some(section) = response.queue {
             state.queue = section;
+            applied.queue = current.queue;
         }
-        if let Some(section) = self.library {
+        if let Some(section) = response.library {
             state.library = section;
+            applied.library = current.library;
         }
-        if let Some(mut section) = self.system {
+        if let Some(mut section) = response.system {
             section.processing = state.system.processing.take();
             state.system = section;
+            applied.system = current.system;
         }
-        if let Some(section) = self.configuration {
+        if let Some(section) = response.configuration {
             state.configuration = section;
+            applied.configuration = current.configuration;
         }
-        if let Some(section) = self.processing {
+        if let Some(section) = response.processing {
             state.system.processing = section.task;
+            applied.processing = current.processing;
         }
+        true
     }
 }
 
@@ -418,13 +442,18 @@ mod tests {
 
     #[test]
     fn partial_read_does_not_acknowledge_unread_concurrent_changes() {
-        let mut applied = StateRevisions {
+        let applied = StateRevisions {
             playback: 1,
             queue: 1,
             library: 1,
             system: 1,
             configuration: 1,
             processing: 1,
+        };
+        let mut observed = ObservedState {
+            instance_id: 7,
+            snapshot: ClientSnapshot::default(),
+            applied,
         };
         let notified = StateRevisions {
             playback: 2,
@@ -449,13 +478,11 @@ mod tests {
             ..StateResponse::default()
         };
         assert_eq!(response.sections(), requested);
-        applied.apply_sections(response.revisions, response.sections());
-        let mut snapshot = ClientSnapshot::default();
         let next = response.revisions;
-        response.apply_to(&mut snapshot);
-        assert_eq!(snapshot.playback.position, 8.0);
+        assert!(observed.apply(7, response));
+        assert_eq!(observed.snapshot().playback.position, 8.0);
         assert_eq!(
-            next.changed_since(applied),
+            next.changed_since(observed.applied()),
             StateSections {
                 queue: true,
                 ..StateSections::default()
@@ -465,11 +492,21 @@ mod tests {
 
     #[test]
     fn runtime_and_configuration_reads_preserve_omitted_state_and_unread_tokens() {
-        let mut snapshot = ClientSnapshot::default();
-        snapshot.configuration.config_path = "/existing/config.toml".into();
-        Arc::make_mut(&mut snapshot.configuration.config).query_batch_size = 37;
-        let retained_config = Arc::clone(&snapshot.configuration.config);
-        let mut applied = StateRevisions::default();
+        let mut observed = ObservedState::new(7);
+        observed.apply(
+            7,
+            StateResponse {
+                configuration: Some(ConfigurationState {
+                    config: Arc::new(rivu_format::config::Config {
+                        query_batch_size: 37,
+                        ..Default::default()
+                    }),
+                    config_path: "/existing/config.toml".into(),
+                }),
+                ..StateResponse::default()
+            },
+        );
+        let retained_config = Arc::clone(&observed.snapshot().configuration.config);
         let current = StateRevisions {
             system: 2,
             configuration: 3,
@@ -483,18 +520,17 @@ mod tests {
             }),
             ..StateResponse::default()
         };
-        applied.apply_sections(runtime.revisions, runtime.sections());
-        runtime.apply_to(&mut snapshot);
+        observed.apply(7, runtime);
         assert!(Arc::ptr_eq(
-            &snapshot.configuration.config,
+            &observed.snapshot().configuration.config,
             &retained_config
         ));
         assert_eq!(
-            snapshot.configuration.config_path,
+            observed.snapshot().configuration.config_path,
             std::path::Path::new("/existing/config.toml")
         );
         assert_eq!(
-            current.changed_since(applied),
+            current.changed_since(observed.applied()),
             StateSections {
                 configuration: true,
                 ..StateSections::default()
@@ -516,18 +552,60 @@ mod tests {
             ..StateResponse::default()
         };
         let next = configuration.revisions;
-        applied.apply_sections(next, configuration.sections());
-        configuration.apply_to(&mut snapshot);
-        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
+        observed.apply(7, configuration);
         assert_eq!(
-            snapshot.system.selected_device.as_deref(),
+            observed.snapshot().configuration.config.query_batch_size,
+            91
+        );
+        assert_eq!(
+            observed.snapshot().system.selected_device.as_deref(),
             Some("runtime output")
         );
         assert_eq!(
-            next.changed_since(applied),
+            next.changed_since(observed.applied()),
             StateSections {
                 system: true,
                 ..StateSections::default()
+            }
+        );
+    }
+
+    #[test]
+    fn missing_sections_and_previous_instance_never_advance_applied_state() {
+        let mut observed = ObservedState::new(8);
+        let revisions = StateRevisions {
+            queue: 9,
+            system: 6,
+            ..Default::default()
+        };
+        assert!(!observed.apply(
+            7,
+            StateResponse {
+                revisions,
+                system: Some(SystemState {
+                    last_error: Some("old instance".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert_eq!(observed.instance_id(), 8);
+        assert_eq!(observed.applied(), StateRevisions::default());
+        assert!(observed.snapshot().system.last_error.is_none());
+        assert!(observed.apply(
+            8,
+            StateResponse {
+                revisions,
+                ..Default::default()
+            }
+        ));
+        assert_eq!(observed.applied(), StateRevisions::default());
+        assert_eq!(
+            revisions.changed_since(observed.applied()),
+            StateSections {
+                queue: true,
+                system: true,
+                ..Default::default()
             }
         );
     }

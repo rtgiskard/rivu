@@ -334,8 +334,14 @@ pub(super) fn read_snapshot(
     state: &CoreState,
     query: &Query,
     maintenance: bool,
+    config: &Arc<Config>,
 ) -> QueryResponse {
-    ReadState::capture(state, query).read(store, query, maintenance)
+    ReadState {
+        config: Arc::clone(config),
+        revisions: state.query_revisions_for(query),
+        playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+    }
+    .read(store, query, maintenance)
 }
 
 impl ReadState {
@@ -866,7 +872,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        core.apply_scan_impacts(impacts).unwrap();
+        core.apply_catalog_changes(impacts).unwrap();
         core.publish();
     }
 
@@ -1207,7 +1213,13 @@ mod tests {
         let snapshot = Store::open_read_snapshot(&path).unwrap();
         let state = core.shared.read().clone();
         let query = Query::Track { track_id: 1 };
-        let before = read_snapshot(&snapshot, &state, &query, false);
+        let before = read_snapshot(
+            &snapshot,
+            &state,
+            &query,
+            false,
+            &state.configuration.config,
+        );
         assert!(
             matches!(&before.result, Ok(ViewResponse::Track(Some(track))) if track.title == "Track 1")
         );
@@ -1218,7 +1230,13 @@ mod tests {
             core.store.track(1).unwrap().unwrap().title,
             "New committed title"
         );
-        let pinned = read_snapshot(&snapshot, &state, &query, false);
+        let pinned = read_snapshot(
+            &snapshot,
+            &state,
+            &query,
+            false,
+            &state.configuration.config,
+        );
         assert_eq!(pinned.revisions, before.revisions);
         assert!(
             matches!(pinned.result, Ok(ViewResponse::Track(Some(track))) if track.title == "Track 1")
@@ -1226,7 +1244,7 @@ mod tests {
         drop(snapshot);
         let fresh = Store::open_read_snapshot(&path).unwrap();
         assert!(
-            matches!(read_snapshot(&fresh, &state, &query, false).result,
+            matches!(read_snapshot(&fresh, &state, &query, false, &state.configuration.config).result,
             Ok(ViewResponse::Track(Some(track))) if track.title == "New committed title")
         );
     }

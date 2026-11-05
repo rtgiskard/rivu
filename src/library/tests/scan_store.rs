@@ -27,7 +27,7 @@ fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Resu
             album: Some("Source album".into()),
         },
     )?;
-    assert!(report.changed);
+    assert!(report.changed());
     let cached = store.known_source(&audio)?.context("cached source")?;
     let known = [(audio.clone(), cached)];
     let rescanned = scan_paths(std::slice::from_ref(&root), &known, false)?;

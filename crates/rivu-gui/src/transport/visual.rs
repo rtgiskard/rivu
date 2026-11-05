@@ -220,19 +220,37 @@ impl VisualClient {
         drop(desired);
         let _ = self.notifications.try_send(());
     }
-    pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
+    /// Run only the local staging copy while all acceptance guards remain live.
+    /// The closure must not call renderers or re-enter this transport.
+    pub(crate) fn consume_current_analysis(
+        &self,
+        consume: impl FnOnce(&AnalysisFrame) -> bool,
+    ) -> bool {
+        let frame = self.analysis.read();
         let desired = self.state.desired.lock();
-        desired.demand.enabled
+        let current = self.state.current.read();
+        let accepted = desired.demand.enabled
             && desired.visualization_enabled
             && !self.state.stopped.load(Ordering::Acquire)
-            && self.state.current.read().is_some_and(|current| {
+            && current.is_some_and(|current| {
                 current.revision == desired.revision
                     && current.display_token == desired.display_token
                     && current.sequence == frame.sequence
                     && current.display_token == frame.display_token
                     && current.epoch == frame.audio_epoch
                     && current.intent == frame.audio_intent
-            })
+            });
+        accepted && consume(&frame)
+    }
+
+    #[cfg(test)]
+    fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
+        self.consume_current_analysis(|current| {
+            current.sequence == frame.sequence
+                && current.display_token == frame.display_token
+                && current.audio_epoch == frame.audio_epoch
+                && current.audio_intent == frame.audio_intent
+        })
     }
     pub(crate) fn set_wakeup(&self, callback: Wakeup) {
         *self.state.wakeup.write() = Some(callback);

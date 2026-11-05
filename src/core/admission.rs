@@ -14,7 +14,7 @@ pub(in crate::core) enum Event {
 pub(in crate::core) struct Saved {
     committed: bool,
     uncertain: bool,
-    impacts: Option<crate::store::ScanImpacts>,
+    impacts: Option<crate::store::CatalogChanges>,
     queue: Option<(usize, Result<QueueState>)>,
     track_total: Option<Result<usize>>,
     history: Option<Result<Vec<HistoryEntry>>>,
@@ -255,7 +255,7 @@ impl Core {
         let total = paths.len();
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
-        let ffmpeg_enabled = self.state.configuration.config.ffmpeg_enabled;
+        let ffmpeg_enabled = self.preferences.settings().ffmpeg_enabled;
         let (sender, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
         let workers = self.workers.clone();
@@ -429,7 +429,7 @@ impl Core {
             if !saved.uncertain
                 && let Some(impacts) = saved.impacts
             {
-                self.store.invalidate_scan_caches(impacts, false);
+                self.store.invalidate_catalog_caches(impacts, false);
             } else {
                 self.store.invalidate_caches();
             }
@@ -438,7 +438,7 @@ impl Core {
         // fails. Publish their tokens before isolating an uncertain outcome,
         // without reading or applying potentially stale view projections.
         if let Some(impacts) = saved.impacts {
-            self.invalidate_scan_impacts(impacts);
+            self.announce_catalog_changes(impacts);
         }
         if saved.uncertain {
             self.database_outcome_uncertain();
@@ -477,14 +477,14 @@ impl Core {
             }
         }
         if let Some(track) = saved.current_track {
-            let projection_stale = self.queue_projection_stale;
-            self.queue_projection_stale = true;
+            let projection_stale = self.transport.projection_stale;
+            self.transport.projection_stale = true;
             match track.and_then(|track| self.replace_current_track(track)) {
                 Ok(()) => {
                     // A failed scalar projection must remain gated even if
                     // the independently captured track snapshot is readable.
                     if !projection_stale {
-                        self.queue_projection_stale = false;
+                        self.transport.projection_stale = false;
                     }
                 }
                 Err(error) => errors.push(format!(
@@ -669,7 +669,7 @@ mod tests {
         });
         let mut saved = Saved::uncertain(anyhow::anyhow!("retirement failed after commit"));
         saved.committed = true;
-        saved.impacts = Some(crate::store::ScanImpacts {
+        saved.impacts = Some(crate::store::CatalogChanges {
             changed: true,
             library: true,
             structure: true,
@@ -786,7 +786,7 @@ mod tests {
         );
         assert!(core.save_queue().is_err());
         core.command(Command::Volume { value: 0.37 }).unwrap();
-        assert_eq!(core.state.playback.volume, 0.37);
+        assert_eq!(core.preferences.live().volume, 0.37);
         drop(core);
         let reopened = Store::open(&directory.path().join("library.db")).unwrap();
         let restored = reopened.queue_ids().unwrap();

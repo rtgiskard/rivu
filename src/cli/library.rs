@@ -38,10 +38,9 @@ pub(super) fn run(
                 let report = rivu_metadata::edit_file(&path, &patch)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
-                } else if report.changed {
+                } else if report.changed() {
                     let backup = report
-                        .backup_path
-                        .as_ref()
+                        .backup_path()
                         .context("Source tag edit omitted its backup path")?;
                     println!(
                         "{}",

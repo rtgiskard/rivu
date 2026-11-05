@@ -6,7 +6,7 @@ use rivu_protocol::{
     AppCommand,
     model::{ClientSnapshot, LibrarySort, Query, QueryStamp},
     query_tracking::QuerySubmission,
-    response::{Ack, QueryError, StateSections, StateWatch, ViewResponse},
+    response::{Ack, ObservedState, QueryError, StateSections, StateWatch, ViewResponse},
 };
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -83,10 +83,9 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
         });
         let mut state = match initial {
             Ok((instance_id, response)) => {
-                let mut state = ClientSnapshot::default();
-                let revisions = response.revisions;
-                response.apply_to(&mut state);
-                (state, revisions, instance_id)
+                let mut state = ObservedState::new(instance_id);
+                state.apply(instance_id, response);
+                state
             }
             Err(error) => {
                 *latest_worker.lock() = Some(Err(format!("TUI state handshake failed: {error:#}")));
@@ -94,29 +93,27 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                 return;
             }
         };
-        *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
+        *latest_worker.lock() = Some(Ok((state.instance_id(), state.snapshot().clone())));
         let _ = sender.try_send(());
-        if state.0.system.shutting_down {
+        if state.snapshot().system.shutting_down {
             return;
         }
         loop {
             match session.watch_until(StateWatch {
-                revisions: state.1,
+                revisions: state.applied(),
                 sections: TERMINAL_SECTIONS,
             }) {
                 Ok(Some(revisions)) => {
                     let changed = revisions
-                        .changed_since(state.1)
+                        .changed_since(state.applied())
                         .intersection(TERMINAL_SECTIONS);
                     if !changed.is_empty() {
                         match session.get_state(changed) {
                             Ok(response) => {
-                                state
-                                    .1
-                                    .apply_sections(response.revisions, response.sections());
-                                response.apply_to(&mut state.0);
-                                let shutting_down = state.0.system.shutting_down;
-                                *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
+                                state.apply(state.instance_id(), response);
+                                let shutting_down = state.snapshot().system.shutting_down;
+                                *latest_worker.lock() =
+                                    Some(Ok((state.instance_id(), state.snapshot().clone())));
                                 let disconnected = sender.try_send(()).is_err_and(|error| {
                                     matches!(
                                         error,
@@ -134,8 +131,6 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                                 break;
                             }
                         }
-                    } else {
-                        state.1 = revisions;
                     }
                 }
                 Ok(None) => break, // Only local owner cancellation ends a watch this way.
@@ -259,15 +254,15 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum QueryKind<'a> {
+pub(super) enum ReadTarget<Text, Location> {
     Queue,
     QueueSelection(u64),
-    Search(&'a str),
+    Search(Text),
     LibrarySelection(i64),
-    Directory(&'a Path),
+    Directory(Location),
     DirectorySelection {
         track_id: i64,
-        path: &'a Path,
+        path: Location,
     },
     OtherTracksCount,
     OtherTracks {
@@ -286,19 +281,23 @@ pub(super) enum QueryKind<'a> {
     Track(i64),
 }
 
+pub(super) type ReadKind<'a> = ReadTarget<&'a str, &'a Path>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct QueryDemandRef<'a> {
-    pub(super) kind: QueryKind<'a>,
+pub(super) struct ReadDemand<'a> {
+    pub(super) kind: ReadKind<'a>,
     pub(super) filter: Option<&'a str>,
     pub(super) offset: usize,
     pub(super) limit: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct QueryDemand {
-    // The submitted protocol query owns the text/path once. Polling demand and
-    // checking freshness borrow it instead of rebuilding an owned query.
-    pub(super) query: Query,
+pub(super) struct ReadSpec {
+    // Complete terminal intent exports both protocol work and borrowed demand.
+    // Retain its actual protocol query for allocation-free polling and stamping.
+    query: Query,
+    target: ReadTarget<String, PathBuf>,
+    filter: Option<String>,
     pub(super) offset: usize,
     pub(super) limit: usize,
     pub(super) stamp: QueryStamp,
@@ -306,11 +305,11 @@ pub(super) struct QueryDemand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct QueryRequest {
-    pub(super) demand: QueryDemand,
+    pub(super) demand: Arc<ReadSpec>,
     pub(super) submission: QuerySubmission,
 }
 
-impl QueryKind<'_> {
+impl ReadKind<'_> {
     pub(super) fn filtered_query(
         self,
         offset: usize,
@@ -340,8 +339,8 @@ impl QueryKind<'_> {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
-            QueryKind::OtherTracksCount => Query::OtherTracksCount,
-            QueryKind::LibrarySelection(track_id) => Query::LibraryLocate {
+            ReadKind::OtherTracksCount => Query::OtherTracksCount,
+            ReadKind::LibrarySelection(track_id) => Query::LibraryLocate {
                 track_id,
                 path: PathBuf::new(),
                 tree: false,
@@ -350,7 +349,7 @@ impl QueryKind<'_> {
                 missing: None,
                 sort: LibrarySort::Id,
             },
-            QueryKind::DirectorySelection { track_id, path } => Query::LibraryLocate {
+            ReadKind::DirectorySelection { track_id, path } => Query::LibraryLocate {
                 track_id,
                 path: path.to_owned(),
                 tree: true,
@@ -359,18 +358,18 @@ impl QueryKind<'_> {
                 missing: None,
                 sort: LibrarySort::Id,
             },
-            QueryKind::Track(track_id) => Query::Track { track_id },
-            QueryKind::PlaylistSummary(playlist_id) => Query::PlaylistSummary { playlist_id },
-            QueryKind::Queue => Query::QueuePage {
+            ReadKind::Track(track_id) => Query::Track { track_id },
+            ReadKind::PlaylistSummary(playlist_id) => Query::PlaylistSummary { playlist_id },
+            ReadKind::Queue => Query::QueuePage {
                 query: None,
                 offset,
                 limit,
             },
-            QueryKind::QueueSelection(queue_id) => Query::QueueEntries {
+            ReadKind::QueueSelection(queue_id) => Query::QueueEntries {
                 query: None,
                 queue_ids: vec![queue_id],
             },
-            QueryKind::Search(query) => Query::LibraryPage {
+            ReadKind::Search(query) => Query::LibraryPage {
                 query: Some(query.to_owned()),
                 favorite: None,
                 missing: None,
@@ -378,7 +377,7 @@ impl QueryKind<'_> {
                 offset,
                 limit,
             },
-            QueryKind::OtherTracks {
+            ReadKind::OtherTracks {
                 favorite,
                 missing,
                 sort,
@@ -400,7 +399,7 @@ impl QueryKind<'_> {
                     limit,
                 },
             },
-            QueryKind::Directory(path) => Query::DirectoryPage {
+            ReadKind::Directory(path) => Query::DirectoryPage {
                 path: path.to_owned(),
                 query: None,
                 favorite: None,
@@ -408,18 +407,18 @@ impl QueryKind<'_> {
                 offset,
                 limit,
             },
-            QueryKind::Playlists => Query::PlaylistSummaries {
+            ReadKind::Playlists => Query::PlaylistSummaries {
                 query: None,
                 offset,
                 limit,
             },
-            QueryKind::Playlist(playlist_id) => Query::PlaylistEntries {
+            ReadKind::Playlist(playlist_id) => Query::PlaylistEntries {
                 query: None,
                 playlist_id,
                 offset,
                 limit,
             },
-            QueryKind::PlaylistSelection {
+            ReadKind::PlaylistSelection {
                 playlist_id,
                 entry_id,
             } => Query::PlaylistEntryLocations {
@@ -440,32 +439,12 @@ impl QueryKind<'_> {
         }
     }
 
-    // Revision selection depends on the query shape and filter presence, not
-    // owned text, paths or occurrence vectors. Snapshot checks need none of them.
-    fn stamp_query(self, filtered: bool) -> Query {
-        let kind = match self {
-            Self::QueueSelection(_) => Self::Queue,
-            Self::Search(_) => Self::Search(""),
-            Self::Directory(_) => Self::Directory(Path::new("")),
-            Self::DirectorySelection { track_id, .. } => Self::DirectorySelection {
-                track_id,
-                path: Path::new(""),
-            },
-            Self::PlaylistSelection { playlist_id, .. } => {
-                return Query::PlaylistEntryLocations {
-                    playlist_id,
-                    query: filtered.then(String::new),
-                    entry_ids: Vec::new(),
-                };
-            }
-            kind => kind,
-        };
-        kind.filtered_query(0, 0, filtered.then(String::new))
-    }
-
     pub(super) fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot, filter: &str) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.stamp_query(!filter.is_empty());
+        if previous.query_revisions(playlist_id) == next.query_revisions(playlist_id) {
+            return false;
+        }
+        let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
         query.stamp(previous.query_revisions(playlist_id))
             != query.stamp(next.query_revisions(playlist_id))
     }
@@ -477,7 +456,14 @@ impl QueryKind<'_> {
         filter: &str,
     ) -> bool {
         let playlist_id = self.playlist_id();
-        let query = self.stamp_query(!filter.is_empty());
+        if previous
+            .query_revisions(playlist_id)
+            .with_bitrate_revision(0)
+            == next.query_revisions(playlist_id).with_bitrate_revision(0)
+        {
+            return false;
+        }
+        let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
         query.stamp(
             previous
                 .query_revisions(playlist_id)
@@ -486,94 +472,108 @@ impl QueryKind<'_> {
     }
 }
 
-impl QueryDemandRef<'_> {
-    pub(super) fn matches(self, demand: &QueryDemand, state: &TuiSnapshot) -> bool {
+impl ReadDemand<'_> {
+    pub(super) fn own(self, state: &TuiSnapshot) -> ReadSpec {
+        let target = match self.kind {
+            ReadKind::Queue => ReadTarget::Queue,
+            ReadKind::QueueSelection(id) => ReadTarget::QueueSelection(id),
+            ReadKind::Search(text) => ReadTarget::Search(text.to_owned()),
+            ReadKind::LibrarySelection(id) => ReadTarget::LibrarySelection(id),
+            ReadKind::Directory(path) => ReadTarget::Directory(path.to_owned()),
+            ReadKind::DirectorySelection { track_id, path } => ReadTarget::DirectorySelection {
+                track_id,
+                path: path.to_owned(),
+            },
+            ReadKind::OtherTracksCount => ReadTarget::OtherTracksCount,
+            ReadKind::OtherTracks {
+                favorite,
+                missing,
+                sort,
+                anchor,
+            } => ReadTarget::OtherTracks {
+                favorite,
+                missing,
+                sort,
+                anchor,
+            },
+            ReadKind::Playlists => ReadTarget::Playlists,
+            ReadKind::Playlist(id) => ReadTarget::Playlist(id),
+            ReadKind::PlaylistSummary(id) => ReadTarget::PlaylistSummary(id),
+            ReadKind::PlaylistSelection {
+                playlist_id,
+                entry_id,
+            } => ReadTarget::PlaylistSelection {
+                playlist_id,
+                entry_id,
+            },
+            ReadKind::Track(id) => ReadTarget::Track(id),
+        };
+        let query =
+            self.kind
+                .filtered_query(self.offset, self.limit, self.filter.map(str::to_owned));
+        let mut demand = ReadSpec {
+            target,
+            filter: self.filter.map(str::to_owned),
+            query,
+            offset: self.offset,
+            limit: self.limit,
+            stamp: Default::default(),
+        };
+        demand.stamp = demand.query.stamp(demand.revisions(state));
+        demand
+    }
+
+    pub(super) fn matches(self, demand: &ReadSpec, state: &TuiSnapshot) -> bool {
         self == demand.borrowed() && demand.stamp == demand.query.stamp(demand.revisions(state))
     }
 }
 
-impl QueryDemand {
-    pub(super) fn kind(&self) -> QueryKind<'_> {
-        match &self.query {
-            Query::QueuePage { .. } => QueryKind::Queue,
-            Query::QueueEntries { queue_ids, .. } => QueryKind::QueueSelection(queue_ids[0]),
-            Query::LibraryPage { query, .. } => {
-                QueryKind::Search(query.as_deref().unwrap_or_default())
-            }
-            Query::LibraryLocate {
-                track_id,
+impl ReadSpec {
+    pub(super) fn protocol_query(&self) -> &Query {
+        &self.query
+    }
+
+    pub(super) fn kind(&self) -> ReadKind<'_> {
+        match &self.target {
+            ReadTarget::Queue => ReadKind::Queue,
+            ReadTarget::QueueSelection(id) => ReadKind::QueueSelection(*id),
+            ReadTarget::Search(text) => ReadKind::Search(text),
+            ReadTarget::LibrarySelection(id) => ReadKind::LibrarySelection(*id),
+            ReadTarget::Directory(path) => ReadKind::Directory(path),
+            ReadTarget::DirectorySelection { track_id, path } => ReadKind::DirectorySelection {
+                track_id: *track_id,
                 path,
-                tree,
-                ..
-            } => {
-                if *tree {
-                    QueryKind::DirectorySelection {
-                        track_id: *track_id,
-                        path,
-                    }
-                } else {
-                    QueryKind::LibrarySelection(*track_id)
-                }
-            }
-            Query::DirectoryPage { path, .. } => QueryKind::Directory(path),
-            Query::OtherTracksCount => QueryKind::OtherTracksCount,
-            Query::OtherTracksPage {
+            },
+            ReadTarget::OtherTracksCount => ReadKind::OtherTracksCount,
+            ReadTarget::OtherTracks {
                 favorite,
                 missing,
                 sort,
-                ..
-            } => QueryKind::OtherTracks {
+                anchor,
+            } => ReadKind::OtherTracks {
                 favorite: *favorite,
                 missing: *missing,
                 sort: *sort,
-                anchor: None,
+                anchor: *anchor,
             },
-            Query::OtherTracksLocate {
-                track_id,
-                favorite,
-                missing,
-                sort,
-                ..
-            } => QueryKind::OtherTracks {
-                favorite: *favorite,
-                missing: *missing,
-                sort: *sort,
-                anchor: Some(*track_id),
-            },
-            Query::PlaylistSummaries { .. } => QueryKind::Playlists,
-            Query::PlaylistEntries { playlist_id, .. } => QueryKind::Playlist(*playlist_id),
-            Query::PlaylistSummary { playlist_id } => QueryKind::PlaylistSummary(*playlist_id),
-            Query::PlaylistEntryLocations {
+            ReadTarget::Playlists => ReadKind::Playlists,
+            ReadTarget::Playlist(id) => ReadKind::Playlist(*id),
+            ReadTarget::PlaylistSummary(id) => ReadKind::PlaylistSummary(*id),
+            ReadTarget::PlaylistSelection {
                 playlist_id,
-                entry_ids,
-                ..
-            } => QueryKind::PlaylistSelection {
+                entry_id,
+            } => ReadKind::PlaylistSelection {
                 playlist_id: *playlist_id,
-                entry_id: entry_ids[0],
+                entry_id: *entry_id,
             },
-            Query::Track { track_id } => QueryKind::Track(*track_id),
-            _ => unreachable!("terminal demand must use a terminal query kind"),
+            ReadTarget::Track(id) => ReadKind::Track(*id),
         }
     }
 
-    pub(super) fn borrowed(&self) -> QueryDemandRef<'_> {
-        let filter = match &self.query {
-            Query::QueuePage { query, .. }
-            | Query::QueueEntries { query, .. }
-            | Query::DirectoryPage { query, .. }
-            | Query::LibraryLocate { query, .. }
-            | Query::OtherTracksPage { query, .. }
-            | Query::OtherTracksLocate { query, .. }
-            | Query::PlaylistSummaries { query, .. }
-            | Query::PlaylistEntries { query, .. }
-            | Query::PlaylistEntryLocations { query, .. } => {
-                query.as_deref().filter(|query| !query.is_empty())
-            }
-            _ => None,
-        };
-        QueryDemandRef {
+    pub(super) fn borrowed(&self) -> ReadDemand<'_> {
+        ReadDemand {
             kind: self.kind(),
-            filter,
+            filter: self.filter.as_deref(),
             offset: self.offset,
             limit: self.limit,
         }
@@ -594,31 +594,29 @@ impl QueryDemand {
 
     pub(super) fn accepts_view(&self, view: &ViewResponse) -> bool {
         match (self.kind(), view) {
-            (QueryKind::Queue, ViewResponse::QueuePage(_))
-            | (QueryKind::QueueSelection(_), ViewResponse::QueueEntries(_))
+            (ReadKind::Queue, ViewResponse::QueuePage(_))
+            | (ReadKind::QueueSelection(_), ViewResponse::QueueEntries(_))
             | (
-                QueryKind::Search(_) | QueryKind::OtherTracks { anchor: None, .. },
+                ReadKind::Search(_) | ReadKind::OtherTracks { anchor: None, .. },
                 ViewResponse::LibraryPage(_),
             )
             | (
-                QueryKind::LibrarySelection(_)
-                | QueryKind::DirectorySelection { .. }
-                | QueryKind::OtherTracks {
+                ReadKind::LibrarySelection(_)
+                | ReadKind::DirectorySelection { .. }
+                | ReadKind::OtherTracks {
                     anchor: Some(_), ..
                 },
                 ViewResponse::LibraryLocate(_),
             )
-            | (QueryKind::Directory(_), ViewResponse::DirectoryPage(_))
-            | (QueryKind::OtherTracksCount, ViewResponse::OtherTracksCount(_))
-            | (QueryKind::Playlists, ViewResponse::PlaylistSummaries(_))
-            | (QueryKind::Playlist(_), ViewResponse::PlaylistEntries(_))
-            | (QueryKind::PlaylistSelection { .. }, ViewResponse::PlaylistEntryLocations(_)) => {
-                true
-            }
-            (QueryKind::Track(id), ViewResponse::Track(track)) => {
+            | (ReadKind::Directory(_), ViewResponse::DirectoryPage(_))
+            | (ReadKind::OtherTracksCount, ViewResponse::OtherTracksCount(_))
+            | (ReadKind::Playlists, ViewResponse::PlaylistSummaries(_))
+            | (ReadKind::Playlist(_), ViewResponse::PlaylistEntries(_))
+            | (ReadKind::PlaylistSelection { .. }, ViewResponse::PlaylistEntryLocations(_)) => true,
+            (ReadKind::Track(id), ViewResponse::Track(track)) => {
                 track.as_ref().is_none_or(|track| track.id == id)
             }
-            (QueryKind::PlaylistSummary(id), ViewResponse::PlaylistSummary(summary)) => {
+            (ReadKind::PlaylistSummary(id), ViewResponse::PlaylistSummary(summary)) => {
                 summary.as_ref().is_none_or(|summary| summary.id == id)
             }
             _ => false,

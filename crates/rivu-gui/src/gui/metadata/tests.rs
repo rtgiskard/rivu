@@ -178,19 +178,22 @@ fn edit_text(
     cx.run_until_parked();
 }
 
-fn ack(ok: bool) -> Ack {
-    Ack {
-        status: if ok {
-            rivu_protocol::response::AckStatus::Succeeded
-        } else {
-            rivu_protocol::response::AckStatus::Failed
+fn ack(ok: bool) -> crate::frontend::CommandDelivery {
+    crate::frontend::CommandDelivery {
+        ack: Ack {
+            status: if ok {
+                rivu_protocol::response::AckStatus::Succeeded
+            } else {
+                rivu_protocol::response::AckStatus::Failed
+            },
+            error: (!ok).then(|| "save failed".into()),
+            revision: 0,
+            scan_id: None,
+            relocation_id: None,
+            processing_id: None,
+            database_optimization: None,
         },
-        error: (!ok).then(|| "save failed".into()),
-        revision: 0,
-        scan_id: None,
-        relocation_id: None,
-        processing_id: None,
-        database_optimization: None,
+        observation: crate::frontend::CommandObservation::Refreshed,
     }
 }
 
@@ -301,6 +304,82 @@ fn failure_retains_input_but_late_failure_cannot_touch_reopened_edit(cx: &mut Te
             );
             assert_eq!(this.edit.as_ref().unwrap().field, Field::Artist);
             assert!(this.edit.as_ref().unwrap().error.is_none());
+        })
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn successful_save_without_observation_preserves_newer_draft_and_baseline(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            let edit = this.edit.as_ref().unwrap();
+            let serial = edit.serial;
+            let baseline = edit.baseline.clone();
+            edit.input
+                .update(cx, |input, cx| input.set_text("submitted", cx));
+            let (save, _) = this
+                .metadata
+                .begin_save(&SavedValue::Title("submitted".into()))
+                .unwrap();
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("newer draft", cx));
+            let mut delivery = ack(true);
+            delivery.observation = crate::frontend::CommandObservation::Unavailable(
+                "read failed; do not retry".into(),
+            );
+            this.finish_save(save, Some((serial, "submitted".into())), None, delivery, cx);
+            let edit = this
+                .edit
+                .as_ref()
+                .expect("unobserved success must not clear the draft");
+            assert_eq!(edit.serial, serial);
+            assert_eq!(edit.input.read(cx).text(), "newer draft");
+            assert_eq!(edit.baseline, baseline);
+            assert!(edit.error.as_ref().unwrap().contains("do not retry"));
+            assert!(!this.metadata.saving(Field::Title));
+        })
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn fresh_success_rebases_only_the_submitted_editor_and_keeps_later_text(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            let serial = this.edit.as_ref().unwrap().serial;
+            let (save, _) = this
+                .metadata
+                .begin_save(&SavedValue::Title("submitted".into()))
+                .unwrap();
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("later", cx));
+            this.finish_save(
+                save,
+                Some((serial, "submitted".into())),
+                None,
+                ack(true),
+                cx,
+            );
+            let edit = this.edit.as_ref().unwrap();
+            assert_eq!(edit.input.read(cx).text(), "later");
+            assert_eq!(edit.baseline, "submitted");
         })
     })
     .unwrap();

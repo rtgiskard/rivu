@@ -635,7 +635,7 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
             assert!(!tui.ui.apply_query(&next, &lookup, Ok(response(&lookup, 2))));
         }
         let request = tui.ui.query_request(&next).unwrap();
-        assert_eq!(request.demand.kind(), QueryKind::Playlist(1));
+        assert_eq!(request.demand.kind(), ReadKind::Playlist(1));
         assert_eq!(request.demand.offset, 0);
         let mut refreshed = response(&request, 2);
         let ViewResponse::PlaylistEntries(page) = &mut refreshed.view else {

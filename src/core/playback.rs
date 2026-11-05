@@ -1,6 +1,98 @@
 use super::*;
 use anyhow::bail;
 
+/// One owner for occurrence intent, navigation and the physical listening source.
+/// QueueState remains the constant-size publication; no queue is retained here.
+#[derive(Default)]
+pub(super) struct PlaybackOwner {
+    pub(super) generation: u64,
+    pub(super) session: Option<PlaybackSession>,
+    pub(super) retired: Option<RetiredPlayback>,
+    pub(super) write_deferred: bool,
+    pub(super) history_pending: bool,
+    pub(super) pending_bitrate: Option<(u64, bool)>,
+    pub(super) pending_navigation: Option<PlaybackStatus>,
+    pub(super) projection_stale: bool,
+    pub(super) selection_pending: bool,
+    pub(super) history: Vec<u64>,
+    pub(super) history_cursor: usize,
+    live_source: Option<u64>,
+    physically_closed_source: Option<u64>,
+}
+
+impl PlaybackOwner {
+    pub(super) fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn admit_source(&mut self) {
+        self.live_source = Some(self.generation);
+        self.physically_closed_source = None;
+    }
+
+    fn reject_start(&mut self) {
+        // Listening was rejected before its first durable fact. Keep the live
+        // source context until physical retirement, but never let a queued
+        // Started or final cached snapshot revive this rejected session.
+        debug_assert!(self.session.as_ref().is_none_or(|session| !session.started));
+        self.session = None;
+    }
+
+    fn confirm_source_closed(&mut self, generation: u64) {
+        if self.live_source == Some(generation) {
+            self.physically_closed_source = self.live_source.take();
+        }
+    }
+
+    pub(super) fn reset_history(&mut self) {
+        self.history.clear();
+        self.history_cursor = 0;
+    }
+
+    pub(super) fn record_history(&mut self, id: u64) {
+        const MAX_NAVIGATION_HISTORY: usize = 4096;
+        self.history.truncate(self.history_cursor);
+        self.history.push(id);
+        if self.history.len() > MAX_NAVIGATION_HISTORY {
+            self.history
+                .drain(..self.history.len() - MAX_NAVIGATION_HISTORY);
+        }
+        self.history_cursor = self.history.len();
+    }
+
+    pub(super) fn select_occurrence(&mut self, id: u64, history: QueueHistory) {
+        self.physically_closed_source = None;
+        self.selection_pending = true;
+        match history {
+            QueueHistory::Record => self.record_history(id),
+            QueueHistory::Preserve => {}
+            QueueHistory::Restore(cursor) => self.history_cursor = cursor,
+        }
+    }
+
+    pub(super) fn replace_occurrences(&mut self) {
+        self.selection_pending = false;
+        self.physically_closed_source = None;
+        self.reset_history();
+    }
+}
+
+pub(super) enum QueueHistory {
+    Record,
+    Preserve,
+    Restore(usize),
+}
+
+pub(super) struct SourceReplacement {
+    pub(super) generation: u64,
+    pub(super) heard: f64,
+    pub(super) position: f64,
+    pub(super) status: PlaybackStatus,
+}
+
 pub(super) struct PlaybackSession {
     pub(super) track_id: i64,
     // The source admitted by Load, shared with the initial current-track projection.
@@ -76,7 +168,7 @@ impl Core {
 
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
-            AudioEvent::Started { generation, info } if generation == self.generation => {
+            AudioEvent::Started { generation, info } if generation == self.transport.generation => {
                 if let Err(error) = self.playback_started(info) {
                     self.stop().with_context(|| format!("{error:#}"))?;
                     return Err(error);
@@ -86,13 +178,13 @@ impl Core {
                 generation,
                 position_seconds,
                 listened_seconds,
-            } if generation == self.generation => {
+            } if generation == self.transport.generation => {
                 self.playback_progress(position_seconds, listened_seconds)?;
             }
             AudioEvent::Ended {
                 generation,
                 bitrate_bps,
-            } if generation == self.generation => {
+            } if generation == self.transport.generation => {
                 self.playback_ended_bitrate(bitrate_bps)?;
                 let status = self.state.playback.status;
                 self.stop_playback(true)?;
@@ -102,7 +194,7 @@ impl Core {
                 revision,
                 snapshot,
                 message,
-            } if snapshot.generation == self.generation
+            } if snapshot.generation == self.transport.generation
                 && revision == self.state.playback.seek_revision =>
             {
                 self.state.playback.position = snapshot.position_seconds;
@@ -114,7 +206,7 @@ impl Core {
             AudioEvent::Failed {
                 generation,
                 message,
-            } if generation == self.generation => {
+            } if generation == self.transport.generation => {
                 self.stop().with_context(|| message.clone())?;
                 self.state.system.last_error = Some(message);
             }
@@ -124,8 +216,8 @@ impl Core {
                 auto_mix,
                 message,
             } if request == self.output_settings_request
-                && device == self.state.system.selected_device
-                && auto_mix == self.state.configuration.config.pipewire_auto_mix =>
+                && device == self.preferences.live().output_device
+                && auto_mix == self.preferences.settings().pipewire_auto_mix =>
             {
                 self.state.system.last_error = Some(message);
             }
@@ -133,15 +225,23 @@ impl Core {
                 generation,
                 config,
                 message,
-            } if generation.is_none_or(|value| value == self.generation)
-                && *config == self.state.configuration.config.equalizer =>
+            } if generation.is_none_or(|value| value == self.transport.generation)
+                && *config == self.preferences.settings().equalizer =>
             {
                 self.state.system.last_error = Some(message);
             }
-            AudioEvent::DecoderStopped { generation } if generation == self.generation => {
-                // The worker has already stopped and may still be sending
-                // events while handling Configure; do not wait on a command.
-                self.finish_playback(Ok(None), false, Ok(()))?;
+            AudioEvent::DecoderStopped { generation }
+                if self.transport.live_source == Some(generation) =>
+            {
+                // A late physical close may settle an uncertain stop. It cannot
+                // retire a newer source, advance navigation or fence twice.
+                self.transport.confirm_source_closed(generation);
+                if generation == self.transport.generation {
+                    self.finish_playback(Ok(None), false, Ok(()))?;
+                } else {
+                    self.state.playback.stopped_source_generation =
+                        self.transport.physically_closed_source;
+                }
             }
             _ => {}
         }
@@ -167,7 +267,7 @@ impl Core {
     }
 
     fn persist_playback_bitrate(&mut self, bitrate: u64, exact: bool) -> bool {
-        let Some(playback) = self.playback.as_ref() else {
+        let Some(playback) = self.transport.session.as_ref() else {
             return false;
         };
         let track_id = playback.track_id;
@@ -177,12 +277,13 @@ impl Core {
         if self.database_maintenance_active() {
             if exact
                 || !self
+                    .transport
                     .pending_bitrate
                     .is_some_and(|(_, pending_exact)| pending_exact)
             {
-                self.pending_bitrate = Some((bitrate, exact));
+                self.transport.pending_bitrate = Some((bitrate, exact));
             }
-            self.playback_write_deferred = true;
+            self.transport.write_deferred = true;
             return false;
         }
         if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after)) {
@@ -213,7 +314,8 @@ impl Core {
     pub(in crate::core) fn playback_ended_bitrate(&mut self, bitrate: Option<u64>) -> Result<()> {
         // Only the worker's actual full-source EOF can supply this value.
         if self
-            .playback
+            .transport
+            .session
             .as_ref()
             .is_some_and(|playback| playback.started && playback.loaded_track.cue.is_none())
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
@@ -223,13 +325,13 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
-        self.start_with_status(queue_id, record_history, PlaybackStatus::Playing)
+    pub(in crate::core) fn start(&mut self, queue_id: u64, history: QueueHistory) -> Result<()> {
+        self.start_with_status(queue_id, history, PlaybackStatus::Playing)
     }
     pub(in crate::core) fn start_with_status(
         &mut self,
         queue_id: u64,
-        record_history: bool,
+        history: QueueHistory,
         status: PlaybackStatus,
     ) -> Result<()> {
         self.ensure_queue_control_ready()?;
@@ -240,7 +342,7 @@ impl Core {
         }
         // Independent controls do not depend on database recovery. Only a new
         // playback owner must settle the previous producer before replacing it.
-        if self.retired_playback.is_some() {
+        if self.transport.retired.is_some() {
             self.flush_deferred_playback()?;
         }
         self.stop()?;
@@ -263,11 +365,12 @@ impl Core {
                         start_seconds: cue.start_seconds(),
                         end_seconds: cue.end_seconds(),
                     }),
-                generation: self.generation,
+                generation: self.transport.generation,
                 start_seconds: 0.0,
                 paused: status == PlaybackStatus::Paused,
             })?;
-            self.playback = Some(PlaybackSession {
+            self.transport.admit_source();
+            self.transport.session = Some(PlaybackSession {
                 track_id: track.id,
                 loaded_track: Arc::clone(&track),
                 source,
@@ -281,23 +384,11 @@ impl Core {
                 paused_at: (status == PlaybackStatus::Paused).then(now),
             });
         }
-        self.state.playback.last_heard_at = None;
-        self.state.queue.current_id = Some(queue_id);
-        // Core serializes occurrence-order writes. Stop can advance metadata
-        // revisions through final accounting, but cannot move this occurrence.
-        self.state.queue.current_position = Some(position);
-        self.state.playback.duration = track.duration;
-        self.state.current_track = Some(track);
-        self.state.playback.status = status;
-        self.state.system.last_error = None;
-        if record_history {
-            self.record_queue_history(queue_id);
-        }
-        self.save_queue()
+        self.accept_loaded_occurrence(queue_id, position, track, status, history)
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
         if self.database_maintenance_active() {
-            self.playback_write_deferred = true;
+            self.transport.write_deferred = true;
             return Ok(());
         }
         let Some(duration) = self
@@ -308,29 +399,33 @@ impl Core {
         else {
             return Ok(());
         };
-        let Some(track_id) = self.playback.as_ref().and_then(|playback| {
+        let Some(track_id) = self.transport.session.as_ref().and_then(|playback| {
             (playback.started
                 && !playback.counted
                 && playback.heard
-                    > duration * self.state.configuration.config.play_count_threshold_percent
-                        / 100.0)
+                    > duration * self.preferences.settings().play_count_threshold_percent / 100.0)
                 .then_some(playback.track_id)
         }) else {
             return Ok(());
         };
         let stats = self.store.increment_play_count(track_id)?;
-        if let Some(playback) = self.playback.as_mut() {
+        if let Some(playback) = self.transport.session.as_mut() {
             playback.counted = true;
         }
         self.update_track_stats(track_id, stats)
     }
     pub(in crate::core) fn playback_started(&mut self, info: MediaInfo) -> Result<()> {
-        let track_id = self.playback.as_ref().map(|playback| playback.track_id);
+        let track_id = self
+            .transport
+            .session
+            .as_ref()
+            .map(|playback| playback.track_id);
         let Some(track_id) = track_id else {
             return Ok(());
         };
         if self
-            .playback
+            .transport
+            .session
             .as_ref()
             .is_some_and(|playback| playback.started)
         {
@@ -338,30 +433,35 @@ impl Core {
         }
         let played_at = now();
         let played_at = self
-            .playback
+            .transport
+            .session
             .as_ref()
             .and_then(|playback| playback.paused_at)
             .map_or(played_at, |paused_at| played_at.min(paused_at));
         let stats = if self
-            .playback
+            .transport
+            .session
             .as_ref()
             .is_some_and(|playback| playback.history_removed)
         {
             None
         } else if self.database_maintenance_active() {
-            self.playback_write_deferred = true;
+            self.transport.write_deferred = true;
             None
         } else {
             match self.store.mark_played(track_id, played_at) {
                 Ok(stats) => Some(stats),
                 Err(error) => {
-                    // A rejected start cannot be revived by a later output snapshot.
-                    self.playback = None;
+                    self.transport.reject_start();
                     return Err(error);
                 }
             }
         };
-        let playback = self.playback.as_mut().expect("playback was checked above");
+        let playback = self
+            .transport
+            .session
+            .as_mut()
+            .expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
         if stats.is_none() {
@@ -378,7 +478,7 @@ impl Core {
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
         let result = (|| -> Result<()> {
             if let Some(stats) = stats {
-                self.playback_history_pending |= stats.changed;
+                self.transport.history_pending |= stats.changed;
                 self.update_track_stats(track_id, stats)?;
                 self.refresh_playback_history().context(
                     "Playback start committed, but refreshing history failed; previous history retained",
@@ -394,7 +494,7 @@ impl Core {
         result
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
-        if let Some(playback) = &mut self.playback
+        if let Some(playback) = &mut self.transport.session
             && playback.started
         {
             if position.is_finite() {
@@ -459,7 +559,7 @@ impl Core {
         natural: bool,
         bookkeeping: Result<()>,
     ) -> Result<()> {
-        let generation = self.generation;
+        let generation = self.transport.generation;
         // A request can beat a queued Started even though the worker has already
         // played audio. Acknowledged stops make that queued bookkeeping safe to
         // consume before generation fencing; errors still fence below.
@@ -469,18 +569,31 @@ impl Core {
         } else {
             bookkeeping
         };
-        // Fence queued events even when stopping or saving the count fails.
-        self.generation = self.generation.wrapping_add(1);
+        if let Some(snapshot) = snapshot
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| snapshot.as_ref())
+        {
+            self.transport.confirm_source_closed(snapshot.generation);
+        }
+        // A physical acknowledgement and a statistics commit are independent facts.
+        // Unknown stop outcomes fence events but never manufacture a close receipt.
+        let had_source = self.transport.live_source == Some(generation)
+            || self.transport.session.is_some()
+            || self.transport.physically_closed_source == Some(generation);
+        if had_source {
+            self.transport.generation = self.transport.generation.wrapping_add(1);
+            self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
+        }
         self.processing.select_audition(None);
-        self.state.processing_audition = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
-        self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
+        self.state.playback.stopped_source_generation = self.transport.physically_closed_source;
         let (snapshot, stopped) = match snapshot {
             Ok(snapshot) => (snapshot, Ok(())),
             Err(error) => (None, Err(error)),
         };
-        if let Some(playback) = &mut self.playback {
+        if let Some(playback) = &mut self.transport.session {
             if let Some(snapshot) = snapshot
                 && snapshot.generation == generation
                 && snapshot.listened_seconds.is_finite()
@@ -506,16 +619,16 @@ impl Core {
                 self.state.playback.duration = playback.position.filter(|position| *position > 0.0);
             }
         }
-        if let Some(stats) = self.playback.take() {
-            debug_assert!(self.retired_playback.is_none());
-            self.retired_playback = Some(RetiredPlayback {
+        if let Some(stats) = self.transport.session.take() {
+            debug_assert!(self.transport.retired.is_none());
+            self.transport.retired = Some(RetiredPlayback {
                 stats,
                 duration: self.state.playback.duration,
             });
-            self.playback_write_deferred = true;
+            self.transport.write_deferred = true;
         }
         if stopped.is_err() || bookkeeping.is_err() {
-            self.pending_navigation = None;
+            self.transport.pending_navigation = None;
         }
         // Retain the same bounded producer owner on ordinary stop failures as
         // during maintenance. Neither a projection error nor an activity write
@@ -525,7 +638,7 @@ impl Core {
     }
     pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
         let mut stop = self.engine.stop_request();
-        let generation = self.generation;
+        let generation = self.transport.generation;
         let mut bookkeeping = Ok(());
         // Only the persistent synchronous business owner enters this wait.
         // The application executor remains free, and the stop handle is the sole audio
@@ -543,7 +656,100 @@ impl Core {
     }
 
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
+        self.transport.pending_navigation = None;
         self.stop_playback(false)
+    }
+
+    pub(in crate::core) fn prepare_source_replacement(&mut self) -> Result<SourceReplacement> {
+        let generation = self.transport.generation;
+        let mut bookkeeping = Ok(());
+        let mut stop = self.engine.stop_request();
+        let snapshot = futures::executor::block_on(stop.wait(|event| {
+            let result = self.retiring_audio_event(generation, event);
+            if bookkeeping.is_ok() {
+                bookkeeping = result;
+            }
+        }));
+        self.engine.restore_events(stop.into_events());
+        let snapshot = match snapshot {
+            Ok(snapshot) if snapshot.generation == generation => {
+                self.transport.confirm_source_closed(generation);
+                snapshot
+            }
+            Ok(snapshot) => {
+                self.finish_playback(
+                    Ok(Some(snapshot)),
+                    false,
+                    Err(anyhow::anyhow!(
+                        "Audio stop snapshot belongs to a different playback generation"
+                    )),
+                )?;
+                bail!("Audio source replacement was rejected");
+            }
+            Err(error) => {
+                self.finish_playback(Err(error), false, bookkeeping)?;
+                bail!("Audio source replacement could not stop its source");
+            }
+        };
+        let drained = self.drain_playback_events(generation);
+        let progress = self.playback_progress(snapshot.position_seconds, snapshot.listened_seconds);
+        if let Err(error) = bookkeeping.and(drained).and(progress) {
+            self.finish_playback(Ok(Some(snapshot)), false, Err(error))?;
+            bail!("Audio source replacement bookkeeping failed");
+        }
+        Ok(SourceReplacement {
+            generation: generation.wrapping_add(1),
+            heard: self
+                .transport
+                .session
+                .as_ref()
+                .map_or(0.0, |session| session.heard),
+            position: self.state.playback.position,
+            status: self.state.playback.status,
+        })
+    }
+
+    pub(in crate::core) fn commit_source_replacement(
+        &mut self,
+        command: AudioCommand,
+    ) -> Result<()> {
+        if let Err(error) = self.engine.send(command) {
+            return self.finish_playback(Ok(None), false, Err(error));
+        }
+        self.transport.generation = self.transport.generation.wrapping_add(1);
+        self.transport.admit_source();
+        self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
+        self.state.playback.stopped_source_generation = None;
+        Ok(())
+    }
+
+    pub(in crate::core) fn resume(&mut self) -> Result<()> {
+        if self.state.playback.status == PlaybackStatus::Stopped {
+            self.ensure_queue_control_ready()?;
+            let id = match self.state.queue.current_id {
+                Some(id) => id,
+                None => self.store.queue_id_at(0)?.context("Queue is empty")?,
+            };
+            return self.start(id, QueueHistory::Record);
+        }
+        self.engine.send(AudioCommand::Pause(false))?;
+        if let Some(session) = self.transport.session.as_mut() {
+            session.paused_at = None;
+        }
+        self.state.playback.status = PlaybackStatus::Playing;
+        Ok(())
+    }
+
+    pub(in crate::core) fn pause(&mut self) -> Result<()> {
+        if self.state.playback.status != PlaybackStatus::Playing {
+            return Ok(());
+        }
+        self.engine.send(AudioCommand::Pause(true))?;
+        if let Some(session) = self.transport.session.as_mut() {
+            session.paused_at.get_or_insert(now());
+        }
+        self.state.playback.status = PlaybackStatus::Paused;
+        Ok(())
     }
     pub(in crate::core) fn advance(&mut self, natural: bool) -> Result<()> {
         self.advance_with_status(natural, PlaybackStatus::Playing)
@@ -563,7 +769,7 @@ impl Core {
     ) -> Result<()> {
         if self.database_maintenance_active() {
             if natural {
-                self.pending_navigation = Some(status);
+                self.transport.pending_navigation = Some(status);
                 return Ok(());
             }
             bail!("Database maintenance is in progress; navigation was not executed");
@@ -574,26 +780,26 @@ impl Core {
         }
         let current = self.state.queue.current_id;
         if natural
-            && self.state.playback.repeat == RepeatMode::One
+            && self.preferences.live().repeat == RepeatMode::One
             && let Some(id) = current
         {
-            return self.start_with_status(id, true, status);
+            return self.start_with_status(id, QueueHistory::Record, status);
         }
-        if self.state.playback.shuffle {
+        if self.preferences.live().shuffle {
             // Every Next is an independent draw over occurrences, including current.
             let id = self
                 .random_queue_id(&mut rand::rng())?
                 .expect("queue is nonempty");
-            return self.start_with_status(id, true, status);
+            return self.start_with_status(id, QueueHistory::Record, status);
         }
         let index = self.state.queue.current_position;
         let next = index.map_or(0, |index| index + 1);
         if let Some(id) = self.store.queue_id_at(next)? {
-            return self.start_with_status(id, true, status);
+            return self.start_with_status(id, QueueHistory::Record, status);
         }
-        if self.state.playback.repeat == RepeatMode::All {
+        if self.preferences.live().repeat == RepeatMode::All {
             let id = self.store.queue_id_at(0)?.context("Queue is empty")?;
-            return self.start_with_status(id, true, status);
+            return self.start_with_status(id, QueueHistory::Record, status);
         }
         if status == PlaybackStatus::Paused {
             Ok(())
@@ -609,18 +815,20 @@ impl Core {
             return self.seek(0.0);
         }
         self.ensure_queue_control_ready()?;
-        if self.state.playback.shuffle
-            && let Some(index) =
-                self.played_cursor
-                    .checked_sub(if self.state.queue.current_id.is_some() {
-                        2
-                    } else {
-                        1
-                    })
+        if self.preferences.live().shuffle
+            && let Some(index) = self.transport.history_cursor.checked_sub(
+                if self.state.queue.current_id.is_some() {
+                    2
+                } else {
+                    1
+                },
+            )
         {
-            self.start_with_status(self.played[index], false, status)?;
-            self.played_cursor = index + 1;
-            return Ok(());
+            return self.start_with_status(
+                self.transport.history[index],
+                QueueHistory::Restore(index + 1),
+                status,
+            );
         }
         let index = self.state.queue.current_position;
         if let Some(index) = index {
@@ -629,7 +837,7 @@ impl Core {
                     .store
                     .queue_id_at(index - 1)?
                     .context("Queue entry not found")?;
-                return self.start_with_status(id, true, status);
+                return self.start_with_status(id, QueueHistory::Record, status);
             }
             return if status == PlaybackStatus::Stopped {
                 Ok(())
@@ -638,7 +846,7 @@ impl Core {
             };
         }
         if let Some(id) = self.store.queue_id_at(0)? {
-            return self.start_with_status(id, true, status);
+            return self.start_with_status(id, QueueHistory::Record, status);
         }
         bail!("Queue is empty")
     }
@@ -648,7 +856,8 @@ impl Core {
             bail!("Nothing is playing");
         }
         let end = self
-            .playback
+            .transport
+            .session
             .as_ref()
             .and_then(|playback| playback.loaded_track.cue.as_ref())
             .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
@@ -665,11 +874,11 @@ impl Core {
         history: Vec<rivu_protocol::model::HistoryEntry>,
     ) {
         self.state.library.history = Arc::new(history);
-        self.playback_history_pending = false;
+        self.transport.history_pending = false;
     }
 
     fn refresh_playback_history(&mut self) -> Result<()> {
-        if self.playback_history_pending {
+        if self.transport.history_pending {
             let history = self.store.history(MAX_QUERY_ROWS)?;
             self.replace_history(history);
         }
@@ -681,31 +890,31 @@ impl Core {
         if self.database_maintenance_active() {
             return Ok(());
         }
-        let retired = self.retired_playback.take();
+        let retired = self.transport.retired.take();
         let retired_duration = retired.as_ref().map(|playback| playback.duration);
         if let Some(retired) = retired {
-            debug_assert!(self.playback.is_none());
-            self.playback = Some(retired.stats);
+            debug_assert!(self.transport.session.is_none());
+            self.transport.session = Some(retired.stats);
         }
         let duration = self.state.playback.duration;
         if let Some(retired_duration) = retired_duration {
             self.state.playback.duration = retired_duration;
         }
         let result = (|| -> Result<()> {
-            if !std::mem::take(&mut self.playback_write_deferred) && retired_duration.is_none() {
+            if !std::mem::take(&mut self.transport.write_deferred) && retired_duration.is_none() {
                 return Ok(());
             }
             // The count's committed bit precedes projection reads. Attempt both
             // producer facts even if one projection fails; never count twice.
             let count = self.count_play();
             let activity = if let Some((track_id, at)) =
-                self.playback.as_ref().and_then(|playback| {
+                self.transport.session.as_ref().and_then(|playback| {
                     (playback.started && !playback.history_removed)
                         .then_some((playback.track_id, playback.last_heard_at))
                         .and_then(|(id, at)| at.map(|at| (id, at)))
                 }) {
                 self.store.mark_played(track_id, at).and_then(|stats| {
-                    self.playback_history_pending |= stats.changed;
+                    self.transport.history_pending |= stats.changed;
                     let projection = self.update_track_stats(track_id, stats);
                     let history = self.refresh_playback_history();
                     projection.and(history)
@@ -713,18 +922,18 @@ impl Core {
             } else {
                 Ok(())
             };
-            if let Some((bitrate, exact)) = self.pending_bitrate.take() {
+            if let Some((bitrate, exact)) = self.transport.pending_bitrate.take() {
                 self.persist_playback_bitrate(bitrate, exact);
             }
             count.and(activity)
         })();
         if retired_duration.is_some() {
-            if let Some(stats) = self.playback.take()
+            if let Some(stats) = self.transport.session.take()
                 && result.is_err()
             {
                 // Park facts on failure; explicit commands and shutdown recover
                 // them before another playback can replace this bounded owner.
-                self.retired_playback = Some(RetiredPlayback {
+                self.transport.retired = Some(RetiredPlayback {
                     stats,
                     duration: self.state.playback.duration,
                 });
@@ -732,10 +941,10 @@ impl Core {
             self.state.playback.duration = duration;
         }
         if result.is_err() {
-            self.pending_navigation = None;
+            self.transport.pending_navigation = None;
         }
         result?;
-        if let Some(status) = self.pending_navigation.take()
+        if let Some(status) = self.transport.pending_navigation.take()
             && !self.state.system.shutting_down
         {
             self.advance_with_status(true, status)?;

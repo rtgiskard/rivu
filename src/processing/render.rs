@@ -1,5 +1,8 @@
 use super::export::prepare_export;
-use super::{AudioOutputs, CachedGraphOutput, Event, ProcessingResult, SourceStamp, graph, neural};
+use super::{
+    AudioOutputs, CachedGraphOutput, Event, ModelRequest, ProcessingResult, SourceStamp, graph,
+    neural,
+};
 use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use async_channel::Sender;
@@ -67,6 +70,13 @@ pub(super) fn run_cached_export(
     tx: &Sender<Event>,
 ) -> Result<ProcessingResult> {
     let pcm = cached.pcm;
+    status.settings.graph_mode = Some(GraphExecutionMode::Offline);
+    let _ = tx.send_blocking(Event::GraphPrepared {
+        id: status.id,
+        mode: GraphExecutionMode::Offline,
+        boundary: None,
+        plan: None,
+    });
     let mut progress = ProgressReporter::new(tx, status.id);
     let destination = status
         .settings
@@ -145,7 +155,7 @@ pub(super) fn run(
     let mut runner = None;
     if let Some(mode) = status
         .settings
-        .graph_mode
+        .graph_requested_mode
         .filter(|mode| *mode != GraphExecutionMode::Offline)
     {
         let (actual, boundary, prepared) = graph::prepare(
@@ -167,6 +177,17 @@ pub(super) fn run(
         status.settings.graph_boundary = boundary;
         status.graph_plan = prepared.as_ref().map(graph::plan_info);
         runner = prepared;
+    }
+    if status.settings.graph_requested_mode == Some(GraphExecutionMode::Offline) {
+        status.settings.graph_mode = Some(GraphExecutionMode::Offline);
+    }
+    if let Some(mode) = status.settings.graph_mode {
+        let _ = tx.send_blocking(Event::GraphPrepared {
+            id: status.id,
+            mode,
+            boundary: status.settings.graph_boundary,
+            plan: status.graph_plan.clone(),
+        });
     }
     if status.settings.graph_mode == Some(GraphExecutionMode::Realtime) {
         check_cancel(cancel)?;
@@ -237,14 +258,25 @@ pub(super) fn run(
             )?;
             AudioOutputs::default()
         } else {
-            neural::run(
-                &input,
-                &config.neural,
-                Arc::clone(&budget),
-                cancel,
+            let outcome = neural::run(
+                ModelRequest {
+                    task_id: status.id,
+                    operation: status.operation,
+                    input: &input,
+                    config: &config.neural,
+                    budget: Arc::clone(&budget),
+                    cancel,
+                },
                 &mut progress,
-                &mut status,
-            )?
+            );
+            status.model_id.clone_from(&outcome.provenance.id);
+            status.model_sha256.clone_from(&outcome.provenance.sha256);
+            // Reliable provenance precedes terminal failure, unlike best-effort progress.
+            let _ = tx.send_blocking(Event::Model {
+                id: status.id,
+                provenance: outcome.provenance,
+            });
+            outcome.result?
         }
     };
     let frames = status

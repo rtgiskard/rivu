@@ -138,6 +138,32 @@ class StreamEntrypointTests(unittest.TestCase):
                                  ("error", code, request["task_id"]))
                 self.assertEqual(stream.read(), b"")
 
+    def test_admitted_model_provenance_survives_later_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            manifest_path = base / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            request = {"version":worker.VERSION, "task_id":"failed-model", "operation":"speech",
+                       "sample_rate":8000, "channels":1, "frames":1,
+                       "model_manifest":str(manifest_path), "parameters":{"post_filter":True}}
+            wire = encode(worker.JSON_FRAME, json.dumps(request).encode())
+            for corrupted in (False, True):
+                if corrupted:
+                    (base / manifest["license_evidence"]).write_text("changed bundle evidence")
+                completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
+                                           input=wire, capture_output=True, timeout=30)
+                self.assertNotEqual(completed.returncode, 0)
+                stream, events = io.BytesIO(completed.stdout), []
+                while stream.tell() < len(completed.stdout):
+                    kind, payload = worker.read_frame(stream)
+                    self.assertEqual(kind, worker.JSON_FRAME)
+                    events.append(json.loads(payload))
+                self.assertEqual(events[-1]["type"], "error")
+                models = [event["model"] for event in events if "model" in event]
+                self.assertEqual(models, [] if corrupted else [
+                    {"id":manifest["id"], "sha256":worker.canonical_digest(manifest)}])
+
     def test_real_dry_worker_preserves_pcm_bits(self):
         import numpy as np
         with tempfile.TemporaryDirectory() as directory:

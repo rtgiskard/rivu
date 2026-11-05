@@ -16,9 +16,9 @@ use rivu_protocol::query_tracking::{QueryEpoch, QueryTicket};
 use rivu_protocol::waveform::WaveformFrame;
 use rivu_protocol::{
     ADMISSION_TIMEOUT, AppCommand, REPLY_TIMEOUT,
-    model::{ClientSnapshot, Command, ConfigMutation, ConfigPatch, Query},
+    model::{Command, ConfigMutation, ConfigPatch, Query},
     response::{
-        Ack, AckStatus, QueryError, QueryResponse, StateResponse, StateRevisions, StateSections,
+        Ack, AckStatus, ObservedState, QueryError, QueryResponse, StateResponse, StateSections,
     },
 };
 use std::{
@@ -33,19 +33,21 @@ const QUERY_WORKERS: usize = 4;
 const QUEUE_CAPACITY: usize = 32;
 
 struct Published {
-    snapshot: ClientSnapshot,
-    revisions: StateRevisions,
+    observed: ObservedState,
     publication: u64,
     error: Option<String>,
+    disconnected: bool,
 }
 
 impl Published {
     fn gui_snapshot(&self) -> GuiSnapshot {
-        let mut snapshot = GuiSnapshot::from_client(&self.snapshot, self.revisions);
+        let mut snapshot =
+            GuiSnapshot::from_client(self.observed.snapshot(), self.observed.applied());
         if let Some(error) = &self.error {
             snapshot.system.last_error = Some(error.clone());
         }
         snapshot.system.revision = self.publication;
+        snapshot.system.shutting_down |= self.disconnected;
         snapshot
     }
 }
@@ -113,7 +115,7 @@ impl Shared {
         {
             let mut published = self.published.write();
             published.error = Some(message);
-            published.snapshot.system.shutting_down |= fatal;
+            published.disconnected |= fatal;
             published.publication = published.publication.wrapping_add(1);
         }
         if fatal {
@@ -136,39 +138,39 @@ impl Shared {
         }
     }
 
-    fn merge(&self, response: StateResponse) {
+    fn merge(&self, response: StateResponse) -> bool {
         let (shutdown, refresh_waveform) = {
             let mut published = self.published.write();
             if self.stop.is_cancelled() {
-                return;
+                return false;
             }
             let device_changed = response.system.as_ref().is_some_and(|next| {
-                next.selected_device != published.snapshot.system.selected_device
+                next.selected_device != published.observed.snapshot().system.selected_device
             });
             let refresh_waveform =
                 response.playback.is_some() || response.configuration.is_some() || device_changed;
             let invalidate_analysis = response.playback.as_ref().is_some_and(|next| {
-                next.source_generation != published.snapshot.source_generation
-                    || next.playback.seek_revision != published.snapshot.playback.seek_revision
-                    || next.playback.status != published.snapshot.playback.status
+                next.source_generation != published.observed.snapshot().source_generation
+                    || next.playback.seek_revision
+                        != published.observed.snapshot().playback.seek_revision
+                    || next.playback.status != published.observed.snapshot().playback.status
             }) || response.configuration.as_ref().is_some_and(|next| {
                 analysis_invalidated_by_config(
-                    &published.snapshot.configuration.config,
+                    &published.observed.snapshot().configuration.config,
                     &next.config,
                 )
             }) || device_changed;
             if invalidate_analysis {
                 self.visual.invalidate();
             }
-            let sections = response.sections();
-            published
-                .revisions
-                .apply_sections(response.revisions, sections);
-            response.apply_to(&mut published.snapshot);
+            published.observed.apply(self.instance_id, response);
             self.visual
-                .configure(&published.snapshot.configuration.config);
+                .configure(&published.observed.snapshot().configuration.config);
             published.publication = published.publication.wrapping_add(1);
-            (published.snapshot.system.shutting_down, refresh_waveform)
+            (
+                published.observed.snapshot().system.shutting_down,
+                refresh_waveform,
+            )
         };
         if refresh_waveform {
             self.wave.refresh();
@@ -177,15 +179,47 @@ impl Shared {
             self.disconnected();
         }
         self.notify();
+        true
     }
 
     fn refresh_after_operation(&self, session: &mut ClientSession) -> Result<()> {
         let _owner = self.refresh.lock();
         let announced = session.get_state(StateSections::default())?.revisions;
-        let current = self.published.read().revisions;
+        let current = self.published.read().observed.applied();
         let sections = announced.changed_since(current);
         if !sections.is_empty() {
-            self.merge(session.get_state(sections)?);
+            let response = session.get_state(sections)?;
+            let complete = response.sections().intersection(sections) == sections;
+            anyhow::ensure!(
+                self.merge(response),
+                "GUI disconnected before state refresh"
+            );
+            anyhow::ensure!(complete, "Incomplete GUI state refresh");
+        }
+        anyhow::ensure!(
+            !self.stop.is_cancelled(),
+            "GUI disconnected before authoritative refresh"
+        );
+        Ok(())
+    }
+
+    fn refresh_announced(
+        &self,
+        session: &mut ClientSession,
+        announced: rivu_protocol::response::StateRevisions,
+    ) -> Result<()> {
+        let _owner = self.refresh.lock();
+        let sections = announced.changed_since(self.published.read().observed.applied());
+        if !sections.is_empty() {
+            // A Watch carries only tokens: even a delayed notification reads
+            // the current payload here, inside the same mutex as ACK refreshes.
+            let response = session.get_state(sections)?;
+            let complete = response.sections().intersection(sections) == sections;
+            anyhow::ensure!(
+                self.merge(response),
+                "GUI disconnected before Watch refresh"
+            );
+            anyhow::ensure!(complete, "Incomplete GUI Watch refresh");
         }
         Ok(())
     }
@@ -194,9 +228,10 @@ impl Shared {
         let published = self.published.read();
         QueryResponse {
             revisions: published
-                .snapshot
+                .observed
+                .snapshot()
                 .library
-                .query_revisions_for(query, published.snapshot.queue.revision),
+                .query_revisions_for(query, published.observed.snapshot().queue.revision),
             result: Err(error),
         }
     }
@@ -205,14 +240,60 @@ impl Shared {
         Ack::new(
             status,
             Some(message),
-            self.published.read().snapshot.system.revision,
+            self.published.read().observed.snapshot().system.revision,
         )
+    }
+}
+
+/// The owner's ACK survives independently of a later observation failure.
+#[derive(Debug)]
+pub(crate) struct CommandDelivery {
+    pub(crate) ack: Ack,
+    pub(crate) observation: CommandObservation,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CommandObservation {
+    Refreshed,
+    Unavailable(String),
+    NotRequested,
+}
+
+impl CommandDelivery {
+    fn observe(ack: Ack, shutdown: bool, refresh: impl FnOnce() -> Result<()>) -> Self {
+        let observation = if shutdown {
+            CommandObservation::NotRequested
+        } else {
+            match refresh() {
+                Ok(()) => CommandObservation::Refreshed,
+                Err(error) => CommandObservation::Unavailable(format!(
+                    "Authoritative GUI refresh failed: {error:#}; do not retry"
+                )),
+            }
+        };
+        Self { ack, observation }
+    }
+
+    /// Draft rebases/writeback require both owner success and a fresh read.
+    pub(crate) fn observed_result(&self) -> std::result::Result<(), String> {
+        if !self.ack.is_success() {
+            return Err(self
+                .ack
+                .error
+                .clone()
+                .unwrap_or_else(|| "Command failed".into()));
+        }
+        match &self.observation {
+            CommandObservation::Refreshed => Ok(()),
+            CommandObservation::Unavailable(error) => Err(error.clone()),
+            CommandObservation::NotRequested => Err("Authoritative state was not requested".into()),
+        }
     }
 }
 
 struct CommandRequest {
     command: AppCommand,
-    reply: Option<oneshot::Sender<Ack>>,
+    reply: Option<oneshot::Sender<CommandDelivery>>,
 }
 struct QueryRequest {
     query: Query,
@@ -253,18 +334,17 @@ impl FrontendRuntime {
         watcher.bind_instance(instance_id)?;
         let visual = Arc::new(VisualClient::connect(data_dir, instance_id)?);
         let wave = Arc::new(WaveClient::connect(data_dir, instance_id)?);
-        let revisions = initial.revisions;
-        let mut snapshot = ClientSnapshot::default();
-        initial.apply_to(&mut snapshot);
-        visual.configure(&snapshot.configuration.config);
+        let mut observed = ObservedState::new(instance_id);
+        observed.apply(instance_id, initial);
+        visual.configure(&observed.snapshot().configuration.config);
         let shared = Arc::new(Shared {
             data_dir: data_dir.to_owned(),
             instance_id,
             published: RwLock::new(Published {
                 error: None,
-                publication: snapshot.system.revision,
-                snapshot,
-                revisions,
+                publication: observed.snapshot().system.revision,
+                observed,
+                disconnected: false,
             }),
             refresh: Mutex::new(()),
             stop,
@@ -323,7 +403,7 @@ impl FrontendRuntime {
         }
         runtime.spawn("rivu-gui-watch", move |shared| {
             while !shared.stop.is_cancelled() {
-                let current = shared.published.read().revisions;
+                let current = shared.published.read().observed.applied();
                 let announced = match watcher.watch_until(current.into()) {
                     Ok(Some(revisions)) => revisions,
                     Ok(None) => break,
@@ -332,19 +412,11 @@ impl FrontendRuntime {
                         break;
                     }
                 };
-                let _owner = shared.refresh.lock();
-                let sections = announced.changed_since(shared.published.read().revisions);
-                if sections.is_empty() {
-                    continue;
-                }
-                match watcher.get_state(sections) {
-                    Ok(response) => shared.merge(response),
-                    Err(error) => {
-                        if !shared.stop.is_cancelled() {
-                            shared.error(format!("GUI state refresh failed: {error:#}"), true);
-                        }
-                        break;
+                if let Err(error) = shared.refresh_announced(&mut watcher, announced) {
+                    if !shared.stop.is_cancelled() {
+                        shared.error(format!("GUI state refresh failed: {error:#}"), true);
                     }
+                    break;
                 }
             }
         })?;
@@ -396,7 +468,7 @@ fn command_worker(
         if matches!(request.command, AppCommand::Core(Command::DismissError)) {
             shared.dismiss_error();
         }
-        let mut ack = match session.request_ack(request.command) {
+        let ack = match session.request_ack(request.command) {
             Ok(ack) => ack,
             Err(error) => {
                 let status = error
@@ -411,30 +483,26 @@ fn command_worker(
                 )
             }
         };
-        if !shutdown
-            && !shared.stop.is_cancelled()
-            && let Err(error) = shared.refresh_after_operation(&mut session)
-        {
-            shared.error(format!("Authoritative GUI refresh failed: {error:#}"), true);
-            if ack.is_success() {
-                ack.status = AckStatus::Failed;
-                ack.error = Some(format!(
-                    "Command succeeded but authoritative state refresh failed: {error:#}; do not retry"
-                ));
-            }
-        }
-        if !shutdown && shared.stop.is_cancelled() && ack.is_success() {
-            ack.status = AckStatus::Failed;
-            ack.error = Some(
-                "Command succeeded but GUI disconnected before authoritative refresh; do not retry"
-                    .into(),
+        let delivery = CommandDelivery::observe(ack, shutdown, || {
+            anyhow::ensure!(
+                !shared.stop.is_cancelled(),
+                "GUI disconnected before authoritative refresh"
             );
+            shared.refresh_after_operation(&mut session)
+        });
+        if let CommandObservation::Unavailable(message) = &delivery.observation
+            && !shared.stop.is_cancelled()
+        {
+            shared.error(message.clone(), true);
         }
         if let Some(reply) = request.reply {
-            let _ = reply.send(ack);
-        } else if !ack.is_success() {
+            let _ = reply.send(delivery);
+        } else if !delivery.ack.is_success() {
             shared.error(
-                ack.error.unwrap_or_else(|| "GUI command failed".into()),
+                delivery
+                    .ack
+                    .error
+                    .unwrap_or_else(|| "GUI command failed".into()),
                 false,
             );
         }
@@ -540,19 +608,22 @@ impl FrontendHandle {
     pub(crate) fn update_config(&self, change: ConfigMutation) -> Result<()> {
         self.send(Command::MutateConfig { change })
     }
-    pub(crate) async fn apply_settings(&self, patch: ConfigPatch) -> Ack {
+    pub(crate) async fn apply_settings(&self, patch: ConfigPatch) -> CommandDelivery {
         self.request_ack(Command::MutateConfig {
             change: ConfigMutation::Settings(Box::new(patch)),
         })
         .await
     }
-    pub(crate) async fn request_ack(&self, command: Command) -> Ack {
+    pub(crate) async fn request_ack(&self, command: Command) -> CommandDelivery {
         let (reply, receiver) = oneshot::channel();
         if !self.is_connected() {
-            return self.shared.ack_error(
-                AckStatus::NotAdmitted,
-                "GUI is disconnected from Core".into(),
-            );
+            return CommandDelivery {
+                ack: self.shared.ack_error(
+                    AckStatus::NotAdmitted,
+                    "GUI is disconnected from Core".into(),
+                ),
+                observation: CommandObservation::NotRequested,
+            };
         }
         match rivu_protocol::transport::timeout(
             ADMISSION_TIMEOUT,
@@ -565,17 +636,23 @@ impl FrontendHandle {
         {
             Ok(Ok(())) => {}
             _ => {
-                return self.shared.ack_error(
-                    AckStatus::NotAdmitted,
-                    "GUI command queue is busy or stopped; command not sent".into(),
-                );
+                return CommandDelivery {
+                    ack: self.shared.ack_error(
+                        AckStatus::NotAdmitted,
+                        "GUI command queue is busy or stopped; command not sent".into(),
+                    ),
+                    observation: CommandObservation::NotRequested,
+                };
             }
         }
-        receiver.await.unwrap_or_else(|_| {
-            self.shared.ack_error(
+        receiver.await.unwrap_or_else(|_| CommandDelivery {
+            ack: self.shared.ack_error(
                 AckStatus::Unknown,
                 "GUI command outcome unknown; do not automatically retry".into(),
-            )
+            ),
+            observation: CommandObservation::Unavailable(
+                "GUI command worker stopped before observation".into(),
+            ),
         })
     }
     pub(crate) fn with_query_timeout(
@@ -662,10 +739,25 @@ impl FrontendHandle {
         (state.publication != revision).then(|| state.gui_snapshot())
     }
     pub(crate) fn config_snapshot(&self) -> Arc<Config> {
-        Arc::clone(&self.shared.published.read().snapshot.configuration.config)
+        Arc::clone(
+            &self
+                .shared
+                .published
+                .read()
+                .observed
+                .snapshot()
+                .configuration
+                .config,
+        )
     }
     pub(crate) fn library_revision(&self) -> u64 {
-        self.shared.published.read().snapshot.library.revision
+        self.shared
+            .published
+            .read()
+            .observed
+            .snapshot()
+            .library
+            .revision
     }
     pub(crate) fn set_wakeup(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.shared.wakeup.write() = Some(Arc::new(callback));
@@ -680,8 +772,11 @@ impl FrontendHandle {
     pub(crate) fn set_waveform_demand(&self, enabled: bool) {
         self.shared.wave.set_enabled(enabled);
     }
-    pub(crate) fn analysis_frame_is_current(&self, frame: &AnalysisFrame) -> bool {
-        self.is_connected() && self.shared.visual.analysis_frame_is_current(frame)
+    pub(crate) fn consume_current_analysis(
+        &self,
+        consume: impl FnOnce(&AnalysisFrame) -> bool,
+    ) -> bool {
+        self.is_connected() && self.shared.visual.consume_current_analysis(consume)
     }
 }
 
@@ -706,6 +801,71 @@ mod tests {
         let runtime =
             crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
         (directory, runtime)
+    }
+
+    #[test]
+    fn successful_ack_survives_failed_refresh_without_replay() {
+        let mut ack = Ack::new(AckStatus::Succeeded, Some("owner warning".into()), 42);
+        ack.scan_id = Some(11);
+        ack.relocation_id = Some(12);
+        ack.processing_id = Some(13);
+        let expected = serde_json::to_value(&ack).unwrap();
+        let mut refreshes = 0;
+        let delivery = CommandDelivery::observe(ack, false, || {
+            refreshes += 1;
+            anyhow::bail!("read failed")
+        });
+        assert_eq!(refreshes, 1);
+        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
+        assert!(matches!(
+            delivery.observation,
+            CommandObservation::Unavailable(_)
+        ));
+        assert!(delivery.observed_result().is_err());
+    }
+
+    #[test]
+    fn failed_ack_and_successful_observation_remain_independent() {
+        let mut ack = Ack::new(AckStatus::Failed, Some("partially committed".into()), 73);
+        ack.scan_id = Some(19);
+        let expected = serde_json::to_value(&ack).unwrap();
+        let delivery = CommandDelivery::observe(ack, false, || Ok(()));
+        assert_eq!(delivery.observation, CommandObservation::Refreshed);
+        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
+        assert_eq!(
+            delivery.observed_result(),
+            Err("partially committed".into())
+        );
+    }
+
+    #[test]
+    fn shutdown_ack_never_requires_a_post_acceptance_read() {
+        let delivery =
+            CommandDelivery::observe(Ack::new(AckStatus::Succeeded, None, 1), true, || {
+                panic!("Shutdown must not refresh after acceptance")
+            });
+        assert!(delivery.ack.is_success());
+        assert_eq!(delivery.observation, CommandObservation::NotRequested);
+    }
+
+    #[test]
+    fn delayed_watch_announcement_cannot_restore_pre_ack_payload() {
+        let (_directory, runtime) = fixture();
+        let mut watch = runtime.handle.session().unwrap();
+        let old_announcement = watch.get_state(StateSections::default()).unwrap().revisions;
+        let delivery = futures::executor::block_on(
+            runtime.handle.request_ack(Command::Volume { value: 0.31 }),
+        );
+        assert!(delivery.observed_result().is_ok());
+        let refreshed = runtime.handle.shared.published.read().observed.applied();
+        runtime
+            .handle
+            .shared
+            .refresh_announced(&mut watch, old_announcement)
+            .unwrap();
+        let published = runtime.handle.shared.published.read();
+        assert_eq!(published.observed.snapshot().playback.volume, 0.31);
+        assert_eq!(published.observed.applied().playback, refreshed.playback);
     }
 
     #[test]
@@ -783,7 +943,8 @@ mod tests {
         assert!(runtime.handle.gui_snapshot().system.last_error.is_some());
         let before = rivu_client::get_state(runtime.handle.data_dir(), StateSections::ALL).unwrap();
         assert!(before.system.as_ref().unwrap().last_error.is_none());
-        let ack = futures::executor::block_on(runtime.handle.request_ack(Command::DismissError));
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::DismissError)).ack;
         assert!(ack.is_success());
         assert!(runtime.handle.gui_snapshot().system.last_error.is_none());
         let after = rivu_client::get_state(runtime.handle.data_dir(), StateSections::ALL).unwrap();

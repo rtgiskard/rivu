@@ -738,28 +738,25 @@ pub(super) fn execute(
                     // traversals stop at its outputs before inference allocates
                     // them; a bypass alias still retains its own PCM storage.
                     release_unreachable_source(&graph, target, &boundaries, Some(id), &mut input)?;
-                    let original_operation = status.operation;
-                    let original_frames = status.frames;
-                    status.operation = operation;
-                    status.frames = Some(upstream.pcm.frames());
-                    let result = neural::run(
-                        &upstream.pcm,
-                        config,
-                        Arc::clone(&budget),
-                        cancel,
+                    let outcome = neural::run(
+                        ModelRequest {
+                            task_id: status.id,
+                            operation,
+                            input: &upstream.pcm,
+                            config,
+                            budget: Arc::clone(&budget),
+                            cancel,
+                        },
                         progress,
-                        status,
                     );
-                    status.operation = original_operation;
-                    status.frames = original_frames;
-                    let result = result?;
                     let entry = status
                         .graph_nodes
                         .iter_mut()
                         .find(|entry| entry.node == id)
                         .context("Missing graph node status")?;
-                    entry.model_id = status.model_id.take();
-                    entry.model_sha256 = status.model_sha256.take();
+                    entry.model_id = outcome.provenance.id;
+                    entry.model_sha256 = outcome.provenance.sha256;
+                    let result = outcome.result?;
                     let outputs = if operation == ProcessingOperation::Speech {
                         vec![result.denoised.context("Missing speech output")?]
                     } else {
@@ -783,6 +780,7 @@ pub(super) fn execute(
                             },
                         );
                     }
+                    node_event(status, id, ProcessingPhase::Complete, None, tx);
                 }
                 _ => {}
             }

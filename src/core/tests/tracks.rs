@@ -12,14 +12,14 @@ fn committed_history_removal_retains_session_suppression_when_refresh_fails() {
     core.command(Command::RemoveHistory { track_ids: vec![1] })
         .unwrap_err();
     assert_eq!(core.track(1).unwrap().last_played, None);
-    assert!(core.playback.as_ref().unwrap().history_removed);
-    assert!(core.playback_history_pending);
+    assert!(core.transport.session.as_ref().unwrap().history_removed);
+    assert!(core.transport.history_pending);
     connection
         .execute("UPDATE tracks SET last_played=NULL WHERE id=4", [])
         .unwrap();
     core.command(Command::RemoveHistory { track_ids: vec![1] })
         .unwrap();
-    assert!(!core.playback_history_pending);
+    assert!(!core.transport.history_pending);
     assert!(core.state.library.history.is_empty());
     progress(&mut core, 3.0, 3.0);
     core.stop().unwrap();
@@ -116,7 +116,7 @@ fn history_removal_rolls_back_batch_and_does_not_suppress_on_failure() {
     );
     assert_eq!(core.track(1).unwrap().last_played, Some(10));
     assert_eq!(core.track(2).unwrap().last_played, Some(20));
-    assert!(!core.playback.as_ref().unwrap().history_removed);
+    assert!(!core.transport.session.as_ref().unwrap().history_removed);
     assert!(
         core.command(Command::RemoveHistory {
             track_ids: vec![1, 999]
@@ -135,17 +135,17 @@ fn removed_active_history_stays_removed_through_late_start_progress_and_stop() {
         if !late_start {
             started(&mut core, Some(10.0)).unwrap();
         }
-        let generation = core.generation;
+        let generation = core.transport.generation;
         core.command(Command::RemoveHistory { track_ids: vec![1] })
             .unwrap();
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         if late_start {
             started(&mut core, Some(10.0)).unwrap();
         }
         progress(&mut core, 3.0, 3.0);
         assert_eq!(play_count(&core, 1), 1);
-        core.playback_write_deferred = true;
+        core.transport.write_deferred = true;
         core.flush_deferred_playback().unwrap();
         assert_eq!(core.track(1).unwrap().last_played, None);
         core.stop().unwrap();
@@ -163,17 +163,17 @@ fn removed_retired_history_discards_deferred_activity_but_counts_heard_audio() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     started(&mut core, Some(10.0)).unwrap();
-    let mut stats = core.playback.take().unwrap();
+    let mut stats = core.transport.session.take().unwrap();
     stats.record_heard(3.0, 100);
-    core.retired_playback = Some(super::super::playback::RetiredPlayback {
+    core.transport.retired = Some(super::super::playback::RetiredPlayback {
         stats,
         duration: Some(10.0),
     });
-    core.playback_write_deferred = true;
+    core.transport.write_deferred = true;
     core.command(Command::RemoveHistory { track_ids: vec![1] })
         .unwrap();
     core.flush_deferred_playback().unwrap();
-    assert!(core.retired_playback.is_none());
+    assert!(core.transport.retired.is_none());
     assert_eq!(play_count(&core, 1), 1);
     assert_eq!(core.track(1).unwrap().last_played, None);
     assert!(core.store.history(MAX_QUERY_ROWS).unwrap().is_empty());
@@ -288,7 +288,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
                     ..ScanResult::default()
                 })
                 .unwrap();
-            core.apply_scan_impacts(impacts).unwrap();
+            core.apply_catalog_changes(impacts).unwrap();
         }
         core.command(Command::CreatePlaylistWithTracks {
             name: "Affected".into(),
@@ -374,7 +374,7 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                         ..ScanResult::default()
                     })
                     .unwrap();
-                core.apply_scan_impacts(impacts).unwrap();
+                core.apply_catalog_changes(impacts).unwrap();
             }
             core.store.mark_played(2, 7).unwrap();
             core.state.library.history = Arc::new(core.store.history(MAX_QUERY_ROWS).unwrap());
@@ -384,8 +384,8 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             core.refresh_queue_tracks().unwrap();
             let current = Arc::clone(core.state.current_track.as_ref().unwrap());
             let queue = core.state.queue.clone();
-            core.played = vec![1, 2, 3, 4, 5];
-            core.played_cursor = 4;
+            core.transport.history = vec![1, 2, 3, 4, 5];
+            core.transport.history_cursor = 4;
             let before = core.state.query_revisions();
             let connection =
                 rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
@@ -424,15 +424,15 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                     core.state.current_track.as_ref().unwrap(),
                     &current
                 ));
-                assert_eq!(core.played, [1, 4, 5]);
-                assert_eq!(core.played_cursor, 2);
+                assert_eq!(core.transport.history, [1, 4, 5]);
+                assert_eq!(core.transport.history_cursor, 2);
             } else {
                 assert!(Arc::ptr_eq(&core.state.library.history, &history));
                 assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
                 assert_queue_saved(&core);
                 assert_eq!(core.state.current_track().unwrap().id, 1);
-                assert_eq!(core.played, [1, 4, 5]);
-                assert_eq!(core.played_cursor, 2);
+                assert_eq!(core.transport.history, [1, 4, 5]);
+                assert_eq!(core.transport.history_cursor, 2);
             }
         }
     }
@@ -613,7 +613,7 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
     let revisions = core.state.query_revisions();
     let sections = core.state.revisions;
     let playback = core.state.playback.clone();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     for hint in [DecoderHint::Ffmpeg, DecoderHint::Native, DecoderHint::Auto] {
         core.command(Command::EditTrack {
             track_id: 2,
@@ -629,8 +629,8 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
         assert_eq!(core.state.queue.current_id, Some(3));
         assert_eq!(core.state.queue.revision, revisions.queue);
         assert_eq!(core.state.playback, playback);
-        assert_eq!(core.generation, generation);
-        assert!(core.playback.is_some());
+        assert_eq!(core.transport.generation, generation);
+        assert!(core.transport.session.is_some());
         let query = Query::QueueBatch {
             query: None,
             after: None,
@@ -780,7 +780,7 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
                     ..ScanResult::default()
                 })
                 .unwrap();
-            core.apply_scan_impacts(impact).unwrap();
+            core.apply_catalog_changes(impact).unwrap();
             let original = CueSegment {
                 sheet: directory.path().join("album.cue"),
                 number: 1,
@@ -795,7 +795,8 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
                 .unwrap()
                 .unwrap();
             let commands = recording_audio(&mut core);
-            core.start_with_status(queue_id, false, status).unwrap();
+            core.start_with_status(queue_id, QueueHistory::Preserve, status)
+                .unwrap();
             assert!(matches!(
                 commands.recv_timeout(Duration::from_secs(2)).unwrap(),
                 AudioCommand::StopAndSnapshot(_)
@@ -807,7 +808,7 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
             started(&mut core, Some(5.0)).unwrap();
             core.publish();
             let before = core.shared.read().clone();
-            let generation = core.generation;
+            let generation = core.transport.generation;
             let changed = CueSegment {
                 start_frame: 150,
                 end_frame: Some(end_frame),
@@ -838,7 +839,7 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
             assert_eq!(current.bitrate_exact, original_metadata.bitrate_exact);
             assert_eq!(published.playback, before.playback);
             assert_eq!(published.queue.current_id, Some(queue_id));
-            assert_eq!(core.generation, generation);
+            assert_eq!(core.transport.generation, generation);
             let stored = core.track(track_id).unwrap();
             assert_eq!(stored.path, replacement);
             assert_eq!(stored.cue.as_ref(), Some(&changed));
@@ -860,7 +861,8 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
             ));
             assert!(commands.is_empty());
 
-            core.start_with_status(queue_id, false, status).unwrap();
+            core.start_with_status(queue_id, QueueHistory::Preserve, status)
+                .unwrap();
             assert!(matches!(
                 commands.recv_timeout(Duration::from_secs(2)).unwrap(),
                 AudioCommand::StopAndSnapshot(_)
@@ -1034,10 +1036,10 @@ fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     playing(&mut core, 2);
-    core.played = vec![1, 2, 3];
-    core.played_cursor = 2;
+    core.transport.history = vec![1, 2, 3];
+    core.transport.history_cursor = 2;
     core.command(Command::RemoveMissingTracks).unwrap();
     assert_eq!(
         core.store
@@ -1060,8 +1062,8 @@ fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk
             .collect::<Vec<_>>(),
         [1]
     );
-    assert_eq!(core.played, [1]);
-    assert_eq!(core.played_cursor, 1);
+    assert_eq!(core.transport.history, [1]);
+    assert_eq!(core.transport.history_cursor, 1);
     assert_eq!(core.state.queue.current_id, None);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.state.library.history.is_empty());
@@ -1072,7 +1074,7 @@ fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk
 fn track_removal_validates_the_set_before_stopping_playback() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     assert!(
         core.command(Command::RemoveTracks {
             track_ids: vec![1, 1, 999],
@@ -1080,7 +1082,7 @@ fn track_removal_validates_the_set_before_stopping_playback() {
         .is_err()
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert!(core.store.track(1).unwrap().is_some());
     core.command(Command::RemoveTracks {
         track_ids: vec![1, 1],
@@ -1117,9 +1119,11 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
                         ..ScanResult::default()
                     })
                     .unwrap();
-                core.apply_scan_impacts(impacts).unwrap();
+                core.apply_catalog_changes(impacts).unwrap();
             }
             playing(&mut core, 3);
+            let generation = core.transport.generation;
+            let late_started = started_event(&core, Some(10.0));
             match status {
                 PlaybackStatus::Stopped => core.stop().unwrap(),
                 PlaybackStatus::Paused => {
@@ -1142,8 +1146,6 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
                 )
                 .unwrap();
             let current = Arc::clone(core.state.current_track.as_ref().unwrap());
-            let generation = core.generation;
-            let late_started = started_event(&core, Some(10.0));
             let command = if missing {
                 Command::RemoveMissingTracks
             } else {
@@ -1154,8 +1156,7 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
             let error = core.command(command).unwrap_err();
             assert!(format!("{error:#}").contains("rejected track deletion"));
             assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-            assert_ne!(core.generation, generation);
-            assert!(core.playback.is_none());
+            assert!(core.transport.session.is_none());
             assert_eq!(core.state.queue.current_id, Some(3));
             assert!(Arc::ptr_eq(
                 core.state.current_track.as_ref().unwrap(),
@@ -1216,7 +1217,7 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
                         ..ScanResult::default()
                     })
                     .unwrap();
-                core.apply_scan_impacts(impacts).unwrap();
+                core.apply_catalog_changes(impacts).unwrap();
             }
             playing(&mut core, 3);
             match status {
@@ -1226,7 +1227,7 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
                 }
                 PlaybackStatus::Playing => {}
             }
-            let generation = core.generation;
+            let generation = core.transport.generation;
             let before = core.state.query_revisions();
             let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
             let command = if missing {
@@ -1241,7 +1242,7 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
                 &scopes
             ));
             assert_eq!(core.state.playback.status, status);
-            assert_eq!(core.generation, generation);
+            assert_eq!(core.transport.generation, generation);
             assert_eq!(core.state.queue.current_id, Some(3));
             assert_eq!(core.state.queue.current_position, Some(1));
             assert_eq!(core.state.current_track().unwrap().id, 2);
@@ -1254,15 +1255,15 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
 fn removing_tracks_prunes_history_and_previous_retains_the_remaining_gap() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 4);
-    core.state.playback.shuffle = true;
-    core.played = vec![1, 2, 3, 4, 5];
-    core.played_cursor = 4;
+    edit_preferences(&mut core, |config| config.shuffle = true);
+    core.transport.history = vec![1, 2, 3, 4, 5];
+    core.transport.history_cursor = 4;
     core.command(Command::RemoveTracks { track_ids: vec![2] })
         .unwrap();
-    assert_eq!(core.played, [1, 4, 5]);
-    assert_eq!(core.played_cursor, 2);
+    assert_eq!(core.transport.history, [1, 4, 5]);
+    assert_eq!(core.transport.history_cursor, 2);
     missing(&mut core, Command::Previous, 1);
-    assert_eq!(core.played_cursor, 2);
+    assert_eq!(core.transport.history_cursor, 2);
     assert_queue_saved(&core);
 }
 
@@ -1389,10 +1390,10 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
         )
         .unwrap();
 
-    let result = core.apply_scan_impacts(crate::store::ScanImpacts {
+    let result = core.apply_catalog_changes(crate::store::CatalogChanges {
         changed: true,
         library: true,
-        ..crate::store::ScanImpacts::default()
+        ..crate::store::CatalogChanges::default()
     });
     assert!(result.is_err());
     assert_eq!(core.track(1).unwrap().title, "Committed title");

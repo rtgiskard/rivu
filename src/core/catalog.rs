@@ -97,20 +97,71 @@ enum ScanInput {
     Import { path: PathBuf, name: String },
 }
 
-/// A worker's committed facts and prepared projections survive later failures.
-pub(super) struct ScanSaved {
-    id: u64,
-    progress: ScanProgress,
-    library_committed: bool,
-    playlist_id: Option<i64>,
-    outcome_uncertain: bool,
-    impacts: Option<crate::store::ScanImpacts>,
-    summary: String,
-    scan_errors: Option<String>,
-    error: Option<anyhow::Error>,
+/// Evidence belongs to a single transaction, never to the whole scan pipeline.
+#[derive(Debug, Default)]
+enum CatalogCommit<T> {
+    #[default]
+    NotAttempted,
+    Pending,
+    NotCommitted,
+    Confirmed(T),
+    Unknown,
+}
+
+impl<T> CatalogCommit<T> {
+    fn confirmed(&self) -> Option<&T> {
+        match self {
+            Self::Confirmed(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn retire(&mut self) {
+        if matches!(self, Self::Pending) {
+            *self = Self::Unknown;
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScanCommits {
+    selection: CatalogCommit<Option<u64>>,
+    library: CatalogCommit<crate::store::CatalogChanges>,
+    playlist: CatalogCommit<i64>,
+}
+
+impl ScanCommits {
+    fn retire(&mut self) {
+        self.selection.retire();
+        self.library.retire();
+        self.playlist.retire();
+    }
+
+    fn is_unknown(&self) -> bool {
+        self.selection.is_unknown() || self.library.is_unknown() || self.playlist.is_unknown()
+    }
+}
+
+/// Prepared projections are independent of authoritative transaction evidence.
+#[derive(Default)]
+struct ScanProjections {
     library_total: Option<Result<usize>>,
     history: Option<Result<Vec<HistoryEntry>>>,
     playlist_total: Option<Result<usize>>,
+}
+
+pub(super) struct ScanSaved {
+    id: u64,
+    progress: ScanProgress,
+    commits: ScanCommits,
+    summary: String,
+    scan_errors: Option<String>,
+    error: Option<anyhow::Error>,
+    projections: ScanProjections,
 }
 
 struct ScanSavingCompletion {
@@ -122,10 +173,12 @@ impl Drop for ScanSavingCompletion {
     fn drop(&mut self) {
         if let Some(mut saved) = self.saved.take() {
             if thread::panicking() {
-                saved.outcome_uncertain = true;
-                saved.error = Some(anyhow::anyhow!(
-                    "Scan saving worker panicked; database changes may already be committed and some projections may be stale; inspect the library before retrying"
-                ));
+                saved.commits.retire();
+                saved.error = Some(anyhow::anyhow!(if saved.commits.is_unknown() {
+                    "Scan saving worker panicked during a write; that transaction outcome is unknown; confirmed commits are retained; restart Rivu before inspecting or retrying"
+                } else {
+                    "Scan saving worker panicked; recorded transaction outcomes are retained, but prepared projections may be stale; inspect the library before retrying"
+                }));
             }
             // The async supervisor joins the transaction before forwarding facts.
             if let Some(sender) = self.sender.take() {
@@ -147,16 +200,11 @@ fn save_scan(
         saved: Some(ScanSaved {
             id: scan.id,
             progress: scan.progress,
-            library_committed: false,
-            playlist_id: None,
-            outcome_uncertain: false,
-            impacts: None,
+            commits: ScanCommits::default(),
             summary: String::new(),
             scan_errors: None,
             error: None,
-            library_total: None,
-            history: None,
-            playlist_total: None,
+            projections: ScanProjections::default(),
         }),
     };
     let saved = completion.saved.as_mut().unwrap();
@@ -177,11 +225,15 @@ fn save_scan(
             return;
         }
     };
+    saved.commits.selection = CatalogCommit::Pending;
     if let Err(error) = store.set_queue_current(current_id) {
+        saved.commits.selection = CatalogCommit::NotCommitted;
         saved.error = Some(error.context("Saving queue position failed; scan has not been saved"));
         return;
     }
+    saved.commits.selection = CatalogCommit::Confirmed(current_id);
     let save_started = Instant::now();
+    saved.commits.library = CatalogCommit::Pending;
     let applied = match other_roots {
         Some(roots) => store.apply_other_tracks_check(&mut result, &roots),
         None => store.apply_scan(&result),
@@ -195,12 +247,12 @@ fn save_scan(
     }) {
         Ok(impacts) => impacts,
         Err(error) => {
+            saved.commits.library = CatalogCommit::NotCommitted;
             saved.error = Some(error);
             return;
         }
     };
-    saved.library_committed = true;
-    saved.impacts = Some(impacts);
+    saved.commits.library = CatalogCommit::Confirmed(impacts);
     saved.summary = result.summary(impacts.skipped_short_tracks);
     tracing::info!(
         id = saved.id,
@@ -253,6 +305,7 @@ fn save_scan(
                 !ids.is_empty(),
                 "Playlist contains no supported, accessible audio tracks"
             );
+            saved.commits.playlist = CatalogCommit::Pending;
             store.create_playlist_with_tracks(&name, &ids)
         })()
         .context("Scan saved, but playlist creation failed");
@@ -260,23 +313,26 @@ fn save_scan(
             Ok(id) => {
                 // Record the DB fact before preparing projections, so unwinding
                 // or any later refresh failure cannot erase the created id.
-                saved.playlist_id = Some(id);
+                saved.commits.playlist = CatalogCommit::Confirmed(id);
             }
-            Err(error) => saved.error = Some(error),
+            Err(error) => {
+                saved.commits.playlist = CatalogCommit::NotCommitted;
+                saved.error = Some(error);
+            }
         }
     }
     // Counts and history can scan substantial DB state. Prepare them here;
     // Core only applies these projections and performs indexed queue reads.
     let refresh_started = Instant::now();
-    let dependencies = impacts.dependencies(saved.playlist_id.is_some());
+    let dependencies = impacts.dependencies(saved.commits.playlist.confirmed().is_some());
     if dependencies.refresh_track_total {
-        saved.library_total = Some(store.track_count());
+        saved.projections.library_total = Some(store.track_count());
     }
     if dependencies.refresh_history {
-        saved.history = Some(store.history(MAX_QUERY_ROWS));
+        saved.projections.history = Some(store.history(MAX_QUERY_ROWS));
     }
-    if saved.playlist_id.is_some() {
-        saved.playlist_total = Some(
+    if saved.commits.playlist.confirmed().is_some() {
+        saved.projections.playlist_total = Some(
             store
                 .playlist_summary_page(None, 0, 0)
                 .map(|page| page.total),
@@ -290,6 +346,77 @@ fn save_scan(
 }
 
 impl Core {
+    /// Publish committed facts without reading potentially large projections.
+    pub(in crate::core) fn announce_catalog_changes(
+        &mut self,
+        impacts: crate::store::CatalogChanges,
+    ) {
+        let dependencies = impacts.dependencies(false);
+        self.invalidate_collection_impacts(
+            dependencies.queue_revision,
+            dependencies.album_revision,
+        );
+        if dependencies.library_revision {
+            self.state.library.revision = self.state.library.revision.wrapping_add(1);
+        }
+        if dependencies.structure_revision {
+            self.state.library.structure_revision =
+                self.state.library.structure_revision.wrapping_add(1);
+        }
+        if dependencies.duplicate_group_revision {
+            self.state.library.duplicate_groups_revision =
+                self.state.library.duplicate_groups_revision.wrapping_add(1);
+        }
+        if dependencies.duplicate_member_revision {
+            self.state.library.duplicate_members_revision = self
+                .state
+                .library
+                .duplicate_members_revision
+                .wrapping_add(1);
+        }
+    }
+
+    /// Announce committed producer facts before any fallible cached projection read.
+    pub(in crate::core) fn apply_catalog_changes(
+        &mut self,
+        impacts: crate::store::CatalogChanges,
+    ) -> Result<()> {
+        self.announce_catalog_changes(impacts);
+        let catalog = self.refresh_catalog_projections(impacts);
+        // A failed projection read cannot hide another committed domain.
+        let dependencies = impacts.dependencies(false);
+        let queue = if dependencies.refresh_queue {
+            self.refresh_queue_tracks()
+        } else {
+            Ok(())
+        };
+        catalog.and(queue)
+    }
+
+    pub(in crate::core) fn refresh_catalog_projections(
+        &mut self,
+        impacts: crate::store::CatalogChanges,
+    ) -> Result<()> {
+        let dependencies = impacts.dependencies(false);
+        let library = if dependencies.refresh_track_total {
+            self.store
+                .track_count()
+                .map(|total| self.state.library.track_total = total)
+                .context("Refreshing library count failed; previous count retained")
+        } else {
+            Ok(())
+        };
+        let history = if dependencies.refresh_history {
+            self.store
+                .history(MAX_QUERY_ROWS)
+                .map(|history| self.replace_history(history))
+                .context("Refreshing history failed; previous history retained")
+        } else {
+            Ok(())
+        };
+        library.and(history)
+    }
+
     pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<u64> {
         self.start_scan(ScanInput::Paths { paths, force })
     }
@@ -306,7 +433,7 @@ impl Core {
         if self.active_scan.is_some() || self.active_external_admission.is_some() {
             bail!("A library scan is already running");
         }
-        let config = Arc::clone(&self.state.configuration.config);
+        let config = Arc::clone(self.preferences.settings());
         let other_tracks_check = matches!(input, ScanInput::OtherTracks { .. });
         let owner = if matches!(input, ScanInput::Import { .. }) {
             rivu_protocol::model::MediaTaskOwner::Playlist
@@ -737,7 +864,7 @@ impl Core {
             self.active_scan = Some(task);
             return;
         }
-        if self.retired_playback.is_some()
+        if self.transport.retired.is_some()
             && let Err(error) = self.flush_deferred_playback()
         {
             self.complete_unsaved_scan(
@@ -771,7 +898,7 @@ impl Core {
         // Re-resolve membership only at the Saving boundary, after any wait for
         // relocation. Settings edits are rejected while this accepted save runs.
         let other_roots = if scan.other_tracks_check {
-            match library::normalize_roots(&self.state.configuration.config.library_roots) {
+            match library::normalize_roots(&self.preferences.settings().library_roots) {
                 Ok(roots) => Some(roots),
                 Err(error) => {
                     self.complete_unsaved_scan(task, Err(error), false);
@@ -791,6 +918,7 @@ impl Core {
         task.worker = self.executor.spawn(async move {
             let id = scan.id;
             let progress = scan.progress.clone();
+            let importing = scan.import.is_some();
             let (completed, completion) = futures::channel::oneshot::channel();
             let joined = workers.execute(move || {
                 save_scan(&database_path, current_id, scan, other_roots, completed)
@@ -798,18 +926,17 @@ impl Core {
             let saved = completion.await.unwrap_or_else(|_| ScanSaved {
                 id,
                 progress,
-                library_committed: false,
-                playlist_id: None,
-                outcome_uncertain: true,
-                impacts: None,
+                commits: ScanCommits {
+                    selection: CatalogCommit::Unknown,
+                    library: CatalogCommit::Unknown,
+                    playlist: if importing { CatalogCommit::Unknown } else { CatalogCommit::NotAttempted },
+                },
                 summary: String::new(),
                 scan_errors: None,
                 error: Some(anyhow::anyhow!(
                     "Scan saving completion failed ({joined:?}); database changes may already be committed; inspect the library before retrying"
                 )),
-                library_total: None,
-                history: None,
-                playlist_total: None,
+                projections: ScanProjections::default(),
             });
             let _ = deliver_scan_event(&sender, ScanEvent::Saved(saved)).await;
         });
@@ -833,7 +960,7 @@ impl Core {
         self.retain_scan_outcome(task.status, task.owner);
     }
 
-    fn complete_saved_scan(&mut self, saved: ScanSaved) {
+    fn complete_saved_scan(&mut self, mut saved: ScanSaved) {
         if !self.active_scan.as_ref().is_some_and(|task| {
             task.status.id == saved.id && task.status.progress.phase == ScanPhase::Saving
         }) {
@@ -841,21 +968,25 @@ impl Core {
         }
         let mut task = self.active_scan.take().unwrap();
         let retired = super::retire_worker(task.worker, "Scan worker panicked");
+        saved.commits.retire();
+        let library_committed = saved.commits.library.confirmed().is_some();
+        let playlist_id = saved.commits.playlist.confirmed().copied();
+        let impacts = saved.commits.library.confirmed().copied();
         // Confirmed commits remain facts even if later worker retirement fails.
         // Publish only their tokens here; uncertain outcomes must not read views.
-        if let Some(playlist_id) = saved.playlist_id {
+        if let Some(playlist_id) = playlist_id {
             self.advance_playlist_entry_revision(playlist_id);
             self.invalidate_playlist_creation(true);
         }
-        if let Some(impacts) = saved.impacts {
-            self.invalidate_scan_impacts(impacts);
+        if let Some(impacts) = impacts {
+            self.announce_catalog_changes(impacts);
         }
-        if saved.outcome_uncertain || retired.is_err() {
+        if saved.commits.is_unknown() {
             self.database_outcome_uncertain();
             task.status.progress = saved.progress;
             task.status.progress.phase = ScanPhase::Failed;
-            task.status.library_committed = saved.library_committed;
-            task.status.playlist_id = saved.playlist_id;
+            task.status.library_committed = library_committed;
+            task.status.playlist_id = playlist_id;
             task.status.message = "Database outcome is uncertain; restart Rivu".into();
             task.status.error = Some(saved.error.map_or_else(
                 || task.status.message.clone(),
@@ -865,8 +996,8 @@ impl Core {
             return;
         }
         task.status.progress = saved.progress;
-        task.status.library_committed = saved.library_committed;
-        task.status.playlist_id = saved.playlist_id;
+        task.status.library_committed = library_committed;
+        task.status.playlist_id = playlist_id;
         task.status.message = saved.summary;
         task.status.error = saved.scan_errors;
         let refresh_started = Instant::now();
@@ -874,13 +1005,15 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(error);
         }
-        if let Some(impacts) = saved.impacts {
-            self.store
-                .invalidate_scan_caches(impacts, saved.playlist_id.is_some());
+        if let Err(error) = retired {
+            errors.push(error);
         }
-        let impacts = saved.impacts;
         if let Some(impacts) = impacts {
-            if let Some(total) = saved.library_total {
+            self.store
+                .invalidate_catalog_caches(impacts, playlist_id.is_some());
+        }
+        if let Some(impacts) = impacts {
+            if let Some(total) = saved.projections.library_total {
                 match total {
                     Ok(total) => self.state.library.track_total = total,
                     Err(error) => errors.push(
@@ -888,7 +1021,7 @@ impl Core {
                     ),
                 }
             }
-            if let Some(history) = saved.history {
+            if let Some(history) = saved.projections.history {
                 match history {
                     Ok(history) => self.replace_history(history),
                     Err(error) => errors.push(
@@ -896,19 +1029,19 @@ impl Core {
                     ),
                 }
             }
-            let dependencies = impacts.dependencies(saved.playlist_id.is_some());
+            let dependencies = impacts.dependencies(playlist_id.is_some());
             if dependencies.refresh_queue
                 && let Err(error) = self.refresh_queue_tracks()
             {
-                errors.push(error.context(if saved.library_committed {
+                errors.push(error.context(if library_committed {
                     "Scan committed, but refreshing views failed; some projections may be stale"
                 } else {
                     "Scan saving failed and refreshing views failed; database changes may already be committed"
                 }));
             }
         }
-        if saved.playlist_id.is_some()
-            && let Some(total) = saved.playlist_total
+        if playlist_id.is_some()
+            && let Some(total) = saved.projections.playlist_total
         {
             match total {
                 Ok(total) => self.state.library.playlist_total = total,
@@ -965,6 +1098,116 @@ impl Core {
 mod tests {
     use super::*;
 
+    fn saving_progress() -> ScanProgress {
+        ScanProgress {
+            phase: ScanPhase::Saving,
+            processed: 0,
+            total: Some(0),
+            errors: 0,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn selection_commit_survives_a_later_library_rollback() {
+        let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+        let database = directory.path().join("library.db");
+        let path = core.track(1).unwrap().path;
+        let current = core.store.queue_id_at(1).unwrap().unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_scan BEFORE UPDATE OF missing ON tracks BEGIN SELECT RAISE(ABORT,'injected scan rollback'); END;").unwrap();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        save_scan(
+            &database,
+            Some(current),
+            ScanFinished {
+                id: 1,
+                progress: saving_progress(),
+                other_tracks_check: false,
+                import: None,
+                result: Ok(ScanResult {
+                    roots: vec![path],
+                    ..Default::default()
+                }),
+            },
+            None,
+            sender,
+        );
+        let saved = futures::executor::block_on(receiver).unwrap();
+        assert_eq!(saved.commits.selection.confirmed(), Some(&Some(current)));
+        assert!(matches!(saved.commits.library, CatalogCommit::NotCommitted));
+        assert!(!saved.commits.is_unknown());
+        assert!(saved.error.is_some());
+        assert_eq!(
+            Store::open(&database)
+                .unwrap()
+                .queue_state()
+                .unwrap()
+                .current_id,
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn library_commit_survives_playlist_creation_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("library.db");
+        drop(Store::open(&database).unwrap());
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        save_scan(
+            &database,
+            None,
+            ScanFinished {
+                id: 1,
+                progress: saving_progress(),
+                other_tracks_check: false,
+                import: Some(("Empty import".into(), Vec::new())),
+                result: Ok(ScanResult::default()),
+            },
+            None,
+            sender,
+        );
+        let saved = futures::executor::block_on(receiver).unwrap();
+        assert_eq!(saved.commits.selection.confirmed(), Some(&None));
+        assert!(saved.commits.library.confirmed().is_some());
+        assert!(matches!(
+            saved.commits.playlist,
+            CatalogCommit::NotCommitted
+        ));
+        assert!(!saved.commits.is_unknown());
+        assert!(saved.error.is_some());
+    }
+
+    #[test]
+    fn projection_unwind_does_not_invent_an_unknown_write() {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let worker = thread::spawn(move || {
+            let _completion = ScanSavingCompletion {
+                sender: Some(sender),
+                saved: Some(ScanSaved {
+                    id: 1,
+                    progress: saving_progress(),
+                    commits: ScanCommits {
+                        selection: CatalogCommit::Confirmed(None),
+                        library: CatalogCommit::Confirmed(Default::default()),
+                        playlist: CatalogCommit::Confirmed(7),
+                    },
+                    summary: String::new(),
+                    scan_errors: None,
+                    error: None,
+                    projections: ScanProjections::default(),
+                }),
+            };
+            panic!("projection preparation failed after all commits");
+        });
+        let saved = futures::executor::block_on(receiver).unwrap();
+        assert!(worker.join().is_err());
+        assert!(!saved.commits.is_unknown());
+        assert_eq!(saved.commits.playlist.confirmed(), Some(&7));
+        assert!(saved.commits.library.confirmed().is_some());
+        assert!(saved.error.is_some());
+    }
+
     #[test]
     fn uncertain_scan_completion_publishes_known_commits_without_refreshing_views() {
         for supervisor_panicked in [false, true] {
@@ -1006,22 +1249,25 @@ mod tests {
             core.complete_saved_scan(ScanSaved {
                 id: 1,
                 progress,
-                library_committed: true,
-                playlist_id: Some(playlist_id),
-                outcome_uncertain: !supervisor_panicked,
-                impacts: Some(crate::store::ScanImpacts {
-                    changed: edit.changed,
-                    library: edit.library,
-                    queue: edit.queue,
-                    albums: edit.albums,
-                    ..Default::default()
-                }),
+                commits: ScanCommits {
+                    selection: CatalogCommit::Unknown,
+                    library: CatalogCommit::Confirmed(crate::store::CatalogChanges {
+                        changed: edit.changed,
+                        library: edit.library,
+                        queue: edit.queue,
+                        albums: edit.albums,
+                        ..Default::default()
+                    }),
+                    playlist: CatalogCommit::Confirmed(playlist_id),
+                },
                 summary: String::new(),
                 scan_errors: None,
                 error: None,
-                library_total: Some(Ok(999)),
-                history: Some(Ok(Vec::new())),
-                playlist_total: Some(Ok(999)),
+                projections: ScanProjections {
+                    library_total: Some(Ok(999)),
+                    history: Some(Ok(Vec::new())),
+                    playlist_total: Some(Ok(999)),
+                },
             });
             let after = core.state.query_revisions();
             assert_ne!(after.library, before.library);
@@ -1063,34 +1309,34 @@ mod tests {
                             errors: 0,
                             path: None,
                         },
-                        library_committed: false,
-                        playlist_id: None,
-                        outcome_uncertain: false,
-                        impacts: None,
+                        commits: ScanCommits {
+                            selection: CatalogCommit::Pending,
+                            ..Default::default()
+                        },
                         summary: String::new(),
                         scan_errors: None,
                         error: None,
-                        library_total: None,
-                        history: None,
-                        playlist_total: None,
+                        projections: ScanProjections::default(),
                     }),
                 };
                 if committed {
                     let store = Store::open(&database_path).unwrap();
                     let saved = completion.saved.as_mut().unwrap();
-                    saved.impacts = Some(store.apply_scan(&ScanResult::default()).unwrap());
-                    saved.library_committed = true;
-                    saved.playlist_id = Some(store.create_playlist("Saved before panic").unwrap());
+                    saved.commits.library =
+                        CatalogCommit::Confirmed(store.apply_scan(&ScanResult::default()).unwrap());
+                    saved.commits.playlist = CatalogCommit::Confirmed(
+                        store.create_playlist("Saved before panic").unwrap(),
+                    );
                 }
                 panic!("saving worker failure");
             });
             let saved = futures::executor::block_on(receiver).unwrap();
             assert!(worker.join().is_err());
-            assert!(saved.outcome_uncertain);
+            assert!(saved.commits.is_unknown());
             assert!(saved.error.is_some());
-            assert_eq!(saved.library_committed, committed);
-            assert_eq!(saved.playlist_id.is_some(), committed);
-            if let Some(id) = saved.playlist_id {
+            assert_eq!(saved.commits.library.confirmed().is_some(), committed);
+            assert_eq!(saved.commits.playlist.confirmed().is_some(), committed);
+            if let Some(&id) = saved.commits.playlist.confirmed() {
                 let store = Store::open(&directory.path().join("library.db")).unwrap();
                 assert!(store.playlist_ids().unwrap().contains(&id));
             }
@@ -1139,19 +1385,17 @@ mod tests {
             core.complete_saved_scan(ScanSaved {
                 id: 1,
                 progress,
-                library_committed: true,
-                playlist_id: None,
-                outcome_uncertain: false,
-                impacts: Some(crate::store::ScanImpacts {
-                    changed: hidden_raw_write,
+                commits: ScanCommits {
+                    library: CatalogCommit::Confirmed(crate::store::CatalogChanges {
+                        changed: hidden_raw_write,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
+                },
                 summary: "Found 1 audio files".into(),
                 scan_errors: None,
                 error: None,
-                library_total: None,
-                history: None,
-                playlist_total: None,
+                projections: ScanProjections::default(),
             });
             assert_eq!(
                 core.scan_results.back().unwrap().progress.phase,

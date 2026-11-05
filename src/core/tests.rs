@@ -98,6 +98,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
     let (scan_tx, scan_rx) = async_channel::bounded(3);
     let (relocation_tx, relocation_rx) = async_channel::bounded(1);
     let tasks = TaskRuntime::start().unwrap();
+    let preferences =
+        crate::core::settings::Preferences::new(Arc::clone(&state.configuration.config), None);
     let mut core = Core {
         store,
         read_queries: None,
@@ -112,24 +114,15 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         publication_observer: None,
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
         task_completions_pending: false,
-        generation: 1,
+        transport: super::playback::PlaybackOwner::new(1),
         output_settings_request: 0,
         next_playlist_token: 0,
         database_unavailable: false,
-        queue_projection_stale: false,
-        queue_current_pending: false,
-        playback: None,
-        retired_playback: None,
-        playback_write_deferred: false,
-        playback_history_pending: false,
-        pending_bitrate: None,
-        pending_navigation: None,
         active_export: None,
         active_external_admission: None,
         active_optimization: None,
         processing: crate::processing::Service::new(),
         pending_processing_audition: None,
-        processing_results: VecDeque::new(),
         scan_tx,
         scan_rx,
         active_scan: None,
@@ -140,10 +133,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         active_relocation: None,
         relocation_results: VecDeque::new(),
         next_relocation_id: 1,
-        played: Vec::new(),
-        played_cursor: 0,
-        saved_config: None,
-        config_save_error: None,
+        preferences,
         _test_tasks: Some(tasks),
     };
     for playlist_id in core.store.playlist_ids().unwrap() {
@@ -151,6 +141,13 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
     }
     core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
     (directory, core)
+}
+
+fn edit_preferences(core: &mut Core, edit: impl FnOnce(&mut Config)) {
+    let mut config = core.preferences.checkpoint();
+    edit(&mut config);
+    core.preferences.accept(Arc::new(config));
+    core.preferences.project(&mut core.state);
 }
 
 // Capture the commands Core really sends without opening a platform device.
@@ -334,7 +331,7 @@ fn committed_queue_scalar_refresh_failure(
     core.command(Command::RemoveTracks { track_ids: vec![2] })
         .unwrap_err();
     assert!(core.store.track(2).unwrap().is_none());
-    assert!(core.queue_projection_stale);
+    assert!(core.transport.projection_stale);
     connection
 }
 
@@ -412,7 +409,7 @@ fn register_cue(core: &mut Core, path: &Path, segment: CueSegment, title: &str) 
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impact).unwrap();
+    core.apply_catalog_changes(impact).unwrap();
     core.store
         .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, number))
         .unwrap()
@@ -430,7 +427,7 @@ fn pending(core: &mut Core, queue_id: u64) {
         (track.id, track.duration)
     };
     core.state.playback.duration = duration;
-    core.playback = Some(PlaybackSession {
+    core.transport.session = Some(PlaybackSession {
         track_id,
         loaded_track: Arc::clone(core.state.current_track.as_ref().unwrap()),
         source: core
@@ -445,12 +442,13 @@ fn pending(core: &mut Core, queue_id: u64) {
         history_removed: false,
         paused_at: None,
     });
+    core.transport.admit_source();
 }
 
 fn started_event(core: &Core, duration: Option<f64>) -> AudioEvent {
     let track = core.state.current_track().unwrap();
     AudioEvent::Started {
-        generation: core.generation,
+        generation: core.transport.generation,
         info: MediaInfo {
             title: track.title.clone(),
             artist: track.artist.clone(),
@@ -480,7 +478,7 @@ fn playing(core: &mut Core, queue_id: u64) {
 
 fn progress(core: &mut Core, position_seconds: f64, listened_seconds: f64) {
     core.audio_event(AudioEvent::Progress {
-        generation: core.generation,
+        generation: core.transport.generation,
         position_seconds,
         listened_seconds,
     })

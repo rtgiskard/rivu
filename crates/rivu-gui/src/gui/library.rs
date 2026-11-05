@@ -258,7 +258,8 @@ impl Library {
             self.scan_error = None;
             let handle = self.context.handle().clone();
             cx.spawn(async move |this, cx| {
-                let ack = handle.request_ack(command).await;
+                let delivery = handle.request_ack(command).await;
+                let ack = delivery.ack;
                 let _ = this.update(cx, |this, cx| {
                     if !ack.is_success() {
                         this.scan_error = Some(
@@ -266,7 +267,12 @@ impl Library {
                                 .unwrap_or_else(|| this.i18n.text("gl-scan-failed").to_owned()),
                         );
                     }
-                    this.refresh(cx);
+                    if matches!(
+                        delivery.observation,
+                        crate::frontend::CommandObservation::Refreshed
+                    ) {
+                        this.refresh(cx);
+                    }
                     cx.notify();
                 });
             })
@@ -683,7 +689,8 @@ mod library_root_tests {
     fn apply_config(handle: &FrontendHandle, change: ConfigMutation) {
         // Command and query IPC workers are independent. The command reply,
         // including its authoritative frontend refresh, is the completion fence.
-        let ack = futures::executor::block_on(handle.request_ack(Command::MutateConfig { change }));
+        let ack =
+            futures::executor::block_on(handle.request_ack(Command::MutateConfig { change })).ack;
         assert!(ack.is_success(), "{ack:?}");
     }
 

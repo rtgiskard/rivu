@@ -1120,6 +1120,7 @@ impl WindowView {
                     panels: &self.workspace.panels,
                     status: self.state.playback.status,
                     source_generation: self.state.source_generation,
+                    stopped_source_generation: self.state.playback.stopped_source_generation,
                     seek_revision: self.state.playback.seek_revision,
                     visible: self.window_visible,
                     shutting_down: self.state.system.shutting_down,
@@ -1386,13 +1387,10 @@ mod state_tests {
         ] {
             let mut staging = AnalysisFrame::default();
             let mut sequence = 0;
-            assert!(stage_analysis_frame(
-                &mut staging,
-                &mut sequence,
-                false,
-                &publication,
-                publication.display_token == frame.display_token,
-            ));
+            assert!(
+                publication.display_token == frame.display_token
+                    && stage_analysis_frame(&mut staging, &mut sequence, false, &publication,)
+            );
             assert_eq!(
                 staging.visualizer.density.as_ptr(),
                 publication.visualizer.density.as_ptr(),
@@ -1471,13 +1469,10 @@ mod state_tests {
         let mut staging = AnalysisFrame::default();
         let mut sequence = publication.sequence;
         // Even an explicit refresh cannot restore a retained pre-hide snapshot.
-        assert!(!stage_analysis_frame(
-            &mut staging,
-            &mut sequence,
-            true,
-            &publication,
-            publication.display_token == frame.display_token,
-        ));
+        assert!(
+            !(publication.display_token == frame.display_token
+                && stage_analysis_frame(&mut staging, &mut sequence, true, &publication,))
+        );
         assert!(staging.visualizer.density.is_empty());
         assert!(staging.settings.is_none());
         let restored = publish(&mut worker, &mut frame, state, 1, 0.0);
@@ -1491,13 +1486,10 @@ mod state_tests {
         );
         assert_eq!(restored.visualizer.band_rms, [0.0; 3]);
         assert_eq!([restored.rms_left, restored.rms_right], [0.0; 2]);
-        assert!(stage_analysis_frame(
-            &mut staging,
-            &mut sequence,
-            false,
-            &restored,
-            restored.display_token == frame.display_token,
-        ));
+        assert!(
+            restored.display_token == frame.display_token
+                && stage_analysis_frame(&mut staging, &mut sequence, false, &restored,)
+        );
         assert_eq!(
             staging.visualizer.density.as_ptr(),
             restored.visualizer.density.as_ptr(),

@@ -189,7 +189,7 @@ impl Core {
                 )),
             },
             TaskTarget::Processing { id } => {
-                let status = self.processing_status_ref(id).ok_or_else(|| {
+                let status = self.processing.status(id).ok_or_else(|| {
                     QueryError::Message("Unknown or expired processing task".into())
                 })?;
                 if self.processing.active_id() == Some(id)

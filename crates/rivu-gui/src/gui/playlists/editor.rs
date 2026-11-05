@@ -74,6 +74,7 @@ impl Playlists {
             cx.notify();
             return;
         }
+        let submitted_name = self.name_input.read(cx).text().to_owned();
         let command = match &editor.action {
             PlaylistNameAction::Create { track_ids } if track_ids.is_empty() => {
                 Command::CreatePlaylist { name }
@@ -95,18 +96,21 @@ impl Playlists {
         cx.spawn(async move |this, cx| {
             let ack = handle.request_ack(command).await;
             let _ = this.update(cx, |this, cx| {
-                this.refresh(cx);
-                if ack.is_success() {
+                if matches!(
+                    ack.observation,
+                    crate::frontend::CommandObservation::Refreshed
+                ) {
+                    this.refresh(cx);
+                }
+                let result = ack.observed_result();
+                if result.is_ok() && this.name_input.read(cx).text() == submitted_name {
                     this.playlist_editor = None;
                     this.name_input
                         .update(cx, |input, cx| input.set_text("", cx));
                     cx.emit(PlaylistEvent::Focus(None));
                 } else if let Some(editor) = this.playlist_editor.as_mut() {
                     editor.pending = false;
-                    editor.error = Some(
-                        ack.error
-                            .unwrap_or_else(|| this.i18n.text("gl-playlist-save-failed").into()),
-                    );
+                    editor.error = result.err();
                     cx.emit(PlaylistEvent::FocusName);
                 }
                 cx.notify();

@@ -210,6 +210,7 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
             panels.reconcile(if has_panel { &layout } else { &empty_layout });
             owner.sync(
                 VisualizerInputs {
+                    stopped_source_generation: None,
                     config,
                     panels: &panels,
                     status: rivu_protocol::model::PlaybackStatus::Paused,

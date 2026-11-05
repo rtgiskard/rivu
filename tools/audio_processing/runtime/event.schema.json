@@ -17,7 +17,14 @@
         "type": {"const": "progress"},
         "stage": {"enum": ["inspect", "load", "inference", "copy"]},
         "completed": {"type": "integer", "minimum": 0},
-        "total": {"type": "integer", "minimum": 1}
+        "total": {"type": "integer", "minimum": 1},
+        "model": {
+          "type": "object", "required": ["id", "sha256"], "additionalProperties": false,
+          "properties": {
+            "id": {"enum": ["MossFormer2_SE_48K", "DeepFilterNet3", "melband_roformer_kim"]},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Verified prepared manifest identity, available before model loading or inference succeeds."}
+          }
+        }
       }
     },
     {

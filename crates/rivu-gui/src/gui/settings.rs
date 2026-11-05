@@ -2127,13 +2127,7 @@ impl Settings {
             let response = handle.apply_settings(patch).await;
             let committed = handle.config_snapshot();
             let _ = this.update(cx, |this, cx| {
-                let result = if response.is_success() {
-                    Ok(())
-                } else {
-                    Err(response
-                        .error
-                        .unwrap_or_else(|| this.tr("settings-save-error").to_string()))
-                };
+                let result = response.observed_result();
                 this.complete_settings_apply(submission, committed, result, cx);
             });
         })
@@ -2673,11 +2667,7 @@ mod tests {
         patch: ConfigPatch,
     ) -> (Arc<Config>, std::result::Result<(), String>) {
         let response = futures::executor::block_on(runtime.handle.apply_settings(patch));
-        let result = if response.is_success() {
-            Ok(())
-        } else {
-            Err(response.error.unwrap())
-        };
+        let result = response.observed_result();
         (runtime.handle.config_snapshot(), result)
     }
 
@@ -3262,6 +3252,7 @@ mod tests {
         let (patch, submission) = submit(&settings, cx);
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
+                .ack
                 .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
@@ -3298,6 +3289,7 @@ mod tests {
         let (patch, submission) = submit(&settings, cx);
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.3 }))
+                .ack
                 .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
@@ -3424,6 +3416,7 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
+                .ack
                 .is_success()
         );
         let (patch, submission) = submit(&settings, cx);

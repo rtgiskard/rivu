@@ -84,7 +84,7 @@ fn scan_saving_keeps_controls_responsive_and_preserves_retired_statistics() {
     core.command(Command::Volume { value: 0.33 }).unwrap();
     core.command(Command::Stop).unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_eq!(core.state.playback.volume, 0.33);
+    assert_eq!(core.preferences.live().volume, 0.33);
     assert_eq!(play_count(&core, 1), 0);
     assert!(core.store.track(1).unwrap().unwrap().last_played.is_none());
     assert!(
@@ -115,14 +115,14 @@ fn dispatched_mpris_seek_during_saving_only_gates_navigation() {
         operation_ack(core, Operation::MprisSeek { queue_id, offset })
     };
     // Seeking must not run queue recovery, which can write on Core's connection.
-    core.queue_current_pending = true;
-    core.queue_projection_stale = true;
+    core.transport.selection_pending = true;
+    core.transport.projection_stale = true;
     for expected in [3.25, 4.5] {
         assert!(seek(&mut core, queue_id, 1_250_000).is_success());
         assert_eq!(core.state.playback.position, expected);
         assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
-        assert!(core.queue_current_pending);
-        assert!(core.queue_projection_stale);
+        assert!(core.transport.selection_pending);
+        assert!(core.transport.projection_stale);
     }
     assert!(seek(&mut core, queue_id, -10_000_000).is_success());
     assert_eq!(core.state.playback.position, 0.0);
@@ -135,19 +135,19 @@ fn dispatched_mpris_seek_during_saving_only_gates_navigation() {
     assert_eq!(core.state.queue.current_id, Some(queue_id));
     assert_eq!(core.state.playback.position, 10.0);
     assert_eq!(core.state.playback.seek_revision, revision);
-    assert_eq!(core.pending_navigation, None);
-    assert!(core.queue_current_pending);
-    assert!(core.queue_projection_stale);
+    assert_eq!(core.transport.pending_navigation, None);
+    assert!(core.transport.selection_pending);
+    assert!(core.transport.projection_stale);
 
     // A known tail is a no-op, but shuffle and repeat-all still require Next.
     core.state.queue.current_position = Some(core.state.queue.total - 1);
     assert!(seek(&mut core, queue_id, i64::MAX).is_success());
-    core.state.playback.shuffle = true;
+    edit_preferences(&mut core, |config| config.shuffle = true);
     assert!(!seek(&mut core, queue_id, i64::MAX).is_success());
-    core.state.playback.shuffle = false;
-    core.state.playback.repeat = RepeatMode::All;
+    edit_preferences(&mut core, |config| config.shuffle = false);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
     assert!(!seek(&mut core, queue_id, i64::MAX).is_success());
-    core.state.playback.repeat = RepeatMode::Off;
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::Off);
     assert_eq!(core.state.playback.seek_revision, revision);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     core.command(Command::Stop).unwrap();
@@ -163,8 +163,8 @@ fn dispatched_mpris_seek_respects_uncertain_database_and_optimization_boundaries
     let _audio = recording_audio(&mut core);
     playing(&mut core, 1);
     core.database_outcome_uncertain();
-    core.queue_current_pending = true;
-    core.queue_projection_stale = true;
+    core.transport.selection_pending = true;
+    core.transport.projection_stale = true;
     assert!(
         operation_ack(
             &mut core,
@@ -186,9 +186,9 @@ fn dispatched_mpris_seek_respects_uncertain_database_and_optimization_boundaries
         )
         .is_success()
     );
-    assert!(core.queue_current_pending);
-    assert!(core.queue_projection_stale);
-    assert_eq!(core.pending_navigation, None);
+    assert!(core.transport.selection_pending);
+    assert!(core.transport.projection_stale);
+    assert_eq!(core.transport.pending_navigation, None);
     assert_eq!(core.state.queue.current_id, Some(1));
 
     // Optimization only starts while stopped: Seek remains a no-op, while
@@ -216,16 +216,19 @@ fn dispatched_mpris_seek_respects_uncertain_database_and_optimization_boundaries
 fn eof_during_scan_saving_preserves_later_pause_intent() {
     let (_directory, mut core, lock) = saving_with_write_lock();
     let _audio = recording_audio(&mut core);
-    core.state.playback.repeat = RepeatMode::One;
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::One);
     started(&mut core, Some(10.0)).unwrap();
     progress(&mut core, 3.0, 3.0);
     core.audio_event(AudioEvent::Ended {
-        generation: core.generation,
+        generation: core.transport.generation,
         bitrate_bps: None,
     })
     .unwrap();
     core.command(Command::Pause).unwrap();
-    assert_eq!(core.pending_navigation, Some(PlaybackStatus::Paused));
+    assert_eq!(
+        core.transport.pending_navigation,
+        Some(PlaybackStatus::Paused)
+    );
     let revision = core.state.playback.seek_revision;
     assert!(
         operation_ack(
@@ -238,11 +241,51 @@ fn eof_during_scan_saving_preserves_later_pause_intent() {
         .is_success()
     );
     assert_eq!(core.state.playback.seek_revision, revision);
-    assert_eq!(core.pending_navigation, Some(PlaybackStatus::Paused));
+    assert_eq!(
+        core.transport.pending_navigation,
+        Some(PlaybackStatus::Paused)
+    );
     finish_saving(&mut core, lock);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(play_count(&core, 1), 1);
+}
+
+#[test]
+fn stop_after_saving_eof_cancels_navigation_without_reopening_the_source() {
+    let (_directory, mut core, lock) = saving_with_write_lock();
+    let commands = recording_audio(&mut core);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::One);
+    started(&mut core, Some(10.0)).unwrap();
+    progress(&mut core, 3.0, 3.0);
+    let source = core.transport.generation;
+    core.audio_event(AudioEvent::Ended {
+        generation: source,
+        bitrate_bps: None,
+    })
+    .unwrap();
+    assert_eq!(
+        core.transport.pending_navigation,
+        Some(PlaybackStatus::Playing)
+    );
+    core.command(Command::Stop).unwrap();
+    let generation = core.transport.generation;
+    let revision = core.state.playback.seek_revision;
+    let receipt = core.state.playback.stopped_source_generation;
+    core.command(Command::Stop).unwrap();
+    assert_eq!(core.transport.pending_navigation, None);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.state.playback.stopped_source_generation, receipt);
+    finish_saving(&mut core, lock);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.transport.pending_navigation, None);
+    assert_eq!(play_count(&core, 1), 1);
+    assert!(
+        commands
+            .try_iter()
+            .all(|command| matches!(command, AudioCommand::StopAndSnapshot(_)))
+    );
 }
 
 #[test]
@@ -294,8 +337,8 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(FAIL,'activity unavailable'); END").unwrap();
     assert!(core.flush_deferred_playback().is_err());
-    assert!(core.retired_playback.is_some());
-    assert!(!core.playback_write_deferred);
+    assert!(core.transport.retired.is_some());
+    assert!(!core.transport.write_deferred);
     assert_eq!(play_count(&core, 1), 1);
     assert!(core.store.track(1).unwrap().unwrap().last_played.is_none());
     core.command(Command::Volume { value: 0.4 }).unwrap();
@@ -305,13 +348,13 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
     .unwrap();
     core.state.system.last_error = Some("previous failure".into());
     core.command(Command::DismissError).unwrap();
-    assert_eq!(core.state.playback.volume, 0.4);
-    assert_eq!(core.state.playback.repeat, RepeatMode::All);
+    assert_eq!(core.preferences.live().volume, 0.4);
+    assert_eq!(core.preferences.live().repeat, RepeatMode::All);
     assert!(core.state.system.last_error.is_none());
-    assert!(core.retired_playback.is_some());
+    assert!(core.transport.retired.is_some());
     assert!(core.command(Command::PlayQueue { queue_id: 2 }).is_err());
     assert_eq!(core.state.queue.current_id, Some(1));
-    assert!(core.playback.is_none());
+    assert!(core.transport.session.is_none());
     assert!(
         core.command(Command::RemoveTracks { track_ids: vec![1] })
             .is_err()
@@ -329,12 +372,12 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
     let failed_scan = core.scan_results.back().unwrap();
     assert_eq!(failed_scan.progress.phase, ScanPhase::Failed);
     assert!(!failed_scan.library_committed);
-    assert!(core.retired_playback.is_some());
+    assert!(core.transport.retired.is_some());
     connection
         .execute_batch("DROP TRIGGER reject_activity")
         .unwrap();
     core.command(Command::PlayQueue { queue_id: 2 }).unwrap();
-    assert!(core.retired_playback.is_none());
+    assert!(core.transport.retired.is_none());
     assert_eq!(play_count(&core, 1), 1);
     assert!(core.store.track(1).unwrap().unwrap().last_played.is_some());
 }
@@ -355,8 +398,8 @@ fn existing_playback_controls_remain_usable_while_database_is_write_locked() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     core.command(Command::Toggle).unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.state.playback.volume, 0.25);
-    assert_eq!(core.state.playback.repeat, RepeatMode::One);
+    assert_eq!(core.preferences.live().volume, 0.25);
+    assert_eq!(core.preferences.live().repeat, RepeatMode::One);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_queue_saved(&core);
     lock.execute_batch("ROLLBACK").unwrap();

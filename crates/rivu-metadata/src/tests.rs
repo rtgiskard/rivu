@@ -145,12 +145,12 @@ fn concrete_flac_edit_preserves_unknown_fields_pictures_multivalues_audio_and_ba
         },
     )
     .unwrap();
-    let backup = report.backup_path.unwrap();
-    assert!(report.changed);
-    assert_eq!(fs::read(&backup).unwrap(), original);
+    let backup = report.backup_path().unwrap();
+    assert!(report.changed());
+    assert_eq!(fs::read(backup).unwrap(), original);
     assert_ne!(
         fs::metadata(&path).unwrap().ino(),
-        fs::metadata(&backup).unwrap().ino()
+        fs::metadata(backup).unwrap().ino()
     );
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -196,14 +196,56 @@ fn no_op_has_no_backup_or_inode_change() {
         },
     )
     .unwrap();
-    assert!(!report.changed);
-    assert!(report.backup_path.is_none());
+    assert!(!report.changed());
+    assert!(report.backup_path().is_none());
     let after = fs::metadata(&path).unwrap();
     assert_eq!(
         (before.ino(), before.mtime(), before.mtime_nsec()),
         (after.ino(), after.mtime(), after.mtime_nsec())
     );
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn directory_sync_failure_preserves_exact_replacement_and_backup_evidence() {
+    for fail_at in [1, 2] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("track.flac");
+        let original = flac(&["TITLE=Original"], None);
+        fs::write(&path, &original).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let failure = crate::writer::edit_file_with_sync(
+            &path,
+            &TagPatch {
+                title: Some("Edited".into()),
+                ..Default::default()
+            },
+            |directory| {
+                calls.set(calls.get() + 1);
+                if calls.get() == fail_at {
+                    anyhow::bail!("injected directory sync failure");
+                }
+                directory.sync_all()?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        let backup = match &failure.outcome {
+            EditFailureOutcome::BeforeReplace {
+                backup_path: Some(backup),
+            } if fail_at == 1 => backup,
+            EditFailureOutcome::ReplacedDurabilityUnknown { backup_path } if fail_at == 2 => {
+                backup_path
+            }
+            other => panic!("wrong replacement evidence: {other:?}"),
+        };
+        assert_eq!(fs::read(backup).unwrap(), original);
+        let tags = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+        assert_eq!(
+            tags.title.as_deref(),
+            Some(if fail_at == 1 { "Original" } else { "Edited" })
+        );
+    }
 }
 
 #[test]
@@ -305,7 +347,7 @@ fn mixed_tags_fill_missing_fields_and_refuse_resurrected_clear() {
         },
     )
     .unwrap();
-    assert!(report.changed);
+    assert!(report.changed());
     let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
     assert_eq!(after.title.as_deref(), Some("Changed"));
     assert_eq!(after.artist, before.artist);
@@ -385,7 +427,7 @@ fn extended_attributes_and_acl_survive_replacement_and_backup() {
         },
     )
     .unwrap();
-    for path in [&path, report.backup_path.as_ref().unwrap()] {
+    for path in [path.as_path(), report.backup_path().unwrap()] {
         let file = File::open(path).unwrap();
         let mut actual = [0; 128];
         let len = unsafe {

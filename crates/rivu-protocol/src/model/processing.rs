@@ -346,6 +346,10 @@ pub struct ProcessingSettings {
     pub graph: Option<ProcessingGraph>,
     #[serde(default)]
     pub graph_target: Option<GraphPort>,
+    /// User intent; never overwritten by graph preparation.
+    #[serde(default)]
+    pub graph_requested_mode: Option<GraphExecutionMode>,
+    /// Resolved execution mode, absent until a plan has been prepared.
     #[serde(default)]
     pub graph_mode: Option<GraphExecutionMode>,
     #[serde(default)]

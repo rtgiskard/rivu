@@ -277,7 +277,7 @@ impl Store {
     pub(crate) fn commit_relocation(
         &self,
         prepared: &PreparedRelocation,
-    ) -> Result<super::ScanImpacts> {
+    ) -> Result<super::CatalogChanges> {
         let tx = self.conn.unchecked_transaction()?;
         let source = relocation_row(&tx, prepared.source.id)?;
         let target = relocation_row(&tx, prepared.target.id)?;
@@ -322,7 +322,7 @@ impl Store {
         let mut cache = self.track_cache.borrow_mut();
         cache.entries.remove(&source.identity.id);
         cache.entries.remove(&target.identity.id);
-        Ok(super::ScanImpacts {
+        Ok(super::CatalogChanges {
             changed: true,
             library: true,
             structure: true,

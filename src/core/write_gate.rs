@@ -4,7 +4,7 @@ use anyhow::bail;
 impl Core {
     pub(in crate::core) fn database_outcome_uncertain(&mut self) {
         self.database_unavailable = true;
-        self.pending_navigation = None;
+        self.transport.pending_navigation = None;
         self.store.invalidate_caches();
         self.state.system.last_error = Some(
             "Database commit outcome is uncertain; database operations are disabled until Rivu restarts".into(),
@@ -27,14 +27,14 @@ impl Core {
     /// Returns true when an intent for deferred EOF navigation was handled here.
     pub(in crate::core) fn maintenance_control(&mut self, command: &Command) -> Result<bool> {
         match command {
-            Command::Stop => self.pending_navigation = None,
+            Command::Stop => self.transport.pending_navigation = None,
             Command::Pause => {
-                if let Some(status) = &mut self.pending_navigation {
+                if let Some(status) = &mut self.transport.pending_navigation {
                     *status = PlaybackStatus::Paused;
                 }
             }
             Command::Resume | Command::Toggle => {
-                if let Some(status) = &mut self.pending_navigation {
+                if let Some(status) = &mut self.transport.pending_navigation {
                     *status = if matches!(command, Command::Toggle)
                         && *status == PlaybackStatus::Playing
                     {

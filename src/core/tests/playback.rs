@@ -7,13 +7,16 @@ fn published_source_generation_tracks_audio_owner_not_pause_state() {
     playing(&mut core, 1);
     core.publish();
     let generation = core.shared.read().source_generation;
-    assert_eq!(generation, core.generation);
+    assert_eq!(generation, core.transport.generation);
     core.command(Command::Pause).unwrap();
     core.publish();
     assert_eq!(core.shared.read().source_generation, generation);
     core.command(Command::Stop).unwrap();
     core.publish();
-    assert_eq!(core.shared.read().source_generation, core.generation);
+    assert_eq!(
+        core.shared.read().source_generation,
+        core.transport.generation
+    );
     assert_ne!(core.shared.read().source_generation, generation);
 }
 
@@ -35,7 +38,7 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
     playing(&mut core, 1);
     core.publish();
     let before = core.shared.read().clone();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     for (heard, count) in [(1.0, 0), (3.0, 1), (4.0, 1)] {
         let previous = core.shared.read().clone();
         assert!(
@@ -82,7 +85,7 @@ fn audio_progress_publishes_committed_statistics_without_rereading_queue_project
     let before = core.shared.read().clone();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("DELETE FROM rivu_meta").unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     for heard in [3.0, 4.0] {
         assert!(
             core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
@@ -155,7 +158,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
         precision_pending(&mut core);
         core.publish();
         let before = core.shared.read().library.album_revision;
-        let generation = core.generation;
+        let generation = core.transport.generation;
         let mut event = started_event(&core, Some(10.0));
         if let AudioEvent::Started { info, .. } = &mut event {
             info.bitrate_bps = Some(192_000);
@@ -174,7 +177,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
         };
         assert!(core.business_event(BusinessEvent::Audio(terminal)));
         let state = core.shared.read();
-        assert_ne!(core.generation, generation);
+        assert_ne!(core.transport.generation, generation);
         assert_eq!(state.playback.status, PlaybackStatus::Stopped);
         assert!(state.current_track().unwrap().bitrate_exact);
         assert_ne!(state.library.album_revision, before);
@@ -192,8 +195,8 @@ fn deferred_bitrate_flush_refreshes_payload_without_shape_invalidation() {
     started(&mut core, Some(10.0)).unwrap();
     core.publish();
     let before = core.shared.read().clone();
-    core.pending_bitrate = Some((192_000, true));
-    core.playback_write_deferred = true;
+    core.transport.pending_bitrate = Some((192_000, true));
+    core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     core.publish();
     let state = core.shared.read();
@@ -240,7 +243,7 @@ fn deferred_bitrate_flush_refreshes_payload_without_shape_invalidation() {
         state.library.bitrate_revision,
         before.library.bitrate_revision.wrapping_add(1)
     );
-    assert!(!core.playback_write_deferred);
+    assert!(!core.transport.write_deferred);
 }
 
 #[test]
@@ -288,8 +291,8 @@ fn bitrate_commit_rejects_payload_batch_baselines_and_occurrence_continuations()
     };
     assert!(queue_batch.next.is_some());
     assert!(playlist_batch.next.is_some());
-    core.pending_bitrate = Some((192_000, true));
-    core.playback_write_deferred = true;
+    core.transport.pending_bitrate = Some((192_000, true));
+    core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     for query in [
         Query::QueueBatch {
@@ -345,7 +348,7 @@ fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
     let before = core.shared.read().library.album_revision;
     assert_eq!(play_count(&core, 1), 0);
     let event = AudioEvent::Ended {
-        generation: core.generation,
+        generation: core.transport.generation,
         bitrate_bps: None,
     };
     assert!(core.business_event(BusinessEvent::Audio(event)));
@@ -371,7 +374,7 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
         )
         .unwrap();
     let event = AudioEvent::Progress {
-        generation: core.generation,
+        generation: core.transport.generation,
         position_seconds: 3.0,
         listened_seconds: 3.0,
     };
@@ -381,7 +384,7 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
     assert_eq!(state.playback.status, PlaybackStatus::Playing);
     assert_eq!(state.current_track().unwrap().play_count, 0);
     assert_eq!(play_count(&core, 1), 0);
-    assert!(!core.playback.as_ref().unwrap().counted);
+    assert!(!core.transport.session.as_ref().unwrap().counted);
     assert_eq!(state.library.revision, before.library.revision);
     assert_eq!(state.library.album_revision, before.library.album_revision);
     assert!(
@@ -405,7 +408,7 @@ fn manual_play_count_updates_projections_without_consuming_playback_count() {
         play_count: 7,
     })
     .unwrap();
-    assert!(!core.playback.as_ref().unwrap().counted);
+    assert!(!core.transport.session.as_ref().unwrap().counted);
     assert_eq!(core.track(1).unwrap().last_played, last_played);
     assert_eq!(core.state.current_track().unwrap().play_count, 7);
     assert_eq!(core.state.library.history[0].play_count, 7);
@@ -434,7 +437,7 @@ fn manual_play_count_updates_projections_without_consuming_playback_count() {
     );
     progress(&mut core, 8.0, 8.0);
     assert_eq!(play_count(&core, 1), 8);
-    assert!(core.playback.as_ref().unwrap().counted);
+    assert!(core.transport.session.as_ref().unwrap().counted);
     core.command(Command::SetPlayCount {
         track_id: 1,
         play_count: 0,
@@ -442,23 +445,23 @@ fn manual_play_count_updates_projections_without_consuming_playback_count() {
     .unwrap();
     progress(&mut core, 9.0, 9.0);
     assert_eq!(play_count(&core, 1), 0);
-    assert!(core.playback.as_ref().unwrap().counted);
+    assert!(core.transport.session.as_ref().unwrap().counted);
 }
 
 #[test]
 fn manual_play_count_recovers_deferred_count_before_overwriting() {
     let (_directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
-    core.playback.as_mut().unwrap().heard = 8.0;
-    core.playback_write_deferred = true;
+    core.transport.session.as_mut().unwrap().heard = 8.0;
+    core.transport.write_deferred = true;
     core.command(Command::SetPlayCount {
         track_id: 1,
         play_count: 4,
     })
     .unwrap();
     assert_eq!(play_count(&core, 1), 4);
-    assert!(core.playback.as_ref().unwrap().counted);
-    assert!(!core.playback_write_deferred);
+    assert!(core.transport.session.as_ref().unwrap().counted);
+    assert!(!core.transport.write_deferred);
     progress(&mut core, 9.0, 9.0);
     assert_eq!(play_count(&core, 1), 4);
 }
@@ -467,8 +470,8 @@ fn manual_play_count_recovers_deferred_count_before_overwriting() {
 fn manual_play_count_does_not_overwrite_failed_deferred_statistics() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 1);
-    core.playback.as_mut().unwrap().heard = 8.0;
-    core.playback_write_deferred = true;
+    core.transport.session.as_mut().unwrap().heard = 8.0;
+    core.transport.write_deferred = true;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_count BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(ABORT,'count rejected'); END").unwrap();
     assert!(
@@ -479,7 +482,7 @@ fn manual_play_count_does_not_overwrite_failed_deferred_statistics() {
         .is_err()
     );
     assert_eq!(play_count(&core, 1), 0);
-    assert!(!core.playback.as_ref().unwrap().counted);
+    assert!(!core.transport.session.as_ref().unwrap().counted);
 }
 
 #[test]
@@ -502,15 +505,15 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         events
             .try_send(AudioEvent::OutputSettingsFailed {
                 request: core.output_settings_request,
-                device: core.state.system.selected_device.clone(),
-                auto_mix: core.state.configuration.config.pipewire_auto_mix,
+                device: core.preferences.live().output_device.clone(),
+                auto_mix: core.preferences.settings().pipewire_auto_mix,
                 message: format!("accepted failure {index}"),
             })
             .unwrap();
     }
     core.engine.events = Some(event_receive);
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let (finished, completion) = bounded(1);
     let worker = thread::spawn(move || {
         let result = core.command(Command::Device {
@@ -533,9 +536,9 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     worker.join().unwrap();
     result.unwrap_err();
     assert_eq!(core.output_settings_request, 1);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert_eq!(
-        core.state.system.selected_device.as_deref(),
+        core.preferences.live().output_device.as_deref(),
         Some("accepted-output")
     );
     assert_eq!(
@@ -544,7 +547,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     );
 
     core.state.playback.position = 2.0;
-    let volume = core.state.playback.volume;
+    let volume = core.preferences.live().volume;
     let seek_revision = core.state.playback.seek_revision;
     for (command, status) in [
         (Command::Volume { value: 0.2 }, PlaybackStatus::Playing),
@@ -557,7 +560,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         assert_eq!(core.state.playback.status, status);
         assert_eq!(core.state.playback.position, 2.0);
         assert_eq!(core.state.playback.seek_revision, seek_revision);
-        assert_eq!(core.state.playback.volume, volume);
+        assert_eq!(core.preferences.live().volume, volume);
     }
     assert_eq!(receive.len(), 64);
     assert_eq!(core.engine.events.as_ref().unwrap().len(), 128);
@@ -595,7 +598,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     );
     drop(receive);
     assert!(core.command(Command::Volume { value: 0.3 }).is_err());
-    assert_eq!(core.state.playback.volume, volume);
+    assert_eq!(core.preferences.live().volume, volume);
 }
 
 #[test]
@@ -682,12 +685,12 @@ fn precision_pending(core: &mut Core) {
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     pending(core, queue_id);
-    assert!(core.playback.as_ref().unwrap().source.is_some());
+    assert!(core.transport.session.as_ref().unwrap().source.is_some());
 }
 
 #[test]
@@ -755,7 +758,7 @@ fn stale_playback_start_cannot_upgrade_precision() {
     core.audio_event(event).unwrap();
     assert_eq!(core.state.library.revision, revision);
     assert_eq!(core.state.library.bitrate_revision, bitrate_revision);
-    assert!(!core.playback.as_ref().unwrap().started);
+    assert!(!core.transport.session.as_ref().unwrap().started);
     assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
     assert_eq!(
         core.store.track(1).unwrap().unwrap().bitrate_bps,
@@ -769,7 +772,7 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
         let (_directory, mut core) = fixture();
         precision_pending(&mut core);
         started(&mut core, Some(10.0)).unwrap();
-        let generation = core.generation;
+        let generation = core.transport.generation;
         core.audio_event(AudioEvent::Ended {
             generation: generation.wrapping_sub(1),
             bitrate_bps: Some(192_000),
@@ -807,7 +810,7 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
     let (_directory, mut core) = fixture();
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.finish_playback(Ok(None), false, Ok(())).unwrap();
     core.audio_event(AudioEvent::Ended {
         generation,
@@ -822,7 +825,7 @@ fn retiring_eof_bitrate_remains_fresh_after_final_statistics() {
     let (_directory, mut core) = fixture();
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let baseline = core.state.library.bitrate_revision;
     let (send, receive) = async_channel::bounded(1);
     core.engine.events = Some(receive);
@@ -857,7 +860,7 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
         let (_directory, mut core) = fixture();
         precision_pending(&mut core);
         let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
-        let generation = core.generation;
+        let generation = core.transport.generation;
         let event = if eof {
             started(&mut core, Some(10.0)).unwrap();
             AudioEvent::Ended {
@@ -877,10 +880,10 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
         core.engine.events = Some(events);
         sender.try_send(event).unwrap();
 
-        core.start(queue_id, false).unwrap();
-        assert_eq!(core.generation, generation.wrapping_add(1));
-        assert!(!core.playback.as_ref().unwrap().started);
-        assert!(core.playback.as_ref().unwrap().source.is_none());
+        core.start(queue_id, QueueHistory::Preserve).unwrap();
+        assert_eq!(core.transport.generation, generation.wrapping_add(1));
+        assert!(!core.transport.session.as_ref().unwrap().started);
+        assert!(core.transport.session.as_ref().unwrap().source.is_none());
 
         // A new decoder estimate must not replace the retiring worker's upgrade.
         let mut event = started_event(&core, Some(10.0));
@@ -923,7 +926,7 @@ fn playback_bitrate_runtime_replacement_and_optional_failure_do_not_interrupt_st
         }
         core.audio_event(event).unwrap();
         assert_eq!(core.state.library.bitrate_revision, bitrate_revision);
-        assert!(core.playback.as_ref().unwrap().started);
+        assert!(core.transport.session.as_ref().unwrap().started);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         let track = core.store.track(1).unwrap().unwrap();
         assert_eq!(track.bitrate_bps, Some(128_000));
@@ -950,7 +953,7 @@ fn failed_bitrate_transaction_does_not_publish_an_update() {
     }
     core.audio_event(event).unwrap();
     assert_eq!(core.state.library.bitrate_revision, before);
-    assert!(core.playback.as_ref().unwrap().started);
+    assert!(core.transport.session.as_ref().unwrap().started);
     let stored = core.store.track(1).unwrap().unwrap();
     assert_eq!(
         (stored.bitrate_bps, stored.bitrate_exact),
@@ -969,8 +972,8 @@ fn unchanged_bitrate_enrichment_does_not_publish_an_update() {
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
     let before = core.state.library.bitrate_revision;
-    core.pending_bitrate = Some((128_000, false));
-    core.playback_write_deferred = true;
+    core.transport.pending_bitrate = Some((128_000, false));
+    core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     assert_eq!(core.state.library.bitrate_revision, before);
     let stored = core.store.track(1).unwrap().unwrap();
@@ -983,7 +986,9 @@ fn unchanged_bitrate_enrichment_does_not_publish_an_update() {
 #[test]
 fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
     let (_directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config).play_count_threshold_percent = 20.0;
+    edit_preferences(&mut core, |config| {
+        config.play_count_threshold_percent = 20.0
+    });
     pending(&mut core, 1);
     assert!(core.store.history(200).unwrap().is_empty());
     started(&mut core, Some(10.0)).unwrap();
@@ -992,7 +997,7 @@ fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
 
     // A duplicate Started must not refresh last-played a second time.
     let played_at = core.store.history(200).unwrap()[0].played_at;
-    core.playback.as_mut().unwrap().paused_at = Some(7);
+    core.transport.session.as_mut().unwrap().paused_at = Some(7);
     started(&mut core, Some(10.0)).unwrap();
     assert_eq!(core.store.history(200).unwrap()[0].played_at, played_at);
     progress(&mut core, 9.0, 2.0);
@@ -1023,7 +1028,9 @@ fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
 fn configured_threshold_controls_counting_including_zero_percent() {
     for percent in [0.0, 50.0, 99.0] {
         let (_directory, mut core) = fixture();
-        Arc::make_mut(&mut core.state.configuration.config).play_count_threshold_percent = percent;
+        edit_preferences(&mut core, |config| {
+            config.play_count_threshold_percent = percent
+        });
         playing(&mut core, 1);
         let boundary = 10.0 * percent / 100.0;
         progress(&mut core, 10.0, boundary);
@@ -1071,12 +1078,12 @@ fn paused_confirmations_do_not_advance_activity_at_stop() {
     progress(&mut core, 2.0, 2.0);
     let heard_at = core.state.playback.last_heard_at;
     core.command(Command::Pause).unwrap();
-    let pause_bound = core.playback.as_ref().unwrap().paused_at.unwrap();
+    let pause_bound = core.transport.session.as_ref().unwrap().paused_at.unwrap();
     progress(&mut core, 20.0, 20.0);
     assert!(core.state.playback.last_heard_at.unwrap() <= pause_bound);
-    assert_eq!(core.playback.as_ref().unwrap().heard, 20.0);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 20.0);
     assert_eq!(play_count(&core, 1), 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.finish_playback(
         Ok(Some(rivu_audio::AudioSnapshot {
             generation,
@@ -1100,7 +1107,7 @@ fn paused_confirmations_do_not_advance_activity_at_stop() {
 fn failed_load_and_stale_events_neither_count_nor_record_recent() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let track = core.state.current_track().unwrap();
     core.audio_event(AudioEvent::Started {
         generation: generation.wrapping_sub(1),
@@ -1132,7 +1139,7 @@ fn failed_load_and_stale_events_neither_count_nor_record_recent() {
         core.state.system.last_error.as_deref(),
         Some("Decoder failed")
     );
-    assert_ne!(core.generation, generation);
+    assert_ne!(core.transport.generation, generation);
     core.audio_event(AudioEvent::Progress {
         generation,
         position_seconds: 10.0,
@@ -1150,7 +1157,7 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
         progress(&mut core, 2.0, 2.0);
-        let generation = core.generation;
+        let generation = core.transport.generation;
         let snapshot_generation = if stale { generation - 1 } else { generation };
         core.finish_playback(
             Ok(Some(audio::AudioSnapshot {
@@ -1164,8 +1171,12 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
         .unwrap();
         assert_eq!(play_count(&core, 1), expected);
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        assert_ne!(core.generation, generation);
-        assert!(core.playback.is_none());
+        assert_ne!(core.transport.generation, generation);
+        assert!(core.transport.session.is_none());
+        assert_eq!(
+            core.state.playback.stopped_source_generation,
+            (!stale).then_some(generation)
+        );
         core.audio_event(AudioEvent::Progress {
             generation,
             position_seconds: 10.0,
@@ -1181,7 +1192,7 @@ fn switching_selection_counts_final_snapshot_without_invalidating_its_position()
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
     progress(&mut core, 2.0, 2.0);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let (commands, receive) = async_channel::bounded(4);
     let idle_commands = core.engine.replace_commands(commands);
     let responder = thread::spawn(move || {
@@ -1197,7 +1208,7 @@ fn switching_selection_counts_final_snapshot_without_invalidating_its_position()
             .unwrap();
     });
 
-    core.start_with_status(2, true, PlaybackStatus::Stopped)
+    core.start_with_status(2, QueueHistory::Record, PlaybackStatus::Stopped)
         .unwrap();
     core.engine.replace_commands(idle_commands);
     responder.join().unwrap();
@@ -1220,7 +1231,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
     for (heard, expected) in [(2.0, 0), (2.01, 1)] {
         let (_directory, mut core) = fixture();
         pending(&mut core, 1);
-        let generation = core.generation;
+        let generation = core.transport.generation;
         let (sender, events) = async_channel::bounded(8);
         core.engine.events = Some(events);
         sender.try_send(started_event(&core, Some(10.0))).unwrap();
@@ -1271,8 +1282,8 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         assert_eq!(core.state.queue.current_id, Some(1));
         assert_eq!(core.state.playback.position, 0.0);
         assert!(core.state.system.last_error.is_none());
-        assert_eq!(core.generation, generation.wrapping_add(1));
-        assert!(core.playback.is_none());
+        assert_eq!(core.transport.generation, generation.wrapping_add(1));
+        assert!(core.transport.session.is_none());
     }
 }
 
@@ -1280,7 +1291,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
 fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let (sender, events) = async_channel::bounded(4);
     core.engine.events = Some(events);
     sender.try_send(started_event(&core, Some(10.0))).unwrap();
@@ -1311,9 +1322,13 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
         )
         .is_err()
     );
-    assert_eq!(core.generation, generation.wrapping_add(1));
+    assert_eq!(core.transport.generation, generation.wrapping_add(1));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert!(core.playback.is_none());
+    assert_eq!(
+        core.state.playback.stopped_source_generation,
+        Some(generation)
+    );
+    assert!(core.transport.session.is_none());
     while let Ok(event) = core.engine.events.as_mut().unwrap().try_recv() {
         core.audio_event(event).unwrap();
     }
@@ -1325,7 +1340,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
 fn stale_events_cannot_count_or_stop_new_playback() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.stop().unwrap();
     playing(&mut core, 2);
     core.audio_event(AudioEvent::Progress {
@@ -1379,13 +1394,13 @@ fn started_uses_valid_decoder_duration_or_keeps_known_metadata_duration() {
 fn rejected_recent_update_stops_without_counting_the_start() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_start_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(ABORT,'activity rejected'); END;").unwrap();
     assert!(started(&mut core, Some(10.0)).is_err());
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_ne!(core.generation, generation);
-    assert!(core.playback.is_none());
+    assert_ne!(core.transport.generation, generation);
+    assert!(core.transport.session.is_none());
     assert!(core.store.history(200).unwrap().is_empty());
     assert_eq!(play_count(&core, 1), 0);
 }
@@ -1398,7 +1413,7 @@ fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
         started(&mut core, None).unwrap();
         progress(&mut core, 10.0, heard);
         assert_eq!(play_count(&core, 1), 0);
-        let generation = core.generation;
+        let generation = core.transport.generation;
         assert!(
             core.audio_event(AudioEvent::Ended {
                 generation,
@@ -1419,7 +1434,7 @@ fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
     started(&mut core, None).unwrap();
     core.command(Command::Seek { seconds: 10.0 }).unwrap();
     progress(&mut core, f64::NAN, 8.0);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     assert!(
         core.audio_event(AudioEvent::Ended {
             generation,
@@ -1443,7 +1458,7 @@ fn stopped_decoder_final_progress_counts_once_and_fences_late_events() {
     playing(&mut core, 1);
     progress(&mut core, 2.0, 2.0);
     progress(&mut core, 2.1, 2.1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.audio_event(AudioEvent::DecoderStopped { generation })
         .unwrap();
     core.audio_event(AudioEvent::Progress {
@@ -1454,18 +1469,22 @@ fn stopped_decoder_final_progress_counts_once_and_fences_late_events() {
     .unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.state.playback.position, 0.0);
-    assert!(core.playback.is_none());
+    assert!(core.transport.session.is_none());
     assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(
+        core.state.playback.stopped_source_generation,
+        Some(generation)
+    );
 }
 
 #[test]
 fn count_save_failure_still_stops_and_preserves_audio_error() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
-    let playback = core.playback.as_mut().unwrap();
+    let playback = core.transport.session.as_mut().unwrap();
     playback.track_id = i64::MAX;
     playback.heard = 3.0;
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let error = core
         .audio_event(AudioEvent::Failed {
             generation,
@@ -1476,7 +1495,7 @@ fn count_save_failure_still_stops_and_preserves_audio_error() {
     assert!(message.contains("Decoder failed"));
     assert!(message.contains("does not exist"));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_ne!(core.generation, generation);
+    assert_ne!(core.transport.generation, generation);
 }
 
 #[test]
@@ -1507,7 +1526,7 @@ fn duplicate_queue_entries_count_as_separate_plays_but_share_recent_history() {
 fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
-    core.playback.as_mut().unwrap().paused_at = Some(10);
+    core.transport.session.as_mut().unwrap().paused_at = Some(10);
     core.store.mark_played(1, 10).unwrap();
     core.replace_history(core.store.history(MAX_QUERY_ROWS).unwrap());
     let history = Arc::clone(&core.state.library.history);
@@ -1519,25 +1538,25 @@ fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
         .unwrap();
     started(&mut core, Some(10.0)).unwrap();
     assert!(Arc::ptr_eq(&history, &core.state.library.history));
-    core.playback_write_deferred = true;
+    core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     assert!(Arc::ptr_eq(&history, &core.state.library.history));
-    assert!(!core.playback_history_pending);
+    assert!(!core.transport.history_pending);
 
-    core.playback.as_mut().unwrap().last_heard_at = Some(11);
-    core.playback_write_deferred = true;
+    core.transport.session.as_mut().unwrap().last_heard_at = Some(11);
+    core.transport.write_deferred = true;
     assert!(core.flush_deferred_playback().is_err());
     assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(11));
-    assert!(core.playback_history_pending);
+    assert!(core.transport.history_pending);
     assert!(Arc::ptr_eq(&history, &core.state.library.history));
     connection
         .execute("UPDATE tracks SET last_played=NULL WHERE id=4", [])
         .unwrap();
     // The retry's mark_played is now unchanged, but the failed projection fact
     // remains pending until an authoritative history read succeeds.
-    core.playback_write_deferred = true;
+    core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
-    assert!(!core.playback_history_pending);
+    assert!(!core.transport.history_pending);
     assert!(!Arc::ptr_eq(&history, &core.state.library.history));
     assert_eq!(core.state.library.history[0].played_at, 11);
 }
@@ -1566,8 +1585,8 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
     for failure in ["activity", "count", "history"] {
         let (directory, mut core) = fixture_with_database(Some(10.0));
         playing(&mut core, 1);
-        core.playback.as_mut().unwrap().paused_at = Some(17);
-        core.playback.as_mut().unwrap().last_heard_at = Some(17);
+        core.transport.session.as_mut().unwrap().paused_at = Some(17);
+        core.transport.session.as_mut().unwrap().last_heard_at = Some(17);
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection.execute_batch(match failure {
             "activity" => "CREATE TRIGGER reject_stop_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(FAIL,'activity unavailable'); END;",
@@ -1575,7 +1594,7 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             "history" => "CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;",
             _ => unreachable!(),
         }).unwrap();
-        let generation = core.generation;
+        let generation = core.transport.generation;
         assert!(
             core.finish_playback(
                 Ok(Some(audio::AudioSnapshot {
@@ -1588,10 +1607,14 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             )
             .is_err()
         );
-        assert_eq!(core.generation, generation.wrapping_add(1));
+        assert_eq!(core.transport.generation, generation.wrapping_add(1));
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        assert!(core.playback.is_none());
-        let retired = core.retired_playback.as_ref().unwrap();
+        assert_eq!(
+            core.state.playback.stopped_source_generation,
+            Some(generation)
+        );
+        assert!(core.transport.session.is_none());
+        let retired = core.transport.retired.as_ref().unwrap();
         assert_eq!(retired.stats.heard, 3.0);
         assert_eq!(retired.stats.counted, failure != "count");
         assert_eq!(play_count(&core, 1), u64::from(failure != "count"));
@@ -1600,11 +1623,11 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
         }
         assert!(
-            core.start_with_status(2, false, PlaybackStatus::Stopped)
+            core.start_with_status(2, QueueHistory::Preserve, PlaybackStatus::Stopped)
                 .is_err()
         );
-        assert!(core.playback.is_none());
-        assert!(core.retired_playback.is_some());
+        assert!(core.transport.session.is_none());
+        assert!(core.transport.retired.is_some());
         core.command(Command::Volume { value: 0.37 }).unwrap();
         connection
             .execute_batch(match failure {
@@ -1615,8 +1638,8 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             })
             .unwrap();
         core.flush_deferred_playback().unwrap();
-        assert!(core.retired_playback.is_none());
-        assert!(core.playback.is_none());
+        assert!(core.transport.retired.is_none());
+        assert!(core.transport.session.is_none());
         assert_eq!(play_count(&core, 1), 1);
         let history = core.store.history(MAX_QUERY_ROWS).unwrap();
         assert_eq!(history[0].played_at, 17);
@@ -1624,7 +1647,7 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
         assert_eq!(core.state.library.history[0].played_at, 17);
         core.flush_deferred_playback().unwrap();
         assert_eq!(play_count(&core, 1), 1);
-        core.start_with_status(2, false, PlaybackStatus::Stopped)
+        core.start_with_status(2, QueueHistory::Preserve, PlaybackStatus::Stopped)
             .unwrap();
         assert_eq!(core.state.current_track().unwrap().id, 2);
         assert_eq!(play_count(&core, 1), 1);
@@ -1635,7 +1658,7 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
 fn stop_bookkeeping_error_does_not_skip_final_confirmed_statistics() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let error = core
         .finish_playback(
             Ok(Some(audio::AudioSnapshot {
@@ -1649,8 +1672,8 @@ fn stop_bookkeeping_error_does_not_skip_final_confirmed_statistics() {
         .unwrap_err();
     assert_eq!(error.to_string(), "Earlier event projection failed");
     assert_eq!(play_count(&core, 1), 1);
-    assert!(core.retired_playback.is_none());
-    assert!(core.playback.is_none());
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.session.is_none());
     assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].play_count, 1);
 }
 
@@ -1658,7 +1681,7 @@ fn stop_bookkeeping_error_does_not_skip_final_confirmed_statistics() {
 fn stop_retains_later_progress_after_queued_start_projection_failure() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch("CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;")
@@ -1676,7 +1699,7 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
             .unwrap();
     }
     assert!(core.finish_playback(Ok(None), false, Ok(())).is_err());
-    let retired = core.retired_playback.as_ref().unwrap();
+    let retired = core.transport.retired.as_ref().unwrap();
     assert_eq!(retired.stats.heard, 8.0);
     assert!(retired.stats.counted);
     assert_eq!(play_count(&core, 1), 1);
@@ -1688,7 +1711,7 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
     core.flush_deferred_playback().unwrap();
     assert_eq!(play_count(&core, 1), 1);
     assert_eq!(core.state.library.history[0].play_count, 1);
-    assert!(core.retired_playback.is_none());
+    assert!(core.transport.retired.is_none());
 }
 
 #[test]
@@ -1696,7 +1719,7 @@ fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
     progress(&mut core, 3.0, 3.0);
-    core.playback.as_mut().unwrap().last_heard_at = Some(17);
+    core.transport.session.as_mut().unwrap().last_heard_at = Some(17);
     let error = core
         .finish_playback(
             Err(anyhow::anyhow!("Output stop unavailable")),
@@ -1707,6 +1730,61 @@ fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
     assert_eq!(error.to_string(), "Output stop unavailable");
     assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].played_at, 17);
     assert_eq!(play_count(&core, 1), 1);
-    assert!(core.retired_playback.is_none());
-    assert!(core.playback.is_none());
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.session.is_none());
+    assert_eq!(core.state.playback.stopped_source_generation, None);
+}
+
+#[test]
+fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
+    for confirmed in [false, true] {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        let source = core.transport.generation;
+        let snapshot = audio::AudioSnapshot {
+            generation: source,
+            position_seconds: 3.0,
+            listened_seconds: 3.0,
+        };
+        let result = core.finish_playback(
+            if confirmed {
+                Ok(Some(snapshot))
+            } else {
+                Err(anyhow::anyhow!("stop unavailable"))
+            },
+            false,
+            Ok(()),
+        );
+        assert_eq!(result.is_ok(), confirmed);
+        let generation = core.transport.generation;
+        let revision = core.state.playback.seek_revision;
+        let receipt = confirmed.then_some(source);
+        assert_eq!(core.state.playback.stopped_source_generation, receipt);
+        // Even an apparently matching idle snapshot cannot claim another close.
+        core.finish_playback(
+            Ok(Some(audio::AudioSnapshot {
+                generation,
+                position_seconds: 90.0,
+                listened_seconds: 90.0,
+            })),
+            false,
+            Ok(()),
+        )
+        .unwrap();
+        assert_eq!(core.state.playback.stopped_source_generation, receipt);
+        assert_eq!(core.transport.generation, generation);
+        assert_eq!(core.state.playback.seek_revision, revision);
+        assert_eq!(play_count(&core, 1), u64::from(confirmed));
+        if !confirmed {
+            // A retry's physical receipt must name the original unresolved source.
+            core.finish_playback(Ok(Some(snapshot)), false, Ok(()))
+                .unwrap();
+            core.audio_event(AudioEvent::DecoderStopped { generation: source })
+                .unwrap();
+            assert_eq!(core.state.playback.stopped_source_generation, Some(source));
+            assert_eq!(core.transport.generation, generation);
+            assert_eq!(core.state.playback.seek_revision, revision);
+            assert_eq!(play_count(&core, 1), 0);
+        }
+    }
 }

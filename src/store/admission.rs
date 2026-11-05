@@ -1,6 +1,6 @@
-use super::Store;
 use super::positions::insert_staged_tracks;
-use super::scan::{PROBE_VERSION, ScanImpacts};
+use super::scan::PROBE_VERSION;
+use super::{CatalogChanges, Store};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -13,7 +13,7 @@ impl Store {
         admission: &ExternalAdmission,
         index: Option<usize>,
         current_id: Option<u64>,
-    ) -> Result<(usize, ScanImpacts, usize)> {
+    ) -> Result<(usize, CatalogChanges, usize)> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute_batch("CREATE TEMP TABLE external_sources(
             ordinal INTEGER PRIMARY KEY,resolved_id INTEGER,path TEXT NOT NULL,fingerprint BLOB,
@@ -95,7 +95,7 @@ impl Store {
                 AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
             {}
             FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", super::scan::staged_projection_columns(false)), [], |row| {
-            Ok(ScanImpacts { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, ..ScanImpacts::default() })
+            Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, ..CatalogChanges::default() })
         })?;
         let changed = tx.execute("UPDATE tracks SET
             fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,

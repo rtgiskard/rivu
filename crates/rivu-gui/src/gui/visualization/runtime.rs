@@ -54,6 +54,7 @@ pub(in crate::gui) struct VisualizerInputs<'a> {
     pub(in crate::gui) status: PlaybackStatus,
     pub(in crate::gui) source_generation: u64,
     pub(in crate::gui) seek_revision: u64,
+    pub(in crate::gui) stopped_source_generation: Option<u64>,
     pub(in crate::gui) visible: bool,
     pub(in crate::gui) shutting_down: bool,
     pub(in crate::gui) current_track_id: Option<i64>,
@@ -129,6 +130,7 @@ pub(in crate::gui) struct VisualizerRuntime {
     status: PlaybackStatus,
     source_generation: u64,
     seek_revision: u64,
+    stopped_source_generation: Option<u64>,
     current_track_id: Option<i64>,
     awaiting_replacement: bool,
     position: f64,
@@ -175,6 +177,7 @@ impl VisualizerRuntime {
             status: PlaybackStatus::Stopped,
             source_generation: 0,
             seek_revision: 0,
+            stopped_source_generation: None,
             current_track_id: None,
             awaiting_replacement: false,
             position: 0.0,
@@ -195,6 +198,7 @@ impl VisualizerRuntime {
             status,
             source_generation,
             seek_revision,
+            stopped_source_generation,
             visible,
             shutting_down,
             current_track_id,
@@ -219,19 +223,25 @@ impl VisualizerRuntime {
             || settings_changed;
         let track_changed = self.current_track_id != current_track_id;
         let stopping = status_changed && status == PlaybackStatus::Stopped;
-        // Only an exact Core Stop fence may retire the old picture with a fade.
-        // Coalesced seeks or source changes must not cross this boundary.
+        // The owner reports which live source was physically closed. Revision
+        // arithmetic cannot distinguish coalesced seeks from an intervening load.
         let fade_on_stop = stopping
             && current_track_id.is_some()
             && !track_changed
-            && source_generation == self.source_generation.wrapping_add(1)
-            && seek_revision == self.seek_revision.wrapping_add(1)
+            && stopped_source_generation == Some(self.source_generation)
+            && self.visible
+            && visible
             && !visualization_changed
             && config.visualization_enabled
             && !shutting_down
             && !settings_changed;
-        let invalidate =
-            signal_changed || track_changed || visualization_changed || shutting_down || stopping;
+        let stop_receipt_changed = self.stopped_source_generation != stopped_source_generation;
+        let invalidate = signal_changed
+            || track_changed
+            || visualization_changed
+            || shutting_down
+            || stopping
+            || (status == PlaybackStatus::Stopped && stop_receipt_changed);
         let membership_changed = self.panel_revision != panels.revision
             || AudioVisualizerOptions::from(self.config.as_ref())
                 != AudioVisualizerOptions::from(config.as_ref());
@@ -264,6 +274,7 @@ impl VisualizerRuntime {
         self.status = status;
         self.source_generation = source_generation;
         self.seek_revision = seek_revision;
+        self.stopped_source_generation = stopped_source_generation;
         self.current_track_id = current_track_id;
         self.position = position;
         self.duration = duration;
@@ -498,25 +509,25 @@ impl VisualizerRuntime {
         if self.status != PlaybackStatus::Playing {
             return;
         }
-        let frame = self.handle.analysis.read();
-        // Capture restarts may discard an incomplete FFT without breaking the
-        // signal. Only the producer's continuity fence can revoke this picture.
-        if frame.settings.is_none()
-            && (self.awaiting_replacement
-                || self.animation_clock.source == Some((frame.generation, frame.sample_rate)))
-        {
+        let staging = &mut self.staging;
+        let sequence = &mut self.sequence;
+        let needs_refresh = self.needs_refresh;
+        let awaiting_replacement = self.awaiting_replacement;
+        let source = self.animation_clock.source;
+        // Acceptance and the local copy share the transport's synchronous lock
+        // boundary. No transport lock survives into renderer/GPU work below.
+        if !self.handle.consume_current_analysis(|frame| {
+            // A capture restart can discard an incomplete FFT without revoking
+            // the last picture; only its continuity fence replaces that image.
+            if frame.settings.is_none()
+                && (awaiting_replacement || source == Some((frame.generation, frame.sample_rate)))
+            {
+                return false;
+            }
+            stage_analysis_frame(staging, sequence, needs_refresh, frame)
+        }) {
             return;
         }
-        if !stage_analysis_frame(
-            &mut self.staging,
-            &mut self.sequence,
-            self.needs_refresh,
-            &frame,
-            self.handle.analysis_frame_is_current(&frame),
-        ) {
-            return;
-        }
-        drop(frame);
         self.needs_refresh = false;
         self.awaiting_replacement = false;
         self.animation_clock.accept(&self.staging, now);
@@ -715,11 +726,7 @@ pub(in crate::gui) fn stage_analysis_frame(
     sequence: &mut u64,
     needs_refresh: bool,
     frame: &AnalysisFrame,
-    frame_is_current: bool,
 ) -> bool {
-    if !frame_is_current {
-        return false;
-    }
     if frame.sequence == *sequence
         && frame.generation == staging.generation
         && frame.settings == staging.settings
@@ -866,8 +873,7 @@ mod tests {
             &mut staging,
             &mut sequence,
             false,
-            &frame,
-            true
+            &frame
         ));
 
         // Continuity loss invalidates the worker frame before another FFT is ready.
@@ -878,8 +884,7 @@ mod tests {
             &mut staging,
             &mut sequence,
             true,
-            &frame,
-            true
+            &frame
         ));
         assert!(staging.settings.is_none());
         assert_eq!(staging.visualizer.band_rms, [0.0; 3]);
@@ -887,8 +892,7 @@ mod tests {
             &mut staging,
             &mut sequence,
             true,
-            &frame,
-            true
+            &frame
         ));
     }
 
@@ -917,21 +921,12 @@ mod tests {
             &mut sequence,
             false,
             &frame,
-            true,
-        ));
-        assert!(!stage_analysis_frame(
-            &mut staging,
-            &mut sequence,
-            true,
-            &frame,
-            false,
         ));
         assert!(stage_analysis_frame(
             &mut staging,
             &mut sequence,
             true,
             &frame,
-            true,
         ));
         assert_eq!(sequence, frame.sequence);
         assert_eq!(staging.visualizer.band_rms, frame.visualizer.band_rms);
@@ -1029,6 +1024,7 @@ mod tests {
         owner.update(cx, |owner, cx| {
             owner.sync(
                 VisualizerInputs {
+                    stopped_source_generation: None,
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1060,6 +1056,7 @@ mod tests {
             panels.reconcile(&layout);
             owner.sync(
                 VisualizerInputs {
+                    stopped_source_generation: None,
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1094,6 +1091,7 @@ mod tests {
             {
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1127,6 +1125,7 @@ mod tests {
             panels.reconcile(&layout);
             owner.sync(
                 VisualizerInputs {
+                    stopped_source_generation: None,
                     config: Arc::clone(&config),
                     panels: &panels,
                     status: PlaybackStatus::Playing,
@@ -1198,6 +1197,7 @@ mod tests {
             let panels = demand(&layout);
             owner.sync(
                 VisualizerInputs {
+                    stopped_source_generation: None,
                     config: Arc::clone(&owner.config),
                     panels: &panels,
                     status: PlaybackStatus::Paused,
@@ -1277,6 +1277,7 @@ mod tests {
         owner.update(cx, |owner, cx| {
             for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
                 let inputs = |config| VisualizerInputs {
+                    stopped_source_generation: None,
                     config,
                     panels: &panels,
                     status,
@@ -1408,6 +1409,7 @@ mod tests {
                 }
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::new(changed),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1491,6 +1493,7 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1519,6 +1522,7 @@ mod tests {
                 assert_eq!(owner.frame_generation, generation);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1545,6 +1549,7 @@ mod tests {
                 assert!(!owner.frame_pending);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1572,6 +1577,7 @@ mod tests {
                 );
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1598,6 +1604,7 @@ mod tests {
                 capped.visualization_fps = 1;
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::new(capped),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1626,6 +1633,7 @@ mod tests {
                 disabled.visualization_enabled = false;
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::new(disabled),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1646,6 +1654,7 @@ mod tests {
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1663,6 +1672,7 @@ mod tests {
                 assert!(owner.demand.enabled);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Playing,
@@ -1681,6 +1691,7 @@ mod tests {
                 panels.reconcile(&empty_layout);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Stopped,
@@ -1700,6 +1711,7 @@ mod tests {
                 panels.reconcile(&layout);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1722,6 +1734,7 @@ mod tests {
                 assert!(!owner.demand.enabled);
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1746,6 +1759,7 @@ mod tests {
                 let generation = owner.frame_generation;
                 owner.sync(
                     VisualizerInputs {
+                        stopped_source_generation: None,
                         config: Arc::clone(&config),
                         panels: &panels,
                         status: PlaybackStatus::Paused,
@@ -1771,7 +1785,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn core_stop_fences_audio_but_keeps_a_bounded_fade_until_cleanup(
+    fn confirmed_stop_keeps_a_bounded_fade_but_idle_stop_cannot_create_one(
         cx: &mut gpui::TestAppContext,
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -1807,18 +1821,21 @@ mod tests {
         });
         let before = runtime.handle.gui_snapshot();
         let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
-        let state = |status, source_generation, seek_revision| VisualizerInputs {
-            config: Arc::clone(&config),
-            panels: &panels,
-            status,
-            source_generation,
-            seek_revision,
-            visible: true,
-            shutting_down: false,
-            current_track_id: Some(track.id),
-            waveform_track: Some(&track),
-            position: 0.0,
-            duration: None,
+        let state = |status, source_generation, seek_revision, stopped_source_generation| {
+            VisualizerInputs {
+                config: Arc::clone(&config),
+                panels: &panels,
+                status,
+                source_generation,
+                seek_revision,
+                stopped_source_generation,
+                visible: true,
+                shutting_down: false,
+                current_track_id: Some(track.id),
+                waveform_track: Some(&track),
+                position: 0.0,
+                duration: None,
+            }
         };
         owner.update(cx, |owner, cx| {
             owner.sync(
@@ -1826,6 +1843,7 @@ mod tests {
                     PlaybackStatus::Playing,
                     before.source_generation,
                     before.playback.seek_revision,
+                    None,
                 ),
                 cx,
             );
@@ -1841,26 +1859,24 @@ mod tests {
             owner.style_coordinator.update(&frame, frame.sample_time);
             owner.staging = frame;
         });
-        // Execute the real Core Stop command: it advances both source and seek
-        // identities, unlike a synthetic status-only presentation transition.
+        // An idle engine's cached snapshot is not a physical close of the
+        // synthetic live presentation above.
         let ack = futures::executor::block_on(
             runtime
                 .handle
                 .request_ack(rivu_protocol::model::Command::Stop),
         );
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.ack.is_success(), "{:?}", ack.ack.error);
         let stopped = runtime.handle.gui_snapshot();
-        assert_ne!(stopped.source_generation, before.source_generation);
-        assert_ne!(
-            stopped.playback.seek_revision,
-            before.playback.seek_revision
-        );
+        assert_eq!(stopped.source_generation, before.source_generation);
+        assert_eq!(stopped.playback.stopped_source_generation, None);
         owner.update(cx, |owner, cx| {
             owner.sync(
                 state(
-                    stopped.playback.status,
-                    stopped.source_generation,
-                    stopped.playback.seek_revision,
+                    PlaybackStatus::Stopped,
+                    before.source_generation.wrapping_add(1),
+                    before.playback.seek_revision.wrapping_add(3),
+                    Some(before.source_generation),
                 ),
                 cx,
             );
@@ -1871,9 +1887,29 @@ mod tests {
             owner.consume_analysis(Instant::now(), cx);
             assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
+            // Duplicate Stop carries the original receipt and never restarts its clock.
+            owner.sync(
+                state(
+                    PlaybackStatus::Stopped,
+                    before.source_generation.wrapping_add(1),
+                    before.playback.seek_revision.wrapping_add(3),
+                    Some(before.source_generation),
+                ),
+                cx,
+            );
             owner
                 .style_coordinator
                 .advance_idle_fade(Instant::now() + Duration::from_secs(3));
+            assert!(!owner.style_coordinator.idle_fading(Instant::now()));
+            owner.sync(
+                state(
+                    PlaybackStatus::Stopped,
+                    before.source_generation.wrapping_add(1),
+                    before.playback.seek_revision.wrapping_add(3),
+                    Some(before.source_generation),
+                ),
+                cx,
+            );
             assert!(!owner.style_coordinator.idle_fading(Instant::now()));
             owner.frame_requested = false;
         });
@@ -1913,7 +1949,7 @@ mod tests {
         let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let mut replacement = track.clone();
         replacement.id += 1;
-        for boundary in 0..7 {
+        for boundary in 0..8 {
             let waveform =
                 cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
             let owner = cx.new(|cx| {
@@ -1926,6 +1962,7 @@ mod tests {
                 )
             });
             let mut state = VisualizerInputs {
+                stopped_source_generation: None,
                 config: Arc::clone(&config),
                 panels: &panels,
                 status: PlaybackStatus::Playing,
@@ -1959,7 +1996,8 @@ mod tests {
                 state.status = PlaybackStatus::Stopped;
                 state.source_generation += 1;
                 state.seek_revision += 1;
-                if boundary >= 5 {
+                state.stopped_source_generation = Some(1);
+                if (5..=6).contains(&boundary) {
                     state.waveform_track = if boundary == 5 {
                         None
                     } else {
@@ -1974,7 +2012,7 @@ mod tests {
                     },
                     cx,
                 );
-                if boundary >= 5 {
+                if (5..=6).contains(&boundary) {
                     assert!(!owner.style_coordinator.idle_fading(Instant::now()));
                     return;
                 }
@@ -1989,6 +2027,7 @@ mod tests {
                             ..config.as_ref().clone()
                         });
                     }
+                    7 => state.stopped_source_generation = None,
                     _ => state.shutting_down = true,
                 }
                 owner.sync(state, cx);
@@ -2000,7 +2039,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn stop_fade_requires_a_single_fence_and_retained_actual_current(
+    fn stop_fade_requires_a_matching_physical_source_not_revision_arithmetic(
         cx: &mut gpui::TestAppContext,
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -2026,14 +2065,34 @@ mod tests {
         let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let current = Some(track.id);
         let wrap = u64::MAX;
-        for (case, before_current, after_current, (generation, revision), steps, fades) in [
-            ("ordinary Stop", current, current, (10, 20), (1, 1), true),
+        for (
+            case,
+            before_current,
+            after_current,
+            (generation, revision),
+            steps,
+            closed,
+            visible,
+            fades,
+        ) in [
+            (
+                "ordinary Stop",
+                current,
+                current,
+                (10, 20),
+                (1, 1),
+                Some(10),
+                true,
+                true,
+            ),
             (
                 "wrapping Stop",
                 current,
                 current,
                 (wrap, wrap),
                 (1, 1),
+                Some(wrap),
+                true,
                 true,
             ),
             (
@@ -2041,8 +2100,10 @@ mod tests {
                 current,
                 current,
                 (10, 20),
-                (1, 2),
-                false,
+                (1, 7),
+                Some(10),
+                true,
+                true,
             ),
             (
                 "coalesced source Stop",
@@ -2050,14 +2111,38 @@ mod tests {
                 current,
                 (10, 20),
                 (2, 1),
+                Some(11),
+                true,
                 false,
             ),
             (
-                "unconfirmed Stop",
+                "source returns to same track",
                 current,
                 current,
                 (10, 20),
-                (0, 0),
+                (3, 3),
+                Some(12),
+                true,
+                false,
+            ),
+            (
+                "unconfirmed Stop despite exact fences",
+                current,
+                current,
+                (10, 20),
+                (1, 1),
+                None,
+                true,
+                false,
+            ),
+            (
+                "hidden Stop",
+                current,
+                current,
+                (10, 20),
+                (1, 1),
+                Some(10),
+                false,
                 false,
             ),
             (
@@ -2066,6 +2151,8 @@ mod tests {
                 None,
                 (10, 20),
                 (1, 1),
+                Some(10),
+                true,
                 false,
             ),
             (
@@ -2074,6 +2161,8 @@ mod tests {
                 None,
                 (10, 20),
                 (1, 1),
+                Some(10),
+                true,
                 false,
             ),
         ] {
@@ -2091,12 +2180,17 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 let state = |status, current_track_id, source_generation, seek_revision| {
                     VisualizerInputs {
+                        stopped_source_generation: if status == PlaybackStatus::Stopped {
+                            closed
+                        } else {
+                            None
+                        },
                         config: Arc::clone(&config),
                         panels: &panels,
                         status,
                         source_generation,
                         seek_revision,
-                        visible: true,
+                        visible,
                         shutting_down: false,
                         current_track_id,
                         // Explicit metadata selection stays the waveform fallback
@@ -2144,6 +2238,19 @@ mod tests {
                 );
                 assert!(owner.staging.settings.is_none(), "{case}");
                 assert!(owner.staging.spectrum_db.is_empty(), "{case}");
+                if !visible {
+                    // A repeated Stop observed after showing the window must not
+                    // resurrect the presentation retired while it was hidden.
+                    let mut shown = state(
+                        PlaybackStatus::Stopped,
+                        after_current,
+                        generation.wrapping_add(steps.0),
+                        revision.wrapping_add(steps.1),
+                    );
+                    shown.visible = true;
+                    owner.sync(shown, cx);
+                    assert!(!owner.style_coordinator.idle_fading(Instant::now()));
+                }
             });
         }
     }

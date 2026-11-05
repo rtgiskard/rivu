@@ -226,7 +226,7 @@ impl PlaybackClock {
                 || self.pending.is_empty())
         {
             self.notified_heard = self.heard;
-            if shared.pcm.state().active {
+            if shared.pcm.wants_cursor_notification() {
                 shared.pcm.notify();
             }
         }

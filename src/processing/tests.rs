@@ -46,7 +46,7 @@ fn completed(service: &mut Service, track: &Track, config: &Arc<Config>) -> Proc
         match next_event(service) {
             Event::Progress { .. } => {}
             Event::Finished { id, result } => {
-                assert_eq!(id, status.id);
+                assert_eq!(id, status);
                 service.finish_task(service.active_id().unwrap()).unwrap();
                 return *result.unwrap();
             }
@@ -85,7 +85,7 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
         accompaniment: true,
         ..Default::default()
     });
-    let _ = service.retain_result(Box::new(result));
+    service.retain_result(Box::new(result));
     service.select_audition(Some((1, 0)));
     (directory, service, track, config)
 }
@@ -333,7 +333,7 @@ fn completed_graph(
     )?;
     loop {
         match next_event(service) {
-            Event::Progress { .. } | Event::GraphNode { .. } => {}
+            Event::Progress { .. } | Event::GraphNode { .. } | Event::GraphPrepared { .. } => {}
             Event::Finished { result, .. } => {
                 service.finish_task(service.active_id().unwrap()).unwrap();
                 return result.map(|result| *result);
@@ -341,6 +341,113 @@ fn completed_graph(
             _ => panic!("unexpected graph event"),
         }
     }
+}
+
+#[test]
+fn graph_model_failure_keeps_each_nodes_provenance_and_original_operation() {
+    let (directory, mut service, track, _) = fixture();
+    let mut source = hound::WavWriter::create(
+        &track.path,
+        hound::WavSpec {
+            channels: 2,
+            sample_rate: 8_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for sample in PCM {
+        source.write_sample(sample).unwrap();
+        source.write_sample(sample).unwrap();
+    }
+    source.finalize().unwrap();
+    let worker = directory.path().join("models.py");
+    fs::write(
+        &worker,
+        r#"import json, signal, struct, sys
+signal.alarm(10)
+def read():
+    kind, size = struct.unpack('<BI', sys.stdin.buffer.read(5))
+    return kind, sys.stdin.buffer.read(size)
+def send(kind, payload):
+    sys.stdout.buffer.write(struct.pack('<BI', kind, len(payload)) + payload)
+kind, payload = read()
+request = json.loads(payload)
+manifest = json.load(open(request['model_manifest']))
+model = dict(id=manifest['id'], sha256=manifest['id'] + '-hash')
+send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='progress', completed=0,
+                        total=request['frames'], model=model)).encode())
+while True:
+    kind, payload = read()
+    if kind == 2:
+        break
+    assert kind == 1
+    if model['id'] == 'first':
+        send(17, payload)
+if model['id'] == 'second':
+    send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='error',
+                            message='second model failed')).encode())
+    sys.stdout.buffer.flush()
+    raise SystemExit(7)
+send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='complete',
+                        sample_rate=request['sample_rate'], channels=request['channels'],
+                        frames=request['frames'], outputs=dict(speech=True), model=model)).encode())
+sys.stdout.buffer.flush()
+"#,
+    )
+    .unwrap();
+    let model = |id: &str| {
+        let manifest = directory.path().join(format!("{id}.json"));
+        fs::write(&manifest, serde_json::json!({"id":id}).to_string()).unwrap();
+        GraphNodeKind::Speech {
+            config: rivu_format::config::NeuralConfig {
+                speech_manifest: Some(manifest),
+                speech_interpreter: "python3".into(),
+                worker: worker.clone(),
+                ..Default::default()
+            },
+        }
+    };
+    let task = service
+        .start_graph(
+            track,
+            graph_config(vec![model("first"), model("second")]),
+            GraphRequest {
+                target: GraphPort { node: 2, port: 0 },
+                mode: GraphExecutionMode::Offline,
+                export_path: None,
+                source_run: None,
+                cached_output: None,
+            },
+        )
+        .unwrap();
+    let mut nodes = BTreeMap::new();
+    loop {
+        match next_event(&mut service) {
+            Event::GraphNode { status, .. } => {
+                nodes.insert(status.node, status);
+            }
+            Event::Finished { id, result } => {
+                assert_eq!(id, task);
+                assert!(result.is_err());
+                service.finish_task(id).unwrap();
+                break;
+            }
+            Event::Progress { .. } | Event::GraphPrepared { .. } => {}
+            _ => panic!("unexpected model graph event"),
+        }
+    }
+    assert_eq!(nodes[&3].phase, ProcessingPhase::Complete);
+    assert_eq!(nodes[&3].model_id.as_deref(), Some("first"));
+    assert_eq!(nodes[&3].model_sha256.as_deref(), Some("first-hash"));
+    assert_eq!(nodes[&4].phase, ProcessingPhase::Failed);
+    assert_eq!(nodes[&4].model_id.as_deref(), Some("second"));
+    assert_eq!(nodes[&4].model_sha256.as_deref(), Some("second-hash"));
+    assert_eq!(
+        service.status(task).unwrap().operation,
+        ProcessingOperation::Graph
+    );
+    assert!(service.status(task).unwrap().model_id.is_none());
 }
 
 fn assert_graph_failure(
@@ -366,9 +473,9 @@ fn assert_graph_failure(
     let mut terminal_nodes = Vec::new();
     let task_error = loop {
         match next_event(service) {
-            Event::Progress { id, .. } => assert_eq!(id, task.id),
+            Event::Progress { id, .. } | Event::GraphPrepared { id, .. } => assert_eq!(id, task),
             Event::GraphNode { id, status } => {
-                assert_eq!(id, task.id);
+                assert_eq!(id, task);
                 if status.node == failed_node && status.phase == ProcessingPhase::Processing {
                     processing_seen = true;
                 }
@@ -382,7 +489,7 @@ fn assert_graph_failure(
                 }
             }
             Event::Finished { id, result } => {
-                assert_eq!(id, task.id);
+                assert_eq!(id, task);
                 service.finish_task(service.active_id().unwrap()).unwrap();
                 break format!(
                     "{:#}",
@@ -590,6 +697,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
         status.operation = ProcessingOperation::Graph;
         status.settings.graph = Some(graph.clone());
         status.settings.graph_target = Some(target);
+        status.settings.graph_requested_mode = Some(GraphExecutionMode::Offline);
         status.settings.graph_mode = Some(GraphExecutionMode::Offline);
         status.graph_nodes = graph
             .ancestors(target)
@@ -757,7 +865,7 @@ fn failed_processing_spawns_do_not_consume_retirement_capacity() {
             match next_event(&mut service) {
                 Event::Progress { .. } => {}
                 Event::Finished { id, result } => {
-                    assert_eq!(id, status.id);
+                    assert_eq!(id, status);
                     let result = result.unwrap();
                     assert_eq!(samples(result.outputs.denoised.as_ref().unwrap()), PCM);
                     service.retire(result);
@@ -874,14 +982,14 @@ fn cancelled_admitted_worker_releases_its_barrier_and_allows_retry() {
                 None,
             )
             .unwrap();
-        assert!(service.cancel(status.id + 1).is_err());
-        service.cancel(status.id).unwrap();
+        assert!(service.cancel(status + 1).is_err());
+        service.cancel(status).unwrap();
         unblock_reclamation(&mut service, release);
         loop {
             match next_event(&mut service) {
                 Event::Progress { .. } => {}
                 Event::Finished { id, result } => {
-                    assert_eq!(id, status.id);
+                    assert_eq!(id, status);
                     assert!(result.is_err());
                     service.finish_task(service.active_id().unwrap()).unwrap();
                     break;
@@ -891,7 +999,7 @@ fn cancelled_admitted_worker_releases_its_barrier_and_allows_retry() {
         }
         assert_eq!(service.memory_bytes(), before);
         let retry = completed(&mut service, &track, &config);
-        assert!(retry.status.id > status.id);
+        assert!(retry.status.id > status);
         assert_eq!(samples(retry.outputs.denoised.as_ref().unwrap()), PCM);
     });
 }
@@ -1044,7 +1152,7 @@ fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
 fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
     let (_directory, mut service, track, config) = fixture();
     let result = completed(&mut service, &track, &config);
-    let _ = service.retain_result(Box::new(result));
+    service.retain_result(Box::new(result));
     service.select_audition(Some((1, 0)));
     service.release_unpinned_audio();
     assert!(service.results()[0].outputs.vocals.is_some());
@@ -1062,6 +1170,35 @@ fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
             .unwrap()
             .retained_bytes()
     );
+}
+
+#[test]
+fn resource_directory_projects_eviction_without_overwriting_outcome_or_pinned_audio() {
+    let (_directory, mut service, track, config) = fixture();
+    let pinned = service.results()[0].status.clone();
+    service.accept_status(pinned);
+    service.retain_terminal(1);
+    for _ in 0..4 {
+        let result = completed(&mut service, &track, &config);
+        let status = result.status.clone();
+        let id = status.id;
+        service.retain_result(Box::new(result));
+        service.accept_status(status);
+        service.retain_terminal(id);
+    }
+    assert_eq!(service.results().len(), 4);
+    assert!(service.results().iter().any(|result| result.status.id == 1));
+    assert!(!service.results().iter().any(|result| result.status.id == 2));
+    assert!(service.status(1).unwrap().outputs.as_ref().unwrap().vocals);
+    let evicted = service.status(2).unwrap();
+    assert_eq!(evicted.phase, ProcessingPhase::Complete);
+    assert!(evicted.error.is_none());
+    assert!(evicted.outputs.is_none());
+    let first = service.current_projection().unwrap();
+    let second = service.current_projection().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.outputs.as_ref().unwrap().denoised);
+    assert_eq!(service.audition_id(), Some(1));
 }
 
 #[test]

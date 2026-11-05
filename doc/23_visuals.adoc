@@ -190,12 +190,14 @@ fresh input is ready. Resumption reanchors display time rather than replaying th
 suspension. A paused business update can request one refresh, but does not advance
 animation or start the optional Audio Visualizer idle fade.
 
-Stop retires all analysis input. With `fade_when_idle` enabled, an ordinary Stop
-on the same actual playback track can fade the last bounded radial drawing for
-two seconds, then release it; no worker audio is consumed while stopped.
-Clearing the queue or changing the playback track clears that drawing immediately,
-even if Metadata still displays the same track. Additional source/seek boundaries
-observed together with Stop also clear it rather than preserve an uncertain fade.
+Stop retires all analysis input. With `fade_when_idle` enabled, a confirmed physical
+close of the displayed live source can fade its last bounded radial drawing for
+two seconds, then release it; no worker audio is consumed while stopped. Core
+publishes that source as `stopped_source_generation`, independently of statistics
+persistence. An idle cached audio snapshot is not new close evidence. Repeated
+Stop preserves the original cause and never restarts the fade or restores a
+hidden, cleared or already released drawing. Clearing the queue, replacing the
+source or an unmatched close clears the drawing rather than guessing continuity.
 
 Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
 clear incompatible retained results even while paused or hidden. These semantic

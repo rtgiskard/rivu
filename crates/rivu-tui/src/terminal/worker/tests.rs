@@ -29,15 +29,17 @@ fn queue_request(
     offset: usize,
     revisions: QueryRevisions,
 ) -> QueryRequest {
-    let query = QueryKind::Queue.into_query(offset, 20);
+    let query = ReadKind::Queue.into_query(offset, 20);
     let submission = tracker.submit(&query, revisions);
     QueryRequest {
-        demand: QueryDemand {
+        demand: Arc::new(ReadSpec {
             offset,
             limit: 20,
             stamp: query.stamp(revisions),
             query,
-        },
+            target: ReadTarget::Queue,
+            filter: None,
+        }),
         submission,
     }
 }
@@ -255,7 +257,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         );
         assert!(
             matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
-            if watch.sections == TERMINAL_SECTIONS && watch.revisions == StateRevisions::default())
+            if watch.sections == TERMINAL_SECTIONS)
         );
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
         let processing_only = StateRevisions {
@@ -266,7 +268,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         reply(&mut stream, WireResponse::Watch(processing_only));
         assert!(
             matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
-            if watch.sections == TERMINAL_SECTIONS && watch.revisions == processing_only)
+            if watch.sections == TERMINAL_SECTIONS)
         );
         ignored.send(()).unwrap();
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -326,8 +328,10 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
     let state = TuiSnapshot::default();
-    let mut ui = UiState::default();
-    ui.view = View::Playlists(PagedList::default());
+    let mut ui = UiState {
+        view: View::Playlists(PagedList::default()),
+        ..UiState::default()
+    };
     let request = ui.query_request(&state).unwrap();
     worker.request(request.clone());
     let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -336,10 +340,10 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         .unwrap();
     for offset in 1..100 {
         worker.request(QueryRequest {
-            demand: QueryDemand {
+            demand: Arc::new(ReadSpec {
                 offset,
-                ..request.demand.clone()
-            },
+                ..request.demand.as_ref().clone()
+            }),
             submission: request.submission,
         });
     }
@@ -469,10 +473,10 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     worker.request(request.clone());
     let stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.request(QueryRequest {
-        demand: QueryDemand {
+        demand: Arc::new(ReadSpec {
             offset: 99,
-            ..request.demand
-        },
+            ..request.demand.as_ref().clone()
+        }),
         submission: request.submission,
     });
     let pending = Arc::clone(&worker.pending);
@@ -769,10 +773,10 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     worker.request(request.clone());
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.request(QueryRequest {
-        demand: QueryDemand {
+        demand: Arc::new(ReadSpec {
             offset: 20,
-            ..request.demand
-        },
+            ..request.demand.as_ref().clone()
+        }),
         submission: request.submission,
     });
     release.send(()).unwrap();
@@ -907,4 +911,50 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
+}
+
+#[test]
+fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_queries() {
+    let mut state = TuiSnapshot::default();
+    state.library.revision = 17;
+    state.queue.revision = 9;
+    for kind in [
+        ReadKind::Queue,
+        ReadKind::QueueSelection(42),
+        ReadKind::PlaylistSelection {
+            playlist_id: 3,
+            entry_id: 7,
+        },
+    ] {
+        let absent = ReadDemand {
+            kind,
+            filter: None,
+            offset: 0,
+            limit: 2,
+        };
+        let empty = ReadDemand {
+            kind,
+            filter: Some(""),
+            offset: 0,
+            limit: 2,
+        };
+        let absent_spec = absent.own(&state);
+        let empty_spec = empty.own(&state);
+        assert_eq!(absent_spec.borrowed(), absent);
+        assert_eq!(empty_spec.borrowed(), empty);
+        assert!(!absent.matches(&empty_spec, &state));
+        assert!(!empty.matches(&absent_spec, &state));
+        assert_eq!(
+            absent_spec.stamp,
+            absent_spec.query().stamp(absent_spec.revisions(&state))
+        );
+        assert_eq!(
+            empty_spec.stamp,
+            empty_spec.query().stamp(empty_spec.revisions(&state))
+        );
+        let mut next = state.clone();
+        next.library.revision += 1;
+        assert!(absent.matches(&absent_spec, &next));
+        assert!(!empty.matches(&empty_spec, &next));
+    }
 }

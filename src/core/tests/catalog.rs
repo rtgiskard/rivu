@@ -118,7 +118,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
     connection
         .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE tracks;")
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap_err();
+    core.apply_catalog_changes(impacts).unwrap_err();
     let after = core.state.query_revisions();
     assert_ne!(after.library, before.library);
     assert_ne!(after.structure, before.structure);
@@ -197,7 +197,7 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
         .map(|entry| entry.track_id)
         .collect();
     assert_eq!(initial, expected);
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     let refreshed: Vec<_> = core
         .state
         .library
@@ -609,7 +609,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                 ..ScanResult::default()
             })
             .unwrap();
-        core.apply_scan_impacts(impacts).unwrap();
+        core.apply_catalog_changes(impacts).unwrap();
         let old_id = core
             .store
             .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))
@@ -822,8 +822,9 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 let new = directory.path().join("new.wav");
                 write_pcm(&existing);
                 write_pcm(&new);
-                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds =
-                    threshold;
+                edit_preferences(&mut core, |config| {
+                    config.scan_min_duration_seconds = threshold
+                });
                 let paths = if directory_scope {
                     vec![directory.path().to_path_buf()]
                 } else {
@@ -832,8 +833,9 @@ fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
                 core.scan(paths, force).unwrap();
                 // Mutating the live configuration after acceptance must not alter
                 // this task, regardless of when its worker reaches the source.
-                Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds =
-                    1 - threshold;
+                edit_preferences(&mut core, |config| {
+                    config.scan_min_duration_seconds = 1 - threshold
+                });
                 assert!(settle_scan(&mut core));
                 let status = core.scan_results.back().unwrap();
                 assert_eq!(status.progress.errors, 0);
@@ -869,7 +871,7 @@ fn duration_only_exclusions_complete_successfully_without_errors() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("new.wav");
     write_pcm(&path);
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 1;
+    edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 1);
     core.scan(vec![path.clone()], false).unwrap();
     assert!(settle_scan(&mut core));
     let task = core.scan_results.back().unwrap();
@@ -909,7 +911,7 @@ fn forced_duration_scan_refreshes_cached_short_existing_tracks() {
             ..ScanResult::default()
         })
         .unwrap();
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 1;
+    edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 1);
     core.scan(vec![path], true).unwrap();
     assert!(settle_scan(&mut core));
     let track = core.store.track(1).unwrap().unwrap();
@@ -953,13 +955,13 @@ fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_sn
         } else {
             1
         };
-        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 3;
+        edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 3);
         core.command(Command::ImportPlaylist {
             path: path.clone(),
             name: Some("Filtered mix".into()),
         })
         .unwrap();
-        Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 0;
+        edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 0);
         assert!(settle_scan(&mut core));
         let task = core.scan_results.back().unwrap();
         assert_eq!(task.progress.errors, 0);
@@ -1140,7 +1142,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
             ..Default::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     core.command(Command::CreatePlaylistWithTracks {
         name: "Retained".into(),
         track_ids: vec![1, 2],
@@ -1395,7 +1397,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     let hidden = excluded.join("hidden.wav");
     write_pcm(&visible);
     write_pcm(&hidden);
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 2;
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
@@ -1423,7 +1425,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
         )
         .unwrap();
     std::fs::remove_file(&hidden).unwrap();
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 1;
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
@@ -1454,7 +1456,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
         .unwrap()
         .unwrap();
     assert!(!core.track(visible_id).unwrap().missing);
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 2;
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
@@ -1475,9 +1477,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
 #[test]
 fn scan_rejects_when_no_library_roots_are_configured() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .clear();
+    edit_preferences(&mut core, |config| config.library_roots.clear());
     assert!(
         core.command(Command::Scan {
             paths: vec![directory.path().to_path_buf()],
@@ -1511,7 +1511,7 @@ fn scan_rejects_prefix_sibling_of_a_configured_root() {
     let sibling = parent.path().join("Music-other");
     std::fs::create_dir(&root).unwrap();
     std::fs::create_dir(&sibling).unwrap();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots = vec![root];
+    edit_preferences(&mut core, |config| config.library_roots = vec![root]);
     assert!(
         core.command(Command::Scan {
             paths: vec![sibling],
@@ -1567,7 +1567,7 @@ fn scan_keeps_distinct_configured_aliases_of_the_same_directory() {
     for alias in [&first, &second] {
         std::os::unix::fs::symlink(outside.path(), alias).unwrap();
     }
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.checkpoint();
     config.library_roots = vec![first.join("."), second.join("unused/..")];
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
@@ -1605,9 +1605,11 @@ fn scan_of_one_root_ignores_an_unavailable_configured_root() {
     let source = directory.path().join("1.wav");
     write_pcm(&source);
     let duration_before = core.track(1).unwrap().duration;
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .push(directory.path().join("offline/Music"));
+    edit_preferences(&mut core, |config| {
+        config
+            .library_roots
+            .push(directory.path().join("offline/Music"))
+    });
     core.command(Command::Scan {
         paths: vec![source.clone()],
         force: false,
@@ -1640,7 +1642,9 @@ fn cue_scan_can_reference_another_configured_root() {
         "FILE ../sources/source.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
     )
     .unwrap();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots = vec![sheets, sources];
+    edit_preferences(&mut core, |config| {
+        config.library_roots = vec![sheets, sources]
+    });
     core.command(Command::Scan {
         paths: vec![sheet.clone()],
         force: false,
@@ -1663,7 +1667,9 @@ fn scan_rejects_a_logical_parent_escape_even_when_the_path_exists() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("Music");
     std::fs::create_dir(&root).unwrap();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots = vec![root.clone()];
+    edit_preferences(&mut core, |config| {
+        config.library_roots = vec![root.clone()]
+    });
     assert!(
         core.command(Command::Scan {
             paths: vec![root.join("..")],
@@ -1683,9 +1689,9 @@ fn missing_and_broken_requests_do_not_prevent_other_roots_from_scanning() {
     std::os::unix::fs::symlink(&missing, &broken).unwrap();
     let source = directory.path().join("1.wav");
     write_pcm(&source);
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .push(missing.clone());
+    edit_preferences(&mut core, |config| {
+        config.library_roots.push(missing.clone())
+    });
     core.command(Command::Scan {
         paths: vec![missing, broken, source.clone()],
         force: false,
@@ -1713,14 +1719,14 @@ fn playlist_import_and_directory_queries_preserve_configured_aliases() {
     .unwrap();
     let alias = directory.path().join("Music");
     std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.checkpoint();
     config.library_roots = vec![alias.join("unused/.."), outside.path().to_path_buf()];
     core.command(Command::Configure {
         config: std::sync::Arc::new(config),
     })
     .unwrap();
     assert_eq!(
-        core.state.configuration.config.library_roots,
+        core.preferences.settings().library_roots,
         [alias.clone(), outside.path().to_path_buf()]
     );
     core.command(Command::Scan {
@@ -1799,7 +1805,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
     core.store.set_queue_current(Some(1)).unwrap();
     core.refresh_queue_tracks().unwrap();
     core.store.mark_played(1, 7).unwrap();
-    core.apply_scan_impacts(crate::store::ScanImpacts {
+    core.apply_catalog_changes(crate::store::CatalogChanges {
         changed: true,
         library: true,
         ..Default::default()
@@ -1840,7 +1846,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
             ..Default::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     let current = core.state.current_track().unwrap();
     assert_eq!(current.codec, "updated-codec");
     assert_eq!(current.sample_rate, 96_000);
@@ -1875,7 +1881,7 @@ fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
         |paths| Ok(vec![None; paths.len()]),
         false,
         &[_directory.path().to_path_buf()],
-        core.state.configuration.config.scan_max_depth,
+        core.preferences.settings().scan_max_depth,
         &library::ScanCancellation::default(),
         |_, _, _, _, _| {},
     )
@@ -1885,7 +1891,7 @@ fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
         .media
         .title = "Cached metadata".into();
     let impacts = core.store.apply_scan(&scanned).unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
         core.command(Command::Scan {
             paths: vec![path.clone()],
@@ -2266,9 +2272,10 @@ fn other_check_empty_roots_rechecks_only_registered_sources_without_duration_fil
     let unregistered = directory.path().join("unregistered.wav");
     write_pcm(&existing);
     write_pcm(&unregistered);
-    let config = Arc::make_mut(&mut core.state.configuration.config);
-    config.library_roots.clear();
-    config.scan_min_duration_seconds = 3600;
+    edit_preferences(&mut core, |config| {
+        config.library_roots.clear();
+        config.scan_min_duration_seconds = 3600;
+    });
     core.command(Command::CheckOtherTracks { force: true })
         .unwrap();
     let id = core.active_scan.as_ref().unwrap().status.id;
@@ -2294,13 +2301,12 @@ fn other_check_empty_roots_rechecks_only_registered_sources_without_duration_fil
 #[test]
 fn other_check_rechecks_roots_after_preparation_and_before_saving() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .clear();
+    edit_preferences(&mut core, |config| config.library_roots.clear());
     let finished = prepare_other_check(&mut core, true);
     assert_eq!(finished.result.as_ref().unwrap().roots.len(), 4);
-    Arc::make_mut(&mut core.state.configuration.config).library_roots =
-        vec![directory.path().join("unused/..")];
+    edit_preferences(&mut core, |config| {
+        config.library_roots = vec![directory.path().join("unused/..")]
+    });
     core.scan_event(ScanEvent::Finished(finished));
     assert!(settle_scan(&mut core));
     for id in 1..=4 {
@@ -2313,9 +2319,7 @@ fn other_check_cancel_and_shutdown_join_preparation_waiting_on_owner() {
     for shutdown in [false, true] {
         let (directory, mut core) = fixture();
         write_pcm(&directory.path().join("1.wav"));
-        Arc::make_mut(&mut core.state.configuration.config)
-            .library_roots
-            .clear();
+        edit_preferences(&mut core, |config| config.library_roots.clear());
         let id = core.start_other_tracks_check(false).unwrap();
         let lookup = loop {
             let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2346,9 +2350,7 @@ fn other_check_cancel_and_shutdown_join_preparation_waiting_on_owner() {
 #[test]
 fn other_check_saving_rejects_cancel_and_shutdown_waits_for_commit() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .clear();
+    edit_preferences(&mut core, |config| config.library_roots.clear());
     let finished = prepare_other_check(&mut core, true);
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();

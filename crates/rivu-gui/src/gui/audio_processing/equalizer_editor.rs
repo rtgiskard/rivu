@@ -3413,6 +3413,7 @@ mod tests {
                     config: config.clone()
                 },
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -3718,14 +3719,14 @@ mod tests {
     ) {
         let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
         let graph_command = matches!(&submission.command, Command::ProcessingGraphEdit { .. });
-        let ack = futures::executor::block_on(runtime.handle.request_ack(submission.command));
+        let ack = futures::executor::block_on(runtime.handle.request_ack(submission.command)).ack;
         assert_eq!(ack.is_success(), success, "{:?}", ack.error);
         owner.update(cx, |owner, cx| {
             owner.pending = owner.pending.saturating_sub(1);
             owner.finish_equalizer_command(success);
             owner.reconcile(owner.context.snapshot(), cx);
             if graph_command {
-                owner.graph_ack(success, cx);
+                owner.graph_ack(success, true, cx);
             }
             if let Some(field) = submission.equalizer_field {
                 owner.finish_equalizer_field(field, success, cx);
@@ -3832,6 +3833,7 @@ mod tests {
             let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
             assert!(
                 futures::executor::block_on(runtime.handle.request_ack(issued.command))
+                    .ack
                     .is_success()
             );
             // Core accepts the local number, then another client updates Core
@@ -3843,6 +3845,7 @@ mod tests {
                         field: external
                     },
                 }))
+                .ack
                 .is_success()
             );
             owner.update(cx, |owner, cx| {
@@ -4010,6 +4013,7 @@ mod tests {
                     field: EqBandEdit::Kind(FilterKind::LowPass)
                 },
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4095,6 +4099,7 @@ mod tests {
                     position: [120., 120.],
                 }),
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4151,6 +4156,7 @@ mod tests {
                     },
                 }),
             }))
+            .ack
             .is_success()
         );
         let before = runtime
@@ -4257,6 +4263,7 @@ mod tests {
                     position: [200., 180.]
                 }),
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4342,6 +4349,7 @@ mod tests {
                     position: [200., 180.]
                 }),
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4399,6 +4407,7 @@ mod tests {
             Command::ProcessingGraphEdit { .. }
         ));
         let success = futures::executor::block_on(runtime.handle.request_ack(submission.command))
+            .ack
             .is_success();
         owner.update(cx, |owner, cx| {
             owner.reconcile(owner.context.snapshot(), cx)
@@ -4411,7 +4420,7 @@ mod tests {
             owner.pending = owner.pending.saturating_sub(1);
             owner.finish_equalizer_command(success);
             owner.reconcile(owner.context.snapshot(), cx);
-            owner.graph_ack(success, cx);
+            owner.graph_ack(success, true, cx);
         });
         cx.run_until_parked();
     }
@@ -4569,6 +4578,7 @@ mod tests {
                     position: [200., 180.]
                 }),
             }))
+            .ack
             .is_success()
         );
         // The next pointer event can see Core's snapshot before parent reconcile.
@@ -4666,6 +4676,7 @@ mod tests {
                     position: [200., 180.]
                 }),
             }))
+            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4949,7 +4960,9 @@ mod tests {
         }
         let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(issued.command)).is_success()
+            futures::executor::block_on(runtime.handle.request_ack(issued.command))
+                .ack
+                .is_success()
         );
         owner.update(cx, |owner, cx| {
             owner.pending = 0;
@@ -5015,6 +5028,7 @@ mod tests {
                 futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
                     edit: EqualizerEdit::Band { index: 0, band },
                 }))
+                .ack
                 .is_success()
             );
             owner.update(cx, |owner, cx| {

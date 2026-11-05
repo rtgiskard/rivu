@@ -1,27 +1,104 @@
 use super::*;
 
-impl Core {
-    // Compose on the Core thread; live playback controls override the saved snapshot.
-    pub(in crate::core) fn effective_config(&self) -> Config {
-        let mut config = self.state.configuration.config.as_ref().clone();
-        config.volume = self.state.playback.volume;
-        config.shuffle = self.state.playback.shuffle;
-        config.repeat = self.state.playback.repeat;
-        config
-            .output_device
-            .clone_from(&self.state.system.selected_device);
+pub(super) struct LiveControls {
+    pub(super) volume: f32,
+    pub(super) shuffle: bool,
+    pub(super) repeat: RepeatMode,
+    pub(super) output_device: Option<String>,
+}
+
+/// Runtime preferences own desired values; published DTOs are observations only.
+/// High-frequency controls never clone the graph or invalidate configuration.
+pub(super) struct Preferences {
+    settings: Arc<Config>,
+    live: LiveControls,
+    saved: Option<Config>,
+    save_error: Option<String>,
+}
+
+impl Preferences {
+    pub(super) fn new(settings: Arc<Config>, saved: Option<Config>) -> Self {
+        let live = LiveControls {
+            volume: settings.volume,
+            shuffle: settings.shuffle,
+            repeat: settings.repeat,
+            output_device: settings.output_device.clone(),
+        };
+        Self {
+            settings,
+            live,
+            saved,
+            save_error: None,
+        }
+    }
+
+    pub(super) fn settings(&self) -> &Arc<Config> {
+        &self.settings
+    }
+
+    pub(super) fn live(&self) -> &LiveControls {
+        &self.live
+    }
+
+    pub(super) fn set_volume(&mut self, volume: f32) {
+        self.live.volume = volume;
+    }
+
+    pub(super) fn set_shuffle(&mut self, shuffle: bool) {
+        self.live.shuffle = shuffle;
+    }
+
+    pub(super) fn set_repeat(&mut self, repeat: RepeatMode) {
+        self.live.repeat = repeat;
+    }
+
+    pub(super) fn select_device(&mut self, device: Option<String>) {
+        self.live.output_device = device;
+    }
+
+    pub(super) fn checkpoint(&self) -> Config {
+        let mut config = self.settings.as_ref().clone();
+        config.volume = self.live.volume;
+        config.shuffle = self.live.shuffle;
+        config.repeat = self.live.repeat;
+        config.output_device.clone_from(&self.live.output_device);
         config
     }
 
+    pub(super) fn accept(&mut self, settings: Arc<Config>) {
+        self.live.volume = settings.volume;
+        self.live.shuffle = settings.shuffle;
+        self.live.repeat = settings.repeat;
+        self.live.output_device.clone_from(&settings.output_device);
+        self.settings = settings;
+    }
+
+    pub(super) fn project(&self, state: &mut CoreState) {
+        if !Arc::ptr_eq(&state.configuration.config, &self.settings) {
+            state.configuration.config = Arc::clone(&self.settings);
+        }
+        state.playback.volume = self.live.volume;
+        state.playback.shuffle = self.live.shuffle;
+        state.playback.repeat = self.live.repeat;
+        if state.system.selected_device != self.live.output_device {
+            state
+                .system
+                .selected_device
+                .clone_from(&self.live.output_device);
+        }
+    }
+}
+
+impl Core {
     pub(in crate::core) fn mutate_config(&mut self, change: ConfigMutation) -> Result<()> {
         if let ConfigMutation::Settings(patch) = change {
             // Playback controls can be newer than the last persisted config.
             // Only explicit draft changes override the owner's execution-time state.
-            let mut config = self.effective_config();
+            let mut config = self.preferences.checkpoint();
             patch.apply_to(&mut config);
             return self.configure(Arc::new(config));
         }
-        let mut config = self.effective_config();
+        let mut config = self.preferences.checkpoint();
         let visualization_changed = matches!(change, ConfigMutation::ToggleVisualization);
         let roots_changed = matches!(
             change,
@@ -56,7 +133,7 @@ impl Core {
             self.engine.ensure_command_capacity(1)?;
         }
         // Quick controls change desired memory state; Apply or shutdown persists it.
-        self.state.configuration.config = Arc::new(config);
+        self.preferences.accept(Arc::new(config));
         if roots_changed {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
@@ -64,7 +141,7 @@ impl Core {
         if visualization_changed {
             self.engine
                 .send(AudioCommand::VisualizationEnabled(
-                    self.state.configuration.config.visualization_enabled,
+                    self.preferences.settings().visualization_enabled,
                 ))
                 .context("Configuration applied, but audio application failed")?;
         }
@@ -72,18 +149,18 @@ impl Core {
     }
     pub(in crate::core) fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
         anyhow::ensure!(
-            config.processing_graph == self.state.configuration.config.processing_graph,
+            config.processing_graph == self.preferences.settings().processing_graph,
             "Processing graph changes require revision-checked ProcessingGraphEdit commands"
         );
         config.validate()?;
         let roots = library::normalize_roots(&config.library_roots)?;
         Arc::make_mut(&mut config).library_roots = roots;
-        let roots_changed = config.library_roots != self.state.configuration.config.library_roots;
-        let previous = &self.state.configuration.config;
+        let roots_changed = config.library_roots != self.preferences.settings().library_roots;
+        let previous = self.preferences.settings();
         let changed = [
             config.visualization_enabled != previous.visualization_enabled,
             config.media_read_buffer_mib != previous.media_read_buffer_mib,
-            config.volume != self.state.playback.volume,
+            config.volume != self.preferences.live().volume,
             config.visualization_signal != previous.visualization_signal,
             config.equalizer != previous.equalizer,
             config.ffmpeg_enabled != previous.ffmpeg_enabled,
@@ -117,19 +194,16 @@ impl Core {
         // Audio delivery may partially succeed; never roll this state back.
         self.store
             .set_track_cache_query_batch_size(config.query_batch_size);
-        self.state.system.selected_device = config.output_device.clone();
-        self.state.playback.volume = config.volume;
         self.set_shuffle(config.shuffle);
-        self.state.playback.repeat = config.repeat;
         self.state.system.ffmpeg_status = ffmpeg_status;
-        self.state.configuration.config = config;
+        self.preferences.accept(config);
         if roots_changed {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
         }
         tracing::info!("configuration_updated");
         let request = self.output_settings_request.wrapping_add(1);
-        let config = &self.state.configuration.config;
+        let config = self.preferences.settings();
         (|| -> Result<()> {
             if visualization_changed {
                 self.engine.send(AudioCommand::VisualizationEnabled(
@@ -167,19 +241,19 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn write_config(&mut self, config: &Config) -> Result<()> {
-        if self.saved_config.as_ref() == Some(config) {
+        if self.preferences.saved.as_ref() == Some(config) {
             return Ok(());
         }
         let result = config
             .save_with_baseline(
                 &self.state.configuration.config_path,
-                self.saved_config.as_ref(),
+                self.preferences.saved.as_ref(),
             )
             .context("Saving configuration");
         match &result {
             Ok(()) => {
-                self.saved_config = Some(config.clone());
-                if let Some(previous) = self.config_save_error.take()
+                self.preferences.saved = Some(config.clone());
+                if let Some(previous) = self.preferences.save_error.take()
                     && self.state.system.last_error.as_ref() == Some(&previous)
                 {
                     self.state.system.last_error = None;
@@ -187,10 +261,10 @@ impl Core {
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                if self.config_save_error.as_ref() != Some(&message) {
+                if self.preferences.save_error.as_ref() != Some(&message) {
                     tracing::error!(error = %message, "configuration_save_failed");
                     self.state.system.last_error = Some(message.clone());
-                    self.config_save_error = Some(message);
+                    self.preferences.save_error = Some(message);
                 }
             }
         }
@@ -200,12 +274,12 @@ impl Core {
     pub(in crate::core) fn flush_config(&mut self) -> Result<bool> {
         // Compare the complete desired config, including quick controls, to the
         // last successful save rather than only checking playback fields.
-        let config = self.effective_config();
-        if self.saved_config.as_ref() == Some(&config) {
+        let config = self.preferences.checkpoint();
+        if self.preferences.saved.as_ref() == Some(&config) {
             return Ok(false);
         }
         self.write_config(&config)?;
-        self.state.configuration.config = Arc::new(config);
+        self.preferences.accept(Arc::new(config));
         Ok(true)
     }
 }

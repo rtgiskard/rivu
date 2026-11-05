@@ -240,7 +240,7 @@ impl Core {
             }
         }
         if !self.database_maintenance_active()
-            && (self.playback_write_deferred || self.pending_navigation.is_some())
+            && (self.transport.write_deferred || self.transport.pending_navigation.is_some())
         {
             if let Err(error) = self.flush_deferred_playback() {
                 self.state.system.last_error =
@@ -277,24 +277,24 @@ impl Core {
             );
         }
         let _ = self.engine.send(AudioCommand::VisualizationEnabled(
-            self.state.configuration.config.visualization_enabled,
+            self.preferences.settings().visualization_enabled,
         ));
         let _ = self
             .engine
-            .send(AudioCommand::Volume(self.state.playback.volume));
+            .send(AudioCommand::Volume(self.preferences.live().volume));
         let _ = self.engine.send(AudioCommand::FfmpegEnabled(
-            self.state.configuration.config.ffmpeg_enabled,
+            self.preferences.settings().ffmpeg_enabled,
         ));
         let _ = self.engine.send(AudioCommand::OutputSettings {
             request: self.output_settings_request,
-            device: self.state.system.selected_device.clone(),
-            auto_mix: self.state.configuration.config.pipewire_auto_mix,
+            device: self.preferences.live().output_device.clone(),
+            auto_mix: self.preferences.settings().pipewire_auto_mix,
         });
         let _ = self.engine.send(AudioCommand::Equalizer(Arc::new(
-            self.state.configuration.config.equalizer.clone(),
+            self.preferences.settings().equalizer.clone(),
         )));
         let _ = self.engine.send(AudioCommand::VisualizationSignal(
-            self.state.configuration.config.visualization_signal,
+            self.preferences.settings().visualization_signal,
         ));
     }
 
@@ -477,7 +477,10 @@ impl Core {
 
     /// Publish observations already captured by the serialized owner.
     pub(in crate::core) fn publish(&mut self) {
-        self.state.source_generation = self.generation;
+        self.preferences.project(&mut self.state);
+        self.state.system.processing = self.processing.current_projection();
+        self.state.processing_audition = self.processing.audition_projection();
+        self.state.source_generation = self.transport.generation;
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         let changes = {
             let mut shared = self.shared.write();
@@ -602,6 +605,7 @@ impl Core {
                 &self.state,
                 query,
                 self.database_maintenance_active(),
+                self.preferences.settings(),
             )
         }
     }

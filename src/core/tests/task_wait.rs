@@ -170,9 +170,9 @@ fn waiter_capacity_is_bounded_and_drop_recovers_it_without_owner_work() {
 fn dropping_an_active_wait_does_not_cancel_processing() {
     let (directory, mut core) = fixture();
     processing::source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
+    let id = core
+        .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    let id = core.state.system.processing.as_ref().unwrap().id;
     let (handle, requests) = wait_handle(&core);
     let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id }));
     assert!(wait.as_mut().now_or_never().is_none());
@@ -199,9 +199,9 @@ fn dropping_an_active_wait_does_not_cancel_processing() {
 fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
     let (directory, mut core) = fixture();
     processing::source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
+    let id = core
+        .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    let id = core.state.system.processing.as_ref().unwrap().id;
     let completion = processing_completion(&mut core);
     // A terminal-looking worker progress report is not the owner's acceptance.
     core.processing_event(crate::processing::Event::Progress {
@@ -233,9 +233,9 @@ fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
 fn shutdown_publishes_processing_cancellation_before_reply() {
     let (directory, mut core) = fixture();
     processing::source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
+    let id = core
+        .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    let id = core.state.system.processing.as_ref().unwrap().id;
     let (handle, requests) = wait_handle(&core);
     let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id }));
     assert!(wait.as_mut().now_or_never().is_none());

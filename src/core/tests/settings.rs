@@ -8,8 +8,8 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
     let (handle, _requests) = super::task_wait::wait_handle(&core);
     let updates = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     let initial = handle.state(StateSections::ALL);
-    let mut snapshot = ClientSnapshot::default();
-    initial.clone().apply_to(&mut snapshot);
+    let mut observed = rivu_protocol::response::ObservedState::new(1);
+    assert!(observed.apply(1, initial.clone()));
     let before = initial.revisions;
     core.mutate_config(ConfigMutation::ToggleWaveformSeek)
         .unwrap();
@@ -29,7 +29,8 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
     let response = handle.state(changed);
     assert_eq!(response.sections(), changed);
     assert!(response.system.is_none());
-    response.apply_to(&mut snapshot);
+    assert!(observed.apply(1, response));
+    let snapshot = observed.snapshot();
     assert_ne!(
         snapshot.configuration.config.waveform_seek_enabled,
         initial.configuration.unwrap().config.waveform_seek_enabled
@@ -60,107 +61,137 @@ fn desktop_subscriptions_filter_clock_and_management_but_retain_owner_changes() 
     let mpris = handle.subscribe_revisions(RevisionInterest::Mpris);
     #[cfg(feature = "gui")]
     let tray = handle.subscribe_revisions(RevisionInterest::Tray);
-    type Mutation = (&'static str, fn(&mut CoreState), bool, bool, bool);
+    type Mutation = (&'static str, fn(&mut Core), bool, bool, bool);
     let mutations: &[Mutation] = &[
-        ("clock", |s| s.playback.position += 1.0, false, false, false),
         (
-            "activity",
-            |s| s.playback.last_heard_at = Some(42),
+            "clock",
+            |s| s.state.playback.position += 1.0,
             false,
             false,
             false,
         ),
-        ("catalog", |s| s.library.revision += 1, false, false, false),
+        (
+            "activity",
+            |s| s.state.playback.last_heard_at = Some(42),
+            false,
+            false,
+            false,
+        ),
+        (
+            "catalog",
+            |s| s.state.library.revision += 1,
+            false,
+            false,
+            false,
+        ),
         (
             "scan",
-            |s| s.system.scan_message = "Scanning".into(),
+            |s| s.state.system.scan_message = "Scanning".into(),
             false,
             false,
             false,
         ),
         (
             "service status",
-            |s| s.system.mpris_status = "Connected".into(),
+            |s| s.state.system.mpris_status = "Connected".into(),
             false,
             false,
             false,
         ),
         (
             "configuration",
-            |s| Arc::make_mut(&mut s.configuration.config).waveform_seek_enabled ^= true,
+            |s| edit_preferences(s, |c| c.waveform_seek_enabled ^= true),
             false,
             false,
             false,
         ),
         (
             "service enable",
-            |s| Arc::make_mut(&mut s.configuration.config).mpris_enabled ^= true,
+            |s| edit_preferences(s, |c| c.mpris_enabled ^= true),
             true,
             false,
             false,
         ),
         (
             "playback status",
-            |s| s.playback.status = PlaybackStatus::Playing,
+            |s| s.state.playback.status = PlaybackStatus::Playing,
             false,
             true,
             true,
         ),
-        ("volume", |s| s.playback.volume = 0.4, false, true, false),
-        ("shuffle", |s| s.playback.shuffle ^= true, false, true, true),
+        (
+            "volume",
+            |s| s.preferences.set_volume(0.4),
+            false,
+            true,
+            false,
+        ),
+        (
+            "shuffle",
+            |s| s.preferences.set_shuffle(!s.preferences.live().shuffle),
+            false,
+            true,
+            true,
+        ),
         (
             "repeat",
-            |s| s.playback.repeat = RepeatMode::All,
+            |s| s.preferences.set_repeat(RepeatMode::All),
             false,
             true,
             true,
         ),
-        ("queue order", |s| s.queue.revision += 1, false, true, false),
+        (
+            "queue order",
+            |s| s.state.queue.revision += 1,
+            false,
+            true,
+            false,
+        ),
         (
             "queue selection",
-            |s| s.queue.current_position = Some(2),
+            |s| s.state.queue.current_position = Some(2),
             false,
             true,
             false,
         ),
         (
             "duration",
-            |s| s.playback.duration = Some(42.0),
+            |s| s.state.playback.duration = Some(42.0),
             false,
             true,
             false,
         ),
         (
             "seek",
-            |s| s.playback.seek_revision += 1,
+            |s| s.state.playback.seek_revision += 1,
             false,
             true,
             false,
         ),
         (
             "track metadata",
-            |s| Arc::make_mut(s.current_track.as_mut().unwrap()).title = "Renamed".into(),
+            |s| Arc::make_mut(s.state.current_track.as_mut().unwrap()).title = "Renamed".into(),
             false,
             true,
             true,
         ),
         (
             "track removal",
-            |s| s.current_track = None,
+            |s| s.state.current_track = None,
             false,
             true,
             true,
         ),
         (
             "shutdown",
-            |s| s.system.shutting_down = true,
+            |s| s.state.system.shutting_down = true,
             true,
             true,
             true,
         ),
     ];
     for &(name, mutate, service_changed, mpris_changed, _tray_changed) in mutations {
-        mutate(&mut core.state);
+        mutate(&mut core);
         core.publish();
         assert_eq!(all.try_recv(), Ok(()), "{name}: all sections");
         assert_eq!(
@@ -244,9 +275,10 @@ fn runtime_and_configuration_responses_derive_from_one_publication() {
     core.publish();
     let (handle, _requests) = super::task_wait::wait_handle(&core);
     let initial = handle.state(StateSections::ALL);
-    Arc::make_mut(&mut core.state.configuration.config).query_batch_size = 91;
-    Arc::make_mut(&mut core.state.configuration.config).ui_theme =
-        rivu_format::config::Theme::TokyoNight;
+    edit_preferences(&mut core, |config| config.query_batch_size = 91);
+    edit_preferences(&mut core, |config| {
+        config.ui_theme = rivu_format::config::Theme::TokyoNight
+    });
     core.state.system.last_error = Some("new runtime".into());
     let unpublished = handle.state(StateSections::ALL);
     assert_eq!(unpublished.revisions, initial.revisions);
@@ -376,7 +408,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
         core.publish();
         assert!(!path.exists());
         if apply {
-            let baseline = core.state.configuration.config.clone();
+            let baseline = core.preferences.settings().clone();
             core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
@@ -390,7 +422,7 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
         assert_eq!(saved.volume, 0.25);
         assert_eq!(
             saved.waveform_seek_enabled,
-            core.state.configuration.config.waveform_seek_enabled
+            core.preferences.settings().waveform_seek_enabled
         );
     }
 }
@@ -408,16 +440,13 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         std::fs::write(&path, &original).unwrap();
         let mut config = Config::load(&path).unwrap();
         config.library_roots = vec![directory.path().to_path_buf()];
-        core.state.playback.volume = config.volume;
-        core.state.playback.shuffle = config.shuffle;
-        core.state.playback.repeat = config.repeat;
-        core.state.system.selected_device = config.output_device.clone();
-        core.saved_config = Some(config.clone());
-        core.state.configuration.config = Arc::new(config);
+        core.preferences =
+            crate::core::settings::Preferences::new(Arc::new(config.clone()), Some(config));
+        core.preferences.project(&mut core.state);
 
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if apply {
-            let baseline = core.state.configuration.config.clone();
+            let baseline = core.preferences.settings().clone();
             core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
                 &baseline, &baseline,
             ))))
@@ -425,7 +454,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         } else {
             let (sender, receiver) = async_channel::bounded(1);
             drop(sender);
-            core = run_until_disconnected(core, receiver);
+            drop(run_until_disconnected(core, receiver));
         }
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("# Hand-edited configuration\n"));
@@ -442,7 +471,6 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         let document: toml::Table = toml::from_str(&saved).unwrap();
         assert!(document.get("visualizations").is_none());
         assert!(document.get("logging").is_none());
-        assert_eq!(core.saved_config.as_ref().unwrap().volume, 0.25);
     }
 }
 
@@ -450,7 +478,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
 fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    let mut config = core.effective_config();
+    let mut config = core.preferences.checkpoint();
     config.query_batch_size = 42;
     config.output_device = Some("retained-output".into());
     core.command(Command::Configure {
@@ -462,7 +490,7 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
     core.command(Command::Volume { value: 0.25 }).unwrap();
     assert!(core.flush_config().unwrap());
     let loaded = Config::load(&path).unwrap();
-    assert_eq!(loaded, core.effective_config());
+    assert_eq!(loaded, core.preferences.checkpoint());
     assert_eq!(loaded.query_batch_size, 42);
     assert_eq!(loaded.output_device.as_deref(), Some("retained-output"));
     assert_eq!(loaded.volume, 0.25);
@@ -475,7 +503,7 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
 fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    let mut config = core.effective_config();
+    let mut config = core.preferences.checkpoint();
     config.output_device = Some("USB DAC".into());
     core.command(Command::Configure {
         config: Arc::new(config),
@@ -484,7 +512,7 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
     let path = core.state.configuration.config_path.clone();
     let original = "# Keep these comments\n[playback]\noutput_device = 'USB DAC'\n[interface]\nquery_batch_size = 64 # explicit default\n";
     std::fs::write(&path, original).unwrap();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.output_device = None;
     core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
@@ -496,8 +524,7 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
         original.replace("output_device = 'USB DAC'\n", ""),
     );
     assert!(Config::load(&path).unwrap().output_device.is_none());
-    assert!(core.state.system.selected_device.is_none());
-    assert!(core.saved_config.as_ref().unwrap().output_device.is_none());
+    assert!(core.preferences.live().output_device.is_none());
 }
 
 #[test]
@@ -506,13 +533,12 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
         let (_directory, mut core) = fixture();
         let _audio = recording_audio(&mut core);
         core.flush_config().unwrap();
-        let saved_config = core.saved_config.clone();
         let path = core.state.configuration.config_path.clone();
         let original = "# Preserve invalid user input\n[playback]\nvolume_percent = 101\n";
         std::fs::write(&path, original).unwrap();
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if apply {
-            let config = Arc::new(core.effective_config());
+            let config = Arc::new(core.preferences.checkpoint());
             assert!(core.command(Command::Configure { config }).is_err());
         } else {
             let (sender, receiver) = async_channel::bounded(1);
@@ -520,9 +546,8 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
             core = run_until_disconnected(core, receiver);
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert_eq!(core.saved_config, saved_config);
         assert!(core.state.system.last_error.is_some());
-        assert_eq!(core.state.playback.volume, 0.25);
+        assert_eq!(core.preferences.live().volume, 0.25);
     }
 }
 
@@ -549,7 +574,7 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     original.extend_from_slice(b"\n# Preserve this comment on no-op saves\n");
     std::fs::write(&path, &original).unwrap();
     let inode = std::fs::metadata(&path).unwrap().ino();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     core.command(Command::Configure {
         config: baseline.clone(),
     })
@@ -611,7 +636,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
         .unwrap();
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     assert!(
-        core.start_with_status(queue_id, false, PlaybackStatus::Stopped)
+        core.start_with_status(queue_id, QueueHistory::Preserve, PlaybackStatus::Stopped)
             .is_err()
     );
     let (sender, receiver) = async_channel::bounded(1);
@@ -630,7 +655,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
     assert_eq!(saved.volume, 0.25);
     assert_eq!(
         saved.waveform_seek_enabled,
-        core.state.configuration.config.waveform_seek_enabled
+        core.preferences.settings().waveform_seek_enabled
     );
 }
 
@@ -640,14 +665,14 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
         for available in 0..=2 {
             let (_directory, mut core) = fixture();
             core.flush_config().unwrap();
-            let baseline = core.state.configuration.config.clone();
+            let baseline = core.preferences.settings().clone();
             let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
             let (commands, _receive) = async_channel::bounded(2);
             for _ in 0..2 - available {
                 commands.try_send(AudioCommand::Volume(0.5)).unwrap();
             }
             core.engine.replace_commands(commands);
-            let mut config = core.effective_config();
+            let mut config = core.preferences.checkpoint();
             config.query_batch_size = 42;
             if change_volume {
                 config.volume = 0.25;
@@ -658,8 +683,8 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
             // Explicit output validation needs one slot; changed volume needs another.
             if available < 1 + usize::from(change_volume) {
                 result.unwrap_err();
-                assert_eq!(*core.state.configuration.config, *baseline);
-                assert_eq!(core.state.playback.volume, baseline.volume);
+                assert_eq!(**core.preferences.settings(), *baseline);
+                assert_eq!(core.preferences.live().volume, baseline.volume);
                 assert_eq!(core.output_settings_request, 0);
                 assert_eq!(
                     std::fs::read(&core.state.configuration.config_path).unwrap(),
@@ -667,8 +692,8 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
                 );
             } else {
                 result.unwrap();
-                assert_eq!(*core.state.configuration.config, config);
-                assert_eq!(core.state.playback.volume, config.volume);
+                assert_eq!(**core.preferences.settings(), config);
+                assert_eq!(core.preferences.live().volume, config.volume);
                 assert_eq!(
                     Config::load(&core.state.configuration.config_path).unwrap(),
                     config
@@ -692,8 +717,8 @@ fn config_failure_retains_values_and_recovers_without_clearing_other_errors() {
         assert!(core.flush_config().is_err());
         core.publish();
         assert!(core.shared.read().system.last_error.is_some());
-        assert_eq!(core.state.playback.volume, 0.25);
-        assert_ne!(core.state.configuration.config.volume, 0.25);
+        assert_eq!(core.preferences.live().volume, 0.25);
+        assert_ne!(core.preferences.settings().volume, 0.25);
         assert_ne!(Config::load(&backup).unwrap().volume, 0.25);
         if unrelated {
             core.state.system.last_error = Some("Unrelated failure".into());
@@ -756,19 +781,18 @@ fn visualization_enabled_toggle_preserves_unsaved_playback_and_device_settings()
     })
     .unwrap();
     // A live output selection must survive unrelated quick changes.
-    core.state.system.selected_device = Some("pending-output".into());
+    edit_preferences(&mut core, |config| {
+        config.output_device = Some("pending-output".into())
+    });
     for enabled in [false, true] {
         core.mutate_config(ConfigMutation::ToggleVisualization)
             .unwrap();
+        assert_eq!(core.preferences.settings().visualization_enabled, enabled);
+        assert_eq!(core.preferences.live().volume, 0.25);
+        assert!(core.preferences.live().shuffle);
+        assert_eq!(core.preferences.live().repeat, RepeatMode::All);
         assert_eq!(
-            core.state.configuration.config.visualization_enabled,
-            enabled
-        );
-        assert_eq!(core.state.playback.volume, 0.25);
-        assert!(core.state.playback.shuffle);
-        assert_eq!(core.state.playback.repeat, RepeatMode::All);
-        assert_eq!(
-            core.state.system.selected_device.as_deref(),
+            core.preferences.live().output_device.as_deref(),
             Some("pending-output")
         );
         assert!(!core.state.configuration.config_path.exists());
@@ -784,20 +808,23 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
         mode: RepeatMode::All,
     })
     .unwrap();
-    core.state.system.selected_device = Some("pending-output".into());
-    let config = Arc::make_mut(&mut core.state.configuration.config);
-    config.ui_scale = 1.25;
-    config.waveform_seek_enabled = false;
-    config.library_columns = crate::config::LibraryColumns {
-        artist: false,
-        album: false,
-        duration: true,
-        codec: false,
-        bitrate: false,
-    };
+    edit_preferences(&mut core, |config| {
+        config.output_device = Some("pending-output".into())
+    });
+    edit_preferences(&mut core, |config| {
+        config.ui_scale = 1.25;
+        config.waveform_seek_enabled = false;
+        config.library_columns = crate::config::LibraryColumns {
+            artist: false,
+            album: false,
+            duration: true,
+            codec: false,
+            bitrate: false,
+        };
+    });
     let (commands, audio) = async_channel::bounded(1);
     core.engine.replace_commands(commands);
-    let mut expected = core.state.configuration.config.as_ref().clone();
+    let mut expected = core.preferences.settings().as_ref().clone();
     expected.volume = 0.25;
     expected.shuffle = true;
     expected.repeat = RepeatMode::All;
@@ -867,12 +894,15 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
         core.mutate_config(ConfigMutation::ToggleLibraryColumn(column))
             .unwrap();
         expected.library_columns = columns;
-        assert_eq!(*core.state.configuration.config, expected);
+        assert_eq!(**core.preferences.settings(), expected);
         assert!(!core.state.configuration.config_path.exists());
-        assert_eq!(core.state.playback.volume, expected.volume);
-        assert_eq!(core.state.playback.shuffle, expected.shuffle);
-        assert_eq!(core.state.playback.repeat, expected.repeat);
-        assert_eq!(core.state.system.selected_device, expected.output_device);
+        assert_eq!(core.preferences.live().volume, expected.volume);
+        assert_eq!(core.preferences.live().shuffle, expected.shuffle);
+        assert_eq!(core.preferences.live().repeat, expected.repeat);
+        assert_eq!(
+            core.preferences.live().output_device,
+            expected.output_device
+        );
         core.publish();
         assert_eq!(*core.shared.read().configuration.config, expected);
         assert!(matches!(
@@ -887,9 +917,7 @@ fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(1);
     core.engine.replace_commands(commands);
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_columns
-        .duration = true;
+    edit_preferences(&mut core, |config| config.library_columns.duration = true);
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     core.mutate_config(ConfigMutation::ToggleLibraryColumn(LibraryColumn::Duration))
         .unwrap();
@@ -914,12 +942,11 @@ fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
 #[test]
 fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() {
     let (directory, mut core) = fixture();
-    core.state
-        .configuration
-        .config
+    core.preferences
+        .settings()
         .save(&core.state.configuration.config_path)
         .unwrap();
-    let before = core.state.configuration.config.clone();
+    let before = core.preferences.settings().clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for root in [directory.path().join("child"), directory.path().join("..")] {
         assert!(
@@ -934,7 +961,7 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
             })
             .is_err()
         );
-        assert_eq!(*core.state.configuration.config, *before);
+        assert_eq!(**core.preferences.settings(), *before);
         assert_eq!(
             std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
@@ -945,30 +972,33 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
 #[test]
 fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
-        directory.path().join("existing");
+    edit_preferences(&mut core, |config| {
+        config.library_roots[0] = directory.path().join("existing")
+    });
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
     core.command(Command::Repeat {
         mode: RepeatMode::All,
     })
     .unwrap();
-    core.state.system.selected_device = Some("pending-output".into());
+    edit_preferences(&mut core, |config| {
+        config.output_device = Some("pending-output".into())
+    });
     let root = directory.path().join("added");
-    let seek = core.state.configuration.config.waveform_seek_enabled;
+    let seek = core.preferences.settings().waveform_seek_enabled;
     core.mutate_config(ConfigMutation::ToggleWaveformSeek)
         .unwrap();
     core.mutate_config(ConfigMutation::AddLibraryRoot(root.clone()))
         .unwrap();
     core.mutate_config(ConfigMutation::AddLibraryRoot(root))
         .unwrap();
-    assert_eq!(core.state.configuration.config.library_roots.len(), 2);
-    assert_eq!(core.state.configuration.config.waveform_seek_enabled, !seek);
-    assert_eq!(core.state.playback.volume, 0.25);
-    assert!(core.state.playback.shuffle);
-    assert_eq!(core.state.playback.repeat, RepeatMode::All);
+    assert_eq!(core.preferences.settings().library_roots.len(), 2);
+    assert_eq!(core.preferences.settings().waveform_seek_enabled, !seek);
+    assert_eq!(core.preferences.live().volume, 0.25);
+    assert!(core.preferences.live().shuffle);
+    assert_eq!(core.preferences.live().repeat, RepeatMode::All);
     assert_eq!(
-        core.state.system.selected_device.as_deref(),
+        core.preferences.live().output_device.as_deref(),
         Some("pending-output")
     );
     assert!(!core.state.configuration.config_path.exists());
@@ -984,10 +1014,11 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
 #[test]
 fn settings_apply_merges_every_unedited_field_at_execution() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
-        directory.path().join("existing");
+    edit_preferences(&mut core, |config| {
+        config.library_roots[0] = directory.path().join("existing")
+    });
     let _audio = recording_audio(&mut core);
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
@@ -1012,7 +1043,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
         core.mutate_config(ConfigMutation::ToggleLibraryColumn(column))
             .unwrap();
     }
-    let mut expected = core.state.configuration.config.as_ref().clone();
+    let mut expected = core.preferences.settings().as_ref().clone();
     expected.scan_max_depth = 7;
     // These playback changes are still newer than the in-memory config snapshot.
     core.command(Command::Volume { value: 0.3 }).unwrap();
@@ -1041,15 +1072,16 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
 #[test]
 fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     let (directory, mut core) = fixture();
-    Arc::make_mut(&mut core.state.configuration.config).library_roots[0] =
-        directory.path().join("existing");
+    edit_preferences(&mut core, |config| {
+        config.library_roots[0] = directory.path().join("existing")
+    });
     let _audio = recording_audio(&mut core);
     core.command(Command::Device {
         name: Some("original-output".into()),
     })
     .unwrap();
     core.flush_config().unwrap();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.volume = 0.4;
     draft.output_device = None;
@@ -1084,7 +1116,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(8);
     core.engine.replace_commands(commands);
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
@@ -1093,7 +1125,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
         core.mutate_config(ConfigMutation::Settings(Box::new(patch.clone())))
             .is_err()
     );
-    assert_eq!(*core.state.configuration.config, *baseline);
+    assert_eq!(**core.preferences.settings(), *baseline);
     assert!(matches!(
         audio.try_recv(),
         Err(async_channel::TryRecvError::Empty)
@@ -1118,7 +1150,7 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
-    let baseline = core.state.configuration.config.clone();
+    let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
@@ -1139,7 +1171,7 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
-    let previous = core.state.configuration.config.clone();
+    let previous = core.preferences.settings().clone();
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     let mut config = previous.as_ref().clone();
     config.volume = 0.25;
@@ -1150,10 +1182,10 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     config.query_batch_size = 32;
     config.output_device = Some("configured-output".into());
     Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
-    core.played = vec![1, 2];
-    core.played_cursor = 2;
+    core.transport.history = vec![1, 2];
+    core.transport.history_cursor = 2;
     let playback = core.state.playback.clone();
-    let device = core.state.system.selected_device.clone();
+    let device = core.preferences.live().output_device.clone();
     let ffmpeg_status = core.state.system.ffmpeg_status.clone();
 
     core.command(Command::Configure {
@@ -1161,14 +1193,14 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.configuration.config, *previous);
-    assert_eq!(core.state.playback.volume, playback.volume);
-    assert_eq!(core.state.playback.shuffle, playback.shuffle);
-    assert_eq!(core.state.playback.repeat, playback.repeat);
-    assert_eq!(core.state.system.selected_device, device);
+    assert_eq!(**core.preferences.settings(), *previous);
+    assert_eq!(core.preferences.live().volume, playback.volume);
+    assert_eq!(core.preferences.live().shuffle, playback.shuffle);
+    assert_eq!(core.preferences.live().repeat, playback.repeat);
+    assert_eq!(core.preferences.live().output_device, device);
     assert_eq!(core.state.system.ffmpeg_status, ffmpeg_status);
-    assert_eq!(core.played, [1, 2]);
-    assert_eq!(core.played_cursor, 2);
+    assert_eq!(core.transport.history, [1, 2]);
+    assert_eq!(core.transport.history_cursor, 2);
     assert!(matches!(
         audio.try_recv(),
         Err(async_channel::TryRecvError::Empty)
@@ -1180,7 +1212,7 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
-    let previous = core.state.configuration.config.clone();
+    let previous = core.preferences.settings().clone();
     previous
         .save(&core.state.configuration.config_path)
         .unwrap();
@@ -1194,8 +1226,8 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.configuration.config, *previous);
-    assert_eq!(core.state.playback.volume, previous.volume);
+    assert_eq!(**core.preferences.settings(), *previous);
+    assert_eq!(core.preferences.live().volume, previous.volume);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
         *previous
@@ -1215,7 +1247,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
         name: Some("PipeWire: desired".into()),
     })
     .unwrap();
-    let auto_mix = core.state.configuration.config.pipewire_auto_mix;
+    let auto_mix = core.preferences.settings().pipewire_auto_mix;
     let request = core.output_settings_request;
     core.command(Command::Device {
         name: Some("PipeWire: other".into()),
@@ -1258,7 +1290,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
         Some("desired output unavailable")
     );
     assert_eq!(
-        core.state.system.selected_device.as_deref(),
+        core.preferences.live().output_device.as_deref(),
         Some("PipeWire: desired")
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -1266,7 +1298,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
     core.command(Command::Stop).unwrap();
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
     playing(&mut core, queue_id);
-    let playback_generation = core.generation;
+    let playback_generation = core.transport.generation;
     core.state.system.last_error = None;
     core.audio_event(AudioEvent::OutputSettingsFailed {
         request: core.output_settings_request,
@@ -1280,7 +1312,7 @@ fn output_settings_errors_follow_current_request_after_stop() {
         Some("configuration failed before the newer playback")
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.generation, playback_generation);
+    assert_eq!(core.transport.generation, playback_generation);
 }
 
 #[test]
@@ -1288,7 +1320,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
     Arc::make_mut(&mut core.state.system.devices).clear();
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.settings().as_ref().clone();
     config.ffmpeg_enabled = false;
     config.output_device = Some("PipeWire: unavailable-configured-sink".into());
     core.command(Command::Configure {
@@ -1299,10 +1331,10 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
         Config::load(&core.state.configuration.config_path)
             .unwrap()
             .output_device,
-        core.state.system.selected_device
+        core.preferences.live().output_device
     );
     assert_eq!(
-        core.state.system.selected_device.as_deref(),
+        core.preferences.live().output_device.as_deref(),
         Some("PipeWire: unavailable-configured-sink")
     );
     core.command(Command::Device {
@@ -1325,7 +1357,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     let (commands, receiver) = async_channel::bounded(64);
     drop(receiver);
     core.engine.replace_commands(commands);
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.settings().as_ref().clone();
     config.volume = 0.25;
     config.shuffle = true;
     config.repeat = RepeatMode::All;
@@ -1334,8 +1366,8 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     config.query_batch_size = 32;
     config.output_device = Some("configured-output".into());
     Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());
-    core.played = vec![1, 2];
-    core.played_cursor = 2;
+    core.transport.history = vec![1, 2];
+    core.transport.history_cursor = 2;
     let expected = config.clone();
 
     core.command(Command::Configure {
@@ -1343,14 +1375,17 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     })
     .unwrap_err();
 
-    assert_eq!(*core.state.configuration.config, expected);
-    assert_eq!(core.state.playback.volume, expected.volume);
-    assert_eq!(core.state.playback.shuffle, expected.shuffle);
-    assert_eq!(core.state.playback.repeat, expected.repeat);
-    assert_eq!(core.state.system.selected_device, expected.output_device);
+    assert_eq!(**core.preferences.settings(), expected);
+    assert_eq!(core.preferences.live().volume, expected.volume);
+    assert_eq!(core.preferences.live().shuffle, expected.shuffle);
+    assert_eq!(core.preferences.live().repeat, expected.repeat);
+    assert_eq!(
+        core.preferences.live().output_device,
+        expected.output_device
+    );
     assert_eq!(core.state.system.ffmpeg_status, "disabled");
-    assert!(core.played.is_empty());
-    assert_eq!(core.played_cursor, 0);
+    assert!(core.transport.history.is_empty());
+    assert_eq!(core.transport.history_cursor, 0);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
         expected
@@ -1364,14 +1399,11 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
 fn visualization_enabled_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    let previous = core.state.configuration.config.visualization_enabled;
+    let previous = core.preferences.settings().visualization_enabled;
     std::fs::create_dir(&core.state.configuration.config_path).unwrap();
     core.mutate_config(ConfigMutation::ToggleVisualization)
         .unwrap();
-    assert_eq!(
-        core.state.configuration.config.visualization_enabled,
-        !previous
-    );
+    assert_eq!(core.preferences.settings().visualization_enabled, !previous);
     assert!(core.state.configuration.config_path.is_dir());
 }
 
@@ -1382,11 +1414,13 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
     drop(receiver);
     core.engine.replace_commands(commands);
     // Pending playback settings must be incorporated in the same memory snapshot.
-    core.state.playback.volume = 0.25;
-    core.state.playback.shuffle = true;
-    core.state.playback.repeat = RepeatMode::All;
-    core.state.system.selected_device = Some("pending-output".into());
-    let mut expected = core.state.configuration.config.as_ref().clone();
+    edit_preferences(&mut core, |config| config.volume = 0.25);
+    edit_preferences(&mut core, |config| config.shuffle = true);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    edit_preferences(&mut core, |config| {
+        config.output_device = Some("pending-output".into())
+    });
+    let mut expected = core.preferences.settings().as_ref().clone();
     expected.volume = 0.25;
     expected.shuffle = true;
     expected.repeat = RepeatMode::All;
@@ -1397,11 +1431,14 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
         core.mutate_config(ConfigMutation::ToggleVisualization)
             .unwrap_err();
 
-        assert_eq!(*core.state.configuration.config, expected);
-        assert_eq!(core.state.playback.volume, expected.volume);
-        assert_eq!(core.state.playback.shuffle, expected.shuffle);
-        assert_eq!(core.state.playback.repeat, expected.repeat);
-        assert_eq!(core.state.system.selected_device, expected.output_device);
+        assert_eq!(**core.preferences.settings(), expected);
+        assert_eq!(core.preferences.live().volume, expected.volume);
+        assert_eq!(core.preferences.live().shuffle, expected.shuffle);
+        assert_eq!(core.preferences.live().repeat, expected.repeat);
+        assert_eq!(
+            core.preferences.live().output_device,
+            expected.output_device
+        );
         assert!(!core.state.configuration.config_path.exists());
         core.publish();
         assert_eq!(*core.shared.read().configuration.config, expected);
@@ -1412,7 +1449,7 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
 fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     let (directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
-    Arc::make_mut(&mut core.state.configuration.config).ffmpeg_enabled = false;
+    edit_preferences(&mut core, |config| config.ffmpeg_enabled = false);
     core.state.system.ffmpeg_status = "disabled".into();
     let (handle, control, worker, _publications) = navigation_runtime(core);
     let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
@@ -1462,9 +1499,9 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
     let _audio = recording_audio(&mut core);
     let first = core.store.queue_id_at(0).unwrap().unwrap();
     let next = core.store.queue_id_at(4).unwrap().unwrap();
-    core.start(first, true).unwrap();
+    core.start(first, QueueHistory::Record).unwrap();
     core.command(Command::Pause).unwrap();
-    let mut config = core.state.configuration.config.as_ref().clone();
+    let mut config = core.preferences.settings().as_ref().clone();
     config.shuffle = true;
     let config = Arc::new(config);
     core.command(Command::Configure {
@@ -1472,7 +1509,7 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
     })
     .unwrap();
     // Choose a non-adjacent draw deterministically, then reapply the same mode.
-    core.start(next, true).unwrap();
+    core.start(next, QueueHistory::Record).unwrap();
     core.command(Command::Pause).unwrap();
     core.command(Command::Configure { config }).unwrap();
     core.navigate(Navigation::Previous).unwrap();

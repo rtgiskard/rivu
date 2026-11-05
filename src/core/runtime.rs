@@ -263,14 +263,11 @@ impl CoreRuntime {
         let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = CoreLifecycle::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
+        let preferences = settings::Preferences::new(Arc::new(config), saved_config);
         let initial = {
             let mut state = CoreState::default();
-            state.playback.volume = config.volume;
-            state.playback.shuffle = config.shuffle;
-            state.playback.repeat = config.repeat;
-            state.system.selected_device = config.output_device.clone();
-            state.configuration.config = Arc::new(config);
             state.configuration.config_path = config_path.to_path_buf();
+            preferences.project(&mut state);
             state
         };
         *shared.write() = initial.clone();
@@ -302,24 +299,15 @@ impl CoreRuntime {
             publication_observer: None,
             task_waiters,
             task_completions_pending: false,
-            generation: 0,
+            transport: playback::PlaybackOwner::new(0),
             output_settings_request: 0,
             next_playlist_token: 0,
             database_unavailable: false,
-            queue_projection_stale: false,
-            queue_current_pending: false,
-            playback: None,
-            retired_playback: None,
-            playback_write_deferred: false,
-            playback_history_pending: false,
-            pending_bitrate: None,
-            pending_navigation: None,
             active_export: None,
             active_external_admission: None,
             active_optimization: None,
             processing: crate::processing::Service::new(),
             pending_processing_audition: None,
-            processing_results: VecDeque::new(),
             scan_tx,
             scan_rx,
             active_scan: None,
@@ -330,10 +318,7 @@ impl CoreRuntime {
             active_relocation: None,
             relocation_results: VecDeque::new(),
             next_relocation_id: 1,
-            played: Vec::new(),
-            played_cursor: 0,
-            saved_config,
-            config_save_error: None,
+            preferences,
             #[cfg(test)]
             _test_tasks: None,
         };

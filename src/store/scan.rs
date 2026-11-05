@@ -1,5 +1,5 @@
-use super::Store;
 use super::rows::{cue_from_row, fingerprint_from_row};
+use super::{CatalogChanges, Store};
 use crate::library::{CueRecord, KnownFile, RegisteredCueMetadata, ScanResult, ScanUncertainty};
 use crate::library::{ImportBudget, ImportBudgetScope};
 use anyhow::{Context, Result, bail};
@@ -13,76 +13,6 @@ use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
 pub(super) const PROBE_VERSION: i64 = 2;
-
-/// Semantic facts and admission counts from one committed scan transaction.
-///
-/// Callers publish each affected projection once, rather than treating `changed`
-/// as a catalog reload request. Duplicate members also depend on `library` and
-/// `duplicate_groups`; `duplicate_members` covers their extra verification facts.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct ScanImpacts {
-    /// Any persisted track write, including hidden raw metadata and probe state.
-    pub changed: bool,
-    /// Effective full Track values (raw metadata hidden by overrides is excluded).
-    pub library: bool,
-    /// Effective queue-row values changed for an already queued identity.
-    pub queue: bool,
-    /// Album membership, ordering, member rows, or representative values changed.
-    pub albums: bool,
-    /// Track insertion or a changed path/CUE identity; missing is not removal.
-    pub structure: bool,
-    /// Ordinary fingerprint membership or present/missing grouping facts.
-    pub duplicate_groups: bool,
-    /// Size/mtime verification facts for fingerprinted ordinary members.
-    pub duplicate_members: bool,
-    /// Successfully scanned new identities excluded by the duration threshold.
-    pub skipped_short_tracks: usize,
-}
-/// Derived invalidation and projection responsibilities for one committed scan.
-/// Keep these rules beside the producer facts so callers cannot invent divergent
-/// `library || queue` or cache-domain combinations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ScanImpactDependencies {
-    pub library_revision: bool,
-    pub structure_revision: bool,
-    pub queue_revision: bool,
-    pub album_revision: bool,
-    pub duplicate_group_revision: bool,
-    pub duplicate_member_revision: bool,
-    pub refresh_history: bool,
-    pub refresh_track_total: bool,
-    pub refresh_queue: bool,
-    pub clear_track_cache: bool,
-    pub clear_filtered_track_count: bool,
-    pub clear_catalog_counts: bool,
-    pub clear_queue_count: bool,
-    pub clear_playlist_count: bool,
-    pub clear_album_counts: bool,
-    pub clear_duplicate_group_count: bool,
-}
-
-impl ScanImpacts {
-    pub(crate) fn dependencies(self, playlist_created: bool) -> ScanImpactDependencies {
-        ScanImpactDependencies {
-            library_revision: self.library,
-            structure_revision: self.structure,
-            queue_revision: self.queue,
-            album_revision: self.albums,
-            duplicate_group_revision: self.duplicate_groups,
-            duplicate_member_revision: self.duplicate_members,
-            refresh_history: self.library,
-            refresh_track_total: self.structure,
-            refresh_queue: self.library || self.queue,
-            clear_track_cache: self.library,
-            clear_filtered_track_count: self.library,
-            clear_catalog_counts: self.library || self.structure,
-            clear_queue_count: self.library || self.queue,
-            clear_playlist_count: self.library || playlist_created,
-            clear_album_counts: self.albums,
-            clear_duplicate_group_count: self.duplicate_groups,
-        }
-    }
-}
 
 /// Compare staged values before updating tracks; hidden raw changes are excluded.
 pub(super) fn staged_projection_columns(cue: bool) -> String {
@@ -394,7 +324,7 @@ impl Store {
         &self,
         result: &mut ScanResult,
         library_roots: &[PathBuf],
-    ) -> Result<ScanImpacts> {
+    ) -> Result<CatalogChanges> {
         let current: HashSet<_> = self
             .other_tracks_sources(library_roots)?
             .into_iter()
@@ -450,11 +380,15 @@ impl Store {
         self.apply_scan_scoped(result, true)
     }
 
-    pub fn apply_scan(&self, result: &ScanResult) -> Result<ScanImpacts> {
+    pub fn apply_scan(&self, result: &ScanResult) -> Result<CatalogChanges> {
         self.apply_scan_scoped(result, false)
     }
 
-    fn apply_scan_scoped(&self, result: &ScanResult, exact_sources: bool) -> Result<ScanImpacts> {
+    fn apply_scan_scoped(
+        &self,
+        result: &ScanResult,
+        exact_sources: bool,
+    ) -> Result<CatalogChanges> {
         let staging = result
             .retained_budget
             .as_ref()
@@ -900,7 +834,7 @@ impl Store {
              FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_projection_columns(true)),
             [],
             |row| {
-                Ok(ScanImpacts {
+                Ok(CatalogChanges {
                     library: row.get(0)?,
                     structure: row.get(1)?,
                     duplicate_groups: row.get(2)?,
@@ -908,7 +842,7 @@ impl Store {
                     queue: row.get(4)?,
                     albums: row.get(5)?,
                     skipped_short_tracks,
-                    ..ScanImpacts::default()
+                    ..CatalogChanges::default()
                 })
             },
         )?;

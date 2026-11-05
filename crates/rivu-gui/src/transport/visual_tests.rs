@@ -83,8 +83,16 @@ fn stereo(window: &SharedPcmWindow, header: PcmHeader, value: f32, frames: usize
 async fn current_after(f: &Fixture, sequence: u64) -> AnalysisFrame {
     rivu_protocol::transport::timeout(Duration::from_secs(5), async {
         loop {
-            let frame = f.client.analysis.read().clone();
-            if frame.sequence > sequence && f.client.analysis_frame_is_current(&frame) {
+            let mut accepted = None;
+            f.client.consume_current_analysis(|frame| {
+                if frame.sequence > sequence {
+                    accepted = Some(frame.clone());
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(frame) = accepted {
                 return frame;
             }
             f.wakes.recv().await.unwrap();
@@ -125,6 +133,41 @@ async fn subscribe(f: &mut Fixture) {
     })
     .await
     .unwrap();
+}
+
+#[test]
+fn analysis_copy_holds_acceptance_guards_and_revocation_never_calls_consumer() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        subscribe(&mut f).await;
+        let state = PcmState {
+            active: true,
+            sample_rate: 48_000,
+            heard_frame: u64::MAX,
+            ..PcmState::default()
+        };
+        stereo(&f.window, header(state, 0), 0.25, 512);
+        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        let accepted = current_after(&f, 0).await;
+        let mut staging_sequence = 0;
+        assert!(f.client.consume_current_analysis(|frame| {
+            assert!(f.client.analysis.try_write().is_none());
+            assert!(f.client.state.desired.try_lock().is_none());
+            assert!(f.client.state.current.try_write().is_none());
+            staging_sequence = frame.sequence;
+            true
+        }));
+        assert_eq!(staging_sequence, accepted.sequence);
+        f.client.invalidate();
+        let mut called = false;
+        assert!(!f.client.consume_current_analysis(|frame| {
+            called = true;
+            staging_sequence = frame.sequence;
+            true
+        }));
+        assert!(!called);
+        assert_eq!(staging_sequence, accepted.sequence);
+    });
 }
 
 #[test]

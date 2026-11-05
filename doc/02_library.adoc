@@ -433,6 +433,14 @@ the temporary copy and backup still require space for two complete files.
 Stop other file writers before editing; the lock is advisory. Keep the reported
 backup until the result has been checked.
 
+Source-edit results distinguish `unchanged` and `replaced`; a replacement reports
+the independent `backup_path`. Failures distinguish `before_replace` (including
+any retained backup) from `replaced_durability_unknown`: the source was already
+replaced, but the directory sync did not confirm crash durability. Inspect the
+source and reported original backup before retrying or rescanning; failure does
+not authorize replay. With `--json`, structured failures go to stderr and retain
+the outcome, source path and backup evidence.
+
 Symlinks and multiply linked files are rejected. Replacement must preserve ownership,
 permissions, and extended attributes, including POSIX ACLs; inability to preserve
 them fails the edit. Native tag structures retain non-target fields and artwork.

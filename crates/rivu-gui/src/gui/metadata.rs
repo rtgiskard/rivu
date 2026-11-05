@@ -524,9 +524,11 @@ impl Metadata {
         token: session::SaveToken,
         submitted: Option<(u64, String)>,
         hint_change: Option<Track>,
-        ack: rivu_protocol::response::Ack,
+        delivery: crate::frontend::CommandDelivery,
         cx: &mut Context<Self>,
     ) {
+        let result = delivery.observed_result();
+        let ack = delivery.ack;
         // A committed decoder change still invalidates waveform work after selection changes.
         if ack.is_success()
             && let Some(track) = hint_change
@@ -536,7 +538,7 @@ impl Metadata {
         if !self.metadata.complete_save(token) {
             return;
         }
-        if ack.is_success() {
+        if result.is_ok() {
             if let Some((serial, text)) = submitted
                 && let Some(edit) = self.edit.as_mut().filter(|edit| edit.serial == serial)
             {
@@ -557,9 +559,7 @@ impl Metadata {
             self.demand_metadata(cx);
             cx.emit(MetadataEvent::TrackChanged);
         } else {
-            let error = ack
-                .error
-                .unwrap_or_else(|| self.context.i18n.text("gl-metadata-save-failed").into());
+            let error = result.expect_err("unsuccessful metadata observation");
             if let Some((serial, _)) = submitted
                 && let Some(edit) = self.edit.as_mut().filter(|edit| edit.serial == serial)
             {

@@ -1,7 +1,7 @@
 use super::*;
 use crate::terminal::{
     state::{KeyAction, TuiState, tests::*},
-    worker::{QueryKind, QueryResult},
+    worker::{QueryResult, ReadKind},
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{Terminal, backend::TestBackend};
@@ -18,7 +18,10 @@ fn command_prompt_keeps_unicode_cursor_in_bounds() {
         ui.command_input = Some("界".repeat(80));
         let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &TuiSnapshot::default(), &mut ui)
+            })
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         assert!(cursor.x < width);
@@ -54,7 +57,12 @@ fn recent_renders_filtered_source_indices() {
     for width in [1, 2, 8, 24, 80] {
         let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
         terminal
-            .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
+            .draw(|frame| {
+                recent
+                    .entries
+                    .set_viewport(frame.area().height.saturating_sub(1) as usize);
+                draw_recent(frame, frame.area(), &mut recent, &i18n, colors)
+            })
             .unwrap();
         let text = terminal_text(&terminal);
         if width >= 24 {
@@ -86,7 +94,12 @@ fn iteration_recent_keeps_exact_alignment_and_live_count_and_time() {
             recent.playback = Some((2, timestamp));
             let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
             terminal
-                .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
+                .draw(|frame| {
+                    recent
+                        .entries
+                        .set_viewport(frame.area().height.saturating_sub(1) as usize);
+                    draw_recent(frame, frame.area(), &mut recent, &i18n, colors)
+                })
                 .unwrap();
             let count = count.to_string();
             let count_width = count.len().min(content_width.saturating_sub(1));
@@ -141,14 +154,24 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
             ..Details::default()
         };
         let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         let ready_text = terminal_text(&terminal);
         let position = (ui.details.scroll, ui.details.max_scroll);
         assert_eq!(position.0, 4);
 
         ui.details.state =
             DetailState::Error(format!("{}\n终", "夜航e\u{301}👩‍🚀/\n".repeat(20)).into());
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         assert!(ui.details.error_max_scroll > ui.page_size);
         assert!(!terminal_text(&terminal).contains('终'));
         for (key, expected) in [
@@ -159,7 +182,12 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
             (KeyCode::End, ui.details.error_max_scroll),
         ] {
             ui.key_action(KeyEvent::from(key), &state);
-            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+            terminal
+                .draw(|frame| {
+                    commit_layout(frame.area(), &mut ui);
+                    draw(frame, &state, &mut ui)
+                })
+                .unwrap();
             assert_eq!(ui.details.error_scroll, expected);
             assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         }
@@ -168,7 +196,12 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         assert_eq!(ui.details.error_scroll, 0);
 
         ui.details.state = DetailState::Loading;
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         for key in [
             KeyCode::Home,
             KeyCode::End,
@@ -181,7 +214,12 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
             assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         }
         ui.details.state = DetailState::Ready(Arc::new(full_track(2)));
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
         assert_eq!(terminal_text(&terminal), ready_text);
     }
@@ -222,7 +260,10 @@ fn iteration_details_refresh_replaced_error_and_container_text() {
         };
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &TuiSnapshot::default(), &mut ui)
+            })
             .unwrap();
         assert!(terminal_text(&terminal).contains("Original message"));
         ui.details.state = if container {
@@ -231,7 +272,10 @@ fn iteration_details_refresh_replaced_error_and_container_text() {
             DetailState::Error("Updated message".into())
         };
         terminal
-            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &TuiSnapshot::default(), &mut ui)
+            })
             .unwrap();
         let text = terminal_text(&terminal);
         assert!(text.contains("Updated message"));
@@ -261,10 +305,20 @@ fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
         ui.show_help = true;
         let state = TuiSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         assert!(ui.help_max_scroll > 0);
         ui.key_action(KeyEvent::from(KeyCode::End), &state);
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         assert!(ui.help_scroll > 0);
         assert!(ui.show_help && !ui.details_active);
         ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
@@ -316,13 +370,23 @@ fn details_refresh_after_metadata_changes_without_reopening() {
         ..Details::default()
     };
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    terminal
+        .draw(|frame| {
+            commit_layout(frame.area(), &mut ui);
+            draw(frame, &state, &mut ui)
+        })
+        .unwrap();
     assert!(terminal_text(&terminal).contains("Original title"));
     let DetailState::Ready(track) = &mut ui.details.state else {
         unreachable!()
     };
     Arc::make_mut(track).title = "Updated title".into();
-    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    terminal
+        .draw(|frame| {
+            commit_layout(frame.area(), &mut ui);
+            draw(frame, &state, &mut ui)
+        })
+        .unwrap();
     let text = terminal_text(&terminal);
     assert!(text.contains("Updated title"));
     assert!(!text.contains("Original title"));
@@ -385,13 +449,23 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
         let mut ui = UiState::default();
         let state = TuiSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                commit_layout(frame.area(), &mut ui);
+                draw(frame, &state, &mut ui)
+            })
+            .unwrap();
         let page_size = ui.page_size;
         ui.search.active = true;
         ui.search.query = "夜航".into();
         for editing in [true, false] {
             ui.search.editing = editing;
-            terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+            terminal
+                .draw(|frame| {
+                    commit_layout(frame.area(), &mut ui);
+                    draw(frame, &state, &mut ui)
+                })
+                .unwrap();
             assert_eq!(ui.page_size, page_size);
             assert_eq!(terminal.backend().cursor_visible(), editing);
             if editing {
@@ -524,6 +598,7 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
         let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
         terminal
             .draw(|frame| {
+                page.set_viewport(frame.area().height.saturating_sub(1) as usize);
                 draw_queue(
                     frame,
                     frame.area(),
@@ -556,7 +631,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     tui.apply_snapshot(state.clone());
     assert!(tui.ui.queue.pages.is_empty());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind(), QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
     assert!(
         matches!(request.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
     );
@@ -581,7 +656,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     state.queue.revision = 2;
     tui.apply_snapshot(state.clone());
     let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind(), QueryKind::QueueSelection(1008));
+    assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
     tui.ui.apply_query(
         &state,
         &request,
@@ -607,6 +682,9 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
     terminal
         .draw(|frame| {
+            tui.ui
+                .queue
+                .set_viewport(frame.area().height.saturating_sub(1) as usize);
             draw_queue(
                 frame,
                 frame.area(),
@@ -623,6 +701,7 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
     let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
     terminal
         .draw(|frame| {
+            commit_page_viewport(ui, frame.area().height.saturating_sub(1).max(1) as usize);
             draw_current_page(
                 frame,
                 frame.area(),
@@ -725,4 +804,45 @@ fn retained_rows_size_columns_until_replaced_trimmed_or_cleared_and_resize_refit
     let tracks = render(&mut page, 100, BrowserMode::Tracks);
     assert!(tracks.content.iter().any(|cell| cell.symbol() == "f"));
     assert_eq!(tracks[(79, 1)].symbol(), "a");
+}
+
+#[test]
+fn drawing_without_a_layout_commit_cannot_change_retention_or_navigation() {
+    let mut ui = UiState::default();
+    ui.queue.viewport_rows = 2;
+    ui.page_size = 2;
+    ui.queue.total = 100;
+    ui.queue.loaded = true;
+    ui.queue.fetch_size = 1;
+    ui.queue.pages.insert(0, vec![queue_row(0, 1000)]);
+    ui.queue.pages.insert(80, vec![queue_row(80, 1080)]);
+    let mut retained = ui.queue.pages.keys().copied().collect::<Vec<_>>();
+    retained.sort_unstable();
+    let coordinates = (
+        ui.queue.selection.selected(),
+        ui.queue.selection.offset(),
+        ui.queue.viewport_rows,
+        ui.page_size,
+    );
+    for height in [3, 24, 5] {
+        let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .unwrap();
+        let mut after = ui.queue.pages.keys().copied().collect::<Vec<_>>();
+        after.sort_unstable();
+        assert_eq!(after, retained);
+        assert_eq!(
+            (
+                ui.queue.selection.selected(),
+                ui.queue.selection.offset(),
+                ui.queue.viewport_rows,
+                ui.page_size
+            ),
+            coordinates
+        );
+    }
+    commit_layout(Rect::new(0, 0, 80, 24), &mut ui);
+    assert!(!ui.queue.pages.contains_key(&80));
+    assert_ne!(ui.queue.viewport_rows, coordinates.2);
 }

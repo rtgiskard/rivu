@@ -94,22 +94,18 @@ fn prepare_mix(core: &mut Core) {
 }
 
 fn begin_mix(core: &mut Core, id: u64) {
-    let mut status = core.processing_status(id).unwrap();
     core.processing
-        .start_mix(id, core.generation, 0.0, 0.0)
+        .start_mix(id, core.transport.generation, 0.0, 0.0)
         .unwrap();
-    status.phase = ProcessingPhase::Processing;
-    status.error = None;
-    core.state.system.processing = Some(Arc::new(status));
 }
 
 #[test]
 fn processing_progress_is_authoritative_without_waking_terminal_state_interest() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
+    let id = core
+        .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    complete(&mut core);
     core.publish();
     let (handle, _requests) = super::task_wait::wait_handle(&core);
     let terminal_sections = StateSections {
@@ -125,11 +121,12 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
     assert!(full.system.as_ref().unwrap().processing.is_none());
     assert!(full.processing.as_ref().unwrap().task.is_some());
     let before = full.revisions;
-    let mut snapshot = ClientSnapshot::default();
-    full.apply_to(&mut snapshot);
-    let retained = snapshot.system.processing.clone();
+    let mut observed = rivu_protocol::response::ObservedState::new(1);
+    observed.apply(1, full);
+    let retained = observed.snapshot().system.processing.clone();
 
-    Arc::make_mut(core.state.system.processing.as_mut().unwrap()).completed += 1;
+    core.processing
+        .progress(id, 1, None, ProcessingPhase::Rendering);
     core.publish();
     assert_eq!(terminal.try_recv(), Err(mpsc::TryRecvError::Empty));
     assert_eq!(processing.try_recv(), Ok(()));
@@ -145,20 +142,21 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
         ..Default::default()
     });
     assert!(update.system.is_none());
-    update.apply_to(&mut snapshot);
-    assert_ne!(snapshot.system.processing, retained);
+    observed.apply(1, update);
+    assert_ne!(observed.snapshot().system.processing, retained);
 
     core.state.system.processing = None;
     core.publish();
     assert_eq!(terminal.try_recv(), Err(mpsc::TryRecvError::Empty));
-    assert_eq!(processing.try_recv(), Ok(()));
-    handle
-        .state(StateSections {
+    assert_eq!(processing.try_recv(), Err(mpsc::TryRecvError::Empty));
+    observed.apply(
+        1,
+        handle.state(StateSections {
             processing: true,
             ..Default::default()
-        })
-        .apply_to(&mut snapshot);
-    assert!(snapshot.system.processing.is_none());
+        }),
+    );
+    assert!(observed.snapshot().system.processing.is_some());
 
     core.state.system.shutting_down = true;
     core.publish();
@@ -196,7 +194,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
     assert_eq!(cancelled.outputs, frozen.outputs);
     assert_eq!(cancelled.settings, frozen.settings);
-    assert_eq!(core.processing_results.len(), 1);
+    assert_eq!(core.processing.history().len(), 1);
 
     // A later successful Mix replaces the same receipt, rather than leaving the
     // old cancellation in history or creating another receipt for the same ID.
@@ -205,8 +203,8 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     let complete_status = core.processing_status(1).unwrap();
     assert_eq!(complete_status.phase, ProcessingPhase::Complete);
     assert!(complete_status.error.is_none());
-    assert_eq!(core.processing_results.len(), 1);
-    assert_eq!(core.processing_results[0], complete_status);
+    assert_eq!(core.processing.history().len(), 1);
+    assert_eq!(core.processing.history()[0], complete_status);
 
     // Cancel once more so falling back to the original Complete is observable.
     begin_mix(&mut core, 1);
@@ -214,7 +212,8 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     core.processing.cancel(1).unwrap();
     core.processing_event(event);
     let latest = core.processing_status(1).unwrap();
-    core.processing.select_audition(Some((1, core.generation)));
+    core.processing
+        .select_audition(Some((1, core.transport.generation)));
     core.start_processing(1, ProcessingOperation::Speech, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), latest);
@@ -226,7 +225,13 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(!core.processing_results.iter().any(|status| status.id == 1));
+    assert!(
+        !core
+            .processing
+            .history()
+            .iter()
+            .any(|status| status.id == 1)
+    );
     assert_eq!(core.processing.results().len(), 1);
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
@@ -309,10 +314,10 @@ fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
     assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
     assert_eq!(cancelled.outputs, frozen.outputs);
     assert_eq!(cancelled.settings, frozen.settings);
-    assert_eq!(core.processing_results.len(), 1);
+    assert_eq!(core.processing.history().len(), 1);
     core.state.system.processing = None;
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
-    core.processing_results.clear();
+    core.publish();
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
 
@@ -368,7 +373,7 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(core.store.track_count().unwrap(), before);
     assert_eq!(
         core.processing.results()[0].status.settings.denoise,
-        core.state.configuration.config.denoise
+        core.preferences.settings().denoise
     );
 }
 #[test]
@@ -450,7 +455,7 @@ fn retained_pcm_and_statuses_are_bounded() {
         complete(&mut core);
     }
     assert_eq!(core.processing.results().len(), 4);
-    assert_eq!(core.processing_results.len(), 32);
+    assert_eq!(core.processing.history().len(), 32);
     assert!(core.processing_status(1).is_none());
     assert!(core.processing_status(3).unwrap().outputs.is_none());
     assert!(
@@ -494,15 +499,14 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     })
     .unwrap();
     let imported = core
-        .state
-        .configuration
-        .config
+        .preferences
+        .settings()
         .equalizer_presets
         .iter()
         .find(|preset| preset.name == "bounded")
         .unwrap();
     assert_eq!(imported.config, preset);
-    let accepted = core.state.configuration.config.clone();
+    let accepted = (*core.preferences.settings()).clone();
     bytes.push(b' ');
     std::fs::write(&path, bytes).unwrap();
     core.equalizer_edit(EqualizerEdit::ImportPreset {
@@ -511,7 +515,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
         overwrite: false,
     })
     .unwrap_err();
-    assert_eq!(core.state.configuration.config, accepted);
+    assert_eq!((*core.preferences.settings()), accepted);
 
     std::fs::remove_file(&path).unwrap();
     let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
@@ -525,7 +529,7 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
             overwrite: false,
         });
         completed
-            .send((core.state.configuration.config.clone(), result))
+            .send(((*core.preferences.settings()).clone(), result))
             .unwrap();
     });
     // Do not join on timeout: a regression must fail rather than hang the suite.
@@ -543,7 +547,7 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
         overwrite: false,
     })
     .unwrap();
-    let configuration = core.state.configuration.config.clone();
+    let configuration = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     let exports = directory.path().join("exports");
     std::fs::create_dir(&exports).unwrap();
@@ -565,10 +569,7 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
     core.equalizer_edit(export(missing.clone())).unwrap_err();
     assert!(!missing.parent().unwrap().exists());
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
-    assert!(Arc::ptr_eq(
-        &core.state.configuration.config,
-        &configuration
-    ));
+    assert!(Arc::ptr_eq(core.preferences.settings(), &configuration));
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
@@ -658,10 +659,7 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         field: EqBandEdit::FrequencyHz(2500.0),
     })
     .unwrap();
-    assert_eq!(
-        core.state.configuration.config.equalizer.bands[0].gain_db,
-        3.0
-    );
+    assert_eq!(core.preferences.settings().equalizer.bands[0].gain_db, 3.0);
     core.denoise_edit(DenoisePatch {
         strength: Some(2.0),
         spectral_gain_floor_db: Some(-18.5),
@@ -673,14 +671,10 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(core.state.configuration.config.denoise.strength, 2.0);
-    assert_eq!(core.state.configuration.config.denoise.wet, 0.25);
+    assert_eq!(core.preferences.settings().denoise.strength, 2.0);
+    assert_eq!(core.preferences.settings().denoise.wet, 0.25);
     assert_eq!(
-        core.state
-            .configuration
-            .config
-            .denoise
-            .spectral_gain_floor_db,
+        core.preferences.settings().denoise.spectral_gain_floor_db,
         -18.5
     );
 }
@@ -695,7 +689,7 @@ fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
         ..Default::default()
     })
     .unwrap();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
         core.denoise_edit(DenoisePatch {
@@ -705,7 +699,7 @@ fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
         })
         .is_err()
     );
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
@@ -718,7 +712,7 @@ fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
         })
         .is_err()
     );
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
@@ -729,9 +723,9 @@ fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(core.state.configuration.config.neural.threads, 2);
-    assert_eq!(core.state.configuration.config.neural.speech_wet_mix, 0.5);
-    assert_eq!(core.state.configuration.config.denoise, baseline.denoise);
+    assert_eq!(core.preferences.settings().neural.threads, 2);
+    assert_eq!(core.preferences.settings().neural.speech_wet_mix, 0.5);
+    assert_eq!(core.preferences.settings().denoise, baseline.denoise);
 }
 
 #[test]
@@ -752,7 +746,7 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
     })
     .unwrap();
     core.equalizer_edit(EqualizerEdit::PreampDb(-6.0)).unwrap();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
         core.equalizer_edit(EqualizerEdit::SavePreset {
@@ -761,7 +755,7 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
         })
         .is_err()
     );
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
@@ -772,16 +766,16 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
     })
     .unwrap();
     assert_eq!(
-        core.state.configuration.config.equalizer_presets[0]
+        core.preferences.settings().equalizer_presets[0]
             .config
             .preamp_db,
         -6.0
     );
     let path = directory.path().join("preset.json");
-    let mut imported = core.state.configuration.config.equalizer.clone();
+    let mut imported = core.preferences.settings().equalizer.clone();
     imported.preamp_db = -9.0;
     std::fs::write(&path, serde_json::to_vec(&imported).unwrap()).unwrap();
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     assert!(
         core.equalizer_edit(EqualizerEdit::ImportPreset {
             path: path.clone(),
@@ -798,16 +792,16 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
         })
         .is_err()
     );
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     core.equalizer_edit(EqualizerEdit::ImportPreset {
         path,
         name,
         overwrite: true,
     })
     .unwrap();
-    assert_eq!(core.state.configuration.config.equalizer_presets.len(), 1);
+    assert_eq!(core.preferences.settings().equalizer_presets.len(), 1);
     assert_eq!(
-        core.state.configuration.config.equalizer_presets[0].config,
+        core.preferences.settings().equalizer_presets[0].config,
         imported
     );
 }
@@ -821,7 +815,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
         let _idle_commands = core.engine.replace_commands(commands);
         core.equalizer_edit(EqualizerEdit::AddBands { count })
             .unwrap();
-        let equalizer = &core.state.configuration.config.equalizer;
+        let equalizer = &core.preferences.settings().equalizer;
         assert_eq!(equalizer.bands.len(), count);
         for (index, band) in equalizer.bands.iter().enumerate() {
             let expected_hz = 20.0 * 1000.0_f64.powf((index as f64 + 0.5) / count as f64);
@@ -836,7 +830,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
         }
         assert_eq!(
             Config::load(&core.state.configuration.config_path).unwrap(),
-            *core.state.configuration.config
+            *(*core.preferences.settings())
         );
     }
 }
@@ -878,7 +872,7 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
     .unwrap();
     core.equalizer_edit(EqualizerEdit::AddBands { count: 2 })
         .unwrap();
-    let equalizer = &core.state.configuration.config.equalizer;
+    let equalizer = &core.preferences.settings().equalizer;
     assert_eq!(&equalizer.bands[..2], original.bands.as_slice());
     assert_eq!(equalizer.enabled, original.enabled);
     assert_eq!(equalizer.preamp_db, original.preamp_db);
@@ -918,7 +912,7 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
     for count in [3, 1, MAX_BANDS, 0] {
         core.equalizer_edit(EqualizerEdit::ResizeBands { count })
             .unwrap();
-        let eq = &core.state.configuration.config.equalizer;
+        let eq = &core.preferences.settings().equalizer;
         assert_eq!(eq.bands.len(), count);
         if count > 0 {
             assert_eq!(eq.bands[0], first);
@@ -934,14 +928,14 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
         .unwrap();
         assert_eq!(saved["equalizer"]["bands"].as_array().unwrap().len(), count);
     }
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [MAX_BANDS + 1, usize::MAX] {
         assert!(
             core.equalizer_edit(EqualizerEdit::ResizeBands { count })
                 .is_err()
         );
-        assert_eq!(core.state.configuration.config, baseline);
+        assert_eq!((*core.preferences.settings()), baseline);
         assert_eq!(
             std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
@@ -964,14 +958,14 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
         receive.try_recv().unwrap(),
         AudioCommand::Equalizer(_)
     ));
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [0, MAX_BANDS, MAX_BANDS + 1, usize::MAX] {
         assert!(
             core.equalizer_edit(EqualizerEdit::AddBands { count })
                 .is_err()
         );
-        assert_eq!(core.state.configuration.config, baseline);
+        assert_eq!((*core.preferences.settings()), baseline);
         assert_eq!(
             std::fs::read(&core.state.configuration.config_path).unwrap(),
             saved
@@ -982,21 +976,18 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
         count: MAX_BANDS - 1,
     })
     .unwrap();
-    assert_eq!(
-        core.state.configuration.config.equalizer.bands.len(),
-        MAX_BANDS
-    );
+    assert_eq!(core.preferences.settings().equalizer.bands.len(), MAX_BANDS);
     assert!(matches!(
         receive.try_recv().unwrap(),
         AudioCommand::Equalizer(_)
     ));
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
         core.equalizer_edit(EqualizerEdit::AddBands { count: 1 })
             .is_err()
     );
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
@@ -1021,9 +1012,8 @@ fn equalizer_batch_generation_uses_current_track_rate_or_unknown_rate_fallback()
         core.equalizer_edit(EqualizerEdit::AddBands { count: MAX_BANDS })
             .unwrap();
         for (index, band) in core
-            .state
-            .configuration
-            .config
+            .preferences
+            .settings()
             .equalizer
             .bands
             .iter()
@@ -1056,7 +1046,7 @@ fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
     .unwrap();
     core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
         .unwrap();
-    let bands = &core.state.configuration.config.equalizer.bands;
+    let bands = &core.preferences.settings().equalizer.bands;
     assert_eq!(bands[0], original);
     let maximum_hz = 8000.0 * MAX_FREQUENCY_RATE_RATIO;
     assert!((bands[1].frequency_hz - (20.0 * maximum_hz).sqrt()).abs() < 1e-8);
@@ -1075,10 +1065,10 @@ fn unusable_equalizer_batch_frequency_range_is_rejected_atomically() {
     let mut track = core.track(1).unwrap();
     track.sample_rate = 40;
     core.state.current_track = Some(Arc::new(track));
-    let baseline = core.state.configuration.config.clone();
+    let baseline = (*core.preferences.settings()).clone();
     core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
         .unwrap_err();
-    assert_eq!(core.state.configuration.config, baseline);
+    assert_eq!((*core.preferences.settings()), baseline);
     assert!(!core.state.configuration.config_path.exists());
     assert!(receive.try_recv().is_err());
 }
@@ -1092,7 +1082,7 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
     complete(&mut core);
     let commands = recording_audio(&mut core);
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
-    core.start(queue_id, false).unwrap();
+    core.start(queue_id, QueueHistory::Preserve).unwrap();
     loop {
         if matches!(
             commands.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -1101,11 +1091,11 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
             break;
         }
     }
-    core.playback.as_mut().unwrap().started = true;
-    core.playback.as_mut().unwrap().heard = 2.5;
-    core.playback.as_mut().unwrap().counted = true;
+    core.transport.session.as_mut().unwrap().started = true;
+    core.transport.session.as_mut().unwrap().heard = 2.5;
+    core.transport.session.as_mut().unwrap().counted = true;
     core.state.playback.position = 0.04;
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let commands = recording_final_snapshot(
         &mut core,
         audio::AudioSnapshot {
@@ -1137,7 +1127,7 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
     assert_eq!(core.state.playback.position, 0.065);
     assert_eq!(core.state.current_track, source);
     assert_eq!(core.state.queue.current_id, Some(queue_id));
-    assert!(core.playback.as_ref().unwrap().counted);
+    assert!(core.transport.session.as_ref().unwrap().counted);
 }
 #[test]
 fn manifest_patch_distinguishes_json_clear_and_preserves_binary_absence() {
@@ -1196,7 +1186,7 @@ fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
         decoder_hint: Some(DecoderHint::Native),
     })
     .unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let current = core.state.queue.current_id;
     for mode in [
         AuditionMode::Original,
@@ -1206,7 +1196,7 @@ fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
         core.audition_processing(1, mode, 0.0, 0.0).unwrap_err();
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.queue.current_id, current);
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
         assert!(core.processing.active_id().is_none());
     }
 }
@@ -1235,7 +1225,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
         decoder_hint: Some(DecoderHint::Native),
     })
     .unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.processing_event(event);
     assert_eq!(
         core.processing_status(1).unwrap().phase,
@@ -1243,7 +1233,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
     );
     assert!(core.processing.results()[0].mix.is_none());
     assert!(core.processing.audition_id().is_none());
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     core.processing.shutdown();
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
 }
@@ -1296,7 +1286,7 @@ fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
     assert!(core.processing.active_id().is_none());
     assert_eq!(core.processing.memory_bytes(), bytes);
     assert_eq!(core.processing_status(1).unwrap(), retained);
-    assert_eq!(core.processing_results.back().unwrap(), &retained);
+    assert_eq!(core.processing.history().back().unwrap(), &retained);
     assert_eq!(
         pcm_samples(
             core.processing.results()[0]
@@ -1319,9 +1309,9 @@ fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
 fn profile_mode_requires_an_explicit_noise_selection_and_preserves_frame_count() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    Arc::make_mut(&mut core.state.configuration.config)
-        .denoise
-        .mode = rivu_dsp::denoise::DenoiseMode::Profile;
+    edit_preferences(&mut core, |config| {
+        config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile
+    });
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -1414,7 +1404,13 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(!core.processing_results.iter().any(|status| status.id == 1));
+    assert!(
+        !core
+            .processing
+            .history()
+            .iter()
+            .any(|status| status.id == 1)
+    );
     let ViewResponse::ProcessingTask(Some(task)) =
         core.view(&Query::ProcessingTask { id: 1 }).unwrap()
     else {
@@ -1448,10 +1444,11 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     .unwrap();
     let manifest = directory.path().join("manifest.json");
     std::fs::write(&manifest, "{}").unwrap();
-    let config = Arc::make_mut(&mut core.state.configuration.config);
-    config.neural.worker = worker;
-    config.neural.speech_interpreter = "/bin/sh".into();
-    config.neural.speech_manifest = Some(manifest);
+    edit_preferences(&mut core, |config| {
+        config.neural.worker = worker;
+        config.neural.speech_interpreter = "/bin/sh".into();
+        config.neural.speech_manifest = Some(manifest);
+    });
     core.command(Command::StartProcessing {
         track_id: 1,
         operation: ProcessingOperation::Speech,
@@ -1537,10 +1534,11 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     .unwrap();
     let manifest = directory.path().join("manifest.json");
     std::fs::write(&manifest, "{}").unwrap();
-    let config = Arc::make_mut(&mut core.state.configuration.config);
-    config.neural.worker = worker;
-    config.neural.speech_interpreter = "/bin/sh".into();
-    config.neural.speech_manifest = Some(manifest);
+    edit_preferences(&mut core, |config| {
+        config.neural.worker = worker;
+        config.neural.speech_interpreter = "/bin/sh".into();
+        config.neural.speech_manifest = Some(manifest);
+    });
     core.processing.panic_on_neural_progress = true;
     core.command(Command::StartProcessing {
         track_id: 1,
@@ -1608,7 +1606,7 @@ fn audition_rejects_stop_snapshot_from_another_generation() {
     complete(&mut core);
     let commands = recording_audio(&mut core);
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
-    core.start(queue_id, false).unwrap();
+    core.start(queue_id, QueueHistory::Preserve).unwrap();
     loop {
         if matches!(
             commands.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -1617,7 +1615,7 @@ fn audition_rejects_stop_snapshot_from_another_generation() {
             break;
         }
     }
-    let generation = core.generation + 1;
+    let generation = core.transport.generation + 1;
     let _commands = recording_final_snapshot(
         &mut core,
         audio::AudioSnapshot {
@@ -1654,7 +1652,7 @@ fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
         })
         .unwrap();
     }
-    let band = &core.state.configuration.config.equalizer.bands[0];
+    let band = &core.preferences.settings().equalizer.bands[0];
     assert_eq!(band.gain_db, 1.0);
     assert!((band.frequency_hz - 1000.0 * 2.0_f64.powf(2.0 / 12.0)).abs() < 1e-9);
     core.equalizer_edit(EqualizerEdit::BandField {
@@ -1670,7 +1668,7 @@ fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
         field: EqBandEdit::GainSteps(100),
     })
     .unwrap();
-    let band = &core.state.configuration.config.equalizer.bands[0];
+    let band = &core.preferences.settings().equalizer.bands[0];
     assert_eq!(band.frequency_hz, 2000.0);
     assert_eq!(band.gain_db, 24.0);
 }
@@ -1792,7 +1790,7 @@ fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
         for (&actual, &expected) in live.iter().zip(expected) {
             assert!((actual - expected).abs() < 2e-6);
         }
-        Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph;
+        edit_preferences(&mut core, |config| config.processing_graph = graph);
         core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
             .unwrap();
         complete(&mut core);
@@ -1854,7 +1852,7 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
         pcm.clone(),
         pcm.len() / 2,
     );
-    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph.clone();
+    edit_preferences(&mut core, |config| config.processing_graph = graph.clone());
     core.processing_graph_run(1, graph_port(3, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
@@ -1942,7 +1940,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
             to: graph_port(to, 0),
         })
         .collect();
-    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph;
+    edit_preferences(&mut core, |config| config.processing_graph = graph);
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
@@ -2063,7 +2061,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
         to: graph_port(b, bp),
     })
     .collect();
-    Arc::make_mut(&mut core.state.configuration.config).processing_graph = graph.clone();
+    edit_preferences(&mut core, |config| config.processing_graph = graph.clone());
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     // The edit changes the draft while the admitted snapshot is immutable.
@@ -2075,7 +2073,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
         },
     )
     .unwrap();
-    assert!(graph.audio_eq(&core.state.configuration.config.processing_graph));
+    assert!(graph.audio_eq(&core.preferences.settings().processing_graph));
     complete(&mut core);
     let status = core.processing_status(1).unwrap();
     assert_eq!(
@@ -2157,7 +2155,8 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
             )
             .unwrap();
             complete(&mut core);
-            core.processing.select_audition(Some((1, core.generation)));
+            core.processing
+                .select_audition(Some((1, core.transport.generation)));
         }
         let outputs = core.processing_status(1).unwrap().graph_outputs;
         let mut action_run = core.processing_status(1).unwrap().graph_run_id.unwrap();
@@ -2310,14 +2309,24 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
         .unwrap();
     assert_eq!(
-        core.state.system.processing.as_ref().unwrap().phase,
+        core.processing_status(1).unwrap().phase,
         ProcessingPhase::Queued
     );
-    assert!(core.state.processing_audition.is_none());
+    let queued = core.processing_status(1).unwrap();
+    assert_eq!(
+        queued.settings.graph_requested_mode,
+        Some(GraphExecutionMode::Auto)
+    );
+    assert_eq!(queued.settings.graph_mode, None);
+    assert!(core.processing.audition_projection().is_none());
     complete(&mut core);
     let task = core.processing_status(1).unwrap();
     assert_eq!(task.phase, ProcessingPhase::Complete, "{:?}", task.error);
     assert_eq!(task.settings.graph_mode, Some(GraphExecutionMode::Realtime));
+    assert_eq!(
+        task.settings.graph_requested_mode,
+        Some(GraphExecutionMode::Auto)
+    );
     assert!(task.graph_outputs.is_empty());
     assert_eq!(task.sample_rate, Some(48000));
     assert_eq!(task.channels, Some(2));
@@ -2325,7 +2334,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
     assert_eq!(
-        core.state.processing_audition,
+        core.processing.audition_projection(),
         Some(ProcessingAudition {
             id: 1,
             output: Some(graph_port(2, 0)),
@@ -2347,18 +2356,61 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
         ProcessingPhase::Cancelled
     );
     assert!(core.processing.audition_id().is_none());
-    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition_projection().is_none());
     let cancelled = core.processing_status(1).unwrap();
-    assert_eq!(core.processing_results[0], cancelled);
+    assert_eq!(core.processing.history()[0], cancelled);
     assert_eq!(core.processing.results()[0].status, cancelled);
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
     complete(&mut core);
-    core.processing_results.retain(|status| status.id != 1);
+    for _ in 0..MAX_RETAINED_SCAN_RESULTS {
+        core.start_processing(1, ProcessingOperation::Speech, None)
+            .unwrap();
+        complete(&mut core);
+    }
+    assert!(
+        !core
+            .processing
+            .history()
+            .iter()
+            .any(|status| status.id == 1)
+    );
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
+}
+
+#[test]
+fn graph_audition_failure_keeps_retained_output_and_failed_operation_receipt() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let (commands, receiver) = async_channel::bounded(64);
+    let _idle_commands = core.engine.replace_commands(commands);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Hybrid)
+        .unwrap();
+    let event = completion(&mut core);
+    drop(receiver);
+    core.processing_event(event);
+    let failed = core.processing_status(1).unwrap();
+    assert_eq!(failed.phase, ProcessingPhase::Failed);
+    assert!(failed.error.is_some());
+    assert_eq!(
+        failed.settings.graph_requested_mode,
+        Some(GraphExecutionMode::Hybrid)
+    );
+    assert_eq!(failed.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
+    assert!(!failed.graph_outputs.is_empty());
+    assert_eq!(core.processing.results().len(), 1);
+    assert!(core.processing.audition_projection().is_none());
+    assert_eq!(terminal_wait(&mut core, 1), failed);
+    let port = failed.graph_outputs[0].port;
+    let destination = directory.path().join("retained-after-audition-failure.wav");
+    core.processing_graph_export(1, port, destination.clone())
+        .unwrap();
+    complete(&mut core);
+    assert!(destination.is_file());
+    assert_eq!(core.processing_status(1).unwrap(), failed);
 }
 
 #[test]
@@ -2375,14 +2427,47 @@ fn selected_live_audition_can_be_cancelled_after_its_receipt_ages_out() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(!core.processing_results.iter().any(|status| status.id == 1));
-    assert_eq!(core.state.processing_audition.unwrap().id, 1);
+    assert!(
+        !core
+            .processing
+            .history()
+            .iter()
+            .any(|status| status.id == 1)
+    );
+    assert_eq!(core.processing.audition_projection().unwrap().id, 1);
     core.cancel_processing(1).unwrap();
-    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition_projection().is_none());
     let cancelled = core.processing_status(1).unwrap();
     assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
     assert_eq!(cancelled.settings, frozen);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
+}
+
+#[test]
+fn cancelling_older_live_audition_does_not_replace_a_newer_processing_receipt() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
+        .unwrap();
+    complete(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    let newer = core.processing_status(2).unwrap();
+    core.cancel_processing(1).unwrap();
+    assert_eq!(core.processing.current_projection().unwrap().id, 2);
+    assert_eq!(core.processing_status(2).unwrap(), newer);
+    assert_eq!(core.processing.active_id(), Some(2));
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Cancelled
+    );
+    complete(&mut core);
+    assert_eq!(
+        core.processing_status(2).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert!(core.processing.audition_projection().is_none());
 }
 
 #[test]
@@ -2406,7 +2491,7 @@ fn new_runs_release_unselected_pcm_but_preserve_frozen_graph_actions() {
     );
     assert!(core.processing_status(2).unwrap().outputs.is_none());
     complete(&mut core);
-    let selected = core.state.processing_audition.unwrap();
+    let selected = core.processing.audition_projection().unwrap();
     assert_eq!(selected.id, 3);
     assert_eq!(selected.output, Some(graph_port(2, 0)));
     assert_eq!(
@@ -2422,7 +2507,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
-    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition_projection().is_none());
     let _commands = recording_audio(&mut core);
     core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
     let admitted = ProcessingAudition {
@@ -2430,14 +2515,14 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
         output: Some(graph_port(2, 0)),
         mode: Some(GraphExecutionMode::Offline),
     };
-    assert_eq!(core.state.processing_audition, Some(admitted));
+    assert_eq!(core.processing.audition_projection(), Some(admitted));
     core.publish();
     assert_eq!(core.shared.read().processing_audition, Some(admitted));
     assert!(
         core.processing_graph_audition(1, graph_port(2, 99))
             .is_err()
     );
-    assert_eq!(core.state.processing_audition, Some(admitted));
+    assert_eq!(core.processing.audition_projection(), Some(admitted));
     let frozen_graph = core.processing_status(1).unwrap().settings.graph.unwrap();
     core.processing_graph_edit(
         frozen_graph.revision,
@@ -2452,7 +2537,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     .unwrap();
     let recomputed = core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
     assert_eq!(recomputed, Some(2));
-    assert_eq!(core.state.processing_audition, Some(admitted));
+    assert_eq!(core.processing.audition_projection(), Some(admitted));
     complete(&mut core);
     assert_eq!(
         core.processing_status(2).unwrap().settings.graph.unwrap(),
@@ -2463,16 +2548,16 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
         output: Some(graph_port(1, 0)),
         mode: Some(GraphExecutionMode::Realtime),
     };
-    assert_eq!(core.state.processing_audition, Some(selected));
+    assert_eq!(core.processing.audition_projection(), Some(selected));
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
     assert_eq!(core.state.system.processing.as_ref().unwrap().id, 3);
-    assert_eq!(core.state.processing_audition, Some(selected));
+    assert_eq!(core.processing.audition_projection(), Some(selected));
     core.publish();
     assert_eq!(core.shared.read().processing_audition, Some(selected));
     core.stop().unwrap();
-    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition_projection().is_none());
     core.publish();
     assert!(core.shared.read().processing_audition.is_none());
 }
@@ -2485,7 +2570,7 @@ fn newer_playback_generation_does_not_get_replaced_by_late_graph_preparation() {
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
         .unwrap();
     let event = completion(&mut core);
-    core.generation = core.generation.wrapping_add(1);
+    core.transport.generation = core.transport.generation.wrapping_add(1);
     core.processing_event(event);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.processing.audition_id().is_none());
@@ -2499,7 +2584,7 @@ fn newer_playback_generation_does_not_get_replaced_by_late_graph_preparation() {
 #[test]
 fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
     let (_directory, mut core) = fixture();
-    let mut stale = core.effective_config();
+    let mut stale = core.preferences.checkpoint();
     core.processing_graph_edit(
         0,
         GraphEdit::Move {
@@ -2515,11 +2600,10 @@ fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
         })
         .is_err()
     );
-    assert_eq!(core.state.configuration.config.processing_graph.revision, 1);
+    assert_eq!(core.preferences.settings().processing_graph.revision, 1);
     assert_eq!(
-        core.state
-            .configuration
-            .config
+        core.preferences
+            .settings()
             .processing_graph
             .node(1)
             .unwrap()
@@ -2540,7 +2624,8 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    core.processing.select_audition(Some((1, core.generation)));
+    core.processing
+        .select_audition(Some((1, core.transport.generation)));
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -2582,10 +2667,10 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
     core.state.playback.status = PlaybackStatus::Paused;
-    core.playback.as_mut().unwrap().started = true;
-    core.playback.as_mut().unwrap().heard = 2.5;
-    core.playback.as_mut().unwrap().counted = true;
-    let generation = core.generation;
+    core.transport.session.as_mut().unwrap().started = true;
+    core.transport.session.as_mut().unwrap().heard = 2.5;
+    core.transport.session.as_mut().unwrap().counted = true;
+    let generation = core.transport.generation;
     let _commands = recording_final_snapshot(
         &mut core,
         audio::AudioSnapshot {
@@ -2596,19 +2681,19 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     );
     let queue = core.state.queue.clone();
     let track = core.state.current_track.clone();
-    let denoise = core.state.configuration.config.denoise.clone();
+    let denoise = core.preferences.settings().denoise.clone();
     core.command(Command::ProcessingBypass).unwrap();
     let mut expected = equalizer;
     expected.enabled = false;
-    assert_eq!(core.state.configuration.config.equalizer, expected);
-    assert_eq!(core.state.configuration.config.denoise, denoise);
+    assert_eq!(core.preferences.settings().equalizer, expected);
+    assert_eq!(core.preferences.settings().denoise, denoise);
     assert_eq!(core.state.queue, queue);
     assert_eq!(core.state.current_track, track);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.state.playback.position, 0.065);
-    assert_eq!(core.playback.as_ref().unwrap().heard, 2.52);
-    assert!(core.playback.as_ref().unwrap().counted);
-    assert!(core.state.processing_audition.is_none());
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 2.52);
+    assert!(core.transport.session.as_ref().unwrap().counted);
+    assert!(core.processing.audition_projection().is_none());
     assert!(core.processing.audition_id().is_none());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
@@ -2626,7 +2711,7 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
         core.processing_graph_run(1, graph_port(2, 0), mode)
             .unwrap();
         let event = completion(&mut core);
-        let generation = core.generation;
+        let generation = core.transport.generation;
         core.command(Command::ProcessingBypass).unwrap();
         assert_eq!(core.processing.cancellation_requested(1), Some(false));
         core.processing_event(event);
@@ -2635,9 +2720,9 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
             ProcessingPhase::Complete
         );
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
         assert!(core.state.current_track.is_none());
-        assert!(core.state.processing_audition.is_none());
+        assert!(core.processing.audition_projection().is_none());
         assert!(core.pending_processing_audition.is_none());
         if mode == GraphExecutionMode::Offline {
             let pcm =
@@ -2660,12 +2745,12 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
         event,
         crate::processing::Event::MixFinished { result: Ok(_), .. }
     ));
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.command(Command::ProcessingBypass).unwrap();
     core.processing_event(event);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert!(core.processing.audition_id().is_none());
-    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition_projection().is_none());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
@@ -2692,7 +2777,7 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
         ProcessingPhase::Complete
     );
     let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let _commands = recording_audio(&mut core);
     assert!(
         core.command(Command::ProcessingGraphAudition {
@@ -2701,15 +2786,15 @@ fn stale_queue_graph_audition_recovers_source_context_before_selecting_occurrenc
         })
         .is_err()
     );
-    assert_eq!(core.generation, generation);
-    assert!(core.queue_projection_stale);
+    assert_eq!(core.transport.generation, generation);
+    assert!(core.transport.projection_stale);
     repair_queue_scalar(&connection);
     core.command(Command::ProcessingGraphAudition {
         id: 1,
         node: graph_port(2, 0),
     })
     .unwrap();
-    assert!(!core.queue_projection_stale);
+    assert!(!core.transport.projection_stale);
     assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(1));
@@ -2978,7 +3063,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
             "database" => core.database_outcome_uncertain(),
             _ => unreachable!(),
         }
-        let generation = core.generation;
+        let generation = core.transport.generation;
         core.processing_event(event);
         assert_eq!(
             core.processing_status(1).unwrap().phase,
@@ -2989,7 +3074,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
         core.processing.shutdown();
         assert_eq!(core.processing.memory_bytes(), retained_bytes);
         assert!(core.processing.audition_id().is_none());
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
     }
 }
 
@@ -3013,7 +3098,7 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
         commands.recv_timeout(Duration::from_secs(10)).unwrap(),
         AudioCommand::Load { .. }
     ) {}
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
@@ -3024,12 +3109,12 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
         &event,
         crate::processing::Event::MixFinished { result: Ok(_), .. }
     ));
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.database_outcome_uncertain();
     core.processing_event(event);
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
-    assert!(core.queue_current_pending);
-    assert_eq!(core.generation, generation);
+    assert!(core.transport.selection_pending);
+    assert_eq!(core.transport.generation, generation);
     assert!(commands.try_recv().is_err());
     assert!(core.processing.audition_id().is_none());
     assert!(core.processing.results()[0].mix.is_none());
@@ -3085,7 +3170,7 @@ fn scan_saving_settles_pending_selection_before_mix_handoff() {
         commands.recv_timeout(Duration::from_secs(10)).unwrap(),
         AudioCommand::Load { .. }
     ) {}
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     lock.execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
@@ -3107,7 +3192,7 @@ fn scan_saving_settles_pending_selection_before_mix_handoff() {
         core.active_scan.as_ref().unwrap().status.progress.phase,
         ScanPhase::Saving
     );
-    assert!(!core.queue_current_pending);
+    assert!(!core.transport.selection_pending);
     assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
 
     // Saving remains active until Core consumes its completion. Holding another
@@ -3162,13 +3247,13 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
             event => core.scan_event(event),
         }
     };
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.scan_event(ScanEvent::Finished(scan));
     assert!(core.active_scan.is_none());
     let status = core.scan_results.back().unwrap();
     assert_eq!(status.progress.phase, ScanPhase::Failed);
     assert!(!status.library_committed);
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
     let inserted: bool = connection
         .query_row(
@@ -3180,7 +3265,7 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
     assert!(!inserted);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     assert_eq!(core.state.queue.current_id, Some(1));
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert!(core.processing.active_id().is_some());
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
@@ -3210,7 +3295,7 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
         AudioCommand::Load { .. }
     ) {}
     core.stop().unwrap();
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     lock.execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
     let target = graph_port(2, 0);
@@ -3218,9 +3303,9 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
         .processing_graph_run(1, target, GraphExecutionMode::Auto)
         .unwrap();
     let graph = completion(&mut core);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     core.command(Command::OptimizeDatabase).unwrap();
-    assert!(!core.queue_current_pending);
+    assert!(!core.transport.selection_pending);
     assert_eq!(core.store.queue_state().unwrap().current_id, Some(1));
 
     // Core still owns maintenance until it consumes the worker completion.
@@ -3230,7 +3315,7 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
         ProcessingPhase::Failed
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert!(core.processing.audition_id().is_none());
     let _ = core.shutdown_optimization();
 
@@ -3238,7 +3323,7 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
     if audition.is_some() {
         complete(&mut core);
     }
-    let selected = core.state.processing_audition.unwrap();
+    let selected = core.processing.audition_projection().unwrap();
     assert_eq!(selected.id, audition.unwrap_or(id));
     assert_eq!(selected.output, Some(target));
 }
@@ -3267,13 +3352,13 @@ fn optimization_queue_recovery_failure_preserves_stopped_graph() {
         .processing_graph_run(1, target, GraphExecutionMode::Auto)
         .unwrap();
     let graph = completion(&mut core);
-    let generation = core.generation;
+    let generation = core.transport.generation;
     assert!(core.command(Command::OptimizeDatabase).is_err());
     assert!(core.active_optimization.is_none());
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert_eq!(core.processing.active_id().unwrap(), id);
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
@@ -3283,8 +3368,8 @@ fn optimization_queue_recovery_failure_preserves_stopped_graph() {
         core.processing_status(id).unwrap().phase,
         ProcessingPhase::Complete
     );
-    let selected = core.state.processing_audition.unwrap();
+    let selected = core.processing.audition_projection().unwrap();
     assert_eq!(selected.id, id);
     assert_eq!(selected.output, Some(target));
-    assert!(!core.queue_current_pending);
+    assert!(!core.transport.selection_pending);
 }

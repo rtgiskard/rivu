@@ -9,7 +9,7 @@ mod xattrs;
 #[cfg(test)]
 mod tests;
 
-pub use writer::{EditReport, TagPatch, edit_file};
+pub use writer::{EditFailure, EditFailureOutcome, EditOutcome, EditReport, TagPatch, edit_file};
 
 use serde::{Deserialize, Serialize};
 

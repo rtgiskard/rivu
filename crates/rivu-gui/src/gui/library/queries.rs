@@ -536,7 +536,8 @@ mod tests {
             let ack =
                 futures::executor::block_on(runtime.handle.request_ack(Command::MutateConfig {
                     change: ConfigMutation::RemoveLibraryRoot(root.clone()),
-                }));
+                }))
+                .ack;
             assert!(ack.is_success(), "{ack:?}");
         }
         let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;

@@ -294,7 +294,11 @@ pub(super) fn write_error(
     json: bool,
 ) -> Result<()> {
     if json {
-        let mut value = serde_json::json!({"error": format!("{error:#}")});
+        let mut value = if let Some(failure) = error.downcast_ref::<rivu_metadata::EditFailure>() {
+            serde_json::to_value(failure)?
+        } else {
+            serde_json::json!({"error": format!("{error:#}")})
+        };
         if let Some(failure) = error.downcast_ref::<rivu_client::CommandFailure>() {
             value["status"] = serde_json::to_value(failure.status)?;
         }

@@ -47,8 +47,8 @@ impl Core {
         {
             // MPRIS Seek beyond the end is Next, including its no-op at the
             // queue tail. Keep both decisions inside the occurrence check.
-            if self.state.playback.shuffle
-                || self.state.playback.repeat == RepeatMode::All
+            if self.preferences.live().shuffle
+                || self.preferences.live().repeat == RepeatMode::All
                 || self
                     .state
                     .queue
@@ -142,18 +142,7 @@ impl Core {
                     CollectionDestination::Playlist { .. } => {}
                 }
             }
-            Command::PlayAlbum { key } => {
-                ensure!(self.store.album_has_tracks(&key)?, "Album is empty");
-                self.stop()?;
-                self.store.queue_album(&key, true)?;
-                self.advance_queue_revision();
-                self.state.current_track = None;
-                self.played.clear();
-                self.played_cursor = 0;
-                self.reload_queue()?;
-                let first = self.store.queue_id_at(0)?.context("Album is empty")?;
-                self.start(first, true)?;
-            }
+            Command::PlayAlbum { key } => self.play_album(&key)?,
             Command::EnqueueAlbum { key } => {
                 self.ensure_queue_control_ready()?;
                 self.store.queue_album(&key, false)?;
@@ -246,53 +235,12 @@ impl Core {
                         .queue_id_at(self.state.queue.total - 1)?
                         .context("Track was not queued")?
                 };
-                self.start(id, true)?;
+                self.start(id, QueueHistory::Record)?;
             }
-            Command::PlayQueue { queue_id } => self.start(queue_id, true)?,
-            Command::PlayPlaylist { playlist_id } => {
-                let total = self
-                    .store
-                    .playlist_entries_page(playlist_id, None, 0, 0)?
-                    .total;
-                ensure!(total > 0, "Playlist is empty");
-                self.stop()?;
-                self.store.replace_queue_from_playlist(playlist_id)?;
-                self.advance_queue_revision();
-                self.state.current_track = None;
-                self.played.clear();
-                self.played_cursor = 0;
-                self.reload_queue()?;
-                let first = self.store.queue_id_at(0)?.context("Playlist is empty")?;
-                self.start(first, true)?;
-            }
-            Command::Resume => {
-                if self.state.playback.status == PlaybackStatus::Stopped {
-                    self.ensure_queue_control_ready()?;
-                    let id = match self.state.queue.current_id {
-                        Some(id) => id,
-                        None => self.store.queue_id_at(0)?.context("Queue is empty")?,
-                    };
-                    self.start(id, true)?;
-                } else {
-                    self.engine.send(AudioCommand::Pause(false))?;
-                    if let Some(playback) = self.playback.as_mut() {
-                        // A resumed session may continue with a larger cumulative
-                        // backend counter; release the old timestamp bound.
-                        playback.paused_at = None;
-                    }
-                    self.state.playback.status = PlaybackStatus::Playing;
-                }
-            }
-            Command::Pause => {
-                if self.state.playback.status == PlaybackStatus::Playing {
-                    self.engine.send(AudioCommand::Pause(true))?;
-                    if let Some(playback) = self.playback.as_mut() {
-                        // Capture the wall-clock boundary once after Pause is accepted.
-                        playback.paused_at.get_or_insert(now());
-                    }
-                    self.state.playback.status = PlaybackStatus::Paused;
-                }
-            }
+            Command::PlayQueue { queue_id } => self.start(queue_id, QueueHistory::Record)?,
+            Command::PlayPlaylist { playlist_id } => self.play_playlist(playlist_id)?,
+            Command::Resume => self.resume()?,
+            Command::Pause => self.pause()?,
             Command::Toggle => {
                 return self.apply_command(
                     if self.state.playback.status == PlaybackStatus::Playing {
@@ -320,12 +268,12 @@ impl Core {
                     bail!("Volume must be between 0 and 1");
                 }
                 self.engine.send(AudioCommand::Volume(value))?;
-                self.state.playback.volume = value;
+                self.preferences.set_volume(value);
             }
             Command::AdjustVolume { delta } => {
                 ensure!(delta.is_finite(), "Volume delta must be finite");
                 return self.apply_command(Command::Volume {
-                    value: (self.state.playback.volume + delta).clamp(0.0, 1.0),
+                    value: (self.preferences.live().volume + delta).clamp(0.0, 1.0),
                 });
             }
             Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
@@ -335,8 +283,8 @@ impl Core {
                 track_ids,
             } => {
                 self.ensure_queue_control_ready()?;
-                let roots = other_tracks
-                    .then_some(self.state.configuration.config.library_roots.as_slice());
+                let roots =
+                    other_tracks.then_some(self.preferences.settings().library_roots.as_slice());
                 if self
                     .store
                     .enqueue_sources(&directories, &track_ids, roots)?
@@ -369,8 +317,7 @@ impl Core {
                 let count = self.store.insert_queue_sources(
                     &directories,
                     &track_ids,
-                    other_tracks
-                        .then_some(self.state.configuration.config.library_roots.as_slice()),
+                    other_tracks.then_some(self.preferences.settings().library_roots.as_slice()),
                     index,
                 )?;
                 if count != 0 {
@@ -391,28 +338,20 @@ impl Core {
             Command::MoveQueueEntries { queue_ids, index } => {
                 self.move_queue_entries(&queue_ids, index)?;
             }
-            Command::ClearQueue => {
-                self.stop()?;
-                if self.store.clear_queue()? {
-                    self.advance_queue_revision();
-                }
-                self.reload_queue()?;
-                self.state.current_track = None;
-                self.played.clear();
-                self.played_cursor = 0;
-            }
+            Command::ClearQueue => self.clear_queue()?,
             Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,
             Command::DeduplicateQueue => self.deduplicate_queue()?,
             Command::Shuffle { enabled } => self.set_shuffle(enabled),
-            Command::Repeat { mode } => self.state.playback.repeat = mode,
+            Command::Repeat { mode } => self.preferences.set_repeat(mode),
             Command::CycleRepeat => {
-                self.state.playback.repeat = match self.state.playback.repeat {
-                    RepeatMode::Off => RepeatMode::All,
-                    RepeatMode::All => RepeatMode::One,
-                    RepeatMode::One => RepeatMode::Off,
-                };
+                self.preferences
+                    .set_repeat(match self.preferences.live().repeat {
+                        RepeatMode::Off => RepeatMode::All,
+                        RepeatMode::All => RepeatMode::One,
+                        RepeatMode::One => RepeatMode::Off,
+                    });
             }
-            Command::ToggleShuffle => self.set_shuffle(!self.state.playback.shuffle),
+            Command::ToggleShuffle => self.set_shuffle(!self.preferences.live().shuffle),
             Command::CreatePlaylist { name } => self.create_playlist(name)?,
             Command::CreatePlaylistWithTracks { name, track_ids } => {
                 self.create_playlist_with_tracks(name, track_ids)?;
@@ -456,8 +395,7 @@ impl Core {
                     playlist_id,
                     &directories,
                     &track_ids,
-                    other_tracks
-                        .then_some(self.state.configuration.config.library_roots.as_slice()),
+                    other_tracks.then_some(self.preferences.settings().library_roots.as_slice()),
                 )? {
                     self.invalidate_playlist_members(&[playlist_id])?;
                 }
@@ -489,8 +427,7 @@ impl Core {
                     playlist_id,
                     &directories,
                     &track_ids,
-                    other_tracks
-                        .then_some(self.state.configuration.config.library_roots.as_slice()),
+                    other_tracks.then_some(self.preferences.settings().library_roots.as_slice()),
                     index,
                 )? {
                     self.invalidate_playlist_members(&[playlist_id])?;
@@ -565,10 +502,10 @@ impl Core {
                 self.engine.send(AudioCommand::OutputSettings {
                     request,
                     device: name.clone(),
-                    auto_mix: self.state.configuration.config.pipewire_auto_mix,
+                    auto_mix: self.preferences.settings().pipewire_auto_mix,
                 })?;
                 self.output_settings_request = request;
-                self.state.system.selected_device = name;
+                self.preferences.select_device(name);
             }
             Command::DismissError => {
                 self.state.system.last_error = None;

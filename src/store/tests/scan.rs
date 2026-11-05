@@ -1,6 +1,6 @@
 use crate::library::{CueRecord, RegisteredCueMetadata, ScanRecord, ScanResult};
-use crate::store::Store;
-use crate::store::scan::{PROBE_VERSION, ScanImpacts};
+use crate::store::scan::PROBE_VERSION;
+use crate::store::{CatalogChanges, Store};
 use rivu_audio::MediaInfo;
 use rivu_protocol::model::CueSegment;
 use std::path::Path;
@@ -284,17 +284,17 @@ fn inserts_report_identity_and_only_applicable_duplicate_impacts() {
         }
         assert_eq!(
             store.apply_scan(&scan).unwrap(),
-            ScanImpacts {
+            CatalogChanges {
                 changed: true,
                 library: true,
                 albums: true,
                 structure: true,
                 duplicate_groups: !cue && fingerprint,
                 duplicate_members: !cue && fingerprint,
-                ..ScanImpacts::default()
+                ..CatalogChanges::default()
             }
         );
-        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
     }
 }
 
@@ -312,11 +312,11 @@ fn verification_rescans_invalidate_library_stats_only_when_size_changes() {
         }
         assert_eq!(
             store.apply_scan(&scan).unwrap(),
-            ScanImpacts {
+            CatalogChanges {
                 changed: true,
                 library: !mtime_only,
                 duplicate_members: true,
-                ..ScanImpacts::default()
+                ..CatalogChanges::default()
             }
         );
         assert_eq!(
@@ -336,7 +336,7 @@ fn verification_rescans_invalidate_library_stats_only_when_size_changes() {
         let stats = store.library_root_stats(&["/music".into()]).unwrap();
         assert_eq!(stats[0].file_size, scan.records[0].size);
         assert_eq!(stats[0].total, 1);
-        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
     }
 }
 
@@ -381,12 +381,12 @@ fn ordinary_fingerprint_changes_affect_grouping_but_not_structure() {
         std::sync::Arc::make_mut(&mut scan.records[0]).fingerprint = fingerprint;
         assert_eq!(
             store.apply_scan(&scan).unwrap(),
-            ScanImpacts {
+            CatalogChanges {
                 changed: true,
                 library: true,
                 albums: true,
                 duplicate_groups: true,
-                ..ScanImpacts::default()
+                ..CatalogChanges::default()
             }
         );
         assert_eq!(
@@ -447,7 +447,7 @@ fn library_changes_do_not_proxy_for_queue_or_album_effects() {
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Retitled queued track".into();
     let queued = store.apply_scan(&scan).unwrap();
     assert!(queued.changed && queued.library && queued.queue && queued.albums);
-    assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+    assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn identical_rescans_keep_queue_content_stable() {
     let state = store.queue_state().unwrap();
     let track = store.track(id).unwrap().unwrap();
     for _ in 0..2 {
-        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         assert_eq!(store.track(id).unwrap().unwrap(), track);
@@ -482,12 +482,12 @@ fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
     std::sync::Arc::make_mut(&mut scan.records[0]).media.codec = "flac".into();
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
             library: true,
             queue: true,
             albums: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     assert_eq!(store.queue_state().unwrap(), state);
@@ -501,7 +501,7 @@ fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
     assert_eq!(after.track.album, "Changed album");
     assert_eq!(after.track.codec, "flac");
     let state = store.queue_state().unwrap();
-    assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+    assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
     assert_eq!(store.queue_state().unwrap(), state);
     assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], after);
 }
@@ -601,7 +601,7 @@ fn audio_source_rescans_refresh_ordinary_and_cue_row_projections() {
                     )
                 );
             }
-            assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+            assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
         }
     }
 }
@@ -626,9 +626,9 @@ fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
     std::sync::Arc::make_mut(&mut scan.records[0]).media.album = "New raw album".into();
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     assert!(store.track_cache.borrow().entries.contains_key(&id));
@@ -715,13 +715,13 @@ fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
         roots: scan.roots.clone(),
         ..ScanResult::default()
     };
-    let expected = ScanImpacts {
+    let expected = CatalogChanges {
         changed: true,
         library: true,
         queue: true,
         albums: true,
         duplicate_groups: true,
-        ..ScanImpacts::default()
+        ..CatalogChanges::default()
     };
     assert_eq!(store.apply_scan(&missing).unwrap(), expected);
     let state = store.queue_state().unwrap();
@@ -730,14 +730,17 @@ fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
     assert_eq!(row.id, page.rows[0].id);
     assert_eq!(row.track_id, id);
     assert!(row.track.missing);
-    assert_eq!(store.apply_scan(&missing).unwrap(), ScanImpacts::default());
+    assert_eq!(
+        store.apply_scan(&missing).unwrap(),
+        CatalogChanges::default()
+    );
     assert_eq!(store.queue_state().unwrap(), state);
     assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
     assert_eq!(store.apply_scan(&scan).unwrap(), expected);
     let recovered = store.queue_state().unwrap();
     assert_eq!(recovered, state);
     assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
-    assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+    assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
     assert_eq!(store.queue_state().unwrap(), recovered);
     assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
 }
@@ -814,11 +817,11 @@ fn scan_metadata_outside_queue_rows_refreshes_without_queue_invalidation() {
     );
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
             library: true,
             albums: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     assert_eq!(store.queue_state().unwrap(), state);
@@ -847,9 +850,9 @@ fn scan_metadata_outside_queue_rows_refreshes_without_queue_invalidation() {
     );
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     assert!(store.track_cache.borrow().entries.contains_key(&id));
@@ -886,13 +889,13 @@ fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_curr
     std::sync::Arc::make_mut(&mut scan.segments[0].source).path = "/music/renamed.wav".into();
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
             library: true,
             queue: true,
             albums: true,
             structure: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     let after = store.queue_state().unwrap();
@@ -908,7 +911,7 @@ fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_curr
         store.track(id).unwrap().unwrap().path,
         scan.segments[0].source.path
     );
-    assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+    assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
     assert_eq!(store.queue_state().unwrap(), after);
     assert_eq!(store.queue_page(None, 0, 10).unwrap(), expected);
 }
@@ -1081,12 +1084,12 @@ fn tiny_scan_relocates_global_identity_without_touching_unrelated_missing_rows()
     };
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
-        ScanImpacts {
+        CatalogChanges {
             changed: true,
             library: true,
             albums: true,
             structure: true,
-            ..ScanImpacts::default()
+            ..CatalogChanges::default()
         }
     );
     assert_eq!(
@@ -1881,8 +1884,8 @@ fn completed_no_change_scan_retains_track_cache_and_hidden_raw_edits_do_not_clea
     let original = store.track(id).unwrap().unwrap();
     assert!(store.track_cache.borrow().entries.contains_key(&id));
     let impacts = store.apply_scan(&scan).unwrap();
-    assert_eq!(impacts, ScanImpacts::default());
-    store.invalidate_scan_caches(impacts, false);
+    assert_eq!(impacts, CatalogChanges::default());
+    store.invalidate_catalog_caches(impacts, false);
     assert!(store.track_cache.borrow().entries.contains_key(&id));
     store
         .edit_track(id, Some("Personal"), None, None, None)
@@ -1892,12 +1895,12 @@ fn completed_no_change_scan_retains_track_cache_and_hidden_raw_edits_do_not_clea
     let impacts = store.apply_scan(&scan).unwrap();
     assert!(impacts.changed);
     assert!(!impacts.library);
-    store.invalidate_scan_caches(impacts, false);
+    store.invalidate_catalog_caches(impacts, false);
     assert!(store.track_cache.borrow().entries.contains_key(&id));
     assert_eq!(store.track(id).unwrap().unwrap(), overridden);
     std::sync::Arc::make_mut(&mut scan.records[0]).media.artist = "Visible artist".into();
     let impacts = store.apply_scan(&scan).unwrap();
-    store.invalidate_scan_caches(impacts, false);
+    store.invalidate_catalog_caches(impacts, false);
     assert!(impacts.library);
     assert!(!store.track_cache.borrow().entries.contains_key(&id));
     assert_ne!(store.track(id).unwrap().unwrap().artist, original.artist);

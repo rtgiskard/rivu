@@ -846,7 +846,16 @@ fn runtime_wire_round_trip_preserves_large_client_configuration_without_transfer
             ..Default::default()
         }
     );
-    response.apply_to(&mut snapshot);
+    let mut observed = crate::response::ObservedState::new(1);
+    observed.apply(
+        1,
+        StateResponse {
+            configuration: Some(snapshot.configuration),
+            ..Default::default()
+        },
+    );
+    observed.apply(1, response);
+    let snapshot = observed.snapshot();
     assert_eq!(snapshot.system.scan_message, "runtime progress");
     assert!(Arc::ptr_eq(&retained, &snapshot.configuration.config));
     assert_eq!(snapshot.configuration.config.query_batch_size, 91);
@@ -1854,6 +1863,7 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
             profile: None,
             graph: Some(ProcessingGraph::default()),
             graph_target: Some(target),
+            graph_requested_mode: Some(GraphExecutionMode::Auto),
             graph_mode: Some(GraphExecutionMode::Offline),
             graph_boundary: Some(GraphPort { node: 1, port: 0 }),
             graph_export_path: Some("/rendered outputs/voice -6 dB.wav".into()),
@@ -1942,7 +1952,18 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     let system_only = state_response(decoded);
     assert!(system_only.processing.is_none());
     assert!(system_only.system.as_ref().unwrap().processing.is_none());
-    system_only.apply_to(&mut snapshot);
+    let mut observed = crate::response::ObservedState::new(1);
+    observed.apply(
+        1,
+        StateResponse {
+            processing: Some(crate::response::ProcessingState {
+                task: snapshot.system.processing.clone(),
+            }),
+            ..Default::default()
+        },
+    );
+    observed.apply(1, system_only);
+    let snapshot = observed.snapshot();
     assert_eq!(
         snapshot.system.processing.as_ref().unwrap().phase,
         ProcessingPhase::Cancelled
@@ -1970,12 +1991,14 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
             .phase,
         ProcessingPhase::Cancelled
     );
-    StateResponse {
-        processing: Some(crate::response::ProcessingState { task: None }),
-        ..Default::default()
-    }
-    .apply_to(&mut snapshot);
-    assert!(snapshot.system.processing.is_none());
+    observed.apply(
+        1,
+        StateResponse {
+            processing: Some(crate::response::ProcessingState { task: None }),
+            ..Default::default()
+        },
+    );
+    assert!(observed.snapshot().system.processing.is_none());
 }
 
 #[test]
@@ -2024,7 +2047,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
 
 #[test]
 fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
-    use crate::model::{ClientSnapshot, MediaTaskOwner, ProcessingAudition};
+    use crate::model::{MediaTaskOwner, ProcessingAudition};
     let audition = ProcessingAudition {
         id: 17,
         output: None,
@@ -2048,8 +2071,9 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
     let WireResponse::State(response) = decode_response_frame(&encoded[4..]).unwrap() else {
         panic!("expected state");
     };
-    let mut snapshot = ClientSnapshot::default();
-    state_response(response).apply_to(&mut snapshot);
+    let mut observed = crate::response::ObservedState::new(1);
+    observed.apply(1, state_response(response));
+    let snapshot = observed.snapshot();
     assert_eq!(snapshot.source_generation, 43);
     assert_eq!(snapshot.processing_audition, Some(audition));
     assert_eq!(snapshot.system.scan_owner, Some(MediaTaskOwner::Playlist));

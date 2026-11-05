@@ -20,7 +20,7 @@ fn initialize_with_pending_devices(
     core.executor = tasks.handle.clone();
     core.workers = tasks.workers.clone();
     core._test_tasks = Some(tasks);
-    Arc::make_mut(&mut core.state.configuration.config).ffmpeg_enabled = false;
+    edit_preferences(&mut core, |config| config.ffmpeg_enabled = false);
     let (release, released) = bounded(1);
     let (started, entered) = bounded(1);
     let (initialized, ready) = bounded(1);
@@ -51,7 +51,7 @@ fn startup_device_enumeration_keeps_restored_queue_queries_available() {
     let (core, release, retired) = initialize_with_pending_devices(core);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.current_track().unwrap().id, 2);
-    assert!(!core.queue_projection_stale);
+    assert!(!core.transport.projection_stale);
     let (handle, control, worker, _) = navigation_runtime(core);
     let query = futures::executor::block_on(async {
         rivu_protocol::transport::timeout(
@@ -505,7 +505,7 @@ fn shutdown_retries_a_failed_runtime_selection_save() {
         )
         .unwrap();
     assert!(
-        core.start_with_status(3, false, PlaybackStatus::Stopped)
+        core.start_with_status(3, QueueHistory::Preserve, PlaybackStatus::Stopped)
             .is_err()
     );
     assert_eq!(core.state.queue.current_id, Some(3));

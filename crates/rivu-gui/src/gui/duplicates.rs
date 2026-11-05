@@ -1072,15 +1072,22 @@ impl Duplicates {
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
-            let ack = ack_handle.request_ack(command).await;
+            let delivery = ack_handle.request_ack(command).await;
+            let refreshed = matches!(
+                delivery.observation,
+                crate::frontend::CommandObservation::Refreshed
+            );
+            let ack = delivery.ack;
             let relocation_id = ack.relocation_id;
             let accepted = this
                 .update(cx, |this, cx| {
                     if !this.duplicate_review.accept_ack(epoch, independent, ack) {
                         return false;
                     }
-                    this.refresh_snapshot(cx);
-                    this.duplicate_review.finish_ack_refresh();
+                    if refreshed {
+                        this.refresh_snapshot(cx);
+                        this.duplicate_review.finish_ack_refresh();
+                    }
                     this.sync_duplicate_review(cx);
                     cx.notify();
                     true

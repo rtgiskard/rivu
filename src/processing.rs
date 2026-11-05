@@ -78,6 +78,27 @@ pub(crate) struct AudioOutputs {
     pub accompaniment: Option<audio::PcmAudio>,
 }
 
+/// Model inputs are independent from the enclosing processing operation/graph.
+pub(super) struct ModelRequest<'a> {
+    pub task_id: u64,
+    pub operation: ProcessingOperation,
+    pub input: &'a audio::PcmAudio,
+    pub config: &'a rivu_format::config::NeuralConfig,
+    pub budget: Arc<audio::PcmBudget>,
+    pub cancel: &'a AtomicBool,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct ModelProvenance {
+    pub id: Option<String>,
+    pub sha256: Option<String>,
+}
+
+pub(super) struct ModelOutcome {
+    pub provenance: ModelProvenance,
+    pub result: Result<AudioOutputs>,
+}
+
 pub(crate) struct GraphAudioContext {
     pub pcm: audio::PcmAudio,
     pub start_frame: i64,
@@ -106,6 +127,16 @@ impl ProcessingResult {
     }
 }
 pub(crate) enum Event {
+    Model {
+        id: u64,
+        provenance: ModelProvenance,
+    },
+    GraphPrepared {
+        id: u64,
+        mode: GraphExecutionMode,
+        boundary: Option<GraphPort>,
+        plan: Option<GraphPlanInfo>,
+    },
     GraphNode {
         id: u64,
         status: GraphNodeStatus,
@@ -136,8 +167,10 @@ pub(crate) struct Service {
     pub receiver: Receiver<Event>,
     active: Option<ActiveTask>,
     results: std::collections::VecDeque<ProcessingResult>,
+    current: Option<Arc<ProcessingTaskStatus>>,
+    history: std::collections::VecDeque<ProcessingTaskStatus>,
     next_id: u64,
-    audition: Option<(u64, u64)>,
+    audition: Option<(ProcessingAudition, u64)>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
     #[cfg(test)]
@@ -155,6 +188,8 @@ impl Service {
             receiver,
             active: None,
             results: Default::default(),
+            current: None,
+            history: Default::default(),
             next_id: 1,
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
@@ -199,37 +234,286 @@ impl Service {
         &self.results
     }
 
+    pub(crate) fn current_projection(&self) -> Option<Arc<ProcessingTaskStatus>> {
+        self.current.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history(&self) -> &std::collections::VecDeque<ProcessingTaskStatus> {
+        &self.history
+    }
+
+    pub(crate) fn status(&self, id: u64) -> Option<&ProcessingTaskStatus> {
+        self.current
+            .as_deref()
+            .filter(|status| status.id == id)
+            .or_else(|| self.history.iter().find(|status| status.id == id))
+            .or_else(|| {
+                self.results
+                    .iter()
+                    .find(|result| result.status.id == id)
+                    .map(|result| &result.status)
+            })
+    }
+
+    fn accept_status(&mut self, status: ProcessingTaskStatus) {
+        self.current = Some(Arc::new(status));
+        self.refresh_availability();
+    }
+
+    pub(crate) fn progress(
+        &mut self,
+        id: u64,
+        completed: u64,
+        total: Option<u64>,
+        phase: ProcessingPhase,
+    ) {
+        if self.active_id() == Some(id)
+            && let Some(status) = self.current.as_mut().filter(|status| status.id == id)
+            && (status.completed != completed || status.total != total || status.phase != phase)
+        {
+            let status = Arc::make_mut(status);
+            status.completed = completed;
+            status.total = total;
+            status.phase = phase;
+        }
+    }
+
+    pub(crate) fn node_status(&mut self, id: u64, node: GraphNodeStatus) {
+        if self.active_id() == Some(id)
+            && let Some(status) = self.current.as_mut().filter(|status| status.id == id)
+            && status
+                .graph_nodes
+                .iter()
+                .any(|entry| entry.node == node.node && *entry != node)
+        {
+            let status = Arc::make_mut(status);
+            if let Some(existing) = status
+                .graph_nodes
+                .iter_mut()
+                .find(|entry| entry.node == node.node)
+            {
+                *existing = node;
+            }
+        }
+    }
+
+    pub(crate) fn graph_prepared(
+        &mut self,
+        id: u64,
+        mode: GraphExecutionMode,
+        boundary: Option<GraphPort>,
+        plan: Option<GraphPlanInfo>,
+    ) {
+        if self.active_id() == Some(id)
+            && let Some(status) = self.current.as_mut().filter(|status| status.id == id)
+            && (status.settings.graph_mode != Some(mode)
+                || status.settings.graph_boundary != boundary
+                || status.graph_plan != plan)
+        {
+            let status = Arc::make_mut(status);
+            status.settings.graph_mode = Some(mode);
+            status.settings.graph_boundary = boundary;
+            status.graph_plan = plan;
+        }
+    }
+
+    pub(crate) fn model_provenance(&mut self, id: u64, provenance: ModelProvenance) {
+        if self.active_id() == Some(id)
+            && let Some(status) = self.current.as_mut().filter(|status| status.id == id)
+            && (status.model_id != provenance.id || status.model_sha256 != provenance.sha256)
+        {
+            let status = Arc::make_mut(status);
+            status.model_id = provenance.id;
+            status.model_sha256 = provenance.sha256;
+        }
+    }
+
+    pub(crate) fn outcome(&mut self, id: u64, phase: ProcessingPhase, error: Option<String>) {
+        if let Some(status) = self.current.as_mut().filter(|status| status.id == id) {
+            if status.phase == phase && status.error == error {
+                return;
+            }
+            let status = Arc::make_mut(status);
+            status.phase = phase;
+            status.error = error;
+        }
+    }
+
+    pub(crate) fn retain_terminal(&mut self, id: u64) {
+        let Some(status) = self.current.as_deref().filter(|status| status.id == id) else {
+            return;
+        };
+        Self::record_terminal(&mut self.results, &mut self.history, status);
+    }
+
+    fn record_terminal(
+        results: &mut std::collections::VecDeque<ProcessingResult>,
+        history: &mut std::collections::VecDeque<ProcessingTaskStatus>,
+        status: &ProcessingTaskStatus,
+    ) {
+        if let Some(result) = results
+            .iter_mut()
+            .find(|result| result.status.id == status.id)
+        {
+            result.status.phase = status.phase;
+            result.status.error.clone_from(&status.error);
+            if result.status.graph_nodes != status.graph_nodes {
+                result.status.graph_nodes.clone_from(&status.graph_nodes);
+            }
+        }
+        if let Some(retained) = history.iter_mut().find(|retained| retained.id == status.id) {
+            retained.clone_from(status);
+        } else {
+            history.push_back(status.clone());
+            while history.len() > 32 {
+                history.pop_front();
+            }
+        }
+    }
+
+    /// Derive availability only where the resource owner changes its directory.
+    /// Publication merely clones the already prepared Arc.
+    fn refresh_availability(&mut self) {
+        fn availability(
+            result: Option<&ProcessingResult>,
+            status: &ProcessingTaskStatus,
+        ) -> (Option<ProcessingOutputs>, bool) {
+            let outputs = result.and_then(|result| {
+                let outputs = ProcessingOutputs {
+                    denoised: result.outputs.denoised.is_some(),
+                    vocals: result.outputs.vocals.is_some(),
+                    accompaniment: result.outputs.accompaniment.is_some(),
+                };
+                (outputs.denoised || outputs.vocals || outputs.accompaniment).then_some(outputs)
+            });
+            let graph_matches = result.map_or(status.graph_outputs.is_empty(), |result| {
+                status.graph_outputs.len() == result.graph_outputs.len()
+                    && status.graph_outputs.iter().zip(&result.graph_outputs).all(
+                        |(published, (port, output))| {
+                            published.port == *port
+                                && published
+                                    .context
+                                    .as_ref()
+                                    .map(|context| context.start_frame)
+                                    == output.context.as_ref().map(|context| context.start_frame)
+                        },
+                    )
+            });
+            (outputs, graph_matches)
+        }
+        fn project(
+            result: Option<&ProcessingResult>,
+            status: &mut ProcessingTaskStatus,
+            outputs: Option<ProcessingOutputs>,
+            graph_matches: bool,
+        ) {
+            status.outputs = outputs;
+            if !graph_matches {
+                status.graph_outputs = result
+                    .into_iter()
+                    .flat_map(|result| &result.graph_outputs)
+                    .map(|(port, output)| GraphNodeOutput {
+                        port: *port,
+                        context: output.context.as_ref().map(|context| GraphOutputContext {
+                            start_frame: context.start_frame,
+                        }),
+                    })
+                    .collect();
+            }
+        }
+        if let Some(current) = &mut self.current {
+            let retained = self
+                .results
+                .iter()
+                .find(|result| result.status.id == current.id);
+            let (outputs, graph_matches) = availability(retained, current);
+            if current.outputs != outputs || !graph_matches {
+                project(retained, Arc::make_mut(current), outputs, graph_matches);
+            }
+        }
+        for status in &mut self.history {
+            let retained = self
+                .results
+                .iter()
+                .find(|result| result.status.id == status.id);
+            let (outputs, graph_matches) = availability(retained, status);
+            project(retained, status, outputs, graph_matches);
+        }
+    }
+
     /// Keep the selected audio pinned until Core commits another audio source.
     pub(crate) fn select_audition(&mut self, selection: Option<(u64, u64)>) {
-        self.audition = selection;
+        self.audition = selection.map(|(id, generation)| {
+            (
+                ProcessingAudition {
+                    id,
+                    output: None,
+                    mode: None,
+                },
+                generation,
+            )
+        });
+    }
+
+    pub(crate) fn select_graph_audition(
+        &mut self,
+        id: u64,
+        generation: u64,
+        output: GraphPort,
+        mode: GraphExecutionMode,
+    ) {
+        self.audition = Some((
+            ProcessingAudition {
+                id,
+                output: Some(output),
+                mode: Some(mode),
+            },
+            generation,
+        ));
+    }
+
+    pub(crate) fn audition_projection(&self) -> Option<ProcessingAudition> {
+        self.audition.map(|(selection, _)| selection)
     }
 
     pub(crate) fn audition_id(&self) -> Option<u64> {
-        self.audition.map(|(id, _)| id)
+        self.audition.map(|(selection, _)| selection.id)
     }
 
     pub(crate) fn audition_selected(&self, id: u64, generation: u64) -> bool {
-        self.audition == Some((id, generation))
+        self.audition
+            .is_some_and(|(selection, selected_generation)| {
+                selection.id == id && selected_generation == generation
+            })
     }
 
-    /// Retention and retirement are one operation; Core publishes eviction effects.
-    pub(crate) fn retain_result(&mut self, result: Box<ProcessingResult>) -> Option<u64> {
+    /// A successful render/export is committed before optional playback admission.
+    /// Later audition failure changes its operation receipt, never its resources.
+    pub(crate) fn accept_result(&mut self, result: Box<ProcessingResult>) {
+        let status = result.status.clone();
+        if result.retains_audio() {
+            self.retain_result(result);
+        } else {
+            self.retire(result);
+        }
+        self.accept_status(status);
+    }
+
+    /// Retention, eviction and projection are one resource-owner transition.
+    fn retain_result(&mut self, result: Box<ProcessingResult>) {
         debug_assert!(result.retains_audio());
-        let evicted = if self.results.len() >= 4 {
+        if self.results.len() >= 4 {
             let index = self
                 .results
                 .iter()
                 .position(|result| Some(result.status.id) != self.audition_id())
                 .expect("only one retained result can be pinned");
             let result = self.results.remove(index).unwrap();
-            let id = result.status.id;
             self.retire(Box::new(result));
-            Some(id)
-        } else {
-            None
-        };
+        }
         self.results.push_back(*result);
-        evicted
+        self.refresh_availability();
     }
 
     pub(crate) fn take_graph_runner(&mut self, id: u64) -> Option<audio::GraphRunner> {
@@ -251,17 +535,15 @@ impl Service {
         }
     }
 
-    pub(crate) fn stop_live_audition(&mut self, id: u64) -> Option<&ProcessingTaskStatus> {
-        let result = self
-            .results
-            .iter_mut()
-            .find(|result| result.status.id == id)?;
-        let status = &mut result.status;
+    pub(crate) fn stop_live_audition(&mut self, id: u64) {
+        let Some(mut status) = self.status(id).cloned() else {
+            return;
+        };
         if !matches!(
             status.settings.graph_mode,
             Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
         ) {
-            return None;
+            return;
         }
         status.phase = ProcessingPhase::Cancelled;
         status.error = Some("Live audition stopped".into());
@@ -270,18 +552,15 @@ impl Service {
                 node.phase = ProcessingPhase::Cancelled;
             }
         }
-        Some(status)
-    }
-
-    /// Update the outcome without replacing the frozen recipe or retained audio.
-    pub(crate) fn record_outcome(&mut self, status: &ProcessingTaskStatus) {
-        if let Some(result) = self
-            .results
-            .iter_mut()
-            .find(|result| result.status.id == status.id)
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.id == id)
         {
-            result.status.phase = status.phase;
-            result.status.error.clone_from(&status.error);
+            self.accept_status(status);
+            self.retain_terminal(id);
+        } else {
+            Self::record_terminal(&mut self.results, &mut self.history, &status);
         }
     }
     pub fn start(
@@ -290,7 +569,7 @@ impl Service {
         config: Arc<Config>,
         operation: ProcessingOperation,
         profile: Option<NoiseSelection>,
-    ) -> Result<ProcessingTaskStatus> {
+    ) -> Result<u64> {
         ensure!(
             operation != ProcessingOperation::Graph,
             "Use ProcessingGraphRun with an explicit target"
@@ -302,7 +581,7 @@ impl Service {
         track: Track,
         config: Arc<Config>,
         request: GraphRequest,
-    ) -> Result<ProcessingTaskStatus> {
+    ) -> Result<u64> {
         config.processing_graph.ancestors(request.target)?;
         self.start_request(
             track,
@@ -319,7 +598,7 @@ impl Service {
         operation: ProcessingOperation,
         profile: Option<NoiseSelection>,
         request: Option<GraphRequest>,
-    ) -> Result<ProcessingTaskStatus> {
+    ) -> Result<u64> {
         let (target, mode, export_path, cached_output, source_run) = if let Some(request) = request
         {
             (
@@ -383,7 +662,8 @@ impl Service {
                 profile,
                 graph: target.map(|_| config.processing_graph.clone()),
                 graph_target: target,
-                graph_mode: target.map(|_| mode),
+                graph_requested_mode: target.map(|_| mode),
+                graph_mode: None,
                 graph_boundary: None,
                 graph_export_path: export_path,
             },
@@ -486,7 +766,8 @@ impl Service {
             cancelled,
             worker,
         });
-        Ok(status)
+        self.accept_status(status);
+        Ok(id)
     }
     pub fn cancel(&self, id: u64) -> Result<()> {
         let task = self
@@ -537,7 +818,7 @@ impl Service {
             return;
         };
         for result in &mut self.results {
-            if Some(result.status.id) == self.audition.map(|(id, _)| id) {
+            if Some(result.status.id) == self.audition.map(|(selection, _)| selection.id) {
                 continue;
             }
             let outputs = std::mem::take(&mut result.outputs);
@@ -556,6 +837,7 @@ impl Service {
                 reclaimer.release_audio(outputs, graph_outputs, mix, runner);
             }
         }
+        self.refresh_availability();
     }
     pub fn retire_pcm(&self, pcm: audio::PcmAudio) {
         self.reclaimer
@@ -615,6 +897,7 @@ impl Service {
             .accompaniment
             .clone()
             .context("No accompaniment stem")?;
+        let mut status = result.status.clone();
         let budget = Arc::clone(&self.budget);
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = Arc::clone(&cancelled);
@@ -678,6 +961,9 @@ impl Service {
             cancelled,
             worker,
         });
+        status.phase = ProcessingPhase::Processing;
+        status.error = None;
+        self.accept_status(status);
         Ok(())
     }
 }

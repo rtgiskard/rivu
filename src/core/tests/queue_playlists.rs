@@ -65,7 +65,7 @@ fn playlist_catalog_moves_change_only_catalog_order_and_its_revision() {
         .unwrap();
     }
     pending(&mut core, 3);
-    core.record_queue_history(3);
+    core.transport.record_history(3);
     let audio = recording_audio(&mut core);
     core.publish();
     let initial = core.state.clone();
@@ -363,7 +363,7 @@ fn indexed_playlist_sources_and_after_moves_update_only_the_target_projection() 
 fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_intents() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 3);
-    core.record_queue_history(3);
+    core.transport.record_history(3);
     let audio = recording_audio(&mut core);
     let revision = core.state.queue.revision;
     core.command(Command::InsertQueue {
@@ -383,7 +383,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
     assert_eq!(core.state.queue.current_position, Some(5));
     assert_eq!(core.state.current_track().unwrap().id, 2);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.played, [3]);
+    assert_eq!(core.transport.history, [3]);
     assert_eq!(core.state.queue.revision, revision + 1);
     let state = core.state.queue.clone();
     let ids = core.store.queue_ids().unwrap();
@@ -1477,7 +1477,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     let key = rivu_protocol::model::AlbumKey {
         directory: directory.path().into(),
         title: "Large".into(),
@@ -1531,7 +1531,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         Some(core.store.queue_id_at(0).unwrap().unwrap())
     );
     let queue = core.store.queue_ids().unwrap();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let current_id = core.state.queue.current_id;
     let playback_status = core.state.playback.status;
     for title in ["Absent", "", " \t\r\n", "\u{a0}\u{2003}\u{202f}\u{3000}"] {
@@ -1545,7 +1545,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         ] {
             assert!(core.command(command).is_err());
             assert_eq!(core.store.queue_ids().unwrap(), queue);
-            assert_eq!(core.generation, generation);
+            assert_eq!(core.transport.generation, generation);
             assert_eq!(core.state.queue.current_id, current_id);
             assert_eq!(core.state.playback.status, playback_status);
         }
@@ -1756,11 +1756,11 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
 fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     playing(&mut core, 3);
-    core.played = vec![1, 3, 5];
-    core.played_cursor = 2;
+    core.transport.history = vec![1, 3, 5];
+    core.transport.history_cursor = 2;
     let order = core.store.queue_ids().unwrap();
     let state = core.state.queue.clone();
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
@@ -1782,10 +1782,10 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         assert_eq!(core.store.queue_ids().unwrap(), order);
         assert_eq!(core.state.queue, state);
         assert_queue_saved(&core);
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-        assert_eq!(core.played, [1, 3, 5]);
-        assert_eq!(core.played_cursor, 2);
+        assert_eq!(core.transport.history, [1, 3, 5]);
+        assert_eq!(core.transport.history_cursor, 2);
     }
 }
 
@@ -1794,9 +1794,9 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     let (_directory, mut core) = fixture();
     playing(&mut core, 3);
     progress(&mut core, 1.5, 1.5);
-    core.played = vec![1, 3, 5];
-    core.played_cursor = 2;
-    let generation = core.generation;
+    core.transport.history = vec![1, 3, 5];
+    core.transport.history_cursor = 2;
+    let generation = core.transport.generation;
     let before = queue_entries(&core);
     for command in [
         Command::MoveQueueEntries {
@@ -1813,7 +1813,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     ] {
         assert!(core.command(command).is_err());
         assert_eq!(queue_entries(&core), before);
-        assert_eq!(core.generation, generation);
+        assert_eq!(core.transport.generation, generation);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     }
     core.command(Command::MoveQueueEntries {
@@ -1827,8 +1827,8 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     );
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(2));
-    assert_eq!(core.generation, generation);
-    assert_eq!(core.played, [1, 3, 5]);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.transport.history, [1, 3, 5]);
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![1, 3, 5],
         index: usize::MAX,
@@ -1842,9 +1842,9 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
         queue_ids: vec![1, 1],
     })
     .unwrap();
-    assert_eq!(core.generation, generation);
-    assert_eq!(core.played, [3, 5]);
-    assert_eq!(core.played_cursor, 1);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.transport.history, [3, 5]);
+    assert_eq!(core.transport.history_cursor, 1);
     core.command(Command::RemoveQueueEntries {
         queue_ids: vec![3, 3],
     })
@@ -1864,16 +1864,16 @@ fn dedup_preserves_playing_duplicate_identity_at_first_position_and_prunes_histo
     })
     .unwrap();
     playing(&mut core, 3);
-    core.played = vec![1, 2, 4, 3, 2, 5];
-    core.played_cursor = 4;
-    let generation = core.generation;
+    core.transport.history = vec![1, 2, 4, 3, 2, 5];
+    core.transport.history_cursor = 4;
+    let generation = core.transport.generation;
     core.command(Command::DeduplicateQueue).unwrap();
     assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(1));
-    assert_eq!(core.played, [1, 4, 3, 5]);
-    assert_eq!(core.played_cursor, 3);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.history, [1, 4, 3, 5]);
+    assert_eq!(core.transport.history_cursor, 3);
+    assert_eq!(core.transport.generation, generation);
     assert_queue_saved(&core);
 }
 
@@ -1882,9 +1882,9 @@ fn randomize_changes_order_without_changing_current_or_history() {
     use rand::SeedableRng;
     let (_directory, mut core) = fixture();
     playing(&mut core, 3);
-    core.played = vec![1, 3, 5];
-    core.played_cursor = 2;
-    let generation = core.generation;
+    core.transport.history = vec![1, 3, 5];
+    core.transport.history_cursor = 2;
+    let generation = core.transport.generation;
     let original = core.store.queue_ids().unwrap();
     core.randomize_queue(&mut rand::rngs::StdRng::seed_from_u64(42))
         .unwrap();
@@ -1896,9 +1896,9 @@ fn randomize_changes_order_without_changing_current_or_history() {
     expected.sort_unstable();
     assert_eq!(actual, expected);
     assert_eq!(core.state.queue.current_id, Some(3));
-    assert_eq!(core.played, [1, 3, 5]);
-    assert_eq!(core.played_cursor, 2);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.history, [1, 3, 5]);
+    assert_eq!(core.transport.history_cursor, 2);
+    assert_eq!(core.transport.generation, generation);
 }
 
 #[test]
@@ -2162,25 +2162,32 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     pending(&mut core, 1);
-    let source = core.playback.as_ref().unwrap().source.as_ref().unwrap();
+    let source = core
+        .transport
+        .session
+        .as_ref()
+        .unwrap()
+        .source
+        .as_ref()
+        .unwrap();
     let source_facts = (
         source.0.id,
         source.0.path.clone(),
         source.0.file_size,
         source.0.modified_ns,
     );
-    core.played = vec![1, 2, 3, 4, 5];
-    core.played_cursor = 4;
+    core.transport.history = vec![1, 2, 3, 4, 5];
+    core.transport.history_cursor = 4;
     let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
-    let generation = core.generation;
+    let generation = core.transport.generation;
     let revision = core.state.queue.revision;
     let commands = recording_audio(&mut core);
     assert!(core.ensure_queue_control_ready().is_err());
-    assert!(core.queue_projection_stale);
-    assert_eq!(core.played, [1, 4, 5]);
-    assert_eq!(core.played_cursor, 2);
+    assert!(core.transport.projection_stale);
+    assert_eq!(core.transport.history, [1, 4, 5]);
+    assert_eq!(core.transport.history_cursor, 2);
     repair_queue_scalar(&connection);
     connection
         .execute_batch("UPDATE tracks SET channels='unreadable' WHERE id=1;")
@@ -2189,23 +2196,30 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     // Evict the surviving track so recovery actually decodes the corrupt row.
     core.store.invalidate_caches();
     assert!(core.ensure_queue_control_ready().is_err());
-    assert!(core.queue_projection_stale);
+    assert!(core.transport.projection_stale);
     assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
-    assert_eq!(core.played, [1, 4, 5]);
-    assert_eq!(core.played_cursor, 2);
+    assert_eq!(core.transport.history, [1, 4, 5]);
+    assert_eq!(core.transport.history_cursor, 2);
     connection
         .execute_batch("UPDATE tracks SET channels=2 WHERE id=1;")
         .unwrap();
     core.ensure_queue_control_ready().unwrap();
-    assert!(!core.queue_projection_stale);
+    assert!(!core.transport.projection_stale);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.state.current_track().unwrap().id, 1);
     assert_eq!(core.state.queue.revision, revision);
-    assert_eq!(core.generation, generation);
+    assert_eq!(core.transport.generation, generation);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.playback.as_ref().unwrap().track_id, 1);
-    let source = core.playback.as_ref().unwrap().source.as_ref().unwrap();
+    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 1);
+    let source = core
+        .transport
+        .session
+        .as_ref()
+        .unwrap()
+        .source
+        .as_ref()
+        .unwrap();
     assert_eq!(
         (
             source.0.id,
@@ -2233,7 +2247,7 @@ fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     core.command(Command::Stop).unwrap();
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert!(core.queue_projection_stale);
+    assert!(core.transport.projection_stale);
 }
 
 #[test]
@@ -2343,9 +2357,9 @@ fn removal_projection_failure_recovers_two_entry_position_and_shuffle_history() 
         core.state.queue.current_id = Some(4);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
-        core.state.playback.shuffle = shuffle;
-        core.played = vec![3, 1, 2, 4];
-        core.played_cursor = 4;
+        edit_preferences(&mut core, |config| config.shuffle = shuffle);
+        core.transport.history = vec![3, 1, 2, 4];
+        core.transport.history_cursor = 4;
         let connection = fail_queue_projection_after(directory.path(), "DELETE");
         let _commands = recording_audio(&mut core);
         assert!(
@@ -2361,8 +2375,8 @@ fn removal_projection_failure_recovers_two_entry_position_and_shuffle_history() 
         assert_eq!(core.state.queue.current_id, Some(3));
         assert_eq!(core.state.queue.current_position, Some(0));
         assert_eq!(core.state.queue.total, 2);
-        assert!(!core.played.contains(&1));
-        assert!(!core.played.contains(&2));
+        assert!(!core.transport.history.contains(&1));
+        assert!(!core.transport.history.contains(&2));
         assert_queue_saved(&core);
     }
 }
@@ -2380,14 +2394,14 @@ fn delayed_queue_projection_preserves_pending_selection_at_its_committed_positio
     ).unwrap();
     core.state.queue.current_id = Some(3);
     assert!(core.save_queue().is_err());
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
     core.store.reorder_queue(&[5, 3, 1, 2, 4]).unwrap();
     core.accept_queue_projection(delayed).unwrap();
-    assert!(!core.queue_current_pending);
-    assert!(!core.queue_projection_stale);
+    assert!(!core.transport.selection_pending);
+    assert!(!core.transport.projection_stale);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(1));
     assert_queue_saved(&core);
@@ -2405,7 +2419,7 @@ fn committed_append_scalar_failure_recovers_without_replaying_insertion() {
             .is_err()
     );
     assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
-    assert!(core.queue_projection_stale);
+    assert!(core.transport.projection_stale);
     let commands = recording_audio(&mut core);
     assert!(core.navigate(Navigation::Previous).is_err());
     assert!(commands.try_recv().is_err());
@@ -2415,5 +2429,21 @@ fn committed_append_scalar_failure_recovers_without_replaying_insertion() {
     assert_eq!(core.state.queue.current_id, Some(5));
     assert_eq!(core.state.queue.current_position, Some(4));
     assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
+    assert_queue_saved(&core);
+}
+
+#[test]
+fn delayed_projection_cannot_replace_a_selection_already_saved_after_its_read() {
+    let (_directory, mut core) = fixture();
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
+    let delayed = core.store.queue_projection(core.state.queue.revision);
+    core.start_with_status(3, QueueHistory::Record, PlaybackStatus::Stopped)
+        .unwrap();
+    assert!(!core.transport.selection_pending);
+    core.accept_queue_projection(delayed).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.queue.current_position, Some(2));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
     assert_queue_saved(&core);
 }

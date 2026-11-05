@@ -684,7 +684,6 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
             .style(Style::default().fg(colors.secondary)),
         rows[1],
     );
-    ui.page_size = inner.height.max(1) as usize;
     let width = inner.width as usize;
     if ui.help_layout.as_ref().is_none_or(|layout| {
         layout.context != context
@@ -802,6 +801,39 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     draw_cached_lines(frame, inner, lines, ui.help_scroll);
 }
 
+fn page_layout(area: Rect) -> [Rect; 4] {
+    let area = area.inner(ratatui::layout::Margin::new(1, 0));
+    let spacing = u16::from(area.height >= 16);
+    Layout::vertical([
+        Constraint::Length(1 + spacing),
+        Constraint::Min(1),
+        Constraint::Length(2 + spacing),
+        Constraint::Length(2),
+    ])
+    .areas(area)
+}
+
+pub(super) fn commit_layout(area: Rect, ui: &mut UiState) {
+    if ui.details_active || ui.show_help {
+        ui.page_size = area.height.saturating_sub(2).max(1) as usize;
+        return;
+    }
+    let rows = page_layout(area)[1].height.saturating_sub(1).max(1) as usize;
+    commit_page_viewport(ui, rows);
+}
+
+fn commit_page_viewport(ui: &mut UiState, rows: usize) {
+    ui.page_size = rows;
+    match &mut ui.view {
+        View::Queue => ui.queue.set_viewport(rows),
+        View::LibraryResults(page) => page.set_viewport(rows),
+        View::Tree(tree) => tree.entries.set_viewport(rows),
+        View::Playlists(page) => page.set_viewport(rows),
+        View::PlaylistDetail { detail, .. } => detail.entries.set_viewport(rows),
+        View::Recent(recent) => recent.entries.set_viewport(rows),
+    }
+}
+
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let colors = TerminalColors::new(state.system.ui_theme);
     let area = frame.area();
@@ -811,7 +843,6 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     );
     if ui.details_active {
         draw_details(frame, area, &mut ui.details, &ui.i18n, colors);
-        ui.page_size = area.height.saturating_sub(2).max(1) as usize;
         return;
     }
     if ui.show_help {
@@ -820,13 +851,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     }
     let area = area.inner(ratatui::layout::Margin::new(1, 0));
     let spacing = u16::from(area.height >= 16);
-    let outer = Layout::vertical([
-        Constraint::Length(1 + spacing),
-        Constraint::Min(1),
-        Constraint::Length(2 + spacing),
-        Constraint::Length(2),
-    ])
-    .split(area);
+    let outer = page_layout(frame.area());
     if spacing != 0 {
         frame.render_widget(
             Block::default()
@@ -1523,7 +1548,6 @@ fn draw_paged_list<T>(
         area.width.saturating_sub(2),
         area.height,
     );
-    page.set_viewport(area.height.saturating_sub(1) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
     let title = if loading {
@@ -1697,7 +1721,6 @@ fn draw_current_page(
 ) {
     let i18n = &ui.i18n;
     let list_area = area;
-    ui.page_size = list_area.height.saturating_sub(1).max(1) as usize;
     match &mut ui.view {
         View::LibraryResults(results) => draw_paged_list(
             frame,

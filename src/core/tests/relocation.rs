@@ -39,7 +39,7 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     let known = core
         .store
         .stored_scan_files(&[directory.path().to_path_buf()])
@@ -62,7 +62,7 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
             ..ScanResult::default()
         })
         .unwrap();
-    core.apply_scan_impacts(impacts).unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
     assert!(core.track(source).unwrap().missing);
     (directory, core, source, target)
 }
@@ -306,7 +306,7 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
                 ..ScanResult::default()
             })
             .unwrap();
-        core.apply_scan_impacts(impacts).unwrap();
+        core.apply_catalog_changes(impacts).unwrap();
         if change_source {
             let impacts = core
                 .store
@@ -315,7 +315,7 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
                     ..ScanResult::default()
                 })
                 .unwrap();
-            core.apply_scan_impacts(impacts).unwrap();
+            core.apply_catalog_changes(impacts).unwrap();
         }
         core.relocation_event(event);
         assert_eq!(

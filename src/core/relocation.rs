@@ -179,7 +179,7 @@ impl VerifiedTarget {
 impl Core {
     fn require_relocation_playback_idle(&self, source_id: i64, target_id: i64) -> Result<()> {
         ensure!(
-            !self.playback.as_ref().is_some_and(
+            !self.transport.session.as_ref().is_some_and(
                 |playback| playback.track_id == source_id || playback.track_id == target_id
             ),
             "Stop playback of the old file and target before relocating"
@@ -210,7 +210,7 @@ impl Core {
             "A relocation verification is already running"
         );
         self.require_relocation_playback_idle(source_id, target_id)?;
-        if self.retired_playback.as_ref().is_some_and(|retired| {
+        if self.transport.retired.as_ref().is_some_and(|retired| {
             retired.stats.track_id == source_id || retired.stats.track_id == target_id
         }) {
             self.flush_deferred_playback()?;
@@ -311,7 +311,7 @@ impl Core {
                 Ok(impacts) => {
                     task.status.phase = RelocationPhase::Completed;
                     // The transaction is committed even if projection refresh fails.
-                    if let Err(error) = self.apply_scan_impacts(impacts) {
+                    if let Err(error) = self.apply_catalog_changes(impacts) {
                         task.status.error = Some(format!(
                             "Relocation committed; refreshing views failed; some projections may be stale: {error:#}"
                         ));

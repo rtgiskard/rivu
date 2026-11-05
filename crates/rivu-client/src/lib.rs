@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn selective_configuration_reads_survive_reconnect_and_reject_new_instance() {
-        use rivu_protocol::model::{ClientSnapshot, ConfigurationState, SystemState};
+        use rivu_protocol::model::{ConfigurationState, SystemState};
         use std::os::unix::net::UnixListener;
 
         fn response(
@@ -1166,38 +1166,52 @@ mod tests {
         let mut client = client_session(directory.path()).unwrap();
         let first = client.get_state(StateSections::ALL).unwrap();
         client.bind_instance(1).unwrap();
-        let mut snapshot = ClientSnapshot::default();
-        let mut applied = StateRevisions::default();
-        applied.apply_sections(first.revisions, first.sections());
-        first.apply_to(&mut snapshot);
-        let retained = Arc::clone(&snapshot.configuration.config);
+        let mut observed = rivu_protocol::response::ObservedState::new(1);
+        assert!(observed.apply(1, first));
+        let retained = Arc::clone(&observed.snapshot().configuration.config);
         let update = client.get_state(runtime).unwrap();
         assert!(update.configuration.is_none());
-        applied.apply_sections(update.revisions, update.sections());
-        update.apply_to(&mut snapshot);
-        assert!(Arc::ptr_eq(&retained, &snapshot.configuration.config));
+        assert!(observed.apply(1, update));
+        assert!(Arc::ptr_eq(
+            &retained,
+            &observed.snapshot().configuration.config
+        ));
         assert_eq!(
-            client.watch(applied.into()).unwrap().changed_since(applied),
+            client
+                .watch(observed.applied().into())
+                .unwrap()
+                .changed_since(observed.applied()),
             configuration
         );
         assert!(client.get_state(configuration).is_err());
         assert_eq!(client.instance_id(), None);
-        assert_eq!(snapshot.configuration.config.query_batch_size, 37);
-        assert_eq!(applied.configuration, 1);
+        assert_eq!(
+            observed.snapshot().configuration.config.query_batch_size,
+            37
+        );
+        assert_eq!(observed.applied().configuration, 1);
 
         let update = client.get_state(configuration).unwrap();
         assert_eq!(client.instance_id(), Some(1));
         assert_eq!(update.sections(), configuration);
-        applied.apply_sections(update.revisions, update.sections());
-        update.apply_to(&mut snapshot);
-        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
-        assert_eq!(snapshot.system.last_error.as_deref(), Some("runtime 2"));
-        assert_eq!(latest.changed_since(applied), runtime);
+        assert!(observed.apply(1, update));
+        assert_eq!(
+            observed.snapshot().configuration.config.query_batch_size,
+            91
+        );
+        assert_eq!(
+            observed.snapshot().system.last_error.as_deref(),
+            Some("runtime 2")
+        );
+        assert_eq!(latest.changed_since(observed.applied()), runtime);
         client.disconnect();
         let error = client.get_state(configuration).unwrap_err();
         assert!(error.downcast_ref::<InstanceChanged>().is_some());
-        assert_eq!(snapshot.configuration.config.query_batch_size, 91);
-        assert_eq!(applied.configuration, 2);
+        assert_eq!(
+            observed.snapshot().configuration.config.query_batch_size,
+            91
+        );
+        assert_eq!(observed.applied().configuration, 2);
         assert_eq!(client.instance_id(), None);
         server.join().unwrap();
     }

@@ -43,7 +43,9 @@ pub(crate) use state::CoreState;
 
 mod runtime;
 use catalog::{MAX_RETAINED_SCAN_RESULTS, ScanEvent, ScanTask};
-use playback::{PlaybackSession, RetiredPlayback};
+#[cfg(test)]
+use playback::PlaybackSession;
+use playback::QueueHistory;
 use relocation::{RelocationFinished, RelocationTask};
 #[cfg(test)]
 use runtime::CompletionGuard;
@@ -393,27 +395,15 @@ struct Core {
     publication_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
     task_completions_pending: bool,
-    generation: u64,
+    transport: playback::PlaybackOwner,
     output_settings_request: u64,
     next_playlist_token: u64,
     database_unavailable: bool,
-    // Failed scalar/current-track refresh gates dependent controls until recovery.
-    queue_projection_stale: bool,
-    // A runtime selection must reach the database before accepting its projection.
-    queue_current_pending: bool,
-    playback: Option<PlaybackSession>,
-    // At most one playback can retire while database writes are excluded.
-    retired_playback: Option<RetiredPlayback>,
-    playback_write_deferred: bool,
-    playback_history_pending: bool,
-    pending_bitrate: Option<(u64, bool)>,
-    pending_navigation: Option<PlaybackStatus>,
     active_export: Option<export::ExportTask>,
     active_external_admission: Option<admission::ExternalAdmissionTask>,
     active_optimization: Option<maintenance::OptimizationTask>,
     processing: crate::processing::Service,
     pending_processing_audition: Option<(u64, u64)>,
-    processing_results: VecDeque<ProcessingTaskStatus>,
     scan_tx: mpsc::Sender<ScanEvent>,
     scan_rx: mpsc::Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
@@ -424,11 +414,7 @@ struct Core {
     active_relocation: Option<RelocationTask>,
     relocation_results: VecDeque<RelocationTaskStatus>,
     next_relocation_id: u64,
-    played: Vec<u64>,
-    // Number of history entries through the current (or just removed) entry.
-    played_cursor: usize,
-    saved_config: Option<Config>,
-    config_save_error: Option<String>,
+    preferences: settings::Preferences,
     #[cfg(test)]
     _test_tasks: Option<TaskRuntime>,
 }
@@ -467,14 +453,14 @@ impl Drop for Core {
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         // Any earlier startup read can fail before the queue projection is reached.
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
         for playlist_id in self.store.playlist_ids()? {
             self.advance_playlist_entry_revision(playlist_id);
         }
         self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
-        self.state.system.ffmpeg_status = if self.state.configuration.config.ffmpeg_enabled {
+        self.state.system.ffmpeg_status = if self.preferences.settings().ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
         } else {
             "disabled".to_owned()

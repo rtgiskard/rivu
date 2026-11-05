@@ -73,6 +73,13 @@ impl PcmControl {
             }
         }
     }
+    /// A notification hint, not a coherent capture identity. Each enabling
+    /// transition also notifies, so a concurrent false cannot lose progress.
+    pub(crate) fn wants_cursor_notification(&self) -> bool {
+        self.capture.load(Ordering::Acquire) & 1 != 0
+            && self.playback_active.load(Ordering::Acquire)
+            && self.visualization_enabled.load(Ordering::Acquire)
+    }
     pub fn set_enabled(&self, enabled: bool) {
         if self
             .capture
@@ -399,6 +406,30 @@ mod tests {
         let producer = control.audio_producer();
         let consumer = TestCapture::new(&control);
         (control, producer, consumer)
+    }
+
+    #[test]
+    fn cursor_notifications_resume_after_each_enabling_transition() {
+        let (control, _, _) = capture();
+        let updates = control.subscribe();
+        for gate in 0..3 {
+            match gate {
+                0 => control.set_enabled(false),
+                1 => control.set_playback_active(false),
+                _ => control.set_visualization_enabled(false),
+            }
+            assert!(!control.wants_cursor_notification());
+            while updates.try_recv().is_ok() {}
+            control.heard_frame.store(4096 + gate, Ordering::Release);
+            match gate {
+                0 => control.set_enabled(true),
+                1 => control.set_playback_active(true),
+                _ => control.set_visualization_enabled(true),
+            }
+            updates.try_recv().unwrap();
+            assert!(control.wants_cursor_notification());
+            assert_eq!(control.state().heard_frame, 4096 + gate);
+        }
     }
 
     #[test]

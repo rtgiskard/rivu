@@ -1050,28 +1050,32 @@ impl AudioProcessing {
         let graph_command = matches!(&command, Command::ProcessingGraphEdit { .. });
         cx.spawn(async move |this, cx| {
             let ack = handle.request_ack(command).await;
-            let success = ack.is_success();
+            let success = ack.ack.is_success();
+            let refreshed = matches!(
+                ack.observation,
+                crate::frontend::CommandObservation::Refreshed
+            );
+            let result = ack.observed_result();
             let _ = this.update(cx, |this, cx| {
                 this.pending = this.pending.saturating_sub(1);
                 this.command_active = false;
-                if !success {
-                    this.error = Some(ack.error.unwrap_or_else(|| {
-                        this.context
-                            .i18n
-                            .text("processing-command-failed")
-                            .to_owned()
-                    }));
+                if let Err(error) = result {
+                    this.error = Some(error);
                 }
-                this.finish_equalizer_command(success);
-                this.reconcile(this.context.snapshot(), cx);
+                if refreshed {
+                    this.finish_equalizer_command(success);
+                    this.reconcile(this.context.snapshot(), cx);
+                }
                 if graph_command {
-                    this.graph_ack(success, cx);
+                    this.graph_ack(success, refreshed, cx);
                 }
-                if success && let Some(submitted) = submitted {
-                    this.finish_parameter_fields(submitted, cx);
-                }
-                if let Some(field) = equalizer_field {
-                    this.finish_equalizer_field(field, success, cx);
+                if refreshed {
+                    if success && let Some(submitted) = submitted {
+                        this.finish_parameter_fields(submitted, cx);
+                    }
+                    if let Some(field) = equalizer_field {
+                        this.finish_equalizer_field(field, success, cx);
+                    }
                 }
                 this.dispatch_next(cx);
                 cx.notify();

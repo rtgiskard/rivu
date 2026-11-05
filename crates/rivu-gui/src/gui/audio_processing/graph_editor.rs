@@ -34,6 +34,7 @@ struct PendingEdit {
     equalizer_submitted: Option<super::equalizer_editor::NodeEqualizerSubmission>,
     equalizer_target: Option<u64>,
     accepted: bool,
+    observed: bool,
     select_after: Option<u64>,
 }
 
@@ -186,6 +187,7 @@ impl AudioProcessing {
         }
         if let Some(pending) = self.graph_editor.pending.as_ref()
             && pending.accepted
+            && pending.observed
             && revision > pending.before.revision
         {
             pending_completed = true;
@@ -302,30 +304,41 @@ impl AudioProcessing {
         }
     }
 
-    pub(super) fn graph_ack(&mut self, success: bool, cx: &mut Context<Self>) {
-        if !success {
-            if let Some(pending) = self.graph_editor.pending.take() {
-                if pending.before.revision != self.state.system.config.processing_graph.revision {
-                    self.graph_editor.undo.clear();
-                    self.graph_editor.redo.clear();
-                }
-                let error = self
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| self.tr("processing-command-failed").to_string());
-                for submitted in pending.submitted {
-                    if self.fields.contains_key(&submitted.key) {
-                        self.graph_editor
-                            .field_errors
-                            .insert(submitted.key, error.clone());
-                    }
-                }
-                if let Some(submission) = pending.equalizer_submitted {
-                    self.finish_node_equalizer_submission(submission, false, cx);
+    pub(super) fn graph_ack(&mut self, success: bool, refreshed: bool, cx: &mut Context<Self>) {
+        if let Some(pending) = self.graph_editor.pending.as_mut() {
+            pending.accepted = success;
+            pending.observed = refreshed;
+        }
+        // Owner acceptance is retained even when no post-command read exists;
+        // only a fresh observation may settle drafts or edit history.
+        if !refreshed {
+            return;
+        }
+        if !success && let Some(pending) = self.graph_editor.pending.take() {
+            if pending.before.revision != self.state.system.config.processing_graph.revision {
+                self.graph_editor.undo.clear();
+                self.graph_editor.redo.clear();
+            }
+            let error = self
+                .error
+                .clone()
+                .unwrap_or_else(|| self.tr("processing-command-failed").to_string());
+            for submitted in pending.submitted {
+                if inspector::submission_current(
+                    self.graph_editor.draft_stamps.get(&submitted.key),
+                    &submitted,
+                    self.fields
+                        .get(&submitted.key)
+                        .map(|field| field.input.read(cx).text()),
+                ) {
+                    self.graph_editor
+                        .field_errors
+                        .insert(submitted.key, error.clone());
                 }
             }
-        } else if let Some(pending) = self.graph_editor.pending.as_mut() {
-            pending.accepted = true;
+            if let Some(submission) = pending.equalizer_submitted {
+                self.finish_node_equalizer_submission(submission, false, cx);
+            }
         }
         self.reconcile_graph(cx);
         self.reconcile_equalizers(cx);
@@ -374,6 +387,7 @@ impl AudioProcessing {
             equalizer_submitted,
             equalizer_target,
             accepted: false,
+            observed: false,
             select_after,
         });
         self.send(
@@ -1371,8 +1385,41 @@ mod tests {
             futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
                 expected_revision: revision,
                 edit: Box::new(GraphEdit::Replace { id: 3, kind }),
-            }));
+            }))
+            .ack;
         assert!(ack.is_success(), "{:?}", ack.error);
+    }
+
+    #[gpui::test]
+    fn accepted_graph_ack_without_fresh_read_cannot_settle_undo(cx: &mut TestAppContext) {
+        let (_directory, _runtime, processing, _window) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            let before = this.state.system.config.processing_graph.clone();
+            this.graph_editor.undo.push_back(before.clone());
+            this.graph_editor.pending = Some(PendingEdit {
+                before: before.clone(),
+                action: HistoryAction::Edit,
+                submitted: Vec::new(),
+                equalizer_submitted: None,
+                equalizer_target: None,
+                accepted: false,
+                observed: false,
+                select_after: None,
+            });
+            // A previously seen publication is not a post-command observation.
+            let mut state = (*this.state).clone();
+            Arc::make_mut(&mut state.system.config)
+                .processing_graph
+                .revision = before.revision + 1;
+            this.state = Rc::new(state);
+            this.graph_ack(true, false, cx);
+            this.reconcile_graph(cx);
+            let pending = this.graph_editor.pending.as_ref().unwrap();
+            assert!(pending.accepted);
+            assert!(!pending.observed);
+            assert_eq!(this.graph_editor.undo.len(), 1);
+            assert!(this.graph_editor.redo.is_empty());
+        });
     }
 
     #[gpui::test]
@@ -1719,7 +1766,8 @@ mod tests {
                     expected_revision: revision,
                     edit: Box::new(GraphEdit::Replace { id: 3, kind }),
                 },
-            ));
+            ))
+            .ack;
             assert!(ack.is_success(), "{:?}", ack.error);
             processing.update(cx, |this, cx| {
                 this.reconcile(this.context.snapshot(), cx);
@@ -1929,6 +1977,7 @@ mod tests {
                     profile: None,
                     graph: Some(config.processing_graph.clone()),
                     graph_target: None,
+                    graph_requested_mode: Some(GraphExecutionMode::Offline),
                     graph_mode: Some(GraphExecutionMode::Offline),
                     graph_boundary: None,
                     graph_export_path: None,

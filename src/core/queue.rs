@@ -2,19 +2,17 @@ use super::*;
 use anyhow::ensure;
 use rand::RngExt;
 
-const MAX_NAVIGATION_HISTORY: usize = 4096;
-
 impl Core {
     pub(in crate::core) fn advance_queue_revision(&mut self) {
         self.state.queue.revision = self.state.queue.revision.wrapping_add(1);
     }
 
     pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         self.refresh_queue_projection()?;
         // Track decoding is part of recovery too: a successful scalar read alone
         // must not reopen controls after a committed metadata mutation.
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         let track = self
             .state
             .queue
@@ -25,27 +23,89 @@ impl Core {
             .transpose()?
             .flatten();
         self.replace_current_track(track)?;
-        self.queue_projection_stale = false;
+        self.transport.projection_stale = false;
         Ok(())
     }
 
     pub(in crate::core) fn set_shuffle(&mut self, enabled: bool) {
-        if self.state.playback.shuffle == enabled {
+        if self.preferences.live().shuffle == enabled {
             return;
         }
-        self.state.playback.shuffle = enabled;
-        self.played.clear();
-        self.played_cursor = 0;
+        self.preferences.set_shuffle(enabled);
+        self.transport.reset_history();
         if let Some(id) = self.state.queue.current_id {
-            self.record_queue_history(id);
+            self.transport.record_history(id);
         }
     }
 
     // Runtime selection remains authoritative until its write succeeds. Queue
     // mutations commit independently and are never replayed by this recovery gate.
+    #[cfg(test)]
     pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
-        self.queue_current_pending = true;
+        self.transport.selection_pending = true;
         self.refresh_queue_projection()
+    }
+
+    pub(in crate::core) fn accept_loaded_occurrence(
+        &mut self,
+        queue_id: u64,
+        position: usize,
+        track: Arc<Track>,
+        status: PlaybackStatus,
+        history: QueueHistory,
+    ) -> Result<()> {
+        self.state.queue.current_id = Some(queue_id);
+        self.state.queue.current_position = Some(position);
+        self.state.playback.duration = track.duration;
+        self.state.current_track = Some(track);
+        self.state.playback.last_heard_at = None;
+        self.state.playback.status = status;
+        self.state.playback.stopped_source_generation = None;
+        self.state.system.last_error = None;
+        self.transport.select_occurrence(queue_id, history);
+        // Load admission is already confirmed. A rejected durable selection
+        // retains this occurrence and its listening source for later recovery.
+        self.refresh_queue_projection()
+    }
+
+    pub(in crate::core) fn queue_replaced(&mut self, changed: bool) -> Result<()> {
+        if changed {
+            self.advance_queue_revision();
+        }
+        self.transport.replace_occurrences();
+        self.state.queue.current_id = None;
+        self.state.queue.current_position = None;
+        self.state.current_track = None;
+        self.state.playback.stopped_source_generation = None;
+        self.reload_queue()
+    }
+
+    pub(in crate::core) fn clear_queue(&mut self) -> Result<()> {
+        self.stop()?;
+        let changed = self.store.clear_queue()?;
+        self.queue_replaced(changed)
+    }
+
+    pub(in crate::core) fn play_album(&mut self, key: &AlbumKey) -> Result<()> {
+        ensure!(self.store.album_has_tracks(key)?, "Album is empty");
+        self.stop()?;
+        self.store.queue_album(key, true)?;
+        self.queue_replaced(true)?;
+        let first = self.store.queue_id_at(0)?.context("Album is empty")?;
+        self.start(first, QueueHistory::Record)
+    }
+
+    pub(in crate::core) fn play_playlist(&mut self, playlist_id: i64) -> Result<()> {
+        let total = self
+            .store
+            .playlist_entries_page(playlist_id, None, 0, 0)?
+            .total;
+        ensure!(total > 0, "Playlist is empty");
+        self.stop()?;
+        self.store.replace_queue_from_playlist(playlist_id)?;
+        self.queue_replaced(true)?;
+        let first = self.store.queue_id_at(0)?.context("Playlist is empty")?;
+        self.start(first, QueueHistory::Record)
     }
 
     pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Result<Option<u64>> {
@@ -56,18 +116,8 @@ impl Core {
             .queue_id_at(rng.random_range(0..self.state.queue.total))
     }
 
-    pub(in crate::core) fn record_queue_history(&mut self, id: u64) {
-        self.played.truncate(self.played_cursor);
-        self.played.push(id);
-        if self.played.len() > MAX_NAVIGATION_HISTORY {
-            self.played
-                .drain(..self.played.len() - MAX_NAVIGATION_HISTORY);
-        }
-        self.played_cursor = self.played.len();
-    }
-
     pub(in crate::core) fn ensure_queue_control_ready(&mut self) -> Result<()> {
-        if self.queue_projection_stale {
+        if self.transport.projection_stale {
             self.reload_queue()?;
         } else {
             self.persist_queue_current()?;
@@ -80,9 +130,9 @@ impl Core {
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before saving"
         );
-        if self.queue_current_pending {
+        if self.transport.selection_pending {
             self.store.set_queue_current(self.state.queue.current_id)?;
-            self.queue_current_pending = false;
+            self.transport.selection_pending = false;
         }
         Ok(())
     }
@@ -91,35 +141,46 @@ impl Core {
         &mut self,
         projection: Result<QueueState>,
     ) -> Result<()> {
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         let mut projection = projection?;
-        // A delayed projection must never replace an unsaved runtime selection.
-        if self.queue_current_pending {
+        if self.transport.selection_pending {
             self.persist_queue_current()?;
             projection = self.store.queue_projection(self.state.queue.revision)?;
+        } else if projection.revision != self.state.queue.revision {
+            projection = self.store.queue_projection(self.state.queue.revision)?;
+        }
+        // Projections carry committed queue structure, not a new selection intent.
+        // Even a formerly pending selection may have been saved since this read
+        // began. Preserve every surviving occurrence and resolve its current index.
+        if let Some(id) = self.state.queue.current_id
+            && !self.store.queue_existing_ids(&[id])?.is_empty()
+        {
+            let (_, position) = self.store.queue_location(id)?;
+            projection.current_id = Some(id);
+            projection.current_position = Some(position);
         }
         projection.revision = self.state.queue.revision;
         self.state.queue = projection;
-        self.queue_projection_stale = false;
+        self.transport.projection_stale = false;
         Ok(())
     }
 
     pub(in crate::core) fn refresh_queue_projection(&mut self) -> Result<()> {
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         self.persist_queue_current()?;
         let projection = self.store.queue_projection(self.state.queue.revision);
         self.accept_queue_projection(projection)
     }
 
     pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
-        self.queue_projection_stale = true;
+        self.transport.projection_stale = true;
         // A committed removal/replacement owns a missing selection. Otherwise
         // retry the runtime intent before accepting the database's old current.
-        if self.queue_current_pending
+        if self.transport.selection_pending
             && let Some(id) = self.state.queue.current_id
             && self.store.queue_existing_ids(&[id])?.is_empty()
         {
-            self.queue_current_pending = false;
+            self.transport.selection_pending = false;
         }
         self.prune_queue_history()?;
         self.refresh_queue_tracks()
@@ -159,12 +220,7 @@ impl Core {
         if self.store.remove_prepared_queue_entries(selection)? {
             self.advance_queue_revision();
         }
-        self.queue_projection_stale = true;
-        self.prune_queue_history()?;
-        self.refresh_queue_projection()?;
-        if self.state.queue.current_id.is_none() {
-            self.state.current_track = None;
-        }
+        self.reload_queue()?;
         Ok(())
     }
 
@@ -222,22 +278,22 @@ impl Core {
     }
 
     pub(in crate::core) fn prune_queue_history(&mut self) -> Result<()> {
-        if self.played.is_empty() {
-            self.played_cursor = 0;
+        if self.transport.history.is_empty() {
+            self.transport.history_cursor = 0;
             return Ok(());
         }
-        let present = self.store.queue_existing_ids(&self.played)?;
+        let present = self.store.queue_existing_ids(&self.transport.history)?;
         let mut index = 0;
         let mut cursor = 0;
-        self.played.retain(|id| {
+        self.transport.history.retain(|id| {
             let keep = present.contains(id);
-            if keep && index < self.played_cursor {
+            if keep && index < self.transport.history_cursor {
                 cursor += 1;
             }
             index += 1;
             keep
         });
-        self.played_cursor = cursor;
+        self.transport.history_cursor = cursor;
         Ok(())
     }
 }

@@ -38,7 +38,11 @@ impl Core {
         mut track: Option<Track>,
     ) -> Result<()> {
         if let Some(track) = track.as_mut()
-            && let Some(playback) = self.playback.as_ref().filter(|p| p.track_id == track.id)
+            && let Some(playback) = self
+                .transport
+                .session
+                .as_ref()
+                .filter(|p| p.track_id == track.id)
         {
             // A rescan can change the CUE FILE, range, and duration without loading
             // a new decoder. Publish the source actually owned by this session;
@@ -72,7 +76,8 @@ impl Core {
         }
         if let Some(track) = track.as_ref()
             && self
-                .playback
+                .transport
+                .session
                 .as_ref()
                 .is_some_and(|playback| playback.track_id == track.id)
             && self.state.current_track.as_ref().is_none_or(|current| {
@@ -82,7 +87,7 @@ impl Core {
             })
         {
             self.engine.send(AudioCommand::Metadata {
-                generation: self.generation,
+                generation: self.transport.generation,
                 metadata: Self::playback_metadata(track),
             })?;
         }
@@ -112,7 +117,8 @@ impl Core {
         if let Some(current) = self.state.current_track.as_ref()
             && current.id == track_id
             && self
-                .playback
+                .transport
+                .session
                 .as_ref()
                 .is_some_and(|playback| playback.track_id == track_id)
             && (title.is_some() || artist.is_some() || album.is_some() || decoder_hint.is_some())
@@ -182,7 +188,8 @@ impl Core {
             return Ok(());
         }
         if self
-            .retired_playback
+            .transport
+            .retired
             .as_ref()
             .is_some_and(|retired| track_ids.contains(&retired.stats.track_id))
         {
@@ -215,8 +222,9 @@ impl Core {
         let (changed, albums) = self.store.remove_history(&track_ids)?;
         // Commit before suppressing producer writes: failed removals preserve history.
         // The flag belongs to the session, including delayed Started/stop snapshots.
-        for playback in self.playback.iter_mut().chain(
-            self.retired_playback
+        for playback in self.transport.session.iter_mut().chain(
+            self.transport
+                .retired
                 .iter_mut()
                 .map(|retired| &mut retired.stats),
         ) {
@@ -234,9 +242,9 @@ impl Core {
             {
                 Arc::make_mut(current).last_played = None;
             }
-            self.playback_history_pending = true;
+            self.transport.history_pending = true;
         }
-        if self.playback_history_pending {
+        if self.transport.history_pending {
             let history = self.store.history(MAX_QUERY_ROWS).context(
                 "History removal committed, but refreshing history failed; previous history retained",
             )?;
@@ -305,7 +313,7 @@ impl Core {
     }
 
     pub(in crate::core) fn remove_missing_tracks(&mut self) -> Result<()> {
-        if self.retired_playback.is_some() {
+        if self.transport.retired.is_some() {
             self.flush_deferred_playback()?;
         }
         if self
@@ -335,18 +343,18 @@ impl Core {
         queue_changed: bool,
         albums_changed: bool,
     ) -> Result<()> {
-        let impacts = crate::store::ScanImpacts {
+        let impacts = crate::store::CatalogChanges {
             changed: true,
             library: true,
             structure: true,
             duplicate_groups: duplicate_groups_changed,
             queue: queue_changed,
             albums: albums_changed,
-            ..crate::store::ScanImpacts::default()
+            ..crate::store::CatalogChanges::default()
         };
-        self.invalidate_scan_impacts(impacts);
+        self.announce_catalog_changes(impacts);
         let playlists = self.invalidate_playlist_members(affected_playlists);
-        let catalog = self.refresh_scan_catalog(impacts);
+        let catalog = self.refresh_catalog_projections(impacts);
         // Recover the committed scalar projection and selected track; a failed
         // refresh keeps dependent queue controls gated until recovery succeeds.
         let queue = if queue_changed {
@@ -412,70 +420,5 @@ impl Core {
         let entry = &mut Arc::make_mut(&mut self.state.library.history)[index];
         entry.title.clone_from(&track.title);
         entry.play_count = track.play_count;
-    }
-
-    /// Publish committed facts without reading potentially large projections.
-    pub(in crate::core) fn invalidate_scan_impacts(&mut self, impacts: crate::store::ScanImpacts) {
-        let dependencies = impacts.dependencies(false);
-        self.invalidate_collection_impacts(
-            dependencies.queue_revision,
-            dependencies.album_revision,
-        );
-        if dependencies.library_revision {
-            self.state.library.revision = self.state.library.revision.wrapping_add(1);
-        }
-        if dependencies.structure_revision {
-            self.state.library.structure_revision =
-                self.state.library.structure_revision.wrapping_add(1);
-        }
-        if dependencies.duplicate_group_revision {
-            self.state.library.duplicate_groups_revision =
-                self.state.library.duplicate_groups_revision.wrapping_add(1);
-        }
-        if dependencies.duplicate_member_revision {
-            self.state.library.duplicate_members_revision = self
-                .state
-                .library
-                .duplicate_members_revision
-                .wrapping_add(1);
-        }
-    }
-
-    /// Announce committed producer facts before any fallible cached projection read.
-    pub(in crate::core) fn apply_scan_impacts(
-        &mut self,
-        impacts: crate::store::ScanImpacts,
-    ) -> Result<()> {
-        self.invalidate_scan_impacts(impacts);
-        let catalog = self.refresh_scan_catalog(impacts);
-        // A failed projection read cannot hide another committed domain.
-        let dependencies = impacts.dependencies(false);
-        let queue = if dependencies.refresh_queue {
-            self.refresh_queue_tracks()
-        } else {
-            Ok(())
-        };
-        catalog.and(queue)
-    }
-
-    fn refresh_scan_catalog(&mut self, impacts: crate::store::ScanImpacts) -> Result<()> {
-        let dependencies = impacts.dependencies(false);
-        let library = if dependencies.refresh_track_total {
-            self.store
-                .track_count()
-                .map(|total| self.state.library.track_total = total)
-                .context("Refreshing library count failed; previous count retained")
-        } else {
-            Ok(())
-        };
-        let history = if dependencies.refresh_history {
-            self.store
-                .history(MAX_QUERY_ROWS)
-                .map(|history| self.replace_history(history))
-                .context("Refreshing history failed; previous history retained")
-        } else {
-            Ok(())
-        };
-        library.and(history)
     }
 }

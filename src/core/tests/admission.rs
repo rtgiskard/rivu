@@ -32,11 +32,9 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     let second = directory.path().join("external-second.wav");
     write_pcm_frames(&first, 1);
     write_pcm_frames(&second, 1);
-    Arc::make_mut(&mut core.state.configuration.config)
-        .library_roots
-        .clear();
-    Arc::make_mut(&mut core.state.configuration.config).scan_min_duration_seconds = 60;
-    let config = Arc::clone(&core.state.configuration.config);
+    edit_preferences(&mut core, |config| config.library_roots.clear());
+    edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 60);
+    let config = Arc::clone(core.preferences.settings());
     let before_queue = core.store.queue_ids().unwrap();
     let before_playback = core.state.playback.clone();
     let before_playlists = core.state.library.playlist_total;
@@ -100,7 +98,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
         before_playlist_revision
     );
     assert_eq!(core.state.library.track_total, before_total + 2);
-    assert!(Arc::ptr_eq(&core.state.configuration.config, &config));
+    assert!(Arc::ptr_eq(core.preferences.settings(), &config));
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected retained media task")
     };
@@ -320,7 +318,7 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
     assert!(core.database_maintenance_active());
     assert!(core.command(Command::CancelScan { id }).is_err());
     core.command(Command::Volume { value: 0.42 }).unwrap();
-    assert_eq!(core.state.playback.volume, 0.42);
+    assert_eq!(core.preferences.live().volume, 0.42);
     assert!(
         core.store
             .track_id_for_identity(crate::store::TrackIdentity::File(&path))
@@ -361,7 +359,7 @@ fn dispatched_mpris_seek_stays_local_during_external_saving() {
         let event = next_admission_event(&mut core);
         core.external_admission_event(event);
     }
-    core.queue_current_pending = true;
+    core.transport.selection_pending = true;
     assert!(
         operation_ack(
             &mut core,
@@ -384,9 +382,9 @@ fn dispatched_mpris_seek_stays_local_during_external_saving() {
         )
         .is_success()
     );
-    assert!(core.queue_current_pending);
+    assert!(core.transport.selection_pending);
     assert_eq!(core.state.queue.current_id, Some(1));
-    assert_eq!(core.pending_navigation, None);
+    assert_eq!(core.transport.pending_navigation, None);
     lock.execute_batch("ROLLBACK").unwrap();
     core.shutdown_external_admission();
     assert!(core.scan_results.back().unwrap().library_committed);
@@ -492,7 +490,7 @@ fn stale_queue_external_paths_command_recovers_before_accepting_task() {
         expected_revision: None,
     })
     .unwrap();
-    assert!(!core.queue_projection_stale);
+    assert!(!core.transport.projection_stale);
     finish_admission(&mut core);
     assert_eq!(core.state.queue.total, 4);
     assert_eq!(
@@ -537,7 +535,7 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
                 ScanPhase::Failed
             }
         );
-        assert_eq!(core.queue_projection_stale, !repaired);
+        assert_eq!(core.transport.projection_stale, !repaired);
         assert_eq!(
             core.store.track_count().unwrap(),
             if repaired { 4 } else { 3 }

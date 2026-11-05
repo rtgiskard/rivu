@@ -303,6 +303,8 @@ def _process_validated(request, source, write_pcm, emit):
     manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = validate_manifest(manifest_path, request["operation"])
+    emit("progress", stage="inspect", completed=1, total=1,
+         model={"id":manifest["id"], "sha256":canonical_digest(manifest)})
     controls = request.get("parameters", {})
     require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0

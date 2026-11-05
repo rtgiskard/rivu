@@ -493,6 +493,11 @@ reservation. Failure or unwinding reaches a terminal task result; neural childre
 are terminated/reaped before failure delivery. Core rechecks cancellation and
 source identity before publication, commits the terminal state, then completes
 task waits. Failed validation/admission does not revoke available PCM.
+A failure while selecting an already retained result does not erase its audio:
+the overall operation can be `failed` while valid outputs remain available for
+later selection or export. Eviction changes availability, not the recorded
+operation outcome. Model nodes preserve independently known model identity and
+verified hashes even if inference fails; the enclosing operation remains a graph.
 
 Native preparation checks cancellation between decoder calls; decoder/filesystem
 operations have no hard cancellation-time guarantee. Retained audition also
@@ -708,12 +713,14 @@ Rendered graph actions reconcile current state before submission and preserve
 the revision that produced the intent. An old Add profile or Mix control cannot
 overwrite newer settings, drafts or an in-flight edit.
 
-Core state owns the selected audition and media-task identity; projections consume
-those facts rather than defining them. The processing service owns worker retirement,
-the four-result retention bound, selected-audio pins and deferred resource release.
-Core keeps automatic-audition intent, cancellation/source admission, export commit
-and terminal-state publication; a cancellation acknowledgement does not transfer
-physical worker ownership to the caller.
+The processing service owns current/history task facts, retained availability,
+audition selection, worker retirement, the four-result bound, selected-audio pins
+and deferred resource release. Core keeps cross-domain automatic-audition intent,
+cancellation/source admission and export commit, and publishes the service's
+immutable projections. A cancellation acknowledgement does not transfer physical
+worker ownership to the caller. Model runners consume an input/settings request
+and return provenance plus an audio result; they do not rewrite task status or
+borrow a graph's operation and timeline fields as temporary model state.
 
 Prepared DSP owns its coefficients, history and stream format. Device callbacks
 do no model loading, FFT planning or file I/O. Allocation, block work and retained

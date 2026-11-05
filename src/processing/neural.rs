@@ -2,14 +2,17 @@
 //! JSON (0), input PCM (1), input end (2), speech/vocals/accompaniment PCM (17/18/19).
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
 use super::render::{ProgressReporter, check_cancel};
-use super::{AudioOutputs, WORKER_EVENT_VERSION, WORKER_REQUEST_VERSION};
+use super::{
+    AudioOutputs, ModelOutcome, ModelProvenance, ModelRequest, WORKER_EVENT_VERSION,
+    WORKER_REQUEST_VERSION,
+};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_audio as audio;
-use rivu_protocol::model::{ProcessingOperation, ProcessingPhase, ProcessingTaskStatus};
+use rivu_protocol::model::{ProcessingOperation, ProcessingPhase};
 use std::{
     io::{Read, Write},
     process::{Child, Command, Stdio},
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -116,16 +119,37 @@ impl Decoder {
     }
 }
 
-pub(super) fn run(
-    input: &audio::PcmAudio,
-    config: &rivu_format::config::NeuralConfig,
-    budget: Arc<audio::PcmBudget>,
-    cancel: &AtomicBool,
+pub(super) fn run(request: ModelRequest<'_>, progress: &mut ProgressReporter<'_>) -> ModelOutcome {
+    let mut provenance = ModelProvenance::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_model(request, progress, &mut provenance)
+    }))
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
+    ModelOutcome { provenance, result }
+}
+
+fn run_model(
+    request: ModelRequest<'_>,
     progress: &mut ProgressReporter<'_>,
-    status: &mut ProcessingTaskStatus,
+    provenance: &mut ModelProvenance,
 ) -> Result<AudioOutputs> {
+    let ModelRequest {
+        task_id,
+        operation,
+        input,
+        config,
+        budget,
+        cancel,
+    } = request;
     check_cancel(cancel)?;
-    let speech = status.operation == ProcessingOperation::Speech;
+    ensure!(
+        matches!(
+            operation,
+            ProcessingOperation::Speech | ProcessingOperation::Separate
+        ),
+        "Invalid model operation"
+    );
+    let speech = operation == ProcessingOperation::Speech;
     ensure!(
         input.layout().as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight]
             || (speech && input.layout().as_ref() == [audio::Channel::FrontCenter]),
@@ -150,10 +174,11 @@ pub(super) fn run(
     );
     let metadata: serde_json::Value =
         serde_json::from_slice(&contents).context("Reading model manifest")?;
+    provenance.id = metadata["id"].as_str().map(str::to_owned);
     if metadata["backend"] == "onnx" {
         ensure!(speech, "Native ONNX models support speech only");
         #[cfg(feature = "onnx")]
-        return super::native_speech::run(input, config, budget, cancel, progress, status);
+        return super::native_speech::run(input, config, budget, cancel, progress, provenance);
         #[cfg(not(feature = "onnx"))]
         bail!("Native ONNX inference requires a build with the onnx feature enabled");
     }
@@ -170,7 +195,7 @@ pub(super) fn run(
     if speech && config.speech_post_filter {
         parameters["post_filter"] = serde_json::Value::Bool(true);
     }
-    let task_id = status.id.to_string();
+    let task_id = task_id.to_string();
     let request = serde_json::to_vec(&serde_json::json!({
         "version":WORKER_REQUEST_VERSION,"task_id":task_id,"operation":if speech {"speech"} else {"separate"},
         "sample_rate":input.sample_rate(),"channels":input.channels(),"frames":input.frames(),
@@ -282,6 +307,12 @@ pub(super) fn run(
                                     && event["task_id"] == task_id,
                                 "Neural event identity/version mismatch"
                             );
+                            if let Some(id) = event["model"]["id"].as_str() {
+                                provenance.id = Some(id.to_owned());
+                            }
+                            if let Some(hash) = event["model"]["sha256"].as_str() {
+                                provenance.sha256 = Some(hash.to_owned());
+                            }
                             match event["type"].as_str() {
                                 Some("progress") => {
                                     #[cfg(test)]
@@ -406,17 +437,10 @@ pub(super) fn run(
                 "Missing or truncated neural output: {key}"
             );
         }
-        status.model_id = Some(
-            event["model"]["id"]
-                .as_str()
-                .context("Missing model id")?
-                .to_owned(),
-        );
-        status.model_sha256 = Some(
-            event["model"]["sha256"]
-                .as_str()
-                .context("Missing model hash")?
-                .to_owned(),
+        ensure!(event["model"]["id"].as_str().is_some(), "Missing model id");
+        ensure!(
+            event["model"]["sha256"].as_str().is_some(),
+            "Missing model hash"
         );
         Ok(AudioOutputs {
             denoised: builders[0]
@@ -444,7 +468,7 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{io::Cursor, sync::atomic::AtomicBool};
 
     #[test]
     fn subprocess_success_preserves_pcm_and_maps_stems() {
@@ -557,7 +581,8 @@ while True:
         for offset in range(0, len(data), 4096):
             send(kind, data[offset:offset + 4096])
     send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
-        completed=len(pcm) // (4 * channels), total=request['frames'])).encode())
+        completed=len(pcm) // (4 * channels), total=request['frames'],
+        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
     sys.stdout.buffer.flush()
 assert sys.stdin.buffer.read() == b''
 expected = [((i % 17) - 8) / 4 for i in range(request['frames'] * channels)]
@@ -580,7 +605,7 @@ if outcome == 'complete-then-nonzero':
         let manifest = if outcome == "onnx-disabled" {
             &b"{\"backend\":\"onnx\"}"[..]
         } else {
-            &b"{}"[..]
+            &b"{\"id\":\"stdlib-fixture\",\"sha256\":\"fixture-hash\"}"[..]
         };
         std::fs::write(directory.path().join(outcome), manifest).unwrap();
         let config = rivu_format::config::NeuralConfig {
@@ -606,51 +631,22 @@ if outcome == 'complete-then-nonzero':
         builder.push(&expected).unwrap();
         let input = builder.finish().unwrap();
         let source_bytes = budget.used_bytes();
-        let mut status = ProcessingTaskStatus {
-            id: 7,
-            track_id: 1,
-            operation,
-            phase: ProcessingPhase::Processing,
-            completed: 0,
-            total: None,
-            error: None,
-            outputs: None,
-            sample_rate: None,
-            channels: None,
-            frames: None,
-            model_id: None,
-            model_sha256: None,
-            source_path: directory.path().join("unused-input.wav"),
-            source_version: String::new(),
-            source_cue: None,
-            settings: rivu_protocol::model::ProcessingSettings {
-                denoise: Default::default(),
-                neural: config.clone(),
-                profile: None,
-                graph: None,
-                graph_target: None,
-                graph_mode: None,
-                graph_boundary: None,
-                graph_export_path: None,
-            },
-            graph_revision: None,
-            graph_run_id: None,
-            graph_outputs: Vec::new(),
-            graph_exported_path: None,
-            graph_nodes: Vec::new(),
-            graph_plan: None,
-        };
         let (tx, rx) = async_channel::bounded(8);
-        let mut progress = ProgressReporter::new(&tx, status.id);
+        let mut progress = ProgressReporter::new(&tx, 7);
         progress.report(ProcessingPhase::Rendering, 0, None);
-        let result = run(
-            &input,
-            &config,
-            Arc::clone(&budget),
-            &AtomicBool::new(false),
+        let outcome_result = run(
+            ModelRequest {
+                task_id: 7,
+                operation,
+                input: &input,
+                config: &config,
+                budget: Arc::clone(&budget),
+                cancel: &AtomicBool::new(false),
+            },
             &mut progress,
-            &mut status,
         );
+        let result = outcome_result.result;
+        let provenance = outcome_result.provenance;
         if outcome == "unsupported-layout" {
             assert!(result.is_err(), "unsupported speakers must not publish PCM");
             assert_eq!(rx.len(), 1);
@@ -687,14 +683,14 @@ if outcome == 'complete-then-nonzero':
                 assert!(error.contains("fixture failure after PCM"), "{error}");
             }
             assert_eq!(budget.used_bytes(), source_bytes);
-            assert!(status.model_id.is_none());
-            assert!(status.model_sha256.is_none());
+            assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
+            assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
             return;
         }
         let outputs = result
             .expect("stdlib neural worker must complete successfully (requires python3 on PATH)");
-        assert_eq!(status.model_id.as_deref(), Some("stdlib-fixture"));
-        assert_eq!(status.model_sha256.as_deref(), Some("fixture-hash"));
+        assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
+        assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
         let speech = operation == ProcessingOperation::Speech;
         for (pcm, present, gain) in [
             (outputs.denoised, speech, 1.0),
