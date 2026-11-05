@@ -1,6 +1,7 @@
 use super::*;
 use crate::app::AppHandle;
 use crate::config::ConfigPersistence;
+use crate::test_support::ipc::socket_test_directory;
 use rivu_client::client_session;
 use rivu_protocol::{AppCommand, transport::*, wire::*};
 use rivu_protocol::{
@@ -1027,12 +1028,6 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     app.request_shutdown().unwrap();
     runtime.join().unwrap();
     drop(owner);
-}
-
-pub(crate) fn socket_test_directory() -> tempfile::TempDir {
-    let cache = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache");
-    std::fs::create_dir_all(&cache).unwrap();
-    tempfile::tempdir_in(cache).unwrap()
 }
 
 #[test]

@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn waveform_socket_rejects_an_unbound_instance_or_version() {
-        let directory = crate::ipc::tests::socket_test_directory();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, _queries) = CoreHandle::test_query_port();
         let tasks = crate::execution::TaskRuntime::start().unwrap();
         let service =
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn full_socket_reloads_authority_before_accepting_a_source_expectation() {
-        let directory = crate::ipc::tests::socket_test_directory();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, queries) = CoreHandle::test_query_port();
         let tasks = crate::execution::TaskRuntime::start().unwrap();
         let service =
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn progressive_socket_refreshes_suspension_without_new_pcm() {
-        let directory = crate::ipc::tests::socket_test_directory();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, _queries) = CoreHandle::test_query_port();
         let tasks = crate::execution::TaskRuntime::start().unwrap();
         let service = WaveServer::start(

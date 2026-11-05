@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn subscription_acknowledges_revision_and_frontier_while_another_client_keeps_capture() {
-        let directory = crate::ipc::tests::socket_test_directory();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, _queries) = CoreHandle::test_query_port();
         let server = PcmServer::start(directory.path(), handle.clone(), 7).unwrap();
         let mut local = Client::connect(directory.path());
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect() {
-        let directory = crate::ipc::tests::socket_test_directory();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, _queries) = CoreHandle::test_query_port();
         let server = PcmServer::start(directory.path(), handle, 7).unwrap();
         let mut observer = Client::connect(directory.path());

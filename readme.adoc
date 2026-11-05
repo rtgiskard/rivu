@@ -230,6 +230,9 @@ Run `make test` for the main behavior suites, or select a suite:
 
 Rust tests use `Cargo.lock`. Install the build/font prerequisites and `dbus`;
 tests use private session buses and require no display server or audio device.
+Use the shared `socket_test_directory` helper for IPC fixtures that run alongside
+subprocess tests. It pins directory inodes across fork so temporary-directory
+cleanup cannot recycle an address while a pre-exec child still holds its listener.
 
 Python tests require NumPy, SciPy, soundfile, and jsonschema:
 `sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`.
