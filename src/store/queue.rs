@@ -17,6 +17,19 @@ pub(crate) struct PreparedQueueRemoval {
 
 const CLEAR_BATCH_SIZE: usize = 4096;
 
+pub(super) fn delete_queue_rows(tx: &Transaction<'_>) -> Result<bool> {
+    // Foreign-key actions collect deletion rowids before removing them. Bound
+    // that temporary set while leaving atomicity to the caller's transaction.
+    let mut delete = tx.prepare(
+        "DELETE FROM playlist_entries WHERE id IN (SELECT id FROM playlist_entries WHERE playlist_id=0 LIMIT ?1)",
+    )?;
+    let mut changed = false;
+    while delete.execute([CLEAR_BATCH_SIZE as i64])? != 0 {
+        changed = true;
+    }
+    Ok(changed)
+}
+
 pub(super) fn integer<T: TryFrom<i64>>(
     row: &rusqlite::Row<'_>,
     index: usize,
@@ -260,7 +273,7 @@ impl Store {
         // queue positions. Unfiltered reconciliation remains an indexed lookup.
         let sql = if query.is_some() {
             format!(
-                "WITH matched AS (SELECT q.id AS queue_id,q.track_id AS queue_track_id,q.position AS queue_position,{LIBRARY_ROW_COLUMNS_QUALIFIED},row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT * FROM matched WHERE queue_id IN (SELECT value FROM json_each(?1)) ORDER BY queue_position,queue_id",
+                "WITH matched AS (SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset FROM matched q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
                 search_filter("t", "?2")
             )
         } else {
@@ -337,7 +350,7 @@ impl Store {
             |row| row.get(0),
         )?;
         ensure!(nonempty, "Playlist is empty or not found");
-        tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
+        delete_queue_rows(&tx)?;
         tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist])?;
         tx.commit()?;
         Ok(())
@@ -418,17 +431,7 @@ impl Store {
 
     pub(crate) fn clear_queue(&self) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        // Foreign-key actions force SQLite to collect deletion rowids before
-        // removing them. Bound that temporary set, but commit the entire clear
-        // together so a failure still restores every occurrence and selection.
-        let mut delete = tx.prepare(
-            "DELETE FROM playlist_entries WHERE id IN (SELECT id FROM playlist_entries WHERE playlist_id=0 LIMIT ?1)",
-        )?;
-        let mut changed = false;
-        while delete.execute([CLEAR_BATCH_SIZE as i64])? != 0 {
-            changed = true;
-        }
-        drop(delete);
+        let changed = delete_queue_rows(&tx)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -722,6 +725,50 @@ mod tests {
             .execute_batch("DROP TRIGGER reject_later_clear;")?;
         assert!(store.clear_queue()?);
         assert_eq!(store.queue_state()?.current_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn replacement_insert_failure_restores_queue_after_multiple_delete_batches() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&vec![1; 2 * CLEAR_BATCH_SIZE + 3])?;
+        let ids = store.queue_ids()?;
+        store.set_queue_current(Some(ids[CLEAR_BATCH_SIZE + 1]))?;
+        let before = store.queue_state()?;
+        let playlist = store.create_playlist("Replacement")?;
+        store.add_playlist(playlist, &[2, 3])?;
+        store.conn.execute(
+            "UPDATE tracks SET raw_album='Replacement' WHERE id IN (2,3)",
+            [],
+        )?;
+        let album = rivu_protocol::model::AlbumKey {
+            directory: "/music".into(),
+            title: "Replacement".into(),
+        };
+        store.conn.execute_batch(
+            "CREATE TEMP TRIGGER reject_replacement_insert AFTER INSERT ON playlist_entries
+             WHEN new.playlist_id=0 BEGIN SELECT RAISE(ABORT,'injected replacement failure'); END;",
+        )?;
+
+        assert!(store.replace_queue_from_playlist(playlist).is_err());
+        assert_eq!(store.queue_ids()?, ids);
+        assert_eq!(store.queue_state()?, before);
+        assert!(store.queue_album(&album, true).is_err());
+        assert_eq!(store.queue_ids()?, ids);
+        assert_eq!(store.queue_state()?, before);
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_replacement_insert;")?;
+        store.queue_album(&album, true)?;
+        assert_eq!(store.queue_state()?.total, 2);
+        assert_eq!(store.queue_state()?.current_id, None);
+        assert!(
+            store
+                .queue_ids()?
+                .iter()
+                .all(|id| *id > *ids.last().unwrap())
+        );
         Ok(())
     }
 

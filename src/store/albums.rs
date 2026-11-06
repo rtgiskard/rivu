@@ -150,7 +150,7 @@ impl Store {
                 "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
                 [],
             )?;
-            tx.execute("DELETE FROM playlist_entries WHERE playlist_id=0", [])?;
+            super::queue::delete_queue_rows(&tx)?;
         }
         tx.execute(&format!("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
         tx.commit()?;

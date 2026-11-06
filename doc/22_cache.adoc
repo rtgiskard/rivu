@@ -42,8 +42,9 @@ on completion. External-file registration and insertion share transaction-local
 SQL staging, preserving request order and repeats without a second resolved-ID
 list. Failure rolls both changes back.
 
-Queue clearing batches at most 4096 occurrences per statement within one atomic
-transaction, bounding temporary delete-plan IDs without exposing partial clears.
+Queue clearing, including replacement from a playlist or album, batches at most
+4096 occurrences per statement within one atomic transaction, bounding temporary
+delete-plan IDs without exposing partial clears or replacements.
 These bounds exclude SQLite page caches and transaction working memory. Freed
 allocations may remain in the allocator; a lower post-restart RSS alone does not
 establish a live-object leak.
