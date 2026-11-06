@@ -541,6 +541,11 @@ PCM or consuming another audition slot. Cached exports share their existing PCM;
 model ancestors and retained Hybrid boundaries keep their PCM requirements.
 For a fixed graph and format, streaming export's output memory does not grow with
 duration; decoder, DSP/profile state, delays and existing cached audio remain costs.
+Synchronous native processing borrows each format-checked decoder block until its
+next mutable decoder operation, rather than copying it into caller staging.
+The same boundary validates format before exposing samples and checks cancellation
+and the opened source identity at EOF. Retained PCM and DSP-owned buffers keep
+their existing ownership.
 
 Profile capture reads only the required prefix, including upstream causal context
 and latency in a graph. Early completion validates cancellation and the opened

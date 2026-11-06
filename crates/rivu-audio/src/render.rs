@@ -109,29 +109,29 @@ impl SourceRenderer {
         })
     }
 
-    /// Decode one bounded block into reusable caller storage; false means EOF.
-    pub fn read_block(&mut self, output: &mut Vec<f32>, cancelled: &AtomicBool) -> Result<bool> {
-        output.clear();
+    /// Decode one format-checked block, borrowed until the next mutable operation.
+    /// None means EOF, after cancellation and opened-source identity validation.
+    pub fn next_block(&mut self, cancelled: &AtomicBool) -> Result<Option<&[f32]>> {
         loop {
             let mut work = DECODE_WORK_BUDGET;
             match self
                 .source
                 .next_frames_with_cancel(Some(cancelled), &mut work)?
             {
-                DecodeStep::Frames(span) => output.extend_from_slice(span.samples),
+                DecodeStep::Frames(_) => break,
                 DecodeStep::Yield => continue,
                 DecodeStep::Eof => {
                     self.finish(cancelled)?;
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
-            if self.source.layout() != self.format.layout.as_ref()
-                || self.source.info().sample_rate != self.format.sample_rate
-            {
-                bail!("Audio render source format changed within the track");
-            }
-            return Ok(true);
         }
+        if self.source.layout() != self.format.layout.as_ref()
+            || self.source.info().sample_rate != self.format.sample_rate
+        {
+            bail!("Audio render source format changed within the track");
+        }
+        Ok(Some(self.source.decoded_samples()))
     }
 
     pub fn finish(&self, cancelled: &AtomicBool) -> Result<()> {
@@ -158,23 +158,9 @@ impl SourceRenderer {
             Arc::clone(&self.format.layout),
             budget,
         )?;
-        loop {
-            let mut work = DECODE_WORK_BUDGET;
-            match self
-                .source
-                .next_frames_with_cancel(Some(cancelled), &mut work)?
-            {
-                DecodeStep::Frames(span) => builder.push(span.samples)?,
-                DecodeStep::Yield => continue,
-                DecodeStep::Eof => break,
-            }
-            if self.source.layout() != self.format.layout.as_ref()
-                || self.source.info().sample_rate != self.format.sample_rate
-            {
-                bail!("Audio render source format changed within the track");
-            }
+        while let Some(block) = self.next_block(cancelled)? {
+            builder.push(block)?;
         }
-        self.finish(cancelled)?;
         builder.finish()
     }
 }
@@ -411,17 +397,14 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let mut renderer =
             SourceRenderer::open(&path, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
-        let mut block = vec![f32::NAN; 7];
         cancelled.store(true, Ordering::Relaxed);
-        assert!(renderer.read_block(&mut block, &cancelled).is_err());
+        assert!(renderer.next_block(&cancelled).is_err());
         cancelled.store(false, Ordering::Relaxed);
         let mut samples = Vec::new();
-        while renderer.read_block(&mut block, &cancelled).unwrap() {
-            assert!(!block.is_empty());
+        while let Some(block) = renderer.next_block(&cancelled).unwrap() {
             assert!(block.len().is_multiple_of(2));
-            samples.extend_from_slice(&block);
+            samples.extend_from_slice(block);
         }
-        assert!(block.is_empty());
         let expected: Vec<_> = (0..800)
             .flat_map(|frame| [frame as f32 / 100.0, -(frame as f32) / 200.0])
             .collect();

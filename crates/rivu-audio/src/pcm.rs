@@ -315,11 +315,12 @@ mod tests {
                 crate::SourceRenderer::from_pcm(alias.clone(), alias.identity()).unwrap();
             assert_eq!(renderer.format().channels(), 6);
             assert!(Arc::ptr_eq(&renderer.format().layout, &layout));
-            let mut block = Vec::new();
             let cancel = std::sync::atomic::AtomicBool::new(false);
-            assert!(renderer.read_block(&mut block, &cancel).unwrap());
-            assert_eq!(block, samples[6..]);
-            assert!(!renderer.read_block(&mut block, &cancel).unwrap());
+            assert_eq!(
+                renderer.next_block(&cancel).unwrap().unwrap(),
+                &samples[6..]
+            );
+            assert!(renderer.next_block(&cancel).unwrap().is_none());
             let rendered = crate::SourceRenderer::from_pcm(alias, slice.identity())
                 .unwrap()
                 .render_pcm(PcmBudget::new(0), &cancel)

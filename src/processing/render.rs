@@ -384,9 +384,11 @@ fn classical_native(
         );
         let mut collector =
             ProfileCollector::new(rate, usize::from(channels), config.fft_size, end - start)?;
-        let mut block = Vec::new();
         let mut position = 0_u64;
-        while position < end && capture.read_block(&mut block, cancel)? {
+        while position < end {
+            let Some(block) = capture.next_block(cancel)? else {
+                break;
+            };
             ensure!(
                 block.len().is_multiple_of(usize::from(channels)),
                 "Incomplete profile source frame"
@@ -425,10 +427,9 @@ fn classical_native(
         )?)
     };
     let mut builder = audio::PcmBuilder::new(rate, Arc::clone(&layout), budget)?;
-    let mut block = Vec::new();
     let mut processed = Vec::new();
     let mut frames = 0_u64;
-    while renderer.read_block(&mut block, cancel)? {
+    while let Some(block) = renderer.next_block(cancel)? {
         ensure!(
             block.len().is_multiple_of(usize::from(channels)),
             "Incomplete denoise source frame"
@@ -438,12 +439,12 @@ fn classical_native(
             .context("Denoise source length overflow")?;
         if let Some(denoiser) = &mut denoiser {
             processed.clear();
-            denoiser.process_block(&block, &mut processed, &mut || {
+            denoiser.process_block(block, &mut processed, &mut || {
                 cancel.load(Ordering::Acquire)
             })?;
             builder.push(&processed)?;
         } else {
-            builder.push(&block)?;
+            builder.push(block)?;
         }
         progress(frames);
     }

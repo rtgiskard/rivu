@@ -461,7 +461,6 @@ impl Engine {
             self.streaming,
             "Decoder engine cannot contain a retained source"
         );
-        let mut decoded = Vec::new();
         let mut position = 0_u64;
         loop {
             if prefix_end.is_some_and(|end| position >= end) {
@@ -470,9 +469,9 @@ impl Engine {
                 renderer.finish(cancel)?;
                 return Ok(position);
             }
-            if !renderer.read_block(&mut decoded, cancel)? {
+            let Some(decoded) = renderer.next_block(cancel)? else {
                 break;
-            }
+            };
             ensure!(
                 decoded.len().is_multiple_of(self.channels),
                 "Incomplete graph source frame"

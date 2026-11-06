@@ -1152,6 +1152,10 @@ impl Source {
         Arc::clone(&self.layout)
     }
 
+    pub(super) fn decoded_samples(&self) -> &[f32] {
+        &self.frames
+    }
+
     /// Returns normalized media alignment and explicit source continuity.
     /// Priming preserves the first span without counting it as delivered.
     pub(super) fn next_frames_with_budget(
