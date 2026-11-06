@@ -107,6 +107,7 @@ fn musical_frequencies(sample_rate: u32) -> Vec<f32> {
 struct SpectrumAnalyzer {
     settings: AnalysisSettings,
     sample_rate: u32,
+    spectrum: bool,
     fft: Arc<dyn Fft<f32>>,
     scratch: Vec<Complex32>,
     frequency: Vec<Complex32>,
@@ -132,7 +133,7 @@ struct SpectrumAnalyzer {
 }
 
 impl SpectrumAnalyzer {
-    fn new(settings: AnalysisSettings, sample_rate: u32) -> Self {
+    fn new(settings: AnalysisSettings, sample_rate: u32, spectrum: bool) -> Self {
         let n = settings.fft_size as usize;
         let fft = FftPlanner::<f32>::new().plan_fft_forward(n);
         let window: Vec<f32> = (0..n)
@@ -179,6 +180,7 @@ impl SpectrumAnalyzer {
         Self {
             settings,
             sample_rate,
+            spectrum,
             scratch: vec![Complex32::default(); fft.get_inplace_scratch_len()],
             frequency: vec![Complex32::default(); n],
             fft,
@@ -296,6 +298,10 @@ impl SpectrumAnalyzer {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
         let density_demand = self.visualizer.demand.stereo_density;
+        let needs_fft = self.spectrum
+            || self.visualizer.demand.spatial_spectrum
+            || self.visualizer.demand.band_energy
+            || self.visualizer.demand.spectrogram;
         let mut energies = [0.0_f64; 3];
         for (i, samples) in self.rolling[self.head..]
             .iter()
@@ -311,13 +317,13 @@ impl SpectrumAnalyzer {
                 energies[1] += right * right;
                 energies[2] += left * right;
             }
-            // Pack both real channels; the merged power below preserves
-            // opposite-phase stereo without reconstructing either spectrum.
-            self.frequency[i] =
-                Complex32::new(samples[0] * self.window[i], samples[1] * self.window[i]);
+            if needs_fft {
+                // Pack both real channels; the merged power below preserves
+                // opposite-phase stereo without reconstructing either spectrum.
+                self.frequency[i] =
+                    Complex32::new(samples[0] * self.window[i], samples[1] * self.window[i]);
+            }
         }
-        self.fft
-            .process_with_scratch(&mut self.frequency, &mut self.scratch);
         if density_demand {
             let [left, right, cross] = energies;
             let total = left + right;
@@ -333,6 +339,12 @@ impl SpectrumAnalyzer {
                 self.visualizer.density = density.snapshot();
             }
         }
+        let rms = [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()];
+        if !needs_fft {
+            return rms;
+        }
+        self.fft
+            .process_with_scratch(&mut self.frequency, &mut self.scratch);
         if self.visualizer.demand.spatial_spectrum {
             self.visualizer.spatial.clear();
             let normalization_squared = self.normalization * self.normalization;
@@ -383,21 +395,23 @@ impl SpectrumAnalyzer {
                 *target = (power * self.power_normalization).sqrt();
             }
         }
-        for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
-            let mut power = 0.0_f32;
-            for bin in first..last {
-                let pair_power = if cached_bins.contains(&bin) {
-                    self.bin_powers[bin - 1]
-                } else {
-                    self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr()
-                };
-                // Nyquist has no negative-frequency partner to double.
-                let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
-                power = power.max(pair_power * 0.25 * endpoint_gain);
+        if self.spectrum {
+            for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
+                let mut power = 0.0_f32;
+                for bin in first..last {
+                    let pair_power = if cached_bins.contains(&bin) {
+                        self.bin_powers[bin - 1]
+                    } else {
+                        self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr()
+                    };
+                    // Nyquist has no negative-frequency partner to double.
+                    let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
+                    power = power.max(pair_power * 0.25 * endpoint_gain);
+                }
+                *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
             }
-            *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
         }
-        [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()]
+        rms
     }
 
     fn snapshot_spectrogram(&mut self) -> bool {
@@ -456,11 +470,18 @@ impl SpectrumAnalyzer {
             self.snapshot_pcm();
         }
         // clone_from reuses storage for steady-state publications.
-        if self.metadata_dirty {
-            frame.frequencies_hz.clone_from(&self.frequencies);
-            self.metadata_dirty = false;
+        frame.spectrum_requested = self.spectrum;
+        if self.spectrum {
+            if self.metadata_dirty {
+                frame.frequencies_hz.clone_from(&self.frequencies);
+                self.metadata_dirty = false;
+            }
+            frame.spectrum_db.clone_from(&self.levels);
+        } else {
+            frame.frequencies_hz = Vec::new();
+            frame.spectrum_db = Vec::new();
+            self.metadata_dirty = true;
         }
-        frame.spectrum_db.clone_from(&self.levels);
         frame.visualizer.clone_from(&self.visualizer);
         frame.sample_rate = self.sample_rate;
         frame.generation = self.generation;
@@ -555,6 +576,7 @@ impl AnalysisEngine {
         self.state = state;
         self.display_token = display_token;
         if let Some(analyzer) = &mut self.analyzer {
+            analyzer.spectrum = demand.enabled && demand.spectrum;
             analyzer.set_visualizer_demand(if demand.enabled {
                 demand.visualizer
             } else {
@@ -584,6 +606,7 @@ impl AnalysisEngine {
         frame.sample_rate = self.state.sample_rate;
         frame.sample_time = self.sample_time;
         frame.settings = None;
+        frame.spectrum_requested = self.demand.enabled && self.demand.spectrum;
         frame.frequencies_hz.clear();
         frame.spectrum_db.clear();
         frame.rms_left = 0.0;
@@ -643,7 +666,11 @@ impl AnalysisEngine {
                 || !analyzer.settings.signal_compatible_with(self.settings)
         });
         if replan {
-            self.analyzer = Some(SpectrumAnalyzer::new(self.settings, header.sample_rate));
+            self.analyzer = Some(SpectrumAnalyzer::new(
+                self.settings,
+                header.sample_rate,
+                self.demand.spectrum,
+            ));
         }
         let analyzer = self.analyzer.as_mut().unwrap();
         analyzer.settings = self.settings;
@@ -756,7 +783,7 @@ mod tests {
     }
 
     fn visualizer_analyzer(demand: VisualizerDemand) -> SpectrumAnalyzer {
-        let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 5120);
+        let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 5120, true);
         analyzer.set_visualizer_demand(demand);
         analyzer
     }
@@ -770,6 +797,7 @@ mod tests {
                 ..visualizer_settings()
             },
             32768,
+            true,
         );
         let musical_band = analyzer
             .bands
@@ -852,7 +880,7 @@ mod tests {
             window: AnalysisWindow::Hann,
             ..visualizer_settings()
         };
-        let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
+        let mut analyzer = SpectrumAnalyzer::new(settings, 32768, true);
         analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
         let bins = [1000, 1010];
         assert!(
@@ -904,6 +932,7 @@ mod tests {
                             ..visualizer_settings()
                         },
                         48000,
+                        true,
                     );
                     analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
                     for i in 0..fft_size {
@@ -947,6 +976,7 @@ mod tests {
                 ..visualizer_settings()
             },
             32768,
+            true,
         );
         assert!(analyzer.spectrogram_snapshots.is_none());
         analyzer.set_visualizer_demand(SPECTROGRAM_DEMAND);
@@ -1056,6 +1086,7 @@ mod tests {
                         ..visualizer_settings()
                     },
                     48_000,
+                    true,
                 );
                 analyzer.set_visualizer_demand(PCM_DEMAND);
                 let total = fft_size as usize + 37;
@@ -1218,7 +1249,7 @@ mod tests {
             window: AnalysisWindow::None,
             signal: VisualizationSignal::After,
         };
-        let mut combined = SpectrumAnalyzer::new(settings, 32768);
+        let mut combined = SpectrumAnalyzer::new(settings, 32768, true);
         combined.set_visualizer_demand(ALL_DEMAND);
         let mut separate = [
             DENSITY_DEMAND,
@@ -1228,7 +1259,7 @@ mod tests {
             SPECTROGRAM_DEMAND,
         ]
         .map(|demand| {
-            let mut analyzer = SpectrumAnalyzer::new(settings, 32768);
+            let mut analyzer = SpectrumAnalyzer::new(settings, 32768, true);
             analyzer.set_visualizer_demand(demand);
             analyzer
         });
@@ -1467,6 +1498,7 @@ mod tests {
                         signal: VisualizationSignal::After,
                     },
                     32768,
+                    true,
                 );
                 analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
                 for i in 0..4096 {
@@ -1497,6 +1529,7 @@ mod tests {
                 signal: VisualizationSignal::After,
             },
             8000,
+            true,
         );
         analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
         for i in 0..512 {
@@ -1727,7 +1760,7 @@ mod tests {
                 };
                 // A1760 is both a musical center and FFT-bin aligned at every size.
                 let rate = 56_320;
-                let mut analyzer = SpectrumAnalyzer::new(settings, rate);
+                let mut analyzer = SpectrumAnalyzer::new(settings, rate, true);
                 analyzer.set_visualizer_demand(SPATIAL_DEMAND);
                 for i in 0..fft_size {
                     let sample = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
@@ -1777,7 +1810,7 @@ mod tests {
                 signal: VisualizationSignal::After,
             };
             for amplitude in [0.5_f32, 1e-6, 1e-8, 0.0, 2.0] {
-                let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
+                let mut analyzer = SpectrumAnalyzer::new(settings, 48_000, true);
                 analyzer.set_visualizer_demand(SPATIAL_DEMAND);
                 for i in 0..fft_size + 137 {
                     let sample = if i % 2 == 0 { amplitude } else { -amplitude };
@@ -1844,7 +1877,7 @@ mod tests {
     #[test]
     fn reset_discards_previous_audio_and_publication_preserves_time() {
         let settings = AnalysisSettings::from(&Config::default());
-        let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
+        let mut analyzer = SpectrumAnalyzer::new(settings, 48_000, true);
         for _ in 0..settings.fft_size {
             analyzer.push([0.5, -0.5]);
         }
@@ -1857,7 +1890,7 @@ mod tests {
         assert!(analyzer.levels.iter().all(|db| *db == -140.0));
         let mut frame = AnalysisFrame::default();
         analyzer.publish(&mut frame, rms, Duration::from_secs(1));
-        let mut changed = SpectrumAnalyzer::new(settings, 8_000);
+        let mut changed = SpectrumAnalyzer::new(settings, 8_000, true);
         let rms = changed.transform();
         changed.publish(&mut frame, rms, Duration::from_secs(2));
         assert_eq!(frame.sequence, 2);

@@ -347,6 +347,8 @@ impl VisualizerRuntime {
             frequency_restored |= self
                 .frequency_views
                 .set_spectrum_visible(!spectrum_ids.is_empty());
+            // FrequencyViews also consumes the base spectrum for Spectrogram.
+            let mut spectrum = frequency_enabled;
             let mut visualizer = VisualizerDemand {
                 spectrogram: !spectrogram_ids.is_empty(),
                 ..Default::default()
@@ -354,6 +356,9 @@ impl VisualizerRuntime {
             for kind in self.panels.values().filter(|_| enabled) {
                 if let PanelKind::Audio(options) = kind {
                     match options.style {
+                        AudioVisualizerStyle::Bars
+                        | AudioVisualizerStyle::Rings
+                        | AudioVisualizerStyle::BarsRings => spectrum = true,
                         AudioVisualizerStyle::StereoDensity => visualizer.stereo_density = true,
                         AudioVisualizerStyle::SpatialSpectrum => visualizer.spatial_spectrum = true,
                         AudioVisualizerStyle::Oscilloscope => visualizer.pcm = true,
@@ -366,6 +371,7 @@ impl VisualizerRuntime {
             }
             let demand = DisplayDemand {
                 enabled: enabled && self.panels.values().any(|kind| kind.analysis()),
+                spectrum,
                 visualizer,
             };
             retain_analysis_staging(&mut self.staging, demand);
@@ -693,6 +699,11 @@ pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand:
         *frame = AnalysisFrame::default();
         return;
     }
+    if !demand.spectrum {
+        frame.spectrum_requested = false;
+        frame.frequencies_hz = Vec::new();
+        frame.spectrum_db = Vec::new();
+    }
     // Retain allocations still demanded by another panel, but release optional
     // snapshots immediately rather than waiting for the next worker publication.
     let visualizer = &mut frame.visualizer;
@@ -902,8 +913,11 @@ mod tests {
             sequence: 7,
             generation: 1,
             settings: Some((&Config::default()).into()),
+            spectrum_requested: true,
             ..Default::default()
         };
+        frame.frequencies_hz = vec![440.0];
+        frame.spectrum_db = vec![-12.0];
         frame.visualizer.demand.band_energy = true;
         frame.visualizer.band_rms = [0.25, 0.5, 0.75];
         let mut staging = frame.clone();
@@ -916,6 +930,8 @@ mod tests {
             },
         );
         assert_eq!(staging.visualizer.band_rms, [0.0; 3]);
+        assert_eq!(staging.frequencies_hz.capacity(), 0);
+        assert_eq!(staging.spectrum_db.capacity(), 0);
         assert!(!stage_analysis_frame(
             &mut staging,
             &mut sequence,
@@ -930,6 +946,8 @@ mod tests {
         ));
         assert_eq!(sequence, frame.sequence);
         assert_eq!(staging.visualizer.band_rms, frame.visualizer.band_rms);
+        assert_eq!(staging.frequencies_hz, frame.frequencies_hz);
+        assert_eq!(staging.spectrum_db, frame.spectrum_db);
         assert_eq!(staging.visualizer.demand, frame.visualizer.demand);
     }
 
@@ -1052,6 +1070,7 @@ mod tests {
             owner.awaiting_replacement = false;
             let generation = owner.frame_generation;
             assert!(!owner.demand.visualizer.pcm);
+            assert!(owner.demand.spectrum);
             assert!(layout.activate(9));
             panels.reconcile(&layout);
             owner.sync(
@@ -1072,6 +1091,7 @@ mod tests {
                 cx,
             );
             assert!(owner.demand.visualizer.pcm);
+            assert!(owner.demand.spectrum);
             assert!(owner.demand.visualizer.band_energy);
             assert!(!owner.awaiting_replacement);
             assert_eq!(owner.frame_generation, generation);
@@ -1180,6 +1200,7 @@ mod tests {
                 sample_rate: 48_000,
                 sample_time: Duration::from_secs(1),
                 settings: Some((&config).into()),
+                spectrum_requested: true,
                 frequencies_hz: vec![100.0, 1000.0],
                 spectrum_db: vec![-12.0, -24.0],
                 ..Default::default()
@@ -1299,6 +1320,7 @@ mod tests {
                         sample_rate: 48_000,
                         sample_time: Duration::from_secs(1),
                         settings: Some(config.as_ref().into()),
+                        spectrum_requested: true,
                         frequencies_hz: vec![100.0, 1000.0],
                         spectrum_db: vec![-12.0, -24.0],
                         ..Default::default()
@@ -1852,6 +1874,7 @@ mod tests {
                 sample_rate: 48_000,
                 sample_time: Duration::from_secs(1),
                 settings: Some(config.as_ref().into()),
+                spectrum_requested: true,
                 frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
                 spectrum_db: vec![-12.0; 4],
                 ..Default::default()
@@ -1988,6 +2011,7 @@ mod tests {
                     sample_rate: 48_000,
                     sample_time: Duration::from_secs(1),
                     settings: Some(config.as_ref().into()),
+                    spectrum_requested: true,
                     frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
                     spectrum_db: vec![-12.0; 4],
                     ..Default::default()
@@ -2215,6 +2239,7 @@ mod tests {
                     sample_rate: 48_000,
                     sample_time: Duration::from_secs(1),
                     settings: Some(config.as_ref().into()),
+                    spectrum_requested: true,
                     frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
                     spectrum_db: vec![-12.0; 4],
                     ..Default::default()

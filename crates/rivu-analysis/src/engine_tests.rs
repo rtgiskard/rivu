@@ -14,6 +14,7 @@ fn setup() -> (AnalysisEngine, AnalysisFrame, PcmState, DisplayDemand) {
     };
     let demand = DisplayDemand {
         enabled: true,
+        spectrum: true,
         visualizer: VisualizerDemand {
             stereo_density: true,
             pcm: true,
@@ -296,4 +297,201 @@ fn density_ingests_the_entire_stream_not_only_latest_fft_tail() {
             .abs_diff(Duration::from_secs_f64(32768.0 / 48000.0))
             < Duration::from_nanos(64)
     );
+}
+
+#[test]
+fn time_domain_demand_skips_fft_without_shortening_window_or_cadence() {
+    for visualizer in [
+        VisualizerDemand::default(),
+        VisualizerDemand {
+            pcm: true,
+            ..Default::default()
+        },
+        VisualizerDemand {
+            stereo_density: true,
+            ..Default::default()
+        },
+        VisualizerDemand {
+            pcm: true,
+            stereo_density: true,
+            ..Default::default()
+        },
+    ] {
+        let (mut engine, mut frame, state, _) = setup();
+        let demand = DisplayDemand {
+            enabled: true,
+            spectrum: false,
+            visualizer,
+        };
+        engine.configure(engine.settings, demand, state, 2, &mut frame);
+        engine.request_frame();
+        engine.ingest(
+            header(state, 0, 0),
+            [[0.5, -0.25]; 511].into_iter(),
+            &mut frame,
+        );
+        let untouched = Complex32::new(123.0, -456.0);
+        engine.analyzer.as_mut().unwrap().frequency.fill(untouched);
+        let now = Instant::now();
+        assert_eq!(engine.publication_delay(now), None);
+        assert!(!engine.publish(&mut frame, now));
+        assert!(frame.settings.is_none());
+        engine.ingest(
+            header(state, 1, 511),
+            [[0.5, -0.25]].into_iter(),
+            &mut frame,
+        );
+        assert!(engine.publish(&mut frame, now));
+        assert!(frame.settings.is_some());
+        assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
+        assert_eq!(
+            frame.sample_time,
+            Duration::from_secs_f64(511.0 / 48_000.0) + Duration::from_secs_f64(1.0 / 48_000.0)
+        );
+        assert!(frame.frequencies_hz.is_empty());
+        assert!(frame.spectrum_db.is_empty());
+        assert_eq!(
+            frame.visualizer.pcm.len(),
+            if visualizer.pcm { 512 } else { 0 }
+        );
+        if visualizer.pcm {
+            assert!(
+                frame
+                    .visualizer
+                    .pcm
+                    .iter()
+                    .all(|samples| *samples == [0.5, -0.25])
+            );
+        }
+        if visualizer.stereo_density {
+            assert!(frame.visualizer.density.iter().any(|value| *value > 0.0));
+            assert_eq!(frame.visualizer.correlation, Some(-1.0));
+            assert_eq!(frame.visualizer.balance, Some(-0.6));
+            assert_eq!(frame.visualizer.side_ratio, Some(0.9));
+        }
+        engine.request_frame();
+        assert_eq!(engine.publication_delay(now), None);
+        engine.ingest(
+            header(state, 2, 512),
+            [[0.5, -0.25]].into_iter(),
+            &mut frame,
+        );
+        assert!(!engine.publish(&mut frame, now));
+        let interval = Duration::from_secs_f64(1.0 / engine.settings.fps as f64);
+        assert_eq!(engine.publication_delay(now), Some(interval));
+        assert!(engine.publish(&mut frame, now + interval));
+        assert!(
+            engine
+                .analyzer
+                .as_ref()
+                .unwrap()
+                .frequency
+                .iter()
+                .all(|bin| *bin == untouched)
+        );
+    }
+}
+
+#[test]
+fn frequency_demand_transitions_preserve_partial_window_and_restore_outputs() {
+    let (mut engine, mut frame, state, _) = setup();
+    let time_domain = DisplayDemand {
+        enabled: true,
+        spectrum: false,
+        visualizer: VisualizerDemand {
+            pcm: true,
+            stereo_density: true,
+            ..Default::default()
+        },
+    };
+    let demands = [
+        DisplayDemand {
+            spectrum: true,
+            ..time_domain
+        },
+        DisplayDemand {
+            visualizer: VisualizerDemand {
+                spatial_spectrum: true,
+                ..time_domain.visualizer
+            },
+            ..time_domain
+        },
+        DisplayDemand {
+            visualizer: VisualizerDemand {
+                band_energy: true,
+                ..time_domain.visualizer
+            },
+            ..time_domain
+        },
+        DisplayDemand {
+            visualizer: VisualizerDemand {
+                spectrogram: true,
+                ..time_domain.visualizer
+            },
+            ..time_domain
+        },
+        DisplayDemand {
+            spectrum: true,
+            ..time_domain
+        },
+    ];
+    let now = Instant::now();
+    let mut expected_fft = None;
+    for (index, demand) in demands.into_iter().enumerate() {
+        let token = index as u64 * 2 + 2;
+        let start = index as u64 * 512;
+        engine.configure(engine.settings, time_domain, state, token, &mut frame);
+        let generation = frame.generation;
+        engine.ingest(
+            header(state, index as u64 * 2, start),
+            [[0.5, -0.25]; 256].into_iter(),
+            &mut frame,
+        );
+        engine.request_frame();
+        let at = now + Duration::from_secs(index as u64 * 2);
+        if index > 0 {
+            assert!(engine.publish(&mut frame, at));
+            assert_eq!(frame.frequencies_hz.capacity(), 0);
+            assert_eq!(frame.spectrum_db.capacity(), 0);
+        }
+        engine.configure(engine.settings, demand, state, token + 1, &mut frame);
+        assert!(frame.settings.is_none());
+        engine.ingest(
+            header(state, index as u64 * 2 + 1, start + 256),
+            [[0.5, -0.25]; 256].into_iter(),
+            &mut frame,
+        );
+        engine.request_frame();
+        assert!(engine.publish(&mut frame, at + Duration::from_secs(1)));
+        assert_eq!(frame.generation, generation);
+        assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
+        assert_eq!(frame.spectrum_requested, demand.spectrum);
+        assert_eq!(frame.frequencies_hz.is_empty(), !demand.spectrum);
+        assert_eq!(frame.spectrum_db.is_empty(), !demand.spectrum);
+        assert_eq!(
+            frame.visualizer.spatial.len(),
+            if demand.visualizer.spatial_spectrum {
+                256
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            frame.visualizer.spectrogram.len(),
+            if demand.visualizer.spectrogram {
+                256
+            } else {
+                0
+            }
+        );
+        if demand.visualizer.band_energy {
+            assert!(frame.visualizer.band_rms.iter().any(|rms| *rms > 0.0));
+        }
+        let frequency = &engine.analyzer.as_ref().unwrap().frequency;
+        if let Some(expected) = &expected_fft {
+            assert_eq!(frequency, expected);
+        } else {
+            expected_fft = Some(frequency.clone());
+        }
+    }
 }

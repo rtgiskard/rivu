@@ -302,8 +302,9 @@ impl RadialRenderer {
 
     pub(super) fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         let mut data = self.data.borrow_mut();
-        if frame.spectrum_db.is_empty()
-            || frame.spectrum_db.len() != frame.frequencies_hz.len()
+        if (frame.spectrum_requested
+            && (frame.spectrum_db.is_empty()
+                || frame.spectrum_db.len() != frame.frequencies_hz.len()))
             || !frame.settings.is_some_and(|settings| {
                 settings.signal_compatible_with(AnalysisSettings {
                     fft_size: data.fft_size,
@@ -334,7 +335,7 @@ impl RadialRenderer {
             data.last_presentation_time = None;
             data.fade_started = None;
         }
-        if !data.visible {
+        if !frame.spectrum_requested || !data.visible {
             return;
         }
         let fft_size = data.fft_size;
@@ -1149,6 +1150,7 @@ mod tests {
         AnalysisFrame {
             sample_rate: 48_000,
             sample_time: Duration::from_secs(1),
+            spectrum_requested: true,
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![-35.0; 4],
             settings: Some(AnalysisSettings::from(&Config::default())),
@@ -1453,6 +1455,12 @@ mod tests {
         accept(&mut radial, &frame());
         radial.set_visible(false);
         accept(&mut radial, &frame());
+        let mut omitted = frame();
+        omitted.spectrum_requested = false;
+        omitted.frequencies_hz.clear();
+        omitted.spectrum_db.clear();
+        omitted.sample_time += Duration::from_secs(1);
+        accept(&mut radial, &omitted);
         assert_eq!(radial.data.borrow().displayed, vec![0.5; 4]);
         assert_eq!(radial.data.borrow().mapping.frequencies.capacity(), 0);
         assert_eq!(radial.data.borrow().mapping.ranges.capacity(), 0);
@@ -1469,6 +1477,28 @@ mod tests {
         latest.spectrum_db.fill(-70.0);
         accept(&mut radial, &latest);
         assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn omitted_spectrum_still_retires_semantically_invalid_radial_output() {
+        for invalidation in 0..4 {
+            let mut radial = RadialRenderer::new();
+            accept(&mut radial, &frame());
+            radial.set_visible(false);
+            let mut omitted = frame();
+            omitted.spectrum_requested = false;
+            omitted.frequencies_hz.clear();
+            omitted.spectrum_db.clear();
+            match invalidation {
+                0 => omitted.generation += 1,
+                1 => omitted.sample_rate = 44_100,
+                2 => omitted.settings = None,
+                _ => omitted.settings.as_mut().unwrap().fft_size *= 2,
+            }
+            accept(&mut radial, &omitted);
+            radial.set_visible(true);
+            assert!(radial.data.borrow().displayed.is_empty());
+        }
     }
 
     #[test]

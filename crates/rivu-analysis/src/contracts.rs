@@ -18,6 +18,8 @@ pub struct VisualizerDemand {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DisplayDemand {
     pub enabled: bool,
+    /// Musical-band spectrum and its frequency axis, independent of other plots.
+    pub spectrum: bool,
     pub visualizer: VisualizerDemand,
 }
 
@@ -135,7 +137,7 @@ impl From<Vec<[f32; 2]>> for PcmSnapshot {
 }
 
 /// `demand` is the request mask. An empty requested snapshot means unavailable
-/// for this publication; it never prevents publishing the base spectrum/RMS.
+/// for this publication; it never prevents publishing other requested data or RMS.
 #[derive(Debug, Default)]
 pub struct VisualizerFrame {
     pub demand: VisualizerDemand,
@@ -195,13 +197,18 @@ pub struct AnalysisFrame {
     pub audio_intent: u64,
     /// True signal continuity; pause and display capture restarts preserve it.
     pub generation: u64,
-    /// Absent until the first publication; identifies the FFT producing this frame.
+    /// Absent until the first full-window publication; identifies its analysis settings.
     pub settings: Option<AnalysisSettings>,
     pub sample_rate: u32,
     /// Monotonic amount of accepted audio represented by this frame.
     pub sample_time: Duration,
+    /// Whether this publication requested the musical-band spectrum. An omitted
+    /// spectrum is not a signal invalidation; requested but empty data is unavailable.
+    pub spectrum_requested: bool,
+    /// Musical-band spectrum axis and levels; empty when not requested.
     pub frequencies_hz: Vec<f32>,
     pub spectrum_db: Vec<f32>,
+    /// Unwindowed channel RMS over the full configured analysis window.
     pub rms_left: f32,
     pub rms_right: f32,
     pub visualizer: VisualizerFrame,
@@ -223,6 +230,7 @@ impl Clone for AnalysisFrame {
         self.settings = source.settings;
         self.sample_rate = source.sample_rate;
         self.sample_time = source.sample_time;
+        self.spectrum_requested = source.spectrum_requested;
         self.frequencies_hz.clone_from(&source.frequencies_hz);
         self.spectrum_db.clone_from(&source.spectrum_db);
         self.rms_left = source.rms_left;

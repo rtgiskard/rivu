@@ -318,6 +318,9 @@ impl FrequencyViews {
             data.spectrum.envelope_initialized = false;
             data.spectrum.last_update = None;
         }
+        if !frame.spectrum_requested {
+            return;
+        }
         if frame.spectrum_db.len() != frame.frequencies_hz.len() {
             data.report_error("Analysis frequency and level counts differ".into());
             return;
@@ -1016,6 +1019,26 @@ mod tests {
         assert!(data.spectrum_render_range().is_some());
     }
 
+    #[test]
+    fn omitted_spectrum_preserves_frequency_history_until_signal_invalidation() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -20.0), Duration::from_secs(1));
+        let mut omitted = frame(1.1, -40.0);
+        omitted.spectrum_requested = false;
+        omitted.frequencies_hz.clear();
+        omitted.spectrum_db.clear();
+        visuals.update(&omitted, omitted.sample_time);
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.latest_levels, vec![-20.0; 4]);
+            assert_eq!(data.spectrogram.len, 1);
+            assert_eq!(data.frequencies, vec![20.0, 200.0, 2000.0, 20_000.0]);
+        }
+        omitted.settings = None;
+        visuals.update(&omitted, omitted.sample_time);
+        assert!(visuals.data.borrow().latest_levels.is_empty());
+    }
+
     fn prepared_body(
         visuals: &FrequencyViews,
         panel: u64,
@@ -1454,6 +1477,7 @@ mod tests {
             sequence: Duration::from_secs_f64(time).as_nanos() as u64,
             sample_rate: 48_000,
             sample_time: Duration::from_secs_f64(time),
+            spectrum_requested: true,
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![level; 4],
             settings: Some(rivu_analysis::AnalysisSettings::from(&Config::default())),

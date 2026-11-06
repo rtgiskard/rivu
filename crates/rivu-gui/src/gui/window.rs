@@ -1309,6 +1309,7 @@ mod state_tests {
         let mut frame = AnalysisFrame::default();
         let all = DisplayDemand {
             enabled: true,
+            spectrum: true,
             visualizer: VisualizerDemand {
                 stereo_density: true,
                 spatial_spectrum: true,
@@ -1405,6 +1406,7 @@ mod state_tests {
                 &mut staging,
                 DisplayDemand {
                     enabled: true,
+                    spectrum: true,
                     visualizer: survivor,
                 },
             );

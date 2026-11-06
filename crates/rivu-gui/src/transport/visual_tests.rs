@@ -105,6 +105,7 @@ async fn current_after(f: &Fixture, sequence: u64) -> AnalysisFrame {
 async fn subscribe(f: &mut Fixture) {
     f.client.set_display_demand(DisplayDemand {
         enabled: true,
+        spectrum: true,
         visualizer: VisualizerDemand {
             pcm: true,
             ..VisualizerDemand::default()
