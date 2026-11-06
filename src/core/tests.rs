@@ -159,6 +159,7 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
     thread::spawn(move || {
         let mut final_snapshot = audio::AudioSnapshot::default();
         while let Ok(command) = receive.recv_blocking() {
+            let command = command.command;
             match &command {
                 AudioCommand::Load {
                     generation,

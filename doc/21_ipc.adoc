@@ -113,22 +113,30 @@ link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifec
 [[realtime-pcm-transport]]
 ==== Realtime PCM transport
 
-The PCM v4 side channel binds to the command session's Core instance and verifies
+The PCM v5 side channel binds to the command session's Core instance and verifies
 the local peer. Its control socket carries 16-byte requests and 72-byte status
-records, including the observed audible output-frame cursor, not a predicted
-presentation deadline. The handshake supplies a Core-owned sealed memfd path;
+records, including the observed audible output-frame cursor and a logical-block
+sequence plus consumed frame offset, not a predicted presentation deadline.
+The handshake supplies a Core-owned sealed memfd path;
 clients map that same window read-only. Existing mappings survive Core retirement,
 but a new command session must attach to its own instance's window.
 
-The window holds 32 blocks of at most 1024 frames and 18 native float channels,
-including standard speaker indices. Sample storage is 2.25 MiB per Core window,
-plus metadata and alignment, independent of the number of clients (at most 16).
+The window uses blocks of at most 1024 frames and 18 native float channels,
+including standard speaker indices. Output setup sizes active retention for its
+bounded prefetch, a 200 ms observer allowance and a maximum FFT window, with at
+least 32 slots and two boundary slots. Contiguous short writes extend the latest
+logical block instead of consuming a new slot for every decoder fragment.
+Native-channel stride and active pages are configured and prefaulted outside
+capture publication. Retention is bounded independently of the number of clients
+(at most 16); neither readers nor a stalled GUI can extend it. Resource bounds
+belong to link:22_cache.adoc#visualization-caching[Visualization caching].
 There is no private capture queue, middleware PCM copy or per-client PCM queue.
 Analysis history and the processed Before FIFO are separate allocations.
 
 PCM publications and cursor progress wake enabled receivers. Each subscription
-request acknowledges its own revision and current sequence frontier; unchanged
-aggregate capture state does not wake other clients. Capture demand is owned by
+request acknowledges its own revision and current sequence/frame-offset frontier;
+new subscribers skip only the existing prefix, including within a growing tail.
+Unchanged aggregate capture state does not wake other clients. Capture demand is owned by
 the aggregate of live subscriptions, subject to visualization enablement; command
 clients cannot override it through a global analysis setter. Shared control changes,
 including first enablement and last-subscriber disconnect, notify disabled clients
@@ -137,12 +145,13 @@ The device callback reads a fixed number of atomic notification hints, not the
 observer's retrying coherent snapshot. Enabling transitions also notify, so a
 concurrent false hint cannot suppress recovery; stable disabled capture does not
 produce continuing cursor wakeups. Observers still validate complete identities.
-Stream identity, applied intent, capture identity and sequence watermarks reject
-obsolete blocks. Missing sequences or explicit gaps break analysis continuity.
+Stream identity, applied intent, capture identity and frame frontiers reject
+obsolete blocks. Consumers revisit a growing partial tail without ingesting its
+accepted prefix twice. Missing sequences or explicit gaps break analysis continuity.
 Readers never pin slots: a writer may replace samples during direct observation.
-Metadata snapshots are validated; payload observation remains best-effort, not a
-lossless snapshot. Slow consumers resume from retained data rather than extending
-the window or reconstructing overwritten history.
+Metadata and post-read revision/configuration fences reject overwritten observations;
+the window is not a lossless snapshot. Slow consumers resume from retained data
+rather than extending storage or reconstructing overwritten history.
 
 Waveform envelopes use their own v3 socket protocol with at most eight clients,
 1 MiB frames, a one-second Hello deadline and five-second control I/O deadlines.

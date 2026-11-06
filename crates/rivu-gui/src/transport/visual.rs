@@ -10,7 +10,8 @@ use parking_lot::{Mutex, RwLock};
 use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand};
 use rivu_format::config::Config;
 use rivu_protocol::pcm::{
-    ControlReader, DEADLINE, MAGIC, PcmState, STATUS_SIZE, address, decode_status, request,
+    ControlReader, DEADLINE, MAGIC, PcmPosition, PcmState, STATUS_SIZE, address, decode_status,
+    request,
 };
 use rivu_shm::{PCM_QUEUE_BLOCKS, SharedPcmWindow};
 use std::{
@@ -293,8 +294,8 @@ async fn run_client(
     let mut sent_revision = 0;
     let mut acknowledged = None;
     let mut pcm_state = PcmState::default();
-    let mut minimum_sequence = 0;
-    let mut last_sequence = 0;
+    let mut minimum_position = PcmPosition::default();
+    let mut position = PcmPosition::default();
     let mut status_reader = ControlReader::<STATUS_SIZE>::new();
     let (mut reader, mut writer) = stream.split();
     let mut engine = AnalysisEngine::new(state.desired.lock().settings);
@@ -304,6 +305,11 @@ async fn run_client(
     let mut drain_again = false;
     let mut capture_revision = 0;
     loop {
+        if drain_again {
+            // A growing retention window never turns catch-up into one
+            // unbounded executor turn or starves ready subscription changes.
+            futures_lite::future::yield_now().await;
+        }
         // Wait for control/cursor notifications; a completed FFT may additionally
         // wait for local display cadence. No playback-time polling is needed.
         let delay = if drain_again {
@@ -360,7 +366,7 @@ async fn run_client(
             let (next, revision, minimum) = decode_status(&result?)?;
             if revision == sent_revision {
                 pcm_state = next;
-                minimum_sequence = minimum;
+                minimum_position = minimum;
                 acknowledged = Some(revision);
             }
         }
@@ -371,29 +377,65 @@ async fn run_client(
             engine.restart_capture(&mut frame);
             // Local subscriptions start after the currently published prefix,
             // even when another GUI keeps global capture enabled.
-            last_sequence = window.sequence();
+            position = window.frontier();
             capture_revision = revision;
         }
         drain_again = false;
         if admitted && demand.enabled && pcm_state.active {
             let latest = window.sequence();
-            last_sequence = last_sequence
-                .max(minimum_sequence)
-                .max(latest.saturating_sub(PCM_QUEUE_BLOCKS as u64));
+            position = position.max(minimum_position).max(PcmPosition {
+                sequence: latest
+                    .saturating_sub(window.retained_blocks() as u64 - 1)
+                    .max(1),
+                offset: 0,
+            });
+            let mut drained = 0;
             for _ in 0..PCM_QUEUE_BLOCKS {
-                if last_sequence >= latest {
+                let sequence = position.sequence.max(1);
+                if sequence > latest {
                     break;
                 }
-                let sequence = last_sequence + 1;
+                drained += 1;
                 let Some(block) = window.block(sequence) else {
-                    last_sequence = sequence;
+                    // An append can fence the current tail temporarily. Keep
+                    // ownership of its already-consumed prefix until it completes.
+                    if sequence == latest {
+                        break;
+                    }
+                    position = PcmPosition {
+                        sequence: sequence + 1,
+                        offset: 0,
+                    };
                     continue;
                 };
-                let header = block.header();
+                let mut header = block.header();
                 if !pcm_state.accepts(header) {
-                    last_sequence = sequence;
+                    // Control status can lag the producer's new identity. The
+                    // latest logical block may still grow under that identity;
+                    // retry its original prefix once the matching status arrives.
+                    if sequence == latest {
+                        break;
+                    }
+                    position = PcmPosition {
+                        sequence: sequence + 1,
+                        offset: 0,
+                    };
                     continue;
                 }
+                let offset = usize::from(position.offset);
+                if offset >= block.len() {
+                    if sequence < latest {
+                        position = PcmPosition {
+                            sequence: sequence + 1,
+                            offset: 0,
+                        };
+                        continue;
+                    }
+                    break;
+                }
+                header.start_frame += offset as u64;
+                header.output_frame += offset as u64;
+                header.gap &= offset == 0;
                 // Coarse following allows a block of lead. Samples stay in the
                 // Core window until the audible cursor approaches their span.
                 if header.output_frame
@@ -408,7 +450,7 @@ async fn run_client(
                     layout.extend_from_slice(block.layout());
                     weights = rivu_dsp::channels::analysis_weights(layout.iter().copied());
                 }
-                let samples = (0..block.len()).map(|index| {
+                let samples = (offset..block.len()).map(|index| {
                     let mut stereo = [0.0; 2];
                     for (channel, weight) in weights.iter().enumerate() {
                         let sample = block.sample(index, channel);
@@ -417,15 +459,45 @@ async fn run_client(
                     }
                     stereo
                 });
-                if engine.ingest(header, samples, &mut frame) {
+                let mut current = true;
+                let ingested = engine.ingest_checked(
+                    header,
+                    samples,
+                    || {
+                        current = block.still_current();
+                        current
+                    },
+                    &mut frame,
+                );
+                if !current {
+                    // The engine retired all potentially mixed samples. Keep
+                    // our pre-read position so a completed append can be retried
+                    // without skipping its tail or double-counting audio time.
+                    break;
+                }
+                if ingested {
                     engine.request_frame();
                 }
-                last_sequence = sequence;
+                if sequence < latest {
+                    position = PcmPosition {
+                        sequence: sequence + 1,
+                        offset: 0,
+                    };
+                } else {
+                    // The latest logical block remains observable while partial.
+                    position = PcmPosition {
+                        sequence,
+                        offset: block.len() as u16,
+                    };
+                    break;
+                }
             }
-            drain_again = last_sequence == latest && window.sequence() > latest;
+            drain_again = drained == PCM_QUEUE_BLOCKS || window.sequence() > latest;
         }
         // Catch up before publishing; never expose an intermediate SHM backlog.
-        let published = admitted && !drain_again && engine.publish(&mut frame, Instant::now());
+        if admitted && !drain_again {
+            engine.publish(&mut frame, Instant::now());
+        }
         // Never hold desired while acquiring staging: readers check acceptance
         // while holding staging, and a token revoke must not deadlock them.
         if frame.sequence != previous_sequence {
@@ -437,14 +509,15 @@ async fn run_client(
             && !state.stopped.load(Ordering::Acquire)
             && frame.sequence != previous_sequence
         {
-            *state.current.write() =
-                (published && admitted && pcm_state.active).then_some(Current {
-                    sequence: frame.sequence,
-                    display_token: frame.display_token,
-                    epoch: frame.audio_epoch,
-                    intent: frame.audio_intent,
-                    revision,
-                });
+            // Current invalidations are real publications too: the runtime must
+            // retire its previous picture even before a fresh FFT window exists.
+            *state.current.write() = (admitted && pcm_state.active).then_some(Current {
+                sequence: frame.sequence,
+                display_token: frame.display_token,
+                epoch: frame.audio_epoch,
+                intent: frame.audio_intent,
+                revision,
+            });
         }
         drop(desired);
         if frame.sequence != previous_sequence {
@@ -455,4 +528,4 @@ async fn run_client(
 
 #[cfg(test)]
 #[path = "visual_tests.rs"]
-mod tests;
+pub(crate) mod tests;

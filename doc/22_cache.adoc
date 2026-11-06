@@ -267,6 +267,7 @@ Workflow, native streaming and neural memory boundaries are specified in
 link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing].
 
 
+[[visualization-caching]]
 == Visualization caching
 
 === Scope and contract
@@ -433,13 +434,23 @@ Source/seek identity and analysis settings govern semantic invalidation even whi
 hidden or paused. The continuity contract belongs to
 link:23_visuals.adoc[Visualization Rendering Design].
 
-Core retains one fixed native-channel PCM window shared read-only with GUI clients:
-32 slots × 1024 frames × 18 float channels, or 2.25 MiB of sample storage plus
-metadata and alignment. Capture writes directly; neither IPC nor GUI transport
-retains another PCM queue. The GUI's logical stereo analysis history remains
-separate. Slots are never pinned by readers, so a stalled GUI cannot retain or
-extend Core storage. The transport contract belongs to
-link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport].
+Core retains one bounded native-channel PCM window shared read-only with GUI
+clients. Output setup selects a native-channel stride and
+`max(32, ceil((prefetch_frames + ceil(sample_rate / 5) + 32768) / 1024) + 2)`
+active slots. The output prefetch has a separate 16 MiB sample limit; observation
+headroom adds 200 ms and the maximum FFT span. At most 7407 slots and 8,213,300
+float samples are addressable: 32,853,200 sample bytes plus bounded metadata and
+alignment. The mapping reserves that maximum, but setup prefaults only configured
+metadata and sample pages; previously faulted pages can remain resident after a
+smaller configuration. Before output setup, the fallback is 32 slots of 1024 frames
+and 18 channels (2.25 MiB of samples).
+
+Capture appends contiguous fragments within logical blocks, with no publication
+allocation. Neither IPC nor GUI transport retains another PCM queue; the GUI's
+logical stereo analysis history remains separate. Slots are never pinned by
+readers, so a stalled GUI cannot retain or extend Core storage. These are bounded
+mapping/sample capacities, not process RSS limits. The transport contract belongs
+to link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport].
 
 The processed Before tap's native-channel source-aligned FIFO is separate from the analysis ring
 and waveform retention. Capture-identity changes, inactive analysis or exhaustion

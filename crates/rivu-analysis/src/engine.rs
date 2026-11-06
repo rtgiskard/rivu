@@ -639,19 +639,40 @@ impl AnalysisEngine {
     }
 
     /// Reject retired streams before touching rolling windows or density history.
+    /// Samples must stay valid throughout ingestion; unpinned storage uses
+    /// `ingest_checked` to validate payload observation before it commits.
     pub fn ingest(
         &mut self,
         header: PcmHeader,
         samples: impl ExactSizeIterator<Item = [f32; 2]>,
         frame: &mut AnalysisFrame,
     ) -> bool {
+        self.ingest_checked(header, samples, || true, frame)
+    }
+
+    /// Observe unpinned samples and validate their source after the last load.
+    /// A replaced payload clears all potentially contaminated rolling/density
+    /// history before any sample time or fresh publication is committed.
+    pub fn ingest_checked(
+        &mut self,
+        header: PcmHeader,
+        samples: impl ExactSizeIterator<Item = [f32; 2]>,
+        still_current: impl FnOnce() -> bool,
+        frame: &mut AnalysisFrame,
+    ) -> bool {
         let count = samples.len();
         if !self.demand.enabled || !self.state.accepts(header) || count == 0 {
             return false;
         }
+        if self.expected.is_some_and(|(next_sequence, start)| {
+            header.sequence < next_sequence.wrapping_sub(1) || header.start_frame < start
+        }) {
+            return false;
+        }
         let discontinuity = header.gap
             || self.expected.is_some_and(|(sequence, start)| {
-                header.sequence != sequence || header.start_frame != start
+                (header.sequence != sequence && header.sequence.wrapping_add(1) != sequence)
+                    || header.start_frame != start
             });
         if discontinuity {
             self.generation = self.generation.wrapping_add(1);
@@ -678,6 +699,11 @@ impl AnalysisEngine {
         analyzer.set_visualizer_demand(self.demand.visualizer);
         for sample in samples {
             analyzer.push(sample);
+        }
+        if !still_current() {
+            self.generation = self.generation.wrapping_add(1);
+            self.restart_capture(frame);
+            return false;
         }
         self.expected = Some((
             header.sequence.wrapping_add(1),

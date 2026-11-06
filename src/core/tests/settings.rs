@@ -582,7 +582,7 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     // Configure enqueues synchronously, but the recorder forwards on another thread.
     audio
         .recv_timeout(Duration::from_secs(2))
-        .expect("No-op Apply still reapplies audio settings");
+        .expect("No-op Apply still validates output settings");
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
     core.command(Command::Volume { value: 0.25 }).unwrap();
@@ -618,6 +618,55 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     drop(run_until_disconnected(core, receiver));
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+}
+
+#[test]
+fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validation() {
+    let (_directory, mut core) = fixture();
+    let (commands, receive) = async_channel::bounded(4);
+    let _idle_commands = core.engine.replace_commands(commands);
+    let before = core.engine.pcm.state();
+    let mut config = core.preferences.checkpoint();
+    config.ui_scale = 1.25;
+    config.visualization_fps = 30;
+    config.analysis_rate_hz = 30;
+    core.command(Command::Configure {
+        config: Arc::new(config.clone()),
+    })
+    .unwrap();
+    assert_eq!(core.engine.pcm.state(), before);
+    assert_eq!(
+        Config::load(&core.state.configuration.config_path).unwrap(),
+        config
+    );
+    assert!(matches!(
+        receive.try_recv().unwrap().command,
+        AudioCommand::OutputSettings {
+            request: 1,
+            device: None,
+            auto_mix: true
+        }
+    ));
+    assert!(
+        receive.is_empty(),
+        "display Apply must not resend unchanged audio controls"
+    );
+
+    // An explicit no-op Apply must still validate the selected output again.
+    core.command(Command::Configure {
+        config: Arc::new(config),
+    })
+    .unwrap();
+    assert_eq!(core.engine.pcm.state(), before);
+    assert!(matches!(
+        receive.try_recv().unwrap().command,
+        AudioCommand::OutputSettings {
+            request: 2,
+            device: None,
+            auto_mix: true
+        }
+    ));
+    assert!(receive.is_empty());
 }
 
 #[test]
@@ -669,7 +718,11 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
             let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
             let (commands, _receive) = async_channel::bounded(2);
             for _ in 0..2 - available {
-                commands.try_send(AudioCommand::Volume(0.5)).unwrap();
+                commands
+                    .try_send(audio::QueuedAudioCommand::test_unfenced(
+                        AudioCommand::Volume(0.5),
+                    ))
+                    .unwrap();
             }
             core.engine.replace_commands(commands);
             let mut config = core.preferences.checkpoint();

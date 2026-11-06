@@ -1316,7 +1316,11 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     let (commands, receive) = async_channel::bounded(1);
-    commands.try_send(AudioCommand::Volume(0.5)).unwrap();
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     let before = core.state.query_revisions();
@@ -1354,7 +1358,10 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
     assert_eq!(core.state.current_track().unwrap().title, "Track 1");
     assert!(core.state.current_track().unwrap().favorite);
     assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
-    assert!(matches!(receive.try_recv(), Ok(AudioCommand::Volume(_))));
+    assert!(matches!(
+        receive.try_recv().map(|queued| queued.command),
+        Ok(AudioCommand::Volume(_))
+    ));
     assert!(receive.is_empty());
 
     core.command(edit()).unwrap();
@@ -1363,7 +1370,7 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
     assert_eq!(current.artist, "Current artist");
     assert_eq!(current.album, "Current album");
     assert!(matches!(
-        receive.try_recv(),
+        receive.try_recv().map(|queued| queued.command),
         Ok(AudioCommand::Metadata { .. })
     ));
     assert!(
@@ -1377,7 +1384,11 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     let (commands, receive) = async_channel::bounded(1);
-    commands.try_send(AudioCommand::Volume(0.5)).unwrap();
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     core.store
@@ -1426,7 +1437,10 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
         core.state.current_track.as_ref().unwrap(),
         &current
     ));
-    assert!(matches!(receive.try_recv(), Ok(AudioCommand::Volume(_))));
+    assert!(matches!(
+        receive.try_recv().map(|queued| queued.command),
+        Ok(AudioCommand::Volume(_))
+    ));
 
     core.refresh_queue_tracks().unwrap();
     let current = core.state.current_track().unwrap();
@@ -1434,7 +1448,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
     assert_eq!(current.artist, "Artist");
     assert_eq!(current.album, "Album");
     assert!(matches!(
-        receive.try_recv(),
+        receive.try_recv().map(|queued| queued.command),
         Ok(AudioCommand::Metadata { .. })
     ));
     assert!(receive.is_empty());

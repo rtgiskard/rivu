@@ -9,7 +9,7 @@ use futures::{
     stream::FuturesUnordered,
 };
 use rivu_protocol::pcm::{
-    ControlReader, DEADLINE, MAGIC, REQUEST_SIZE, address, word, write_status,
+    ControlReader, DEADLINE, MAGIC, PcmPosition, REQUEST_SIZE, address, word, write_status,
 };
 use rivu_shm::MAX_CLIENTS;
 use std::{
@@ -212,7 +212,7 @@ async fn serve_client(
         id,
     };
     let mut revision = 0;
-    let mut minimum_sequence = 0;
+    let mut minimum_position = PcmPosition::default();
     let (mut reader, mut writer) = stream.split();
     loop {
         // Ready control I/O must still return to the publisher and other sessions.
@@ -230,10 +230,10 @@ async fn serve_client(
             let mut state = state.borrow_mut();
             state.clients.get_mut(&id).unwrap().0 = command[1] != 0;
             state.aggregate();
-            minimum_sequence = state.handle.pcm.sequence();
+            minimum_position = state.handle.pcm.frontier();
         }
         let snapshot = state.borrow().handle.pcm.state();
-        write_status(&mut writer, snapshot, revision, minimum_sequence).await?;
+        write_status(&mut writer, snapshot, revision, minimum_position).await?;
     }
 }
 
@@ -244,7 +244,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::time::Duration;
 
-    type Status = (PcmState, u64, u64);
+    type Status = (PcmState, u64, PcmPosition);
 
     struct Client(UnixStream);
 
@@ -337,7 +337,7 @@ mod tests {
             peer.read_exact(&mut bytes).unwrap();
             let (enabled, revision, frontier) = decode_status(&bytes).unwrap();
             assert_eq!(revision, 11);
-            assert_eq!(frontier, 0);
+            assert_eq!(frontier, PcmPosition::default());
             assert_eq!(enabled.capture, initial.capture + 1);
             assert_eq!(handle.pcm.state().capture, enabled.capture);
         }
@@ -353,15 +353,21 @@ mod tests {
         let server = PcmServer::start(directory.path(), handle.clone(), 7).unwrap();
         let mut local = Client::connect(directory.path());
         let initial = local.subscribe(false, 1);
-        assert_eq!(initial, (handle.pcm.state(), 1, 0));
-        assert_eq!(local.subscribe(false, 2), (initial.0, 2, 0));
+        assert_eq!(initial, (handle.pcm.state(), 1, PcmPosition::default()));
+        assert_eq!(
+            local.subscribe(false, 2),
+            (initial.0, 2, PcmPosition::default())
+        );
 
         let mut keeper = Client::connect(directory.path());
         let shared = keeper.subscribe(true, 1).0;
         assert_eq!(shared.capture, initial.0.capture + 1);
-        assert_eq!(local.capture(shared.capture), (shared, 2, 0));
+        assert_eq!(
+            local.capture(shared.capture),
+            (shared, 2, PcmPosition::default())
+        );
         let window = handle.pcm.window();
-        let publish = || {
+        let publish = |start_frame| {
             assert!(window.publish(
                 PcmHeader {
                     epoch: shared.epoch,
@@ -369,26 +375,76 @@ mod tests {
                     generation: shared.generation,
                     capture: shared.capture,
                     sample_rate: shared.sample_rate,
+                    start_frame,
+                    output_frame: start_frame,
                     ..Default::default()
                 },
                 &[0, 1],
                 [0.25, -0.25].into_iter(),
             ));
-            window.sequence()
+            window.frontier()
         };
-        let first = publish();
+        let first = publish(0);
+        assert_eq!(
+            first,
+            PcmPosition {
+                sequence: 1,
+                offset: 1
+            }
+        );
         assert_eq!(local.subscribe(false, 3), (shared, 3, first));
         assert_eq!(local.subscribe(false, 4), (shared, 4, first));
-        let second = publish();
+        let second = publish(1);
+        assert_eq!(
+            second,
+            PcmPosition {
+                sequence: 1,
+                offset: 2
+            }
+        );
         assert!(second > first);
         assert_eq!(local.subscribe(true, 5), (shared, 5, second));
-        let third = publish();
+        let third = publish(2);
+        assert_eq!(
+            third,
+            PcmPosition {
+                sequence: 1,
+                offset: 3
+            }
+        );
         assert!(third > second);
         assert_eq!(local.subscribe(false, 6), (shared, 6, third));
         assert_eq!(local.subscribe(true, 7), (shared, 7, third));
         drop(local);
         drop(keeper);
         drop(server);
+    }
+
+    #[test]
+    fn unchanged_aggregate_does_not_wake_status_broadcasts() {
+        let (handle, _queries) = CoreHandle::test_query_port();
+        let updates = handle.pcm.subscribe();
+        while updates.try_recv().is_ok() {}
+        let (notify, _notifications) = async_channel::bounded(1);
+        let mut state = ServerState {
+            handle,
+            clients: BTreeMap::from([(1, (true, notify.clone()))]),
+        };
+        state.aggregate();
+        assert_eq!(updates.try_recv(), Ok(()));
+        let enabled = state.handle.pcm.state();
+        state.clients.insert(2, (true, notify));
+        state.aggregate();
+        state.clients.get_mut(&1).unwrap().0 = false;
+        state.aggregate();
+        state.clients.remove(&1);
+        state.aggregate();
+        assert_eq!(state.handle.pcm.state(), enabled);
+        assert_eq!(updates.try_recv(), Err(async_channel::TryRecvError::Empty));
+        state.clients.remove(&2);
+        state.aggregate();
+        assert_eq!(updates.try_recv(), Ok(()));
+        assert_eq!(state.handle.pcm.state().capture, enabled.capture + 1);
     }
 
     #[test]
@@ -401,15 +457,24 @@ mod tests {
         let mut first = Client::connect(directory.path());
         let enabled = first.subscribe(true, 1).0;
         assert_eq!(enabled.capture, initial.capture + 1);
-        assert_eq!(observer.capture(enabled.capture), (enabled, 11, 0));
+        assert_eq!(
+            observer.capture(enabled.capture),
+            (enabled, 11, PcmPosition::default())
+        );
 
         let mut second = Client::connect(directory.path());
         assert_eq!(second.subscribe(true, 1).0, enabled);
         assert_eq!(first.subscribe(false, 2).0, enabled);
+        // An unchanged aggregate must not queue a broadcast before this ACK.
+        observer.0.write_all(&request(1, 0, 12)).unwrap();
+        assert_eq!(observer.status(), (enabled, 12, PcmPosition::default()));
         drop(second);
         let disabled = observer.capture(enabled.capture + 1).0;
         assert!(!disabled.active);
-        assert_eq!(observer.subscribe(false, 12), (disabled, 12, 0));
+        assert_eq!(
+            observer.subscribe(false, 13),
+            (disabled, 13, PcmPosition::default())
+        );
 
         // Coalescing may skip intermediate broadcasts, but fast off/on still
         // revokes the previous capture identity even without any audio frames.
@@ -419,11 +484,17 @@ mod tests {
         }
         first.0.write_all(&requests).unwrap();
         let resumed = first.capture(disabled.capture + 3).0;
-        assert_eq!(observer.capture(resumed.capture), (resumed, 12, 0));
+        assert_eq!(
+            observer.capture(resumed.capture),
+            (resumed, 13, PcmPosition::default())
+        );
         drop(first);
         let stopped = observer.capture(resumed.capture + 1).0;
         assert!(!stopped.active);
-        assert_eq!(observer.subscribe(false, 13), (stopped, 13, 0));
+        assert_eq!(
+            observer.subscribe(false, 14),
+            (stopped, 14, PcmPosition::default())
+        );
         drop(observer);
         drop(server);
     }

@@ -2,7 +2,7 @@
 
 use super::{
     AudioCommand, AudioEvent, AudioShutdownReceiver, AudioSnapshot, PlaybackMetadata,
-    WaveformFrame,
+    QueuedAudioCommand, WaveformFrame,
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
@@ -26,11 +26,11 @@ use std::{
 const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
-    receiver: async_channel::Receiver<AudioCommand>,
+    receiver: async_channel::Receiver<QueuedAudioCommand>,
     // A non-seek read ahead is an ordering barrier, not a command to discard.
-    pending: Option<AudioCommand>,
-    // Discarding a seek target must still settle its admitted analysis intent.
-    coalesced_intents: usize,
+    pending: Option<QueuedAudioCommand>,
+    // Every admitted fence is settled, including discarded seek targets.
+    admitted_intents: usize,
 }
 
 impl CommandInbox {
@@ -48,22 +48,27 @@ impl CommandInbox {
             self.receiver.try_recv()?
         };
         *remaining -= 1;
+        self.admitted_intents += usize::from(command.pcm_intent);
         let AudioCommand::Seek {
             mut seconds,
             mut revision,
-        } = command
+        } = command.command
         else {
-            return Ok(command);
+            return Ok(command.command);
         };
         while *remaining > 0 {
             match self.receiver.try_recv() {
-                Ok(AudioCommand::Seek {
-                    seconds: target,
-                    revision: target_revision,
+                Ok(QueuedAudioCommand {
+                    command:
+                        AudioCommand::Seek {
+                            seconds: target,
+                            revision: target_revision,
+                        },
+                    pcm_intent,
                 }) => {
                     *remaining -= 1;
                     seconds = target;
-                    self.coalesced_intents += 1;
+                    self.admitted_intents += usize::from(pcm_intent);
                     revision = target_revision;
                 }
                 Ok(barrier) => {
@@ -163,7 +168,7 @@ pub(super) struct Worker {
 }
 impl Worker {
     pub(super) fn new(
-        commands: async_channel::Receiver<AudioCommand>,
+        commands: async_channel::Receiver<QueuedAudioCommand>,
         commands_ready: Receiver<()>,
         events: async_channel::Sender<AudioEvent>,
         shutdown: AudioShutdownReceiver,
@@ -175,7 +180,7 @@ impl Worker {
             commands: CommandInbox {
                 receiver: commands,
                 pending: None,
-                coalesced_intents: 0,
+                admitted_intents: 0,
             },
             commands_ready,
             events,
@@ -222,9 +227,6 @@ impl Worker {
         );
     }
     fn command(&mut self, command: AudioCommand) -> bool {
-        if command.changes_pcm_source() {
-            self.analyzer.apply_audio_intents(1);
-        }
         match command {
             AudioCommand::Shutdown => {
                 self.stop();
@@ -662,7 +664,7 @@ impl Worker {
                 return false;
             }
             self.analyzer
-                .apply_audio_intents(std::mem::take(&mut self.commands.coalesced_intents) as u64);
+                .apply_audio_intents(std::mem::take(&mut self.commands.admitted_intents) as u64);
             if !self.command(command) {
                 return false;
             }
@@ -807,32 +809,325 @@ mod tests {
     use crossbeam_channel::bounded;
     use futures::channel::oneshot;
 
+    fn admitted_worker() -> (Worker, crate::AudioEngine) {
+        let (worker, commands, events, shutdown) = opening_worker();
+        let engine = crate::AudioEngine {
+            commands,
+            admission: parking_lot::Mutex::new(crate::AudioAdmission::default()),
+            command_wake: bounded(1).0,
+            events: Some(events),
+            pcm: Arc::clone(&worker.analyzer),
+            waveform: Arc::clone(&worker.waveform),
+            waveform_control: Arc::clone(&worker.waveform_control),
+            worker: None,
+            shutdown: parking_lot::Mutex::new(Some(shutdown)),
+        };
+        (worker, engine)
+    }
+
+    #[test]
+    fn unchanged_engine_settings_preserve_pcm_identity_and_partial_analysis() {
+        use rivu_analysis::{
+            AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand, VisualizerDemand,
+        };
+        let (mut worker, engine) = admitted_worker();
+        let file = crate::playback::tests::pcm();
+        let (playback, _render) =
+            crate::playback::tests::test_playback_with_waveform(file.path(), None, Arc::default());
+        worker.playback = Some(playback);
+        let pcm = Arc::clone(&engine.pcm);
+        pcm.reset(
+            48_000,
+            &[crate::Channel::FrontLeft, crate::Channel::FrontRight],
+        );
+        pcm.set_enabled(true);
+        worker.refresh_pcm();
+        let settings = AnalysisSettings {
+            fft_size: 512,
+            ..AnalysisSettings::from(&rivu_format::config::Config::default())
+        };
+        let demand = DisplayDemand {
+            enabled: true,
+            spectrum: true,
+            visualizer: VisualizerDemand {
+                stereo_density: true,
+                ..Default::default()
+            },
+        };
+        let mut analysis = AnalysisEngine::new(settings);
+        let mut frame = AnalysisFrame::default();
+        let before = pcm.state();
+        analysis.configure(settings, demand, before, 1, &mut frame);
+        let mut producer = pcm.audio_producer();
+        producer.push(0, &[0.25; 512]);
+        let window = pcm.window();
+        let block = window.block(window.sequence()).unwrap();
+        let first = block.header();
+        assert_eq!(block.len(), 256);
+        assert!(analysis.ingest(
+            first,
+            (0..block.len()).map(|index| [block.sample(index, 0), block.sample(index, 1)]),
+            &mut frame,
+        ));
+        analysis.request_frame();
+        assert!(!analysis.publish(&mut frame, Instant::now()));
+        for command in [
+            AudioCommand::VisualizationEnabled(true),
+            AudioCommand::VisualizationSignal(rivu_format::config::VisualizationSignal::After),
+            AudioCommand::OutputSettings {
+                request: 1,
+                device: None,
+                auto_mix: true,
+            },
+        ] {
+            engine.send(command).unwrap();
+            assert_eq!(pcm.state(), before);
+        }
+        assert!(worker.control_round());
+        assert_eq!(pcm.state(), before);
+        assert!(engine.events.as_ref().unwrap().is_empty());
+        let settings = AnalysisSettings {
+            fps: 30,
+            ..settings
+        };
+        analysis.configure(settings, demand, pcm.state(), 1, &mut frame);
+        producer.push(256, &[0.75; 512]);
+        let block = window.block(window.sequence()).unwrap();
+        assert_eq!(block.len(), 512);
+        let mut tail = block.header();
+        tail.start_frame += 256;
+        tail.output_frame += 256;
+        tail.gap = false;
+        assert!(analysis.ingest(
+            tail,
+            (256..block.len()).map(|index| [block.sample(index, 0), block.sample(index, 1)]),
+            &mut frame,
+        ));
+        analysis.request_frame();
+        assert!(analysis.publish(&mut frame, Instant::now()));
+        assert!((frame.rms_left - 0.3125_f32.sqrt()).abs() < 1e-6);
+        let mut uninterrupted = AnalysisEngine::new(settings);
+        let mut reference = AnalysisFrame::default();
+        uninterrupted.configure(settings, demand, before, 1, &mut reference);
+        assert!(uninterrupted.ingest(
+            first,
+            (0..512).map(|index| if index < 256 { [0.25; 2] } else { [0.75; 2] }),
+            &mut reference,
+        ));
+        uninterrupted.request_frame();
+        assert!(uninterrupted.publish(&mut reference, Instant::now()));
+        assert_eq!(frame.spectrum_db, reference.spectrum_db);
+        assert_eq!(&*frame.visualizer.density, &*reference.visualizer.density);
+
+        engine
+            .send(AudioCommand::VisualizationSignal(
+                rivu_format::config::VisualizationSignal::Before,
+            ))
+            .unwrap();
+        assert_ne!(pcm.state().intent, pcm.state().applied_intent);
+        analysis.configure(settings, demand, pcm.state(), 1, &mut frame);
+        assert!(!analysis.ingest(first, (0..512).map(|_| [1.0; 2]), &mut frame));
+        assert!(worker.control_round());
+        assert_eq!(pcm.state().intent, pcm.state().applied_intent);
+        assert!(pcm.state().epoch > before.epoch);
+
+        // A rejected real target still revokes old PCM and retires playback.
+        producer.push(512, &[0.5; 512]);
+        let retired = window.block(window.sequence()).unwrap().header();
+        engine
+            .send(AudioCommand::OutputSettings {
+                request: 2,
+                device: Some("invalid-playing-target".into()),
+                auto_mix: true,
+            })
+            .unwrap();
+        assert!(!pcm.state().accepts(retired));
+        assert!(worker.control_round());
+        assert!(worker.playback.is_none());
+        assert!(!pcm.state().active);
+        assert_eq!(pcm.state().intent, pcm.state().applied_intent);
+        assert_eq!(worker.device.as_deref(), Some("invalid-playing-target"));
+        assert!(matches!(
+            engine.events.as_ref().unwrap().try_recv(),
+            Ok(AudioEvent::Failed { generation: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn queued_settings_settle_only_their_admitted_intent_including_failed_targets() {
+        use rivu_format::config::VisualizationSignal::{After, Before};
+        let (mut worker, engine) = admitted_worker();
+        let output = |request, target: Option<&str>, auto_mix| AudioCommand::OutputSettings {
+            request,
+            device: target.map(str::to_owned),
+            auto_mix,
+        };
+        let commands = [
+            (AudioCommand::VisualizationEnabled(true), false),
+            (AudioCommand::VisualizationEnabled(false), true),
+            (AudioCommand::VisualizationEnabled(false), false),
+            (AudioCommand::VisualizationEnabled(true), true),
+            (AudioCommand::VisualizationSignal(After), false),
+            (AudioCommand::VisualizationSignal(Before), true),
+            (AudioCommand::VisualizationSignal(Before), false),
+            (AudioCommand::VisualizationSignal(After), true),
+            (output(0, None, true), false),
+            (output(0, None, false), true),
+            (output(0, None, false), false),
+            (output(0, None, true), true),
+            (output(1, Some("invalid-admitted-target-a"), true), true),
+            (output(2, Some("invalid-admitted-target-a"), true), false),
+            (output(3, Some("invalid-admitted-target-b"), true), true),
+        ];
+        let fences: Vec<_> = commands.iter().map(|(_, fence)| *fence).collect();
+        for (command, _) in commands {
+            engine.send(command).unwrap();
+        }
+        assert_eq!(engine.pcm.state().intent, 8);
+        let mut applied = 0;
+        for fence in fences {
+            let mut remaining = 1;
+            let command = worker.commands.try_recv_round(&mut remaining).unwrap();
+            let count = std::mem::take(&mut worker.commands.admitted_intents) as u64;
+            assert_eq!(count, u64::from(fence));
+            worker.analyzer.apply_audio_intents(count);
+            assert!(worker.command(command));
+            applied += count;
+            // An unchanged command ahead of later changes must not settle them.
+            assert_eq!(engine.pcm.state().applied_intent, applied);
+            assert_eq!(engine.pcm.state().intent, 8);
+        }
+        assert_eq!(worker.device.as_deref(), Some("invalid-admitted-target-b"));
+        let events = engine.events.as_ref().unwrap();
+        for (request, target) in [
+            (1, "invalid-admitted-target-a"),
+            (2, "invalid-admitted-target-a"),
+            (3, "invalid-admitted-target-b"),
+        ] {
+            assert!(
+                matches!(events.try_recv(), Ok(AudioEvent::OutputSettingsFailed {
+                request: failed, device: Some(device), ..
+            }) if failed == request && device == target)
+            );
+        }
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejected_queue_admission_does_not_remember_settings_or_reserve_fences() {
+        use rivu_format::config::VisualizationSignal::Before;
+        for closed in [false, true] {
+            let (mut worker, mut engine) = admitted_worker();
+            let original = if closed {
+                let (send, receive) = async_channel::bounded(1);
+                drop(receive);
+                Some(engine.replace_commands(send))
+            } else {
+                for _ in 0..MAX_COMMANDS_PER_ROUND {
+                    engine.send(AudioCommand::Volume(0.5)).unwrap();
+                }
+                None
+            };
+            let before = engine.pcm.state();
+            let commands = || {
+                [
+                    AudioCommand::VisualizationEnabled(false),
+                    AudioCommand::VisualizationSignal(Before),
+                    AudioCommand::OutputSettings {
+                        request: 1,
+                        device: Some("invalid-rejected-target".into()),
+                        auto_mix: false,
+                    },
+                ]
+            };
+            for command in commands() {
+                engine.send(command).unwrap_err();
+                assert_eq!(engine.pcm.state(), before);
+            }
+            if let Some(original) = original {
+                engine.replace_commands(original);
+            } else {
+                assert!(worker.control_round());
+            }
+            for (index, command) in commands().into_iter().enumerate() {
+                engine.send(command).unwrap();
+                assert_eq!(engine.pcm.state().intent, before.intent + index as u64 + 1);
+            }
+            for command in commands() {
+                engine.send(command).unwrap();
+            }
+            assert_eq!(engine.pcm.state().intent, before.intent + 3);
+            assert!(worker.control_round());
+            assert_eq!(engine.pcm.state().applied_intent, before.intent + 3);
+            assert_eq!(worker.device.as_deref(), Some("invalid-rejected-target"));
+            assert!(!worker.pipewire_auto_mix);
+        }
+    }
+
     #[test]
     fn coalesced_seeks_settle_every_admitted_pcm_intent() {
-        use std::sync::atomic::Ordering;
-        let (mut worker, commands, _events, _shutdown) = opening_worker();
-        let control = Arc::clone(&worker.analyzer);
+        let (mut worker, engine) = admitted_worker();
+        let file = crate::playback::tests::pcm();
+        worker.command(AudioCommand::Load {
+            path: file.path().to_owned(),
+            range: None,
+            decoder_hint: DecoderHint::Native,
+            metadata: Arc::default(),
+            generation: 41,
+            start_seconds: 0.0,
+            paused: true,
+        });
+        let before = engine.pcm.state();
         let count = MAX_COMMANDS_PER_ROUND as u64;
-        let epoch = control.epoch.load(Ordering::Acquire);
-        control.desired_intent.store(count, Ordering::Release);
         for revision in 1..=count {
-            commands
-                .try_send(AudioCommand::Seek {
+            engine
+                .send(AudioCommand::Seek {
+                    seconds: revision as f64 / 1000.0,
+                    revision,
+                })
+                .unwrap();
+        }
+        assert_ne!(engine.pcm.state().intent, engine.pcm.state().applied_intent);
+        assert!(worker.control_round());
+        assert_eq!(engine.pcm.state().epoch, before.epoch + 2);
+        assert_eq!(engine.pcm.state().intent, before.intent + count);
+        assert_eq!(engine.pcm.state().applied_intent, before.intent + count);
+        assert_eq!(
+            worker.opening.as_ref().unwrap().pending_seek,
+            Some((count as f64 / 1000.0, count))
+        );
+    }
+
+    #[test]
+    fn seek_read_ahead_barrier_keeps_its_fence_pending_until_execution() {
+        let (mut worker, engine) = admitted_worker();
+        for revision in 1..MAX_COMMANDS_PER_ROUND as u64 {
+            engine
+                .send(AudioCommand::Seek {
                     seconds: revision as f64,
                     revision,
                 })
                 .unwrap();
         }
-        assert_ne!(control.state().intent, control.state().applied_intent);
+        engine.send(AudioCommand::Pause(true)).unwrap();
+        assert_eq!(engine.pcm.state().intent, MAX_COMMANDS_PER_ROUND as u64);
         assert!(worker.control_round());
-        assert_eq!(control.epoch.load(Ordering::Acquire), epoch + 4);
-        assert_eq!(control.state().intent, count);
-        assert_eq!(control.state().applied_intent, count);
+        assert_eq!(
+            engine.pcm.state().applied_intent,
+            MAX_COMMANDS_PER_ROUND as u64 - 1
+        );
+        assert!(worker.commands.has_ready());
+        assert!(worker.control_round());
+        assert_eq!(
+            engine.pcm.state().applied_intent,
+            MAX_COMMANDS_PER_ROUND as u64
+        );
+        assert!(!worker.commands.has_ready());
     }
 
     fn opening_worker() -> (
         Worker,
-        async_channel::Sender<AudioCommand>,
+        async_channel::Sender<QueuedAudioCommand>,
         async_channel::Receiver<AudioEvent>,
         AudioShutdown,
     ) {
@@ -1305,7 +1600,9 @@ mod tests {
                 metadata: Arc::default(),
             },
         ] {
-            commands.try_send(command).unwrap();
+            commands
+                .try_send(QueuedAudioCommand::test_unfenced(command))
+                .unwrap();
         }
         assert!(worker.control_round());
         assert!(worker.opening.is_some(), "{:?}", events.try_recv());
@@ -1325,7 +1622,7 @@ mod tests {
             ..PlaybackMetadata::default()
         });
         commands
-            .try_send(AudioCommand::Load {
+            .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Load {
                 path: file.path().to_owned(),
                 range: None,
                 decoder_hint: DecoderHint::Native,
@@ -1333,13 +1630,13 @@ mod tests {
                 generation: 42,
                 start_seconds: 0.0,
                 paused: true,
-            })
+            }))
             .unwrap();
         commands
-            .try_send(AudioCommand::Metadata {
+            .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Metadata {
                 generation: 41,
                 metadata: edited,
-            })
+            }))
             .unwrap();
         assert!(worker.control_round());
         let opening = worker.opening.as_ref().unwrap();
@@ -1375,7 +1672,9 @@ mod tests {
             }
             let (reply, mut snapshot) = oneshot::channel();
             commands
-                .try_send(AudioCommand::StopAndSnapshot(reply))
+                .try_send(QueuedAudioCommand::test_unfenced(
+                    AudioCommand::StopAndSnapshot(reply),
+                ))
                 .unwrap();
             assert!(worker.control_round());
             assert_eq!(
@@ -1395,7 +1694,9 @@ mod tests {
             let (reply, snapshot) = oneshot::channel();
             drop(snapshot);
             commands
-                .try_send(AudioCommand::StopAndSnapshot(reply))
+                .try_send(QueuedAudioCommand::test_unfenced(
+                    AudioCommand::StopAndSnapshot(reply),
+                ))
                 .unwrap();
             assert!(worker.control_round());
             assert_eq!(
@@ -1421,7 +1722,7 @@ mod tests {
             worker.poll_opening();
             assert!(worker.opening.is_some());
             commands
-                .try_send(AudioCommand::Load {
+                .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Load {
                     path: empty.path().to_owned(),
                     range: None,
                     decoder_hint: DecoderHint::Native,
@@ -1429,7 +1730,7 @@ mod tests {
                     generation: 42,
                     start_seconds: 0.0,
                     paused: true,
-                })
+                }))
                 .unwrap();
             assert!(worker.control_round());
             worker.poll_opening();
@@ -1455,7 +1756,9 @@ mod tests {
                 if disconnect {
                     drop(shutdown);
                 } else {
-                    commands.try_send(AudioCommand::Shutdown).unwrap();
+                    commands
+                        .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Shutdown))
+                        .unwrap();
                 }
                 assert!(!worker.control_round());
                 assert!(worker.opening.is_none());
@@ -1473,11 +1776,13 @@ mod tests {
         worker.poll_opening();
         assert!(worker.opening.is_some());
         commands
-            .try_send(AudioCommand::OutputSettings {
-                request: 7,
-                device: Some("invalid-opening-target".into()),
-                auto_mix: false,
-            })
+            .try_send(QueuedAudioCommand::test_unfenced(
+                AudioCommand::OutputSettings {
+                    request: 7,
+                    device: Some("invalid-opening-target".into()),
+                    auto_mix: false,
+                },
+            ))
             .unwrap();
         assert!(worker.control_round());
         assert!(worker.opening.is_none());
@@ -1500,7 +1805,9 @@ mod tests {
             41,
         );
         commands
-            .try_send(AudioCommand::FfmpegEnabled(false))
+            .try_send(QueuedAudioCommand::test_unfenced(
+                AudioCommand::FfmpegEnabled(false),
+            ))
             .unwrap();
         assert!(worker.control_round());
         assert!(worker.opening.is_none());
@@ -1524,7 +1831,9 @@ mod tests {
         worker.poll_opening();
         assert!(worker.opening.is_some());
         commands
-            .try_send(AudioCommand::FfmpegEnabled(false))
+            .try_send(QueuedAudioCommand::test_unfenced(
+                AudioCommand::FfmpegEnabled(false),
+            ))
             .unwrap();
         assert!(worker.control_round());
         assert!(worker.opening.is_none());
@@ -1591,7 +1900,9 @@ mod tests {
         futures::executor::block_on(async {
             let (commands, receive) = async_channel::bounded(1);
             let (command_wake, commands_ready) = bounded(1);
-            commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+            commands
+                .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Volume(0.4)))
+                .unwrap();
             let (events, event_receive) = async_channel::bounded(1);
             events
                 .try_send(AudioEvent::Ended {
@@ -1641,7 +1952,9 @@ mod tests {
         futures::executor::block_on(async {
             let (commands, receive) = async_channel::bounded(1);
             let (command_wake, commands_ready) = bounded(1);
-            commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+            commands
+                .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Volume(0.4)))
+                .unwrap();
             let (events, event_receive) = async_channel::bounded(1);
             events
                 .try_send(AudioEvent::DecoderStopped { generation: 7 })
@@ -1663,7 +1976,7 @@ mod tests {
                 [AudioEvent::DecoderStopped { generation: 7 }]
             ));
             assert!(matches!(
-                receive.try_recv().unwrap(),
+                receive.try_recv().unwrap().command,
                 AudioCommand::Volume(0.4)
             ));
 
@@ -1673,7 +1986,7 @@ mod tests {
                     .is_none()
             );
             commands_ready.try_recv().unwrap();
-            let AudioCommand::StopAndSnapshot(reply) = receive.try_recv().unwrap() else {
+            let AudioCommand::StopAndSnapshot(reply) = receive.try_recv().unwrap().command else {
                 panic!("stop was not admitted after capacity became available");
             };
             assert!(
@@ -1724,7 +2037,9 @@ mod tests {
                 let (commands, receive) = async_channel::bounded(1);
                 let (command_wake, _commands_ready) = bounded(1);
                 if queue_full {
-                    commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+                    commands
+                        .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Volume(0.4)))
+                        .unwrap();
                 }
                 let (events, event_receive) = async_channel::bounded(1);
                 let created = Instant::now();
@@ -1862,12 +2177,13 @@ mod tests {
                     revision: 3,
                 },
             ] {
-                send.try_send(command).unwrap();
+                send.try_send(QueuedAudioCommand::test_unfenced(command))
+                    .unwrap();
             }
             let mut inbox = CommandInbox {
                 receiver,
                 pending: None,
-                coalesced_intents: 0,
+                admitted_intents: 0,
             };
             let mut remaining = MAX_COMMANDS_PER_ROUND;
             assert!(matches!(
@@ -1899,17 +2215,17 @@ mod tests {
     fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
         let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 2);
         for target in 1..=MAX_COMMANDS_PER_ROUND + 2 {
-            send.try_send(AudioCommand::Seek {
+            send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Seek {
                 seconds: target as f64,
                 revision: target as u64,
-            })
+            }))
             .unwrap();
         }
         drop(send);
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
-            coalesced_intents: 0,
+            admitted_intents: 0,
         };
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
@@ -1940,11 +2256,12 @@ mod tests {
     #[test]
     fn replenished_commands_yield_each_round_without_reordering() {
         let (send, receiver) = async_channel::bounded(1);
-        send.try_send(AudioCommand::Volume(0.0)).unwrap();
+        send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Volume(0.0)))
+            .unwrap();
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
-            coalesced_intents: 0,
+            admitted_intents: 0,
         };
         let mut handled = 0;
         for _ in 0..3 {
@@ -1954,7 +2271,10 @@ mod tests {
                 handled += 1;
                 // Model a producer replenishing every consumed slot, without
                 // thread timing or ever allowing the inbox to become empty.
-                send.try_send(AudioCommand::Volume(handled as f32)).unwrap();
+                send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Volume(
+                    handled as f32,
+                )))
+                .unwrap();
             }
             assert_eq!(remaining, 0);
             assert!(
@@ -1969,22 +2289,23 @@ mod tests {
     fn round_boundary_keeps_a_seek_read_ahead_barrier_before_later_seeks() {
         let (send, receiver) = async_channel::bounded(MAX_COMMANDS_PER_ROUND + 1);
         for target in 1..MAX_COMMANDS_PER_ROUND {
-            send.try_send(AudioCommand::Seek {
+            send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Seek {
                 seconds: target as f64,
                 revision: target as u64,
-            })
+            }))
             .unwrap();
         }
-        send.try_send(AudioCommand::Pause(true)).unwrap();
-        send.try_send(AudioCommand::Seek {
+        send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Pause(true)))
+            .unwrap();
+        send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Seek {
             seconds: 100.0,
             revision: 100,
-        })
+        }))
         .unwrap();
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
-            coalesced_intents: 0,
+            admitted_intents: 0,
         };
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
@@ -2010,17 +2331,17 @@ mod tests {
     #[test]
     fn single_seek_does_not_wait_for_more_input() {
         let (send, receiver) = async_channel::bounded(1);
-        send.try_send(AudioCommand::Seek {
+        send.try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Seek {
             seconds: 7.0,
             revision: 7,
-        })
+        }))
         .unwrap();
         let (done, completed) = bounded(1);
         let worker = std::thread::spawn(move || {
             let mut inbox = CommandInbox {
                 receiver,
                 pending: None,
-                coalesced_intents: 0,
+                admitted_intents: 0,
             };
             let mut remaining = MAX_COMMANDS_PER_ROUND;
             done.send(inbox.try_recv_round(&mut remaining).unwrap())
@@ -2043,7 +2364,9 @@ mod tests {
             for borrowed in [false, true] {
                 let (commands, receive) = async_channel::bounded(1);
                 let (command_wake, commands_ready) = bounded(1);
-                commands.try_send(AudioCommand::Pause(true)).unwrap();
+                commands
+                    .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Pause(true)))
+                    .unwrap();
                 let (events, event_receive) = async_channel::bounded(1);
                 events
                     .try_send(AudioEvent::Ended {
@@ -2077,6 +2400,7 @@ mod tests {
                 });
                 let mut engine = AudioEngine {
                     commands,
+                    admission: Mutex::new(crate::AudioAdmission::default()),
                     command_wake,
                     events: Some(event_receive),
                     pcm,

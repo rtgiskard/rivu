@@ -353,9 +353,6 @@ impl AudioCommand {
                 | Self::Pause(_)
                 | Self::Stop
                 | Self::StopAndSnapshot(_)
-                | Self::OutputSettings { .. }
-                | Self::VisualizationEnabled(_)
-                | Self::VisualizationSignal(_)
         )
     }
 }
@@ -401,8 +398,57 @@ pub enum AudioEvent {
     },
 }
 
+/// A queued command carries the PCM fence chosen at admission, not execution.
+pub struct QueuedAudioCommand {
+    pub command: AudioCommand,
+    pcm_intent: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl QueuedAudioCommand {
+    /// Fill a test queue without reserving a production PCM fence.
+    pub fn test_unfenced(command: AudioCommand) -> Self {
+        Self {
+            command,
+            pcm_intent: false,
+        }
+    }
+}
+
+struct AudioAdmission {
+    visualization_enabled: bool,
+    signal: VisualizationSignal,
+    device: Option<String>,
+    auto_mix: bool,
+}
+
+impl Default for AudioAdmission {
+    fn default() -> Self {
+        Self {
+            visualization_enabled: true,
+            signal: VisualizationSignal::After,
+            device: None,
+            auto_mix: true,
+        }
+    }
+}
+
+impl AudioAdmission {
+    fn changes_pcm(&self, command: &AudioCommand) -> bool {
+        match command {
+            AudioCommand::VisualizationEnabled(enabled) => self.visualization_enabled != *enabled,
+            AudioCommand::VisualizationSignal(signal) => self.signal != *signal,
+            AudioCommand::OutputSettings {
+                device, auto_mix, ..
+            } => self.device != *device || self.auto_mix != *auto_mix,
+            _ => command.changes_pcm_source(),
+        }
+    }
+}
+
 pub struct AudioEngine {
-    commands: async_channel::Sender<AudioCommand>,
+    commands: async_channel::Sender<QueuedAudioCommand>,
+    admission: Mutex<AudioAdmission>,
     command_wake: Sender<()>,
     pub events: Option<async_channel::Receiver<AudioEvent>>,
     pub pcm: Arc<PcmControl>,
@@ -442,6 +488,7 @@ impl AudioEngine {
             })?;
         Ok(Self {
             commands,
+            admission: Mutex::new(AudioAdmission::default()),
             command_wake,
             events: Some(events),
             pcm,
@@ -458,24 +505,53 @@ impl AudioEngine {
             self.shutdown.lock().take();
             return Ok(());
         }
-        let changes_pcm = command.changes_pcm_source();
+        let mut admission = self.admission.lock();
+        let changes_pcm = admission.changes_pcm(&command);
+        self.ensure_command_capacity(1)?;
+        let enabled = match &command {
+            AudioCommand::VisualizationEnabled(enabled) => *enabled,
+            _ => admission.visualization_enabled,
+        };
+        let signal = match &command {
+            AudioCommand::VisualizationSignal(signal) => *signal,
+            _ => admission.signal,
+        };
+        let output = match &command {
+            AudioCommand::OutputSettings {
+                device, auto_mix, ..
+            } if changes_pcm => Some((device.clone(), *auto_mix)),
+            _ => None,
+        };
         if changes_pcm {
-            self.ensure_command_capacity(1)?;
             self.pcm.admit_intent();
         }
-        self.commands
-            .try_send(command)
-            .inspect_err(|_| {
+        // Semantic admission and the actual FIFO send share the same order.
+        match self.commands.try_send(QueuedAudioCommand {
+            command,
+            pcm_intent: changes_pcm,
+        }) {
+            Ok(()) => {
+                admission.visualization_enabled = enabled;
+                admission.signal = signal;
+                if let Some((device, auto_mix)) = output {
+                    admission.device = device;
+                    admission.auto_mix = auto_mix;
+                }
+            }
+            Err(error) => {
                 if changes_pcm {
                     self.pcm.cancel_intent();
                 }
-            })
-            .map_err(|error| match error {
-                async_channel::TrySendError::Full(_) => {
-                    anyhow::anyhow!("Audio command queue is full; command not queued")
-                }
-                async_channel::TrySendError::Closed(_) => anyhow::anyhow!("Audio worker stopped"),
-            })?;
+                return Err(match error {
+                    async_channel::TrySendError::Full(_) => {
+                        anyhow::anyhow!("Audio command queue is full; command not queued")
+                    }
+                    async_channel::TrySendError::Closed(_) => {
+                        anyhow::anyhow!("Audio worker stopped")
+                    }
+                });
+            }
+        }
         // This is only a coalesced queue-ready notification. The bounded
         // queue owns every command and wakes async capacity waiters itself.
         let _ = self.command_wake.try_send(());
@@ -520,8 +596,8 @@ impl AudioEngine {
     #[cfg(any(test, feature = "test-support"))]
     pub fn replace_commands(
         &mut self,
-        commands: async_channel::Sender<AudioCommand>,
-    ) -> async_channel::Sender<AudioCommand> {
+        commands: async_channel::Sender<QueuedAudioCommand>,
+    ) -> async_channel::Sender<QueuedAudioCommand> {
         let previous = std::mem::replace(&mut self.commands, commands);
         let _ = self.command_wake.try_send(());
         previous
@@ -550,7 +626,7 @@ impl Drop for PendingPcmIntent {
 
 impl AudioStop {
     fn new(
-        commands: async_channel::Sender<AudioCommand>,
+        commands: async_channel::Sender<QueuedAudioCommand>,
         command_wake: Sender<()>,
         events: async_channel::Receiver<AudioEvent>,
         pcm: Arc<PcmControl>,
@@ -563,7 +639,10 @@ impl AudioStop {
                     pcm.admit_intent();
                     let mut intent = PendingPcmIntent(Some(pcm));
                     commands
-                        .send(AudioCommand::StopAndSnapshot(reply))
+                        .send(QueuedAudioCommand {
+                            command: AudioCommand::StopAndSnapshot(reply),
+                            pcm_intent: true,
+                        })
                         .await
                         .map_err(|_| anyhow::anyhow!("Audio worker stopped"))?;
                     intent.0 = None;

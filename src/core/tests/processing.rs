@@ -331,7 +331,7 @@ fn recording_final_snapshot(
     thread::spawn(move || {
         let _previous = previous;
         while let Ok(command) = receive.recv_blocking() {
-            match command {
+            match command.command {
                 AudioCommand::StopAndSnapshot(reply) => {
                     let (recorded_reply, _) = oneshot::channel();
                     let _ = record.send(AudioCommand::StopAndSnapshot(recorded_reply));
@@ -918,7 +918,7 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
             assert_eq!(eq.bands[0], first);
         }
         assert!(matches!(
-            receive.try_recv().unwrap(),
+            receive.try_recv().unwrap().command,
             AudioCommand::Equalizer(_)
         ));
         assert!(receive.try_recv().is_err());
@@ -955,7 +955,7 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     })
     .unwrap();
     assert!(matches!(
-        receive.try_recv().unwrap(),
+        receive.try_recv().unwrap().command,
         AudioCommand::Equalizer(_)
     ));
     let baseline = (*core.preferences.settings()).clone();
@@ -978,7 +978,7 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     .unwrap();
     assert_eq!(core.preferences.settings().equalizer.bands.len(), MAX_BANDS);
     assert!(matches!(
-        receive.try_recv().unwrap(),
+        receive.try_recv().unwrap().command,
         AudioCommand::Equalizer(_)
     ));
     let baseline = (*core.preferences.settings()).clone();

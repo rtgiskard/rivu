@@ -5207,6 +5207,7 @@ dependencies = [
  "pipewire",
  "pkg-config",
  "ringbuf",
+ "rivu-analysis",
  "rivu-dsp",
  "rivu-format",
  "rivu-metadata",

@@ -40,6 +40,7 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 hound = "3.5"
 tempfile = "3.27"
 rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
+rivu-analysis = { path = "../rivu-analysis" }
 
 [build-dependencies]
 # Share libspa-sys's generator version instead of compiling two bindgen families.

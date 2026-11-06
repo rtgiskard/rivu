@@ -211,6 +211,205 @@ fn borrowed_accessor_neither_copies_pcm_nor_prevents_overwrite() {
 }
 
 #[test]
+fn partial_native_blocks_publish_immediately_and_fill_before_advancing() {
+    let owner = SharedPcmWindow::new().unwrap();
+    owner.retain_output(96_000, 384_000, 3).unwrap();
+    let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
+    let mut start = header(1);
+    start.start_frame = 0;
+    start.output_frame = 0;
+    start.gap = true;
+    assert!(owner.publish(start, &[17, 5, 0], (0..257 * 3).map(|_| 0.25)));
+    let first = reader.block(1).unwrap();
+    assert_eq!(first.len(), 257);
+    assert_eq!(
+        reader.frontier(),
+        PcmPosition {
+            sequence: 1,
+            offset: 257
+        }
+    );
+    let mut tail = start;
+    tail.start_frame = 257;
+    tail.output_frame = 257;
+    tail.gap = false;
+    assert!(owner.publish(tail, &[17, 5, 0], (0..1024 * 3).map(|_| 0.75)));
+    assert!(!first.still_current());
+    let completed = reader.block(1).unwrap();
+    assert_eq!(completed.len(), PCM_BLOCK_FRAMES);
+    assert!(completed.header().gap);
+    for frame in 0..PCM_BLOCK_FRAMES {
+        assert_eq!(
+            completed.sample(frame, 2),
+            if frame < 257 { 0.25 } else { 0.75 }
+        );
+    }
+    let remainder = reader.block(2).unwrap();
+    assert_eq!(remainder.len(), 257);
+    assert_eq!(remainder.header().start_frame, 1024);
+    assert_eq!(remainder.header().output_frame, 1024);
+    assert!(!remainder.header().gap);
+    assert_eq!(
+        reader.frontier(),
+        PcmPosition {
+            sequence: 2,
+            offset: 257
+        }
+    );
+    tail.start_frame = 1281;
+    tail.output_frame = 1281;
+    assert!(owner.publish(tail, &[17, 5, 0], [0.5; 3].into_iter()));
+    assert_eq!(
+        reader.frontier(),
+        PcmPosition {
+            sequence: 2,
+            offset: 258
+        }
+    );
+    assert_eq!(reader.block(2).unwrap().sample(257, 2), 0.5);
+    owner.retain_output(12_000, 48_000, 2).unwrap();
+    assert!(!remainder.still_current());
+    assert!(reader.block(2).is_none());
+}
+
+#[test]
+fn fragmented_high_rate_prefetch_preserves_every_native_frame_in_order() {
+    for rate in [48_000, 192_000, 384_000, 900_000, 900_001] {
+        let owner = SharedPcmWindow::new().unwrap();
+        let frames = rate as usize / 4 + (rate as usize).div_ceil(5);
+        owner.retain_output(rate as usize / 4, rate, 2).unwrap();
+        let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
+        let mut written = 0;
+        let mut fragment = 0;
+        while written < frames {
+            let count = [1, 37, 512, 103, 1024][fragment % 5].min(frames - written);
+            let mut next = header(0);
+            next.sample_rate = rate;
+            next.start_frame = written as u64;
+            next.output_frame = 8192 + written as u64;
+            assert!(owner.publish(
+                next,
+                &[17, 0],
+                (written * 2..(written + count) * 2).map(|i| i as f32)
+            ));
+            written += count;
+            fragment += 1;
+        }
+        assert_eq!(reader.sequence(), frames.div_ceil(PCM_BLOCK_FRAMES) as u64);
+        let mut read = 0;
+        for sequence in 1..=reader.sequence() {
+            let block = reader
+                .block(sequence)
+                .expect("prefetched native block was overwritten");
+            assert_eq!(block.header().start_frame, read as u64);
+            assert_eq!(block.header().output_frame, 8192 + read as u64);
+            assert_eq!(block.layout(), [17, 0]);
+            for frame in 0..block.len() {
+                assert_eq!(block.sample(frame, 0), (read * 2) as f32);
+                assert_eq!(block.sample(frame, 1), (read * 2 + 1) as f32);
+                read += 1;
+            }
+        }
+        assert_eq!(read, frames);
+    }
+}
+
+#[test]
+fn retention_is_bounded_by_native_samples_not_max_channels_per_slot() {
+    let owner = SharedPcmWindow::new().unwrap();
+    for channels in 1..=MAX_PCM_CHANNELS {
+        let frames = MAX_PREFETCH_SAMPLES / channels;
+        let rate = (frames * 4 + 3) as u32;
+        owner.retain_output(frames, rate, channels).unwrap();
+        let storage = owner.storage();
+        assert_eq!(
+            storage.stride.load(Ordering::Relaxed) as usize,
+            PCM_BLOCK_FRAMES * channels
+        );
+        assert!(owner.retained_blocks() <= MAX_QUEUE_BLOCKS);
+        assert!(owner.retained_blocks() * PCM_BLOCK_FRAMES * channels <= MAX_RETENTION_SAMPLES);
+    }
+    let previous = owner.retained_blocks();
+    for (frames, rate, channels) in [
+        (MAX_PREFETCH_SAMPLES + 1, 48_000, 1),
+        (12_000, 0, 2),
+        (12_000, 48_000, 0),
+        (12_000, 48_000, MAX_PCM_CHANNELS + 1),
+        (usize::MAX, u32::MAX, MAX_PCM_CHANNELS),
+    ] {
+        assert!(owner.retain_output(frames, rate, channels).is_err());
+        assert_eq!(owner.retained_blocks(), previous);
+    }
+    let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
+    assert!(reader.retain_output(12_000, 48_000, 2).is_err());
+}
+
+#[test]
+fn write_fenced_append_keeps_the_last_completed_frontier() {
+    let owner = SharedPcmWindow::new().unwrap();
+    let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
+    let start = header(0);
+    assert!(owner.publish(start, &[0, 1], [0.25; 512].into_iter()));
+    let previous = reader.block(1).unwrap();
+    let frontier = reader.frontier();
+    let mut tail = start;
+    tail.start_frame += 256;
+    tail.output_frame += 256;
+    assert!(owner.publish(
+        tail,
+        &[0, 1],
+        (0..512).map(|_| {
+            assert_eq!(reader.frontier(), frontier);
+            assert!(reader.block(1).is_none());
+            assert!(!previous.still_current());
+            0.75
+        })
+    ));
+    assert_eq!(
+        reader.frontier(),
+        PcmPosition {
+            sequence: 1,
+            offset: 512
+        }
+    );
+    assert_eq!(reader.block(1).unwrap().sample(256, 1), 0.75);
+}
+
+#[test]
+fn reconfiguration_retires_borrowed_samples_before_the_arena_is_reused() {
+    let owner = SharedPcmWindow::new().unwrap();
+    let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
+    assert!(owner.publish(header(0), &[0, 1], [0.25, -0.5].into_iter()));
+    let previous = reader.block(1).unwrap();
+    let metadata = previous.header();
+    owner.retain_output(1, 1, 1).unwrap();
+    assert!(!previous.still_current());
+    assert!(reader.block(1).is_none());
+    for index in 0..owner.retained_blocks() {
+        let value = index as f32 + 1.0;
+        assert!(owner.publish(
+            header(index as u64 + 2),
+            &[17],
+            (0..1).map(|_| {
+                // Configuration and revision fences retire the old borrowed view
+                // before any changed-stride payload is installed in its arena.
+                assert!(!previous.still_current());
+                value
+            })
+        ));
+    }
+    let latest = reader.block(reader.sequence()).unwrap();
+    assert_eq!(latest.layout(), [17]);
+    assert_eq!(latest.sample(0, 0), owner.retained_blocks() as f32);
+    assert_eq!(previous.header(), metadata);
+    assert_eq!(previous.layout(), [0, 1]);
+    // Unpinned loads observe reused storage, not a secretly retained PCM copy.
+    // They are never current once the configuration fence has invalidated them.
+    assert_eq!(previous.sample(0, 0), latest.sample(0, 0));
+    assert!(!previous.still_current());
+}
+
+#[test]
 fn full_native_layout_preserves_order_and_every_float_bit() {
     let owner = SharedPcmWindow::new().unwrap();
     let layout: [u32; MAX_PCM_CHANNELS] =
@@ -350,6 +549,8 @@ fn reader_rejects_malformed_and_in_progress_metadata() {
         (&slot.layout[1], 0),
         (&slot.gap, 2),
         (&slot.sample_rate, 0),
+        (&slot.sample_offset, MAX_RETENTION_SAMPLES as u32),
+        (&slot.sample_offset, u32::MAX),
     ] {
         let original = field.swap(bad, Ordering::Relaxed);
         assert!(reader.block(1).is_none());

@@ -51,10 +51,12 @@ channels' relationship.
 
 === PCM admission
 
-The shared tap holds at most 32,768 frames of up to 18 native channels and observes only PCM admitted to
-output. Each refill admits at most 16,384 frames before returning to control
-handling. DSP and monitor EQ process converted fragments once; later edits do
-not reprocess pending output. Rolling waveform capture remains decoder-driven.
+The shared tap observes only PCM admitted to output. Its native-channel retention
+covers bounded output prefetch, observer headroom and the maximum FFT span; exact
+resource limits belong to link:22_cache.adoc#visualization-caching[Visualization caching].
+Each refill admits at most 16,384 frames before returning to control handling.
+DSP and monitor EQ process converted fragments once; later edits do not reprocess
+pending output. Rolling waveform capture remains decoder-driven.
 
 After and bypass taps borrow admitted PCM. A processed Before tap needs a
 source-aligned FIFO bounded by graph latency plus one converted fragment
@@ -78,12 +80,15 @@ execution failure stops playback rather than resuming uncertain decoder state.
 PCM arrival and output-cursor progress wake GUI analysis to ingest a finite retained
 prefix independently of display requests. Native samples are read directly from
 the shared window without an intermediate stereo PCM buffer. Readers do not pin
-slots; concurrent overwrites remain best-effort observation. Each drain is bounded
-to the window's 32 slots. `analysis_rate_hz` limits FFT transforms and publications,
-not PCM ingestion. The worker coalesces fresh input until a complete window and
-its publication deadline are available, then publishes one latest local shared
-frame rather than a result backlog. No fresh input means no publication timer;
-hidden, paused and disabled gates revoke pending analysis and timed wakeups.
+slots; post-read revision/configuration checks reject overwritten observations.
+Each scheduling round processes at most 32 logical blocks and yields between
+continuations. Growing partial tails retain a frame offset so every accepted frame
+is ingested once, including across subscription boundaries. `analysis_rate_hz`
+limits publications and demanded FFT transforms, not PCM ingestion. The worker
+coalesces fresh input until a complete window and its publication deadline are
+available, then publishes one latest local shared frame rather than a result
+backlog. No fresh input means no publication timer; hidden, paused and disabled
+gates revoke pending analysis and timed wakeups.
 
 Analysis always observes the latest complete window. When that window is shorter
 than the analysis interval, a transient between observed windows can be absent
@@ -118,10 +123,17 @@ display demand never starts playback. Capture restarts fence queued input and
 late publications, including quick hide/show transitions.
 
 Load, audition-source replacement and Seek reserve monotonic audio intent.
-The visualizer runtime accepts only frames matching current display demand, the actual
-audio epoch and the applied intent. Queued newer commands therefore cannot
-relabel old audio. Capture restarts and rejected seeks remain distinct from a
-successful semantic source change.
+Settings admission compares the latest successfully queued output, signal and
+visualization targets; unchanged settings reserve no new PCM boundary. Each queued
+command carries that decision, and execution settles exactly its admitted fence,
+including coalesced seeks. A display-only Apply therefore preserves the partial
+analysis window while still validating the requested output; real target changes
+and failed changed targets cannot relabel old PCM as current.
+The visualizer runtime accepts only frames matching current display demand, the
+actual audio epoch and applied intent. Current invalidation frames also reach the
+runtime while replacement analysis is incomplete, retiring stale drawings without
+waiting for the next FFT. Capture restarts and rejected seeks remain distinct from
+a successful semantic source change.
 
 Source/seek boundaries, Stop, dropped samples, FFT/window/signal or sample-rate
 changes, and disabling visualizations break signal continuity. The producer owns its generation;

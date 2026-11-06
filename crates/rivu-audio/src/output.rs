@@ -28,7 +28,7 @@ use std::{
 // Preserve the quarter-second queue (at least 2048 frames) without letting
 // decoded metadata request unbounded memory. Callback scratch is at most 1/8
 // of this budget because it holds only 256 frames.
-const MAX_PCM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PCM_BUFFER_BYTES: usize = rivu_protocol::pcm::PCM_OUTPUT_MAX_BYTES;
 
 fn output_capacity(rate: u32, channels: usize) -> Result<usize> {
     if rate == 0 || channels == 0 {
@@ -266,6 +266,9 @@ impl Output {
             bail!("Decoded speaker layout exceeds native PCM channel limit");
         }
         let capacity = output_capacity(rate, source_channels)?;
+        analyzer
+            .window()
+            .retain_output(capacity / source_channels, rate, source_channels)?;
         let (producer, consumer) = HeapRb::try_new(capacity)
             .context("Cannot allocate audio output PCM buffer")?
             .split();
@@ -1430,6 +1433,98 @@ mod pcm_tests {
     use super::*;
 
     #[test]
+    fn normal_prefetch_retains_fragmented_native_pcm_until_audible_at_high_rates() {
+        use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand};
+        let layout = [Channel::FrontLeft, Channel::FrontRight];
+        for rate in [48_000, 192_000, 384_000] {
+            let capacity = output_capacity(rate, layout.len()).unwrap();
+            let (mut output, mut callback, pcm) =
+                test_output_layout(rate, false, &layout, &layout, capacity);
+            pcm.set_enabled(true);
+            pcm.set_playback_active(true);
+            let mut producer = pcm.audio_producer();
+            let window = pcm.window();
+            let settings = AnalysisSettings {
+                fft_size: 512,
+                ..AnalysisSettings::from(&rivu_format::config::Config::default())
+            };
+            let demand = DisplayDemand {
+                enabled: true,
+                ..Default::default()
+            };
+            let mut analysis = AnalysisEngine::new(settings);
+            let mut frame = AnalysisFrame::default();
+            let mut next = 1;
+            let mut offset = 0;
+            let mut accepted = 0;
+            let mut fragment = 0;
+            let now = Instant::now();
+            let mut device = vec![0.0; rate as usize / 10 * layout.len()];
+            for round in 0..12 {
+                while output.vacant_frames() > 0 {
+                    // Decoder fragments must not exhaust descriptors before
+                    // their admitted output reaches the audible cursor.
+                    let frames = [1, 37, 512, 103, 1024][fragment % 5].min(output.vacant_frames());
+                    fragment += 1;
+                    let native: Vec<_> = (0..frames).flat_map(|_| [0.25, -0.5]).collect();
+                    let start = output.submitted;
+                    assert_eq!(output.push(&native), frames);
+                    producer.push(start, &native);
+                }
+                assert_eq!(output.refill_delay(false), Duration::from_millis(100));
+                callback.render(&mut device, timestamp(round * 100, round * 100 + 20));
+                let state = pcm.state();
+                analysis.configure(settings, demand, state, 1, &mut frame);
+                let previous = accepted;
+                while next <= window.sequence() {
+                    let block = window
+                        .block(next)
+                        .expect("prefetched audible PCM was overwritten");
+                    if offset == block.len() {
+                        if next < window.sequence() {
+                            next += 1;
+                            offset = 0;
+                            continue;
+                        }
+                        break;
+                    }
+                    let mut header = block.header();
+                    header.start_frame += offset as u64;
+                    header.output_frame += offset as u64;
+                    header.gap &= offset == 0;
+                    if header.output_frame
+                        > state.heard_frame + rivu_protocol::pcm::PCM_BLOCK_FRAMES as u64
+                    {
+                        break;
+                    }
+                    assert_eq!(header.start_frame, accepted);
+                    assert_eq!(header.output_frame, accepted);
+                    assert_eq!(block.layout(), [0, 1]);
+                    let count = block.len() - offset;
+                    assert!(analysis.ingest(
+                        header,
+                        (offset..block.len()).map(|index| {
+                            let sample = [block.sample(index, 0), block.sample(index, 1)];
+                            assert_eq!(sample, [0.25, -0.5]);
+                            sample
+                        }),
+                        &mut frame
+                    ));
+                    accepted += count as u64;
+                    offset = block.len();
+                }
+                assert!(
+                    accepted > previous,
+                    "normal refill starved audible analysis at {rate} Hz"
+                );
+                analysis.request_frame();
+                assert!(analysis.publish(&mut frame, now + Duration::from_millis(round * 100)));
+                assert_eq!([frame.rms_left, frame.rms_right], [0.25, 0.5]);
+            }
+        }
+    }
+
+    #[test]
     fn pcm_capacity_preserves_normal_high_rate_and_multichannel_queues() {
         for (rate, channels, expected) in [
             (1, 2, 2048 * 2),
@@ -1585,6 +1680,10 @@ mod pcm_tests {
         capacity: usize,
     ) -> (Output, OutputCallback, Arc<PcmControl>) {
         let analyzer = Arc::new(PcmControl::default());
+        analyzer
+            .window()
+            .retain_output(capacity / source.len(), rate, source.len())
+            .unwrap();
         let (producer, consumer) = HeapRb::new(capacity).split();
         analyzer.reset(rate, source);
         let shared = Arc::new(OutputShared::new(1.0, paused, &analyzer));

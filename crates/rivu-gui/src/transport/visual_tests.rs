@@ -80,12 +80,169 @@ fn stereo(window: &SharedPcmWindow, header: PcmHeader, value: f32, frames: usize
     assert!(window.publish(header, &[0, 1], (0..frames * 2).map(|_| value)));
 }
 
+#[test]
+fn checked_shared_observation_discards_overwritten_and_reconfigured_payloads() {
+    for reconfigure in [false, true] {
+        let window = SharedPcmWindow::new().unwrap();
+        let reader = SharedPcmWindow::open(&window.share_path()).unwrap();
+        let settings = AnalysisSettings {
+            fft_size: 512,
+            ..AnalysisSettings::from(&Config::default())
+        };
+        let demand = DisplayDemand {
+            enabled: true,
+            spectrum: true,
+            visualizer: VisualizerDemand {
+                pcm: true,
+                stereo_density: true,
+                ..Default::default()
+            },
+        };
+        let state = PcmState {
+            active: true,
+            sample_rate: 48_000,
+            heard_frame: u64::MAX,
+            ..Default::default()
+        };
+        let mut engine = AnalysisEngine::new(settings);
+        let mut frame = AnalysisFrame::default();
+        engine.configure(settings, demand, state, 1, &mut frame);
+        let generation = frame.generation;
+        stereo(&window, header(state, 0), 0.25, 512);
+        let block = reader.block(1).unwrap();
+        let samples = (0..block.len()).map(|index| {
+            if index == 256 {
+                if reconfigure {
+                    window.retain_output(12_000, 48_000, 3).unwrap();
+                }
+                // Replace the exact borrowed sample region halfway through
+                // direct observation, without timing or a mocked validity flag.
+                for publication in 0..window.retained_blocks() {
+                    let next = header(state, 4096 + publication as u64 * 1024);
+                    assert!(window.publish(next, &[17, 0, 1], (0..512 * 3).map(|_| 0.875),));
+                }
+            }
+            let stereo = [block.sample(index, 0), block.sample(index, 1)];
+            assert_eq!(stereo, if index < 256 { [0.25; 2] } else { [0.875; 2] });
+            stereo
+        });
+        assert!(!engine.ingest_checked(
+            block.header(),
+            samples,
+            || block.still_current(),
+            &mut frame,
+        ));
+        assert!(frame.generation > generation);
+        assert_eq!(frame.sample_time, Duration::ZERO);
+        assert!(frame.settings.is_none());
+        assert!(frame.spectrum_db.is_empty());
+        assert!(frame.visualizer.pcm.is_empty());
+        assert!(frame.visualizer.density.is_empty());
+        engine.request_frame();
+        let now = Instant::now();
+        assert!(!engine.publish(&mut frame, now));
+
+        stereo(&window, header(state, 200_000), 0.5, 512);
+        let clean = reader.block(reader.sequence()).unwrap();
+        assert!(engine.ingest_checked(
+            clean.header(),
+            (0..clean.len()).map(|index| [clean.sample(index, 0), clean.sample(index, 1)]),
+            || clean.still_current(),
+            &mut frame,
+        ));
+        engine.request_frame();
+        assert!(engine.publish(&mut frame, now));
+        let mut reference = AnalysisEngine::new(settings);
+        let mut expected = AnalysisFrame::default();
+        reference.configure(settings, demand, state, 1, &mut expected);
+        assert!(reference.ingest(clean.header(), [[0.5; 2]; 512].into_iter(), &mut expected));
+        reference.request_frame();
+        assert!(reference.publish(&mut expected, now));
+        assert_eq!(frame.sample_time, expected.sample_time);
+        assert_eq!(frame.rms_left, expected.rms_left);
+        assert_eq!(frame.spectrum_db, expected.spectrum_db);
+        assert_eq!(frame.visualizer.pcm, expected.visualizer.pcm);
+        assert_eq!(frame.visualizer.density, expected.visualizer.density);
+    }
+}
+
+#[test]
+fn latest_new_identity_tail_survives_lagged_control_status() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        subscribe(&mut f).await;
+        let old = PcmState {
+            epoch: 4,
+            active: true,
+            sample_rate: 48_000,
+            heard_frame: u64::MAX,
+            ..Default::default()
+        };
+        write_status(&mut f.server, old, 1, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().audio_epoch != old.epoch {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let next = PcmState { epoch: 6, ..old };
+        stereo(&f.window, header(next, 0), 0.25, 128);
+        let frontier = f.window.frontier();
+
+        // A display-token publication is an observable barrier proving that
+        // ingestion ran against the old status after the new prefix appeared.
+        let mut demand = f.client.state.desired.lock().demand;
+        demand.visualizer.band_energy = true;
+        f.client.set_display_demand(demand);
+        let token = f.client.state.desired.lock().display_token;
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut observed = false;
+                f.client.consume_current_analysis(|frame| {
+                    observed = frame.display_token == token && frame.audio_epoch == old.epoch;
+                    observed
+                });
+                if observed {
+                    break;
+                }
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+
+        stereo(&f.window, header(next, 128), 0.75, 512);
+        assert_eq!(f.window.frontier().sequence, frontier.sequence);
+        assert_eq!(f.window.frontier().offset, 640);
+        write_status(&mut f.server, next, 1, PcmPosition::default())
+            .await
+            .unwrap();
+        let recovered = current_after(&f, 0).await;
+        assert_eq!(recovered.audio_epoch, next.epoch);
+        assert_eq!(
+            recovered.sample_time,
+            Duration::from_secs_f64(640.0 / 48_000.0)
+        );
+        assert_eq!(recovered.rms_left, 0.75);
+        assert!(
+            recovered
+                .visualizer
+                .pcm
+                .iter()
+                .all(|sample| *sample == [0.75; 2])
+        );
+    });
+}
+
 async fn current_after(f: &Fixture, sequence: u64) -> AnalysisFrame {
     rivu_protocol::transport::timeout(Duration::from_secs(5), async {
         loop {
             let mut accepted = None;
             f.client.consume_current_analysis(|frame| {
-                if frame.sequence > sequence {
+                if frame.sequence > sequence && frame.settings.is_some() {
                     accepted = Some(frame.clone());
                     true
                 } else {
@@ -123,7 +280,7 @@ async fn subscribe(f: &mut Fixture) {
             ..PcmState::default()
         },
         1,
-        0,
+        PcmPosition::default(),
     )
     .await
     .unwrap();
@@ -134,6 +291,86 @@ async fn subscribe(f: &mut Fixture) {
     })
     .await
     .unwrap();
+}
+
+#[test]
+fn growing_partial_block_wakes_analysis_without_advancing_its_logical_sequence() {
+    let mut f = fixture();
+    async_io::block_on(subscribe(&mut f));
+    let state = PcmState {
+        active: true,
+        sample_rate: 48_000,
+        heard_frame: u64::MAX,
+        ..PcmState::default()
+    };
+    stereo(&f.window, header(state, 0), 0.25, 256);
+    let sequence = f.window.sequence();
+    async_io::block_on(async {
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut accepted = false;
+                f.client.consume_current_analysis(|frame| {
+                    accepted = frame.audio_epoch == state.epoch && frame.settings.is_none();
+                    accepted
+                });
+                if accepted {
+                    break;
+                }
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    });
+    thread::scope(|scope| {
+        let (started, writing) = std::sync::mpsc::sync_channel(0);
+        let (release, resume) = std::sync::mpsc::sync_channel(0);
+        let window = &f.window;
+        let publisher = scope.spawn(move || {
+            window.publish(
+                header(state, 256),
+                &[0, 1],
+                (0..512).map(|sample| {
+                    if sample == 0 {
+                        started.send(()).unwrap();
+                        resume.recv().unwrap();
+                    }
+                    0.75
+                }),
+            )
+        });
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Force an ingest turn while the current tail is write-fenced. It must
+        // retain both this sequence and the already-consumed 256-frame prefix.
+        let mut demand = f.client.state.desired.lock().demand;
+        demand.visualizer.band_energy = true;
+        f.client.set_display_demand(demand);
+        let token = f.client.state.desired.lock().display_token;
+        async_io::block_on(async {
+            rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+                while f.client.analysis.read().display_token != token {
+                    f.wakes.recv().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        });
+        release.send(()).unwrap();
+        assert!(publisher.join().unwrap());
+    });
+    assert_eq!(f.window.sequence(), sequence);
+    async_io::block_on(async {
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
+        let frame = current_after(&f, 0).await;
+        assert!((frame.rms_left - 0.3125_f32.sqrt()).abs() < 1e-6);
+        assert_eq!(&frame.visualizer.pcm[..256], &[[0.25; 2]; 256]);
+        assert_eq!(&frame.visualizer.pcm[256..], &[[0.75; 2]; 256]);
+    });
 }
 
 #[test]
@@ -148,7 +385,9 @@ fn analysis_copy_holds_acceptance_guards_and_revocation_never_calls_consumer() {
             ..PcmState::default()
         };
         stereo(&f.window, header(state, 0), 0.25, 512);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let accepted = current_after(&f, 0).await;
         let mut staging_sequence = 0;
         assert!(f.client.consume_current_analysis(|frame| {
@@ -188,10 +427,14 @@ fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes(
         };
         f.client.configure(&config);
         stereo(&f.window, header(state, 0), 0.25, 512);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let first = current_after(&f, 0).await;
         stereo(&f.window, header(state, 512), 0.5, 512);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let second = current_after(&f, first.sequence).await;
         assert_eq!(second.rms_left, 0.5);
 
@@ -201,7 +444,9 @@ fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes(
             .read(&mut f.server)
             .await
             .unwrap();
-        write_status(&mut f.server, state, 2, 0).await.unwrap();
+        write_status(&mut f.server, state, 2, PcmPosition::default())
+            .await
+            .unwrap();
         assert!(!f.client.analysis_frame_is_current(&second));
         stereo(&f.window, header(state, 1024), 0.875, 512);
         f.client.set_display_demand(demand);
@@ -217,7 +462,7 @@ fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes(
         })
         .await
         .unwrap();
-        let minimum = f.window.sequence();
+        let minimum = f.window.frontier();
         write_status(&mut f.server, state, 3, minimum)
             .await
             .unwrap();
@@ -251,7 +496,9 @@ fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
             &[1, 2, 0],
             (0..512 * 3).map(|i| [0.25, 0.5, 1.0][i % 3])
         ));
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             while f.client.analysis.read().audio_epoch != state.epoch {
                 f.wakes.recv().await.unwrap();
@@ -268,7 +515,9 @@ fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
             heard_frame: 10_000,
             ..state
         };
-        write_status(&mut f.server, advanced, 1, 0).await.unwrap();
+        write_status(&mut f.server, advanced, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let native = current_after(&f, 0).await;
         assert_eq!(native.rms_left, 0.75);
         assert_eq!(native.rms_right, 0.375);
@@ -290,7 +539,7 @@ fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
         })
         .await
         .unwrap();
-        let minimum = f.window.sequence();
+        let minimum = f.window.frontier();
         let next = PcmState {
             epoch: 6,
             intent: 1,
@@ -323,7 +572,7 @@ fn subscription_frontier_excludes_pre_subscription_pcm_with_current_identity() {
         // Local retirement is complete, but the server's newer frontier must
         // still exclude this otherwise-valid prefix from the first FFT window.
         stereo(&f.window, header(state, 0), 0.9, 512);
-        let minimum = f.window.sequence();
+        let minimum = f.window.frontier();
         stereo(&f.window, header(state, 512), 0.25, 256);
         write_status(&mut f.server, state, 1, minimum)
             .await
@@ -352,8 +601,9 @@ fn subscription_frontier_excludes_pre_subscription_pcm_with_current_identity() {
     });
 }
 
-#[test]
-fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
+pub(crate) fn with_gap_invalidation(
+    consume: impl FnOnce(&VisualClient, &AnalysisFrame, &AnalysisFrame),
+) {
     async_io::block_on(async {
         let mut f = fixture();
         subscribe(&mut f).await;
@@ -364,7 +614,9 @@ fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
             ..PcmState::default()
         };
         stereo(&f.window, header(state, 0), 0.5, 512);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let first = current_after(&f, 0).await;
         for index in 0..PCM_QUEUE_BLOCKS * 2 {
             stereo(
@@ -374,7 +626,9 @@ fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
                 512,
             );
         }
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let caught_up = current_after(&f, first.sequence).await;
         assert_eq!(caught_up.rms_left, 0.75);
         assert!(caught_up.generation > first.generation);
@@ -386,11 +640,17 @@ fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
         let mut gap = header(state, start);
         gap.gap = true;
         stereo(&f.window, gap, 0.25, 256);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             loop {
                 let frame = f.client.analysis.read().clone();
                 if frame.generation > caught_up.generation && frame.settings.is_none() {
+                    assert!(f.client.analysis_frame_is_current(&frame));
+                    assert!(frame.visualizer.pcm.is_empty());
+                    assert!(frame.spectrum_db.is_empty());
+                    consume(&f.client, &caught_up, &frame);
                     break;
                 }
                 f.wakes.recv().await.unwrap();
@@ -400,7 +660,9 @@ fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
         .unwrap();
         assert!(!f.client.analysis_frame_is_current(&caught_up));
         stereo(&f.window, header(state, start + 256), 0.25, 256);
-        write_status(&mut f.server, state, 1, 0).await.unwrap();
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
         let fresh = current_after(&f, caught_up.sequence).await;
         assert_eq!(fresh.rms_left, 0.25);
         assert!(
@@ -411,6 +673,11 @@ fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
                 .all(|sample| *sample == [0.25; 2])
         );
     });
+}
+
+#[test]
+fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
+    with_gap_invalidation(|_, _, _| {});
 }
 
 #[test]

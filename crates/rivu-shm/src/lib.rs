@@ -1,12 +1,12 @@
 //! Core-owned, bounded native-channel PCM shared memory.
 //!
-//! The owner allocates and faults in the entire window before capture. Readers map
-//! it read-only and borrow atomic samples directly: they never pin a slot or make
-//! the publisher wait. Metadata is a validated snapshot, but samples may be
+//! The owner prefaults the configured native retention region before capture.
+//! Readers map it read-only and borrow atomic samples directly: they never pin a
+//! slot or make the publisher wait. Metadata is a validated snapshot, but samples may be
 //! replaced while a reader uses them. This is deliberately best-effort observation,
 //! not a lossless queue or an A/V synchronization mechanism.
 use anyhow::{Context, Result, ensure};
-use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PcmHeader};
+use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PCM_OUTPUT_MAX_BYTES, PcmHeader, PcmPosition};
 use std::{
     fs::File,
     io,
@@ -20,8 +20,21 @@ use std::{
 pub const MAX_CLIENTS: usize = 16;
 pub const PCM_QUEUE_BLOCKS: usize = 32;
 pub const MAX_PCM_CHANNELS: usize = 18;
-const MAGIC: u64 = u64::from_le_bytes(*b"RIVUPCM4");
-const VERSION: u32 = 4;
+// Retain output prefetch, 200 ms observer headroom, and observation history.
+// Native-channel strides avoid multiplying the maximum mono frame count by 18.
+const MAX_PREFETCH_SAMPLES: usize = PCM_OUTPUT_MAX_BYTES / size_of::<f32>();
+const MAX_QUEUE_BLOCKS: usize = MAX_PREFETCH_SAMPLES.div_ceil(PCM_BLOCK_FRAMES)
+    + (MAX_PREFETCH_SAMPLES.div_ceil(5) * 4).div_ceil(PCM_BLOCK_FRAMES)
+    + PCM_QUEUE_BLOCKS
+    + 2;
+const MAX_RETENTION_SAMPLES: usize = MAX_PREFETCH_SAMPLES
+    + MAX_PREFETCH_SAMPLES.div_ceil(5) * 4
+    + PCM_QUEUE_BLOCKS * PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS
+    + 4 * PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS;
+const POSITION_BITS: u32 = PCM_BLOCK_FRAMES.ilog2() + 1;
+const POSITION_MASK: u64 = (1 << POSITION_BITS) - 1;
+const MAGIC: u64 = u64::from_le_bytes(*b"RIVUPCM5");
+const VERSION: u32 = 5;
 const REQUIRED_SEALS: libc::c_int =
     libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_FUTURE_WRITE | libc::F_SEAL_SEAL;
 
@@ -33,8 +46,11 @@ struct Storage {
     slots: AtomicU32,
     block_frames: AtomicU32,
     max_channels: AtomicU32,
-    sequence: AtomicU64,
-    blocks: [Slot; PCM_QUEUE_BLOCKS],
+    position: AtomicU64,
+    configuration: AtomicU64,
+    stride: AtomicU32,
+    blocks: [Slot; MAX_QUEUE_BLOCKS],
+    samples: [AtomicU32; MAX_RETENTION_SAMPLES],
 }
 
 #[repr(C, align(64))]
@@ -52,10 +68,10 @@ struct Slot {
     frames: AtomicU32,
     channels: AtomicU32,
     layout: [AtomicU32; MAX_PCM_CHANNELS],
-    samples: [AtomicU32; PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS],
+    sample_offset: AtomicU32,
 }
 
-/// A fixed shared PCM window, with exactly one writable owner.
+/// A bounded shared PCM window, with exactly one writable owner.
 ///
 /// `open` creates a read-only handle. Dropping the owner closes its advertised
 /// `/proc/<pid>/fd/<fd>` path; mappings already opened by readers remain valid.
@@ -78,7 +94,7 @@ impl SharedPcmWindow {
         // SAFETY: the name is NUL-terminated and memfd_create retains no pointer.
         let fd = unsafe {
             libc::memfd_create(
-                c"rivu-pcm-v4".as_ptr(),
+                c"rivu-pcm-v5".as_ptr(),
                 libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
             )
         };
@@ -92,16 +108,8 @@ impl SharedPcmWindow {
         file.set_len(size_of::<Storage>() as u64)
             .context("Sizing PCM window")?;
         let window = Self::map(file, true)?;
-        // SAFETY: this is a fresh, exclusively owned mapping of the exact size.
-        // Zero is a valid representation for every atomic integer in Storage.
-        // Touch every byte now, allocating/faulting all pages before capture.
-        unsafe {
-            window
-                .storage
-                .as_ptr()
-                .cast::<u8>()
-                .write_bytes(0, size_of::<Storage>());
-        }
+        // Fresh memfd pages are zero-initialized; zero is valid for these atomics.
+        // Only the active native working region is materialized, not the arena.
         let storage = window.storage();
         storage
             .bytes
@@ -116,6 +124,14 @@ impl SharedPcmWindow {
         storage
             .max_channels
             .store(MAX_PCM_CHANNELS as u32, Ordering::Relaxed);
+        storage.stride.store(
+            (PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS) as u32,
+            Ordering::Relaxed,
+        );
+        for slot in &storage.blocks[..PCM_QUEUE_BLOCKS] {
+            slot.revision.store(0, Ordering::Relaxed);
+        }
+        window.prefault(PCM_QUEUE_BLOCKS * PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS);
         storage.magic.store(MAGIC, Ordering::Release);
         // FUTURE_WRITE permits this already-established owner mapping, but
         // prevents writable mappings or writes through subsequently opened fds.
@@ -152,7 +168,8 @@ impl SharedPcmWindow {
             storage.magic.load(Ordering::Acquire) == MAGIC
                 && storage.bytes.load(Ordering::Relaxed) == size_of::<Storage>() as u64
                 && storage.version.load(Ordering::Relaxed) == VERSION
-                && storage.slots.load(Ordering::Relaxed) == PCM_QUEUE_BLOCKS as u32
+                && (PCM_QUEUE_BLOCKS..=MAX_QUEUE_BLOCKS)
+                    .contains(&(storage.slots.load(Ordering::Relaxed) as usize))
                 && storage.block_frames.load(Ordering::Relaxed) == PCM_BLOCK_FRAMES as u32
                 && storage.max_channels.load(Ordering::Relaxed) == MAX_PCM_CHANNELS as u32,
             "Invalid PCM window metadata"
@@ -162,8 +179,9 @@ impl SharedPcmWindow {
 
     fn map(file: File, writable: bool) -> Result<Self> {
         let protection = libc::PROT_READ | if writable { libc::PROT_WRITE } else { 0 };
-        // Read-side page faults also belong to setup, not the following loop.
-        let flags = libc::MAP_SHARED | if writable { 0 } else { libc::MAP_POPULATE };
+        // The owner prefaults active sample pages. Readers must not materialize
+        // the unused maximum arena while opening a read-only mapping.
+        let flags = libc::MAP_SHARED;
         // SAFETY: fd is live and its length was established/validated by caller.
         let address = unsafe {
             libc::mmap(
@@ -206,15 +224,87 @@ impl SharedPcmWindow {
         ))
     }
 
-    /// Latest completed publication, or zero before the first publication.
+    /// Latest logical block, or zero before the first publication.
     pub fn sequence(&self) -> u64 {
-        self.storage().sequence.load(Ordering::Acquire)
+        self.frontier().sequence
     }
 
-    /// Publish native interleaved samples, assigning a monotonically increasing
-    /// sequence regardless of `header.sequence`. Returns false for read-only or
-    /// concurrently publishing handles, invalid metadata/layout/length, or an
-    /// exhausted sequence counter. Never waits or allocates.
+    /// Atomically observed prefix, including publications that only append a tail.
+    pub fn frontier(&self) -> PcmPosition {
+        let position = self.storage().position.load(Ordering::Acquire);
+        PcmPosition {
+            sequence: position >> POSITION_BITS,
+            offset: (position & POSITION_MASK) as u16,
+        }
+    }
+
+    /// Retain output prefetch plus a refill interval and observation history.
+    /// Called while audio is fenced, before publishing the new native layout.
+    pub fn retain_output(&self, output_frames: usize, rate: u32, channels: usize) -> Result<()> {
+        ensure!(
+            self.writable && rate != 0 && channels != 0 && channels <= MAX_PCM_CHANNELS,
+            "Invalid native PCM retention layout"
+        );
+        ensure!(
+            output_frames
+                .checked_mul(channels)
+                .is_some_and(|samples| samples <= MAX_PREFETCH_SAMPLES),
+            "PCM prefetch exceeds output budget"
+        );
+        let frames = output_frames
+            .checked_add((rate as usize).div_ceil(5))
+            .and_then(|frames| frames.checked_add(PCM_QUEUE_BLOCKS * PCM_BLOCK_FRAMES))
+            .context("PCM retention frame capacity overflow")?;
+        let slots = (frames.div_ceil(PCM_BLOCK_FRAMES) + 2).max(PCM_QUEUE_BLOCKS);
+        let stride = PCM_BLOCK_FRAMES * channels;
+        let samples = slots
+            .checked_mul(stride)
+            .context("PCM retention sample capacity overflow")?;
+        ensure!(
+            slots <= MAX_QUEUE_BLOCKS && samples <= MAX_RETENTION_SAMPLES,
+            "PCM retention exceeds bounded window"
+        );
+        ensure!(
+            self.publishing
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok(),
+            "PCM retention cannot change while publishing"
+        );
+        let _publishing = Publishing(&self.publishing);
+        let storage = self.storage();
+        storage.configuration.fetch_add(1, Ordering::AcqRel);
+        // Preserve the metadata write fence when rebasing the shared sample arena.
+        fence(Ordering::Release);
+        for slot in &storage.blocks[..(storage.slots.load(Ordering::Relaxed) as usize).max(slots)] {
+            slot.revision.store(0, Ordering::Relaxed);
+        }
+        self.prefault(samples);
+        storage.stride.store(stride as u32, Ordering::Relaxed);
+        storage.slots.store(slots as u32, Ordering::Relaxed);
+        storage.configuration.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    fn prefault(&self, samples: usize) {
+        for sample in self.storage().samples[..samples]
+            .iter()
+            .step_by(4096 / size_of::<u32>())
+        {
+            sample.fetch_or(0, Ordering::Relaxed);
+        }
+        if let Some(last) = self.storage().samples[..samples].last() {
+            last.fetch_or(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn retained_blocks(&self) -> usize {
+        self.storage().slots.load(Ordering::Acquire) as usize
+    }
+
+    /// Publish native samples, filling the latest partial block when identity,
+    /// layout and frame positions are continuous. Each fragment touches at most
+    /// two slots and copies each sample once; it never waits or allocates.
+    /// Readers retain an offset to consume each growing logical block tail once.
     pub fn publish(
         &self,
         mut header: PcmHeader,
@@ -238,47 +328,116 @@ impl SharedPcmWindow {
         }
         let _publishing = Publishing(&self.publishing);
         let storage = self.storage();
-        let Some(sequence) = storage.sequence.load(Ordering::Relaxed).checked_add(1) else {
-            return false;
-        };
-        header.sequence = sequence;
-        let slot = &storage.blocks[((sequence - 1) % PCM_QUEUE_BLOCKS as u64) as usize];
-        let writing = slot.revision.load(Ordering::Relaxed).wrapping_add(1) | 1;
-        slot.revision.store(writing, Ordering::Relaxed);
-        // A reader acquiring any new atomic metadata must also observe this
-        // invalidation when it checks revision after taking its snapshot.
-        fence(Ordering::Release);
-        slot.sequence.store(sequence, Ordering::Relaxed);
-        slot.epoch.store(header.epoch, Ordering::Relaxed);
-        slot.intent.store(header.intent, Ordering::Relaxed);
-        slot.generation.store(header.generation, Ordering::Relaxed);
-        slot.capture.store(header.capture, Ordering::Relaxed);
-        slot.start_frame
-            .store(header.start_frame, Ordering::Relaxed);
-        slot.output_frame
-            .store(header.output_frame, Ordering::Relaxed);
-        slot.sample_rate
-            .store(header.sample_rate, Ordering::Relaxed);
-        slot.gap.store(u32::from(header.gap), Ordering::Relaxed);
-        slot.frames.store(frames as u32, Ordering::Relaxed);
-        slot.channels.store(layout.len() as u32, Ordering::Relaxed);
-        for (target, channel) in slot.layout.iter().zip(layout) {
-            target.store(*channel, Ordering::Relaxed);
-        }
-        for target in &slot.samples[..count] {
-            let Some(value) = samples.next() else {
-                // A broken ExactSizeIterator leaves the slot unpublished. A
-                // subsequent publisher can replace it without waiting.
+        let latest = self.sequence();
+        let append = self.block(latest).filter(|previous| {
+            let old = previous.header();
+            !header.gap
+                && old.epoch == header.epoch
+                && old.intent == header.intent
+                && old.generation == header.generation
+                && old.capture == header.capture
+                && old.sample_rate == header.sample_rate
+                && old.start_frame + previous.len() as u64 == header.start_frame
+                && old.output_frame + previous.len() as u64 == header.output_frame
+                && previous.layout() == layout
+                && previous.len() < PCM_BLOCK_FRAMES
+        });
+        let incoming = header;
+        let (sequence, previous_frames) = if let Some(previous) = append {
+            header = previous.header();
+            (latest, previous.len())
+        } else {
+            let Some(sequence) = latest.checked_add(1) else {
                 return false;
             };
-            target.store(value.to_bits(), Ordering::Relaxed);
+            (sequence, 0)
+        };
+        let first_frames = frames.min(PCM_BLOCK_FRAMES - previous_frames);
+        let second_frames = frames - first_frames;
+        let Some(final_sequence) = sequence.checked_add(u64::from(second_frames != 0)) else {
+            return false;
+        };
+        if final_sequence > u64::MAX >> POSITION_BITS {
+            return false;
+        }
+        header.sequence = sequence;
+        let second = PcmHeader {
+            sequence: final_sequence,
+            start_frame: incoming.start_frame + first_frames as u64,
+            output_frame: incoming.output_frame + first_frames as u64,
+            gap: false,
+            ..incoming
+        };
+        let mut completed = [None, None];
+        for (part, (header, previous_frames, frames)) in [
+            (header, previous_frames, first_frames),
+            (second, 0, second_frames),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if frames == 0 {
+                continue;
+            }
+            let count = frames * layout.len();
+            let index =
+                ((header.sequence - 1) % u64::from(storage.slots.load(Ordering::Relaxed))) as usize;
+            let slot = &storage.blocks[index];
+            let stride = storage.stride.load(Ordering::Relaxed) as usize;
+            let offset = index * stride;
+            if (previous_frames + frames) * layout.len() > stride {
+                return false;
+            }
+            let writing = slot.revision.load(Ordering::Relaxed).wrapping_add(1) | 1;
+            slot.revision.store(writing, Ordering::Relaxed);
+            // Any newly observed metadata or samples must also reveal invalidation
+            // when a reader validates its snapshot after the acquire fence.
+            fence(Ordering::Release);
+            slot.sequence.store(header.sequence, Ordering::Relaxed);
+            slot.epoch.store(header.epoch, Ordering::Relaxed);
+            slot.intent.store(header.intent, Ordering::Relaxed);
+            slot.generation.store(header.generation, Ordering::Relaxed);
+            slot.capture.store(header.capture, Ordering::Relaxed);
+            slot.start_frame
+                .store(header.start_frame, Ordering::Relaxed);
+            slot.output_frame
+                .store(header.output_frame, Ordering::Relaxed);
+            slot.sample_rate
+                .store(header.sample_rate, Ordering::Relaxed);
+            slot.gap.store(u32::from(header.gap), Ordering::Relaxed);
+            slot.frames
+                .store((previous_frames + frames) as u32, Ordering::Relaxed);
+            slot.channels.store(layout.len() as u32, Ordering::Relaxed);
+            slot.sample_offset.store(offset as u32, Ordering::Relaxed);
+            for (target, channel) in slot.layout.iter().zip(layout) {
+                target.store(*channel, Ordering::Relaxed);
+            }
+            let start = offset + previous_frames * layout.len();
+            for target in &storage.samples[start..start + count] {
+                let Some(value) = samples.next() else {
+                    // A dishonest ExactSizeIterator leaves touched slots fenced.
+                    return false;
+                };
+                target.store(value.to_bits(), Ordering::Relaxed);
+            }
+            completed[part] = Some((slot, writing));
         }
         if samples.next().is_some() {
             return false;
         }
-        slot.revision
-            .store(writing.wrapping_add(1), Ordering::Release);
-        storage.sequence.store(sequence, Ordering::Release);
+        for (slot, writing) in completed.into_iter().flatten() {
+            slot.revision
+                .store(writing.wrapping_add(1), Ordering::Release);
+        }
+        let tail = if second_frames == 0 {
+            previous_frames + first_frames
+        } else {
+            second_frames
+        };
+        storage.position.store(
+            (final_sequence << POSITION_BITS) | tail as u64,
+            Ordering::Release,
+        );
         true
     }
 
@@ -288,7 +447,13 @@ impl SharedPcmWindow {
         if sequence == 0 || sequence > self.sequence() {
             return None;
         }
-        let slot = &self.storage().blocks[((sequence - 1) % PCM_QUEUE_BLOCKS as u64) as usize];
+        let storage = self.storage();
+        let configuration = storage.configuration.load(Ordering::Acquire);
+        if !configuration.is_multiple_of(2) {
+            return None;
+        }
+        let slots = storage.slots.load(Ordering::Relaxed) as usize;
+        let slot = &storage.blocks[((sequence - 1) % slots as u64) as usize];
         let revision = slot.revision.load(Ordering::Acquire);
         if revision == 0 || revision & 1 != 0 {
             return None;
@@ -307,6 +472,7 @@ impl SharedPcmWindow {
         };
         let frames = slot.frames.load(Ordering::Relaxed) as usize;
         let channels = slot.channels.load(Ordering::Relaxed) as usize;
+        let sample_offset = slot.sample_offset.load(Ordering::Relaxed) as usize;
         if channels == 0 || channels > MAX_PCM_CHANNELS {
             return None;
         }
@@ -318,6 +484,10 @@ impl SharedPcmWindow {
         // observed an in-progress replacement rather than its final revision.
         fence(Ordering::Acquire);
         if slot.revision.load(Ordering::Relaxed) != revision
+            || storage.configuration.load(Ordering::Relaxed) != configuration
+            || sample_offset
+                .checked_add(frames.saturating_mul(channels))
+                .is_none_or(|end| end > MAX_RETENTION_SAMPLES)
             || header.sequence != sequence
             || gap > 1
             || !valid_header(header, frames)
@@ -327,6 +497,9 @@ impl SharedPcmWindow {
         }
         Some(SharedPcmBlock {
             slot,
+            storage,
+            configuration,
+            sample_offset,
             revision,
             header,
             frames,
@@ -356,6 +529,9 @@ impl Drop for Publishing<'_> {
 /// No PCM payload is copied into this accessor.
 pub struct SharedPcmBlock<'a> {
     slot: &'a Slot,
+    storage: &'a Storage,
+    configuration: u64,
+    sample_offset: usize,
     revision: u64,
     header: PcmHeader,
     frames: usize,
@@ -382,10 +558,18 @@ impl SharedPcmBlock<'_> {
             frame < self.frames && channel < self.channels,
             "PCM sample index out of bounds"
         );
-        f32::from_bits(self.slot.samples[frame * self.channels + channel].load(Ordering::Relaxed))
+        f32::from_bits(
+            self.storage.samples[self.sample_offset + frame * self.channels + channel]
+                .load(Ordering::Relaxed),
+        )
     }
     pub fn still_current(&self) -> bool {
+        // Pair with the writer's release fence before payload replacement.
+        // Prior relaxed sample loads must precede the revision/configuration
+        // rechecks, including when they observed a not-yet-completed write.
+        fence(Ordering::Acquire);
         self.slot.revision.load(Ordering::Acquire) == self.revision
+            && self.storage.configuration.load(Ordering::Acquire) == self.configuration
     }
 }
 

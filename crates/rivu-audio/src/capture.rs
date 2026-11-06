@@ -1,7 +1,7 @@
 //! Continuous bounded native PCM capture. Audio admission never waits for its observer.
 use crate::Channel;
 use rivu_format::config::VisualizationSignal;
-use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PcmHeader, PcmState};
+use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PcmHeader, PcmPosition, PcmState};
 use rivu_shm::{MAX_PCM_CHANNELS, SharedPcmWindow};
 use std::sync::{
     Arc,
@@ -94,8 +94,8 @@ impl PcmControl {
     pub fn subscribe(&self) -> async_channel::Receiver<()> {
         self.updates.clone()
     }
-    pub fn sequence(&self) -> u64 {
-        self.window.sequence()
+    pub fn frontier(&self) -> PcmPosition {
+        self.window.frontier()
     }
     pub fn window(&self) -> Arc<SharedPcmWindow> {
         Arc::clone(&self.window)
@@ -305,10 +305,11 @@ pub(crate) struct TestCapture {
 #[cfg(test)]
 impl TestCapture {
     pub(crate) fn new(control: &Arc<PcmControl>) -> Self {
+        let position = control.frontier();
         Self {
             control: Arc::clone(control),
-            next: control.sequence().wrapping_add(1),
-            offset: 0,
+            next: position.sequence.max(1),
+            offset: usize::from(position.offset),
             layout: [0; MAX_PCM_CHANNELS],
             channels: 0,
             weights: Vec::new(),
@@ -318,9 +319,9 @@ impl TestCapture {
         if output.is_empty() {
             return None;
         }
-        let latest = self.control.sequence();
+        let latest = self.control.frontier().sequence;
         let oldest = latest
-            .saturating_sub(rivu_shm::PCM_QUEUE_BLOCKS as u64 - 1)
+            .saturating_sub(self.control.window.retained_blocks() as u64 - 1)
             .max(1);
         if self.next < oldest {
             self.next = oldest;
@@ -328,6 +329,9 @@ impl TestCapture {
         }
         while self.next <= latest {
             let Some(block) = self.control.window.block(self.next) else {
+                if self.next == latest {
+                    return None;
+                }
                 self.next += 1;
                 self.offset = 0;
                 continue;
@@ -337,6 +341,14 @@ impl TestCapture {
                 self.next += 1;
                 self.offset = 0;
                 continue;
+            }
+            if self.offset >= block.len() {
+                if self.next < latest {
+                    self.next += 1;
+                    self.offset = 0;
+                    continue;
+                }
+                return None;
             }
             if block.layout() != &self.layout[..self.channels] {
                 self.channels = block.layout().len();
@@ -360,7 +372,8 @@ impl TestCapture {
             header.output_frame += self.offset as u64;
             header.gap &= self.offset == 0;
             self.offset += count;
-            if self.offset == block.len() {
+            if self.offset == block.len() && (block.len() == PCM_BLOCK_FRAMES || self.next < latest)
+            {
                 self.next += 1;
                 self.offset = 0;
             }
@@ -455,6 +468,30 @@ mod tests {
             }
         }
         assert_eq!(cursor, 2500);
+    }
+
+    #[test]
+    fn new_observer_skips_published_prefix_and_reads_each_appended_tail_once() {
+        let (control, mut producer, _) = capture();
+        producer.push(100, &[0.9; 6]);
+        let mut consumer = TestCapture::new(&control);
+        assert!(consumer.try_pop().is_none());
+        for (frame, value) in [(3, 0.25), (4, 0.5), (5, 0.75)] {
+            producer.push(100 + frame, &[value; 2]);
+            assert_eq!(
+                control.frontier(),
+                PcmPosition {
+                    sequence: 1,
+                    offset: frame as u16 + 1
+                }
+            );
+            let sample = consumer.try_pop().unwrap();
+            assert_eq!(sample.samples, [value; 2]);
+            assert_eq!(sample.header.start_frame, frame);
+            assert_eq!(sample.header.output_frame, 100 + frame);
+            assert!(!sample.gap);
+            assert!(consumer.try_pop().is_none());
+        }
     }
 
     #[test]

@@ -497,7 +497,9 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     core.flush_config().unwrap();
     for index in 1..64 {
         commands
-            .try_send(AudioCommand::Volume(index as f32))
+            .try_send(audio::QueuedAudioCommand::test_unfenced(
+                AudioCommand::Volume(index as f32),
+            ))
             .unwrap();
     }
     let (events, event_receive) = async_channel::bounded(128);
@@ -565,13 +567,13 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     assert_eq!(receive.len(), 64);
     assert_eq!(core.engine.events.as_ref().unwrap().len(), 128);
     assert!(matches!(
-        receive.try_recv().unwrap(),
+        receive.try_recv().unwrap().command,
         AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
             if device == "accepted-output"
     ));
     for index in 1..64 {
         assert!(matches!(
-            receive.try_recv().unwrap(),
+            receive.try_recv().unwrap().command,
             AudioCommand::Volume(value) if value == index as f32
         ));
     }
@@ -589,7 +591,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     })
     .unwrap();
     assert!(matches!(
-        receive.try_recv().unwrap(),
+        receive.try_recv().unwrap().command,
         AudioCommand::OutputSettings { request: 2, .. }
     ));
     assert!(
@@ -1196,7 +1198,7 @@ fn switching_selection_counts_final_snapshot_without_invalidating_its_position()
     let (commands, receive) = async_channel::bounded(4);
     let idle_commands = core.engine.replace_commands(commands);
     let responder = thread::spawn(move || {
-        let AudioCommand::StopAndSnapshot(reply) = receive.recv_blocking().unwrap() else {
+        let AudioCommand::StopAndSnapshot(reply) = receive.recv_blocking().unwrap().command else {
             panic!("selection must retire the previous playback");
         };
         reply

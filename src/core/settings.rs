@@ -168,6 +168,8 @@ impl Core {
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
         // Explicit Apply always validates output, including an unchanged idle sink.
+        // The engine compares admitted output targets, so validation alone does
+        // not revoke the PCM identity or discard a client's partial FFT window.
         self.engine
             .ensure_command_capacity(1 + changed.iter().filter(|&&changed| changed).count())?;
         let [

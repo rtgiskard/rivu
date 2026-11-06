@@ -758,6 +758,27 @@ mod tests {
     use super::*;
     use crate::test_support::CoreRuntime;
 
+    #[test]
+    fn current_transport_gap_invalidation_retires_the_staged_picture() {
+        crate::transport::visual::tests::with_gap_invalidation(|client, previous, invalidation| {
+            let mut staging = previous.clone();
+            let mut sequence = previous.sequence;
+            let mut clock = AnimationClock::default();
+            clock.accept(previous, Instant::now());
+            assert!(client.consume_current_analysis(|frame| {
+                assert_eq!(frame.sequence, invalidation.sequence);
+                stage_analysis_frame(&mut staging, &mut sequence, false, frame)
+            }));
+            assert!(staging.settings.is_none());
+            assert!(staging.spectrum_db.is_empty());
+            assert!(staging.visualizer.pcm.is_empty());
+            assert!(staging.generation > previous.generation);
+            clock.accept(&staging, Instant::now());
+            assert!(clock.source.is_none());
+            assert_eq!(clock.advance(Instant::now()), Duration::ZERO);
+        });
+    }
+
     fn demand(layout: &layout::Layout) -> crate::gui::workspace::WorkspacePanels {
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         panels.reconcile(layout);

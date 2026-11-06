@@ -70,6 +70,106 @@ fn rejected_pcm_never_prepares_or_advances_analysis() {
 }
 
 #[test]
+fn growing_logical_block_accepts_only_its_new_contiguous_tail() {
+    let (mut engine, mut frame, state, _) = setup();
+    let first = header(state, 7, 0);
+    assert!(engine.ingest(first, [[0.25; 2]; 256].into_iter(), &mut frame));
+    let generation = frame.generation;
+    let sample_time = engine.sample_time;
+    assert!(!engine.ingest(first, [[1.0; 2]; 256].into_iter(), &mut frame));
+    assert!(!engine.ingest(
+        header(state, 6, 256),
+        [[1.0; 2]; 256].into_iter(),
+        &mut frame
+    ));
+    assert_eq!(frame.generation, generation);
+    assert_eq!(engine.sample_time, sample_time);
+    assert!(engine.ingest(
+        header(state, 7, 256),
+        [[0.75; 2]; 256].into_iter(),
+        &mut frame
+    ));
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, Instant::now()));
+    assert!((frame.rms_left - 0.3125_f32.sqrt()).abs() < 1e-6);
+    assert_eq!(&frame.visualizer.pcm[..256], &[[0.25; 2]; 256]);
+    assert_eq!(&frame.visualizer.pcm[256..], &[[0.75; 2]; 256]);
+    assert_eq!(frame.generation, generation);
+    assert!(engine.ingest(
+        header(state, 8, 512),
+        [[0.5; 2]; 512].into_iter(),
+        &mut frame
+    ));
+    assert_eq!(frame.generation, generation);
+}
+
+#[test]
+fn invalid_sample_observation_revokes_history_without_committing_audio_time() {
+    let (mut engine, mut frame, state, _) = setup();
+    let now = Instant::now();
+    assert!(engine.ingest(
+        header(state, 1, 0),
+        [[0.25; 2]; 512].into_iter(),
+        &mut frame
+    ));
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, now));
+    let previous = frame.clone();
+    assert!(!engine.ingest_checked(
+        header(state, 2, 512),
+        [[1.0, -1.0]; 256].into_iter(),
+        || false,
+        &mut frame,
+    ));
+    assert!(frame.generation > previous.generation);
+    assert_eq!(frame.sample_time, previous.sample_time);
+    assert_eq!(engine.sample_time, previous.sample_time);
+    assert!(frame.settings.is_none());
+    assert!(frame.visualizer.density.is_empty());
+    assert!(frame.visualizer.pcm.is_empty());
+    assert!(frame.spectrum_db.is_empty());
+    assert!(engine.expected.is_none());
+    assert!(!engine.fresh);
+    assert!(!engine.requested);
+    engine.request_frame();
+    assert!(!engine.publish(&mut frame, now + Duration::from_secs(1)));
+
+    // Retry the same logical position. Neither the failed span nor earlier
+    // density history may contribute to the clean replacement window.
+    assert!(engine.ingest_checked(
+        header(state, 2, 512),
+        [[0.75; 2]; 256].into_iter(),
+        || true,
+        &mut frame,
+    ));
+    assert!(!engine.publish(&mut frame, now + Duration::from_secs(1)));
+    assert!(engine.ingest_checked(
+        header(state, 2, 768),
+        [[0.75; 2]; 256].into_iter(),
+        || true,
+        &mut frame,
+    ));
+    engine.request_frame();
+    assert!(engine.publish(&mut frame, now + Duration::from_secs(1)));
+    let (mut reference, mut expected, reference_state, _) = setup();
+    assert!(reference.ingest(
+        header(reference_state, 2, 512),
+        [[0.75; 2]; 512].into_iter(),
+        &mut expected,
+    ));
+    reference.request_frame();
+    assert!(reference.publish(&mut expected, now));
+    assert_eq!(frame.spectrum_db, expected.spectrum_db);
+    assert_eq!(frame.visualizer.density, expected.visualizer.density);
+    assert_eq!(frame.visualizer.pcm, expected.visualizer.pcm);
+    assert_eq!(frame.rms_left, expected.rms_left);
+    assert_eq!(
+        frame.sample_time,
+        previous.sample_time + Duration::from_secs_f64(256.0 / 48_000.0) * 2
+    );
+}
+
+#[test]
 fn permit_survives_partial_windows_and_fps_only_changes() {
     let (mut engine, mut frame, state, demand) = setup();
     engine.request_frame();
