@@ -1120,7 +1120,7 @@ impl Duplicates {
         let theme = rivu_ui::theme::palette(cx);
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
-        let mut groups = column().gap_2();
+        let mut groups = column().flex_shrink_0().gap_2();
         if review.groups_loading {
             groups = groups.child(caption(theme, self.tr("gl-groups-loading")));
         } else if let Some(page) = &review.groups {
@@ -1167,6 +1167,7 @@ impl Duplicates {
                             gpui::Toggled::False
                         })
                         .w_full()
+                        .flex_shrink_0()
                         .justify_start()
                         .child(
                             column()
@@ -1646,12 +1647,14 @@ impl Duplicates {
             rivu_ui::Dialog::card(theme)
                 .id("duplicate-review-card")
                 .w(relative(0.94))
-                .max_h(window.viewport_size().height * 0.92)
+                .h((window.viewport_size().height - px(32.))
+                    .max(px(0.))
+                    .min(window.rem_size() * (640. / 16.)))
                 .min_w_0()
                 .min_h_0()
                 .p_3()
                 .gap_2()
-                .overflow_y_scroll()
+                .overflow_hidden()
                 .child(
                     rivu_ui::panel_heading_row(
                         rivu_ui::list_panel_header(
@@ -1692,11 +1695,12 @@ impl Duplicates {
                                     ),
                             ),
                     )
-                    .items_start(),
+                    .items_start()
+                    .flex_shrink_0(),
                 )
                 .child(
                     row()
-                        .flex_shrink(1.)
+                        .flex_1()
                         .min_h_0()
                         .items_stretch()
                         .child(

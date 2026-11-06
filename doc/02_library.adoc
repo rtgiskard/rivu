@@ -648,6 +648,10 @@ paths, existence, scan state, metadata, user state, and reference counts. Choose
 `Use as old record` on a missing identity and `Use as destination` on a present
 one, then review and confirm. Ineligible destinations show a rejection warning.
 
+The review uses the same height as Settings, constrained by the window. Group and
+file lists scroll independently without moving the heading, pagers, or bottom
+note; selection feedback has its own bounded scrolling area.
+
 Group and file pages are independent; paging preserves the selected pair.
 Confirmation locks selection and paging. Use Back to selection to revise the pair
 or Refresh to reset. Close or Esc leaves undecided pairs unchanged and returns
