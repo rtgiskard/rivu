@@ -166,6 +166,32 @@ impl Core {
         })
     }
 
+    fn audio_settings_failed(&mut self, event: AudioEvent) {
+        match event {
+            AudioEvent::OutputSettingsFailed {
+                request,
+                device,
+                auto_mix,
+                message,
+            } if request == self.output_settings_request
+                && device == self.preferences.live().output_device
+                && auto_mix == self.preferences.settings().pipewire_auto_mix =>
+            {
+                self.state.system.last_error = Some(message);
+            }
+            AudioEvent::EqualizerSettingsFailed {
+                generation,
+                config,
+                message,
+            } if generation.is_none_or(|value| value == self.transport.generation)
+                && *config == self.preferences.settings().equalizer =>
+            {
+                self.state.system.last_error = Some(message);
+            }
+            _ => {}
+        }
+    }
+
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
             AudioEvent::Started { generation, info } if generation == self.transport.generation => {
@@ -210,26 +236,8 @@ impl Core {
                 self.stop().with_context(|| message.clone())?;
                 self.state.system.last_error = Some(message);
             }
-            AudioEvent::OutputSettingsFailed {
-                request,
-                device,
-                auto_mix,
-                message,
-            } if request == self.output_settings_request
-                && device == self.preferences.live().output_device
-                && auto_mix == self.preferences.settings().pipewire_auto_mix =>
-            {
-                self.state.system.last_error = Some(message);
-            }
-            AudioEvent::EqualizerSettingsFailed {
-                generation,
-                config,
-                message,
-            } if generation.is_none_or(|value| value == self.transport.generation)
-                && *config == self.preferences.settings().equalizer =>
-            {
-                self.state.system.last_error = Some(message);
-            }
+            event @ (AudioEvent::OutputSettingsFailed { .. }
+            | AudioEvent::EqualizerSettingsFailed { .. }) => self.audio_settings_failed(event),
             AudioEvent::DecoderStopped { generation }
                 if self.transport.live_source == Some(generation) =>
             {
@@ -534,6 +542,10 @@ impl Core {
                 generation: event_generation,
                 bitrate_bps,
             } if event_generation == generation => self.playback_ended_bitrate(bitrate_bps)?,
+            // Settings failures describe the current desired configuration, not
+            // terminal playback control. Admit them before fencing this source.
+            event @ (AudioEvent::OutputSettingsFailed { .. }
+            | AudioEvent::EqualizerSettingsFailed { .. }) => self.audio_settings_failed(event),
             // Retiring terminal events cannot advance, recursively stop, or revive playback.
             _ => {}
         }

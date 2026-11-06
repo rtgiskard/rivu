@@ -267,6 +267,18 @@ link:90_open_issues.adoc#pcm-owner-retirement-coverage[PCM owner-drop],
 link:90_open_issues.adoc#socket-retirement-test-isolation[socket isolation]
 and link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity].
 
+[[DEC-011]]
+=== DEC-011: Retire playback without discarding current settings failures
+
+Status: implemented, 2026-11-06.
+
+Playback retirement suppresses transport terminal actions, not independent
+settings failure reporting. Normal and retiring dispatch share output-request
+and EQ configuration/generation validation; stale failures remain ignored.
+Do not route retiring terminal events through ordinary dispatch, which can
+recursively Stop or advance navigation. Evidence and resolution:
+link:90_open_issues.adoc#retiring-settings-failures[retiring settings failures].
+
 == Unapproved candidates
 
 Status: not adopted or authorized, 2026-11-06. These are investigation candidates,

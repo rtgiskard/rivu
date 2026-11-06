@@ -281,6 +281,11 @@ instead of rerouting; a failed device change stops playback and retains the
 requested setting. Select an available sink and explicitly restart playback to
 recover. Reapplying the same setting validates it again, even while stopped.
 
+Output and Monitor EQ application failures remain reportable while Stop or an
+audition source replacement retires playback. Superseded setting requests and
+inapplicable EQ generations/configurations are ignored; retiring playback events
+do not restart transport or advance the queue.
+
 Changing sink or remixing rebuilds output at the final confirmed audible position,
 preserving pause without reopening the decoder. It does not apply a newly saved
 Decoder hint or read-buffer size. PipeWire handles device-rate conversion.

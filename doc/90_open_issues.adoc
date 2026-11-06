@@ -64,6 +64,23 @@ protection remains unresolved.
 
 == Resolved investigations
 
+[[retiring-settings-failures]]
+=== Settings failures consumed during playback retirement
+
+Status: resolved in implementation, 2026-11-06.
+
+Stop and audition source replacement consume audio events while retiring playback.
+Their restricted dispatcher previously discarded output and EQ application failures,
+including failures still matching current settings. Shared settings-failure handling
+now preserves request/configuration/generation validation in both dispatch paths;
+retiring terminal events still cannot recurse into Stop or advance navigation.
+A standalone probe executing the extracted production dispatcher lost a current
+failure before correction and passed eight current/stale cases after correction.
+A real Core regression also passed, covering Stop waiting, post-reply draining,
+source replacement and shared-state publication. Neither check exercises a real
+output device. Design:
+link:91_design_decisions.adoc#DEC-011[DEC-011].
+
 [[denoise-hum-work-admission]]
 === Denoise hum arithmetic-work admission
 
