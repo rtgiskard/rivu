@@ -377,23 +377,7 @@ mod tests {
         let name = current
             .name()
             .expect("test harness must name the test thread");
-        const CHILD_TEST: &str = "RIVU_ISOLATED_STARTUP_TEST";
-        if std::env::var_os(CHILD_TEST).as_deref() == Some(std::ffi::OsStr::new(name)) {
-            return false;
-        }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture"])
-            .env(CHILD_TEST, name)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{name}: {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        true
+        crate::test_support::run_in_subprocess(name, std::time::Duration::from_secs(20))
     }
 
     fn runtime_fixture() -> (tempfile::TempDir, CoreRuntime) {

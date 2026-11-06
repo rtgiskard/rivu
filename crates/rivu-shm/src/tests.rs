@@ -2,7 +2,10 @@ use super::*;
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        fs::MetadataExt,
+        net::{UnixListener, UnixStream},
+    },
     process::{Child, Command},
     time::Duration,
 };
@@ -80,6 +83,8 @@ fn cross_process_child() {
     };
     let path = PathBuf::from(std::env::var_os("RIVU_PCM_TEST_PATH").unwrap());
     let window = SharedPcmWindow::open(&path).unwrap();
+    let original = window.file.metadata().unwrap();
+    let original_identity = (original.dev(), original.ino());
     assert_eq!(window.sequence(), 0);
     let mut signal = UnixStream::connect(Path::new(&data_dir).join("ready.sock")).unwrap();
     signal
@@ -95,9 +100,21 @@ fn cross_process_child() {
     assert_native(&block, expected, &NATIVE_LAYOUT, PCM_BLOCK_FRAMES);
     signal.write_all(&[2]).unwrap();
     signal.read_exact(&mut byte).unwrap();
-    // The owner closed its advertised fd, but this mapping and its borrowed
-    // accessor retain the shared memory without either process pinning a slot.
-    assert!(SharedPcmWindow::open(&path).is_err());
+    match fs::metadata(&path) {
+        Ok(current) => assert_ne!(
+            (current.dev(), current.ino()),
+            original_identity,
+            "the owner's advertised fd still refers to the original PCM window"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "cannot inspect {} after owner drop: {error}",
+            path.display()
+        ),
+    }
+    // The owner closed its advertised fd, whose number may already be reused.
+    // This mapping and its borrowed accessor retain the original shared memory
+    // without either process pinning a slot.
     assert_native(&block, expected, &NATIVE_LAYOUT, PCM_BLOCK_FRAMES);
     signal.write_all(&[3]).unwrap();
 }

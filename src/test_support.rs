@@ -4,26 +4,39 @@ pub mod ipc;
 
 /// Re-run a potentially blocking regression in a killable process, not a thread
 /// whose destructor could join the same stuck worker during unwinding.
-#[cfg(test)]
-pub(crate) fn run_in_subprocess(test: &str, timeout: std::time::Duration) -> bool {
+pub fn run_in_subprocess(test: &str, timeout: std::time::Duration) -> bool {
     const CHILD_TEST: &str = "RIVU_BOUNDED_TEST";
     if std::env::var(CHILD_TEST).as_deref() == Ok(test) {
         return false;
     }
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
-        .env(CHILD_TEST, test)
-        .spawn()
-        .unwrap();
+    struct Runner {
+        child: std::process::Child,
+        reaped: bool,
+    }
+    impl Drop for Runner {
+        fn drop(&mut self) {
+            if !self.reaped {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+    let mut runner = Runner {
+        child: std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD_TEST, test)
+            .spawn()
+            .unwrap(),
+        reaped: false,
+    };
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = runner.child.try_wait().unwrap() {
+            runner.reaped = true;
             assert!(status.success(), "{test} failed: {status}");
             return true;
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             panic!("{test} exceeded {timeout:?}");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

@@ -191,6 +191,12 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
 
 #[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::app_commands_route_over_ipc_without_changing_business_state",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
     crate::config::Config {
@@ -336,6 +342,12 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
 
 #[test]
 fn malformed_request_during_watch_receives_invalid_request_response() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::malformed_request_during_watch_receives_invalid_request_response",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     use std::io::{Read, Write};
 
     fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
@@ -403,6 +415,12 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
 
 #[test]
 fn library_root_queries_run_through_real_owner_and_ipc_session() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::library_root_queries_run_through_real_owner_and_ipc_session",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     use crate::{config::Config, core::CoreRuntime, store::Store};
     use rivu_protocol::{
         model::{LibrarySort, MAX_QUERY_ROWS},
@@ -1032,9 +1050,16 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
 
 #[test]
 fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::instance_acquisition_creates_directory_without_socket_or_lock_files",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let data_dir = directory.path().join("data");
     let owner = SocketOwner::acquire(&data_dir).unwrap();
+    let _identity = std::fs::File::open(&data_dir).unwrap();
     assert!(data_dir.is_dir());
     assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
     assert!(SocketOwner::acquire(&data_dir).is_err());
@@ -1048,9 +1073,16 @@ fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
 
 #[test]
 fn directory_aliases_share_instance_ownership_and_transport() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::directory_aliases_share_instance_ownership_and_transport",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let data_dir = directory.path().join("data");
     let owner = SocketOwner::acquire(&data_dir).unwrap();
+    let _identity = std::fs::File::open(&data_dir).unwrap();
     let symlink = directory.path().join("alias");
     std::os::unix::fs::symlink(&data_dir, &symlink).unwrap();
     let current_dir = std::env::current_dir().unwrap();
@@ -1079,11 +1111,19 @@ fn directory_aliases_share_instance_ownership_and_transport() {
 
 #[test]
 fn distinct_data_directories_acquire_independent_instances() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::distinct_data_directories_acquire_independent_instances",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let first = directory.path().join("first");
     let second = directory.path().join("second");
     let first_owner = SocketOwner::acquire(&first).unwrap();
     let second_owner = SocketOwner::acquire(&second).unwrap();
+    let _first_identity = std::fs::File::open(&first).unwrap();
+    let _second_identity = std::fs::File::open(&second).unwrap();
     for data_dir in [&first, &second] {
         assert!(SocketOwner::acquire(data_dir).is_err());
         let address = rivu_protocol::wire::address(data_dir).unwrap();
@@ -1099,6 +1139,12 @@ fn distinct_data_directories_acquire_independent_instances() {
 
 #[test]
 fn simultaneous_starters_acquire_one_real_listener() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::simultaneous_starters_acquire_one_real_listener",
+        std::time::Duration::from_secs(15),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let barrier = std::sync::Barrier::new(8);
     std::thread::scope(|scope| {

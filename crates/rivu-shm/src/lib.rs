@@ -74,7 +74,8 @@ struct Slot {
 /// A bounded shared PCM window, with exactly one writable owner.
 ///
 /// `open` creates a read-only handle. Dropping the owner closes its advertised
-/// `/proc/<pid>/fd/<fd>` path; mappings already opened by readers remain valid.
+/// fd; its `/proc/<pid>/fd/<fd>` path can then refer to a reused descriptor.
+/// Mappings already opened by readers remain valid.
 /// Neither publishing nor accessing a block allocates or waits for a reader.
 pub struct SharedPcmWindow {
     storage: NonNull<Storage>,

@@ -187,6 +187,79 @@ DSP/profile state, delays and existing results still cost memory. This evidence
 is not an RSS or export-latency measurement, nor a promise of unlimited WAV size.
 See link:27_audio_processing.adoc#tasks-retention-and-audition[Processing and export].
 
+[[DEC-010]]
+=== DEC-010: Scope retirement regressions to stable resource ownership
+
+Status: implemented and verified, 2026-11-06.
+
+Use pinned identity for PCM and bounded single-test isolation only where immediate
+retirement requires exclusive process ownership. Keep production ownership,
+protocols and ordinary test concurrency unchanged; these cases share an ownership
+rule, not necessarily one observation primitive.
+
+The PCM reader already pins the original memfd. Compare its `(dev, ino)` with
+metadata of the owner's advertised path after Drop: a missing path or a different
+object is valid retirement; the same object exposes an owner-fd leak. Keep the
+retained PCM check too. Do not require path disappearance or reopen the replacement:
+an fd reused for a socket need not support that open. This restores coverage lost
+when the original path-unopenable assertion was removed, without extra isolation.
+
+Isolate socket retirement checks from unrelated forking tests, keeping immediate
+rebind/EOF assertions inside the live isolated case. Directory pins prevent inode
+recycling, not listener inheritance; preserve existing pins without treating them
+as isolation. Scope any shared runner access to these tests, not the whole suite.
+
+For the two neural regressions, the isolated case must own only its interpreter as
+a direct child and retain ordinary SIGCHLD wait semantics, without an independent
+reaper. After terminal delivery, before applying it or retiring Core, require
+`ECHILD` from `waitid(P_ALL, 0, ..., WEXITED | WNOHANG | WNOWAIT)`. Live and zombie
+children fail without transferring production wait ownership. Preserve the
+stdout-closed readiness barrier; remove stale numeric-PID checks and cleanup.
+If exclusive child-set ownership cannot be established, a pidfd acquired before
+retirement remains an alternative, not the default.
+
+Replace the fixtures' busy loops with a blocking builtin read on an inherited
+lifeline endpoint. Create its guard only inside the isolated case; both endpoints
+must survive asynchronous spawn and the retirement assertion. Only the inherited
+endpoint clears CLOEXEC; its peer stays exclusively owned by the runner. Do not
+clone or shut down that peer before failure or assertion completion: cooperative
+EOF must not make a missing production kill pass. The scripts use builtins without
+spawning descendants. Declare the guard after Core so failure unwind closes it
+before Core joins; cleanup only closes owned FDs. Direct inheritance avoids a
+named FIFO's startup race: if its last writer dies before the shell opens the FIFO,
+a blocking open can wait forever.
+
+`src/test_support.rs` exposes the bounded runner through the existing `test-support`
+boundary for GUI cases; app startup uses the same helper. A guard kills and waits
+for the owned runner on timeout or unwind. The foreground process group is unchanged:
+a new group needs explicit terminal-signal forwarding, and group kill plus leader
+wait does not prove descendant reaping. Lifeline EOF lets these fixtures terminate
+when their runner dies, even before the first read; it is failure cleanup, not a
+synchronous resource-retirement assertion or a general process-tree supervisor.
+There are no retries, observer threads or global subreaping.
+
+No production PCM attach change is indicated by this review. Mapping precedes
+enabling; ingestion requires a matching nonzero subscription revision acknowledged
+on the same connection. Buffered revision-zero status cannot admit enabled PCM.
+Preserve this ordering rather than adding instance metadata or FD transfer solely
+because the advertised path can be reused.
+
+`make lint` and `make test-rust` passed, including default/all/disabled workspace
+features and GUI-only/TUI-only test runs. The checks retain immediate socket
+retirement assertions and exercise both neural retirement regressions.
+
+The cross-process PCM regression checks descriptor retirement and retained native
+samples together. A real SharedPcmWindow smoke distinguished owner leaks, close
+without reuse, and memfd/socket reuse while preserving PCM. The shared-runner smoke
+checked success, child failure, timeout and unwind after spawn, requiring no remaining
+direct children. Prior PID-namespace probes distinguished live, zombie and reaped
+children without consuming status; an actual Rust Command and /bin/sh probe covered
+lifeline exit before its first read and after startup. Fixture exit is not descendant
+reaping. Production PCM admission was checked statically. Investigation records:
+link:90_open_issues.adoc#pcm-owner-retirement-coverage[PCM owner-drop],
+link:90_open_issues.adoc#socket-retirement-test-isolation[socket isolation]
+and link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity].
+
 == Unapproved candidates
 
 Status: not adopted or authorized, 2026-11-06. These are investigation candidates,

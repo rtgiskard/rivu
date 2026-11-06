@@ -573,6 +573,7 @@ impl Drop for Desktop {
 mod tests {
     use super::*;
     use gpui::AppContext;
+    use rivu::test_support::ipc::socket_test_directory;
 
     #[test]
     fn activation_coalesces_and_shutdown_retires_desktop() {
@@ -600,8 +601,14 @@ mod tests {
 
     #[test]
     fn retiring_desktop_releases_singleton_before_activation_waiters() {
+        if rivu::test_support::run_in_subprocess(
+            "desktop::tests::retiring_desktop_releases_singleton_before_activation_waiters",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         use std::io::{Read, Write};
-        let directory = tempfile::tempdir().unwrap();
+        let directory = socket_test_directory();
         let tasks = TaskRuntime::start().unwrap();
         let control = DesktopControl::default();
         let activation = Activation::start(
@@ -637,7 +644,7 @@ mod tests {
 
     #[test]
     fn bound_but_unready_desktop_does_not_disable_startup_deadline() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = socket_test_directory();
         let _listener = Activation::bind(directory.path()).unwrap();
         let error =
             async_io::block_on(raise_async(directory.path(), 7, Some(Instant::now()))).unwrap_err();
@@ -666,7 +673,13 @@ mod tests {
             .unwrap();
             return;
         }
-        let directory = tempfile::tempdir().unwrap();
+        if rivu::test_support::run_in_subprocess(
+            "desktop::tests::independent_gui_activation_uses_existing_service_and_kernel_singleton",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        let directory = socket_test_directory();
         let runtime = crate::test_support::CoreRuntime::start(
             directory.path(),
             &directory.path().join("config.toml"),
@@ -716,7 +729,13 @@ mod tests {
 
     #[test]
     fn dropping_desktop_never_shuts_down_the_service() {
-        let directory = tempfile::tempdir().unwrap();
+        if rivu::test_support::run_in_subprocess(
+            "desktop::tests::dropping_desktop_never_shuts_down_the_service",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        let directory = socket_test_directory();
         let runtime = crate::test_support::CoreRuntime::start(
             directory.path(),
             &directory.path().join("config.toml"),
@@ -745,7 +764,13 @@ mod tests {
     fn final_window_close_defers_gui_quit_and_preserves_service_and_layout(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
+        if rivu::test_support::run_in_subprocess(
+            "desktop::tests::final_window_close_defers_gui_quit_and_preserves_service_and_layout",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        let directory = socket_test_directory();
         let runtime = crate::test_support::CoreRuntime::start(
             directory.path(),
             &directory.path().join("config.toml"),
@@ -803,7 +828,7 @@ mod tests {
 
     #[test]
     fn core_quit_forces_desktop_exit_even_with_pending_activation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = socket_test_directory();
         let runtime = crate::test_support::CoreRuntime::start(
             directory.path(),
             &directory.path().join("config.toml"),

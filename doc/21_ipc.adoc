@@ -118,8 +118,10 @@ the local peer. Its control socket carries 16-byte requests and 72-byte status
 records, including the observed audible output-frame cursor and a logical-block
 sequence plus consumed frame offset, not a predicted presentation deadline.
 The handshake supplies a Core-owned sealed memfd path;
-clients map that same window read-only. Existing mappings survive Core retirement,
-but a new command session must attach to its own instance's window.
+clients map that same window read-only. The `/proc/<pid>/fd/<fd>` path identifies
+a live descriptor, not a permanent window: after close, its number can be reused.
+Existing mappings survive Core retirement, but a new command session must attach
+to its own instance's window.
 
 The window uses blocks of at most 1024 frames and 18 native float channels,
 including standard speaker indices. Output setup sizes active retention for its

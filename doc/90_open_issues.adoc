@@ -64,6 +64,61 @@ protection remains unresolved.
 
 == Resolved investigations
 
+[[pcm-owner-retirement-coverage]]
+=== PCM owner-drop descriptor retirement
+
+Status: resolved in implementation, 2026-11-06; verified under DEC-010.
+
+The original CI correction correctly allowed fd-number reuse but lost the owner-fd
+release check. The cross-process regression now compares the reader-pinned memfd's
+device/inode with metadata of the old advertised path. A missing path or replacement
+passes; the original object fails, as do unexpected metadata errors. Native PCM
+remains checked after owner Drop. A real SharedPcmWindow smoke distinguished an
+unreleased owner, close without reuse, and reuse by another memfd or a socket while
+preserving the original mapped content. No production owner-fd leak was observed.
+Ownership and unchanged production attach admission:
+link:91_design_decisions.adoc#DEC-010[DEC-010].
+
+[[socket-retirement-test-isolation]]
+=== Socket retirement tests and fork inheritance
+
+Status: resolved in implementation, 2026-11-06; verified under DEC-010.
+
+Immediate IPC rebind/EOF and desktop singleton reacquisition checks now construct
+their fixtures in bounded isolated test processes, excluding listeners inherited
+by unrelated parallel tests. App startup shares the same guarded runner. Actual
+child directories in ownership tests retain File pins; GUI fixtures use the shared
+pinned directory helper. Ordinary test concurrency is unchanged.
+
+The investigation's controlled fork/exec barrier retained EADDRINUSE and delayed
+EOF after local close with or without a directory pin; exec released both. This
+explains the precondition gap, not a reproduced Rust-suite failure or the original
+PCM CI failure. Directory pins prevent inode recycling, not listener inheritance.
+The client crate remains unchanged: no subprocess entry was found in its test binary.
+Scope and cleanup boundaries: link:91_design_decisions.adoc#DEC-010[DEC-010].
+
+[[neural-retirement-pid-reuse]]
+=== Neural retirement checks and numeric PID reuse
+
+Status: resolved in implementation, 2026-11-06; verified under DEC-010.
+
+The cancellation-after-stdout-EOF and unwind regressions no longer wait or signal
+an already-reaped numeric PID. Each runs in an isolated process, checks ordinary
+SIGCHLD semantics and an initially empty child set, then requires non-reaping
+P_ALL observation to report ECHILD after Finished but before event application or
+Core retirement. Live and zombie interpreters fail the assertion.
+
+Inherited lifelines replace the shell busy loops. Their guards retain both endpoints
+through asynchronous spawn and the retirement assertion; failure closes the sole
+peer before Core joins. Stdout-closed readiness, progress-induced unwind, task-wait
+ordering and subsequent processing recovery remain covered.
+
+The investigation forced stale-PID reuse in a disposable namespace; the old cleanup
+killed a replacement while a retained-pidfd control left it alive. That was not an
+observed production reaping leak. The inherited-endpoint startup/failure probes
+establish fixture exit, not descendant reaping. Design and evidence boundaries:
+link:91_design_decisions.adoc#DEC-010[DEC-010].
+
 === Filtered root-count dependency recovery
 
 Status: resolved, 2026-11-06. A failed root-total dependency remains retryable

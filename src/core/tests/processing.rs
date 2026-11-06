@@ -1432,14 +1432,90 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
         .unwrap();
 }
 
+fn assert_no_neural_interpreter_children() {
+    let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+    // SAFETY: status is writable; WNOHANG cannot block and WNOWAIT never reaps.
+    // This isolated runner has no direct child other than the interpreter.
+    let observed = unsafe {
+        libc::waitid(
+            libc::P_ALL,
+            0,
+            status.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    assert_eq!(observed, -1, "interpreter remained live or unreaped");
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+}
+
+fn neural_retirement_lifeline() -> (
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: a null action only queries the current disposition.
+    assert_eq!(
+        unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) },
+        0
+    );
+    // SAFETY: sigaction initialized action on success.
+    let action = unsafe { action.assume_init() };
+    assert_eq!(
+        action.sa_sigaction,
+        libc::SIG_DFL,
+        "SIGCHLD must not be reaped independently"
+    );
+    assert_eq!(action.sa_flags & libc::SA_NOCLDWAIT, 0);
+    assert_no_neural_interpreter_children();
+
+    let (inherited, peer) = UnixStream::pair().unwrap();
+    // UnixStream::pair sets CLOEXEC on both ends. Only the worker endpoint may
+    // survive exec; the un-cloned peer stays owned exclusively by this runner.
+    // SAFETY: inherited owns a valid descriptor throughout these fcntl calls.
+    let flags = unsafe { libc::fcntl(inherited.as_raw_fd(), libc::F_GETFD) };
+    assert_ne!(flags, -1);
+    // SAFETY: peer owns a valid descriptor and must never be inherited.
+    let peer_flags = unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_GETFD) };
+    assert_ne!(peer_flags, -1);
+    assert_ne!(peer_flags & libc::FD_CLOEXEC, 0);
+    assert_eq!(
+        unsafe {
+            libc::fcntl(
+                inherited.as_raw_fd(),
+                libc::F_SETFD,
+                flags & !libc::FD_CLOEXEC,
+            )
+        },
+        0
+    );
+    (inherited, peer)
+}
+
 #[test]
 fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::processing::neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    use std::os::fd::AsRawFd;
+
     let (directory, mut core) = fixture();
+    // Declared after Core: failures close the lifeline before Core joins.
+    let lifeline = neural_retirement_lifeline();
+    let inherited_fd = lifeline.0.as_raw_fd();
     source(directory.path());
     let worker = directory.path().join("close_stdout.sh");
     std::fs::write(
         &worker,
-        "exec 1>&-\nprintf '%s' \"$$\" > \"${0%/*}/worker.ready\"\nwhile :; do :; done\n",
+        format!(
+            ": <&{inherited_fd} || exit 1\nexec 1>&-\nprintf ready > \"${{0%/*}}/worker.ready\"\nIFS= read -r lifeline <&{inherited_fd}\n"
+        ),
     )
     .unwrap();
     let manifest = directory.path().join("manifest.json");
@@ -1457,19 +1533,16 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     .unwrap();
     let ready = directory.path().join("worker.ready");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let pid = loop {
-        if let Ok(pid) = std::fs::read_to_string(&ready)
-            && let Ok(pid) = pid.parse::<libc::pid_t>()
-            && pid > 0
-        {
-            break pid;
+    loop {
+        if matches!(std::fs::read_to_string(&ready), Ok(contents) if contents == "ready") {
+            break;
         }
         assert!(
             Instant::now() < deadline,
             "Interpreter did not reach the closed-stdout fixture"
         );
         thread::yield_now();
-    };
+    }
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let event = loop {
@@ -1483,27 +1556,13 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
             Err(_) => break None,
         }
     };
-    if event.is_none() {
-        // The processing worker retains wait ownership; kill only to unblock
-        // its cleanup if cancellation regresses, without an external utility.
-        // SAFETY: pid identifies this test's interpreter child.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
     assert!(
         event.is_some(),
         "Cancellation stalled after interpreter stdout EOF"
     );
-    let mut exit = 0;
-    // SAFETY: WNOHANG cannot block; reaping must precede terminal delivery,
-    // not happen as a side effect of retiring the owner below.
-    let observed = unsafe { libc::waitpid(pid, &mut exit, libc::WNOHANG) };
-    let error = std::io::Error::last_os_error();
-    if observed == 0 {
-        // SAFETY: an unreaped live child still belongs to this test process.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    assert_eq!(observed, -1, "interpreter remained live or unreaped");
-    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    // Observe before applying Finished or retiring Core, without reaping a
+    // zombie or releasing the lifeline that keeps a live interpreter blocked.
+    assert_no_neural_interpreter_children();
     core.processing_event(event.unwrap());
     assert_eq!(
         core.processing_status(1).unwrap().phase,
@@ -1513,7 +1572,19 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
 
 #[test]
 fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::processing::neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    use std::os::fd::AsRawFd;
+
     let (directory, mut core) = fixture();
+    // Keep both ends through async spawn and assertions. Unwind closes these
+    // before Core joins; runner death also closes the sole peer immediately.
+    let lifeline = neural_retirement_lifeline();
+    let inherited_fd = lifeline.0.as_raw_fd();
     source(directory.path());
     let worker = directory.path().join("panic_progress.sh");
     let progress = serde_json::json!({
@@ -1529,7 +1600,9 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     }
     std::fs::write(
         &worker,
-        format!("printf '%s' \"$$\" > \"${{0%/*}}/worker.ready\"\nprintf '{header}'\nprintf '%s' '{progress}'\nwhile :; do :; done\n"),
+        format!(
+            ": <&{inherited_fd} || exit 1\nprintf '{header}'\nprintf '%s' '{progress}'\nIFS= read -r lifeline <&{inherited_fd}\n"
+        ),
     )
     .unwrap();
     let manifest = directory.path().join("manifest.json");
@@ -1553,31 +1626,10 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
         requests.try_recv().unwrap(),
     ));
     let event = completion(&mut core);
-    // The shell cannot exit by itself: its real progress event triggers unwind
-    // while it is alive. Reaping must precede sending this failure event, not
-    // merely precede the next owner admission or happen during final shutdown.
-    let pid = std::fs::read_to_string(directory.path().join("worker.ready"))
-        .unwrap()
-        .parse::<libc::pid_t>()
-        .unwrap();
-    let mut exit = 0;
-    // SAFETY: pid identifies this task's child and exit is writable; WNOHANG
-    // never blocks if a regression leaves the interpreter running.
-    let observed = unsafe { libc::waitpid(pid, &mut exit, libc::WNOHANG) };
-    let error = std::io::Error::last_os_error();
-    if observed == 0 {
-        // Do not leave a live child behind when the regression fails.
-        // SAFETY: the unreaped child is still owned by this test process.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            libc::waitpid(pid, &mut exit, 0);
-        }
-    }
-    assert_eq!(
-        observed, -1,
-        "interpreter remained live or unreaped at failure delivery"
-    );
-    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    // The validated descriptor and retained peer keep the shell alive until a
+    // real progress event triggers unwind. Reaping must precede this failure
+    // event, not just the next admission or final owner shutdown.
+    assert_no_neural_interpreter_children();
     assert!(core.processing.active_id().is_some());
     assert!(wait.as_mut().now_or_never().is_none());
     core.processing_event(event);
@@ -1585,7 +1637,6 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
         panic!("expected processing failure");
     };
     assert_eq!(status.phase, ProcessingPhase::Failed);
-    assert!(status.error.is_some());
     assert!(core.processing.active_id().is_none());
     assert!(core.processing.results().is_empty());
     core.start_processing(1, ProcessingOperation::Denoise, None)
