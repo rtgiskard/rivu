@@ -324,7 +324,10 @@ impl Library {
                             LibraryNode::Track(id) => gpui::ElementId::NamedInteger("library-track".into(), *id as u64),
                             LibraryNode::Directory(path) => gpui::ElementId::Path(Arc::clone(path)),
                         };
-                        let selected = this.directory_row_selected(entry);
+                        let selected = match &node {
+                            LibraryNode::Track(id) => this.library.selected().contains(id),
+                            node => this.library.selected_nodes().contains(node),
+                        };
                         let id = node;
                         let retry_counts = match entry {
                             DirectoryRow::OtherTracks => this.library.other_count_failed(),

@@ -44,8 +44,9 @@ async fn library_search_counts(
         }) {
             continue;
         }
-        let root_matched = if unfiltered && let Some(total) = root_totals.get(root) {
-            *total
+        let root_total = *root_totals.get(root)?;
+        let root_matched = if unfiltered {
+            root_total
         } else {
             let response = handle
                 .query_if_current(
@@ -69,33 +70,7 @@ async fn library_search_counts(
             };
             page.total
         };
-        let root_total = if unfiltered {
-            root_matched
-        } else if let Some(total) = root_totals.get(root) {
-            *total
-        } else {
-            let response = handle
-                .query_if_current(
-                    Query::LibraryRootPage {
-                        path: root.clone(),
-                        query: None,
-                        favorite: None,
-                        missing: None,
-                        sort: *sort,
-                        offset: 0,
-                        limit: 0,
-                    },
-                    ticket.clone(),
-                )
-                .await;
-            if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
-                return None;
-            }
-            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-                return None;
-            };
-            page.total
-        };
+        // Unfiltered membership comes exclusively from the batched root owner.
         matched += root_matched;
         total += root_total;
         root_counts.insert(root.clone(), (root_matched, root_total));
@@ -427,6 +402,7 @@ mod tests {
         use rivu::test_support::catalog::CatalogFixture;
         use rivu_format::config::Config;
         use rivu_protocol::model::{Command, ConfigMutation, Query};
+        use rivu_protocol::response::ViewResponse;
 
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("music");
@@ -467,6 +443,20 @@ mod tests {
         assert!(response.result.is_ok());
         let revisions = response.revisions;
         let mut library = LibraryBrowser::default();
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        let load_totals = |library: &mut LibraryBrowser, roots: &[std::path::PathBuf]| {
+            let (generation, offsets) = library.begin_root_counts(roots, revisions.structure);
+            for offset in offsets {
+                let response = runtime.handle.query(Query::LibraryRootCounts {
+                    roots: roots.to_vec(),
+                });
+                let Ok(ViewResponse::LibraryRootCounts(counts)) = response.result else {
+                    panic!("expected batched root totals");
+                };
+                library.accept_root_counts(generation, offset, counts);
+            }
+        };
+        load_totals(&mut library, &roots);
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
         let result =
@@ -514,6 +504,7 @@ mod tests {
         ];
         let mut nested_library = LibraryBrowser::default();
         nested_library.refresh_search("needle".into());
+        load_totals(&mut nested_library, &overlapping);
         let request = nested_library
             .prepare_search_counts(&overlapping, revisions)
             .1

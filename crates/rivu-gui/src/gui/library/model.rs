@@ -167,7 +167,16 @@ impl LibraryBrowser {
             counts.other_tracks = None;
             counts.failed = false;
         }
-        let request = if counts.totals.is_some() || counts.failed || counts.worker.is_some() {
+        // The batched root-count owner is the sole producer of unfiltered totals.
+        // Wait before reserving a worker so its immutable snapshot is complete.
+        let roots_ready = roots
+            .iter()
+            .all(|root| self.counts.totals.contains_key(root));
+        let request = if !roots_ready
+            || counts.totals.is_some()
+            || counts.failed
+            || counts.worker.is_some()
+        {
             None
         } else {
             let generation = counts.projection.generation();
@@ -477,18 +486,16 @@ impl LibraryBrowser {
     }
 
     pub(super) fn root_count_failed(&self, path: &std::path::Path) -> bool {
-        if self.buffer.query.is_some()
+        let filtered = self.buffer.query.is_some()
             || self.buffer.favorite.is_some()
-            || self.buffer.missing.is_some()
-        {
-            return self.search_counts.failed;
-        }
-        self.counts.failed.iter().any(|&offset| {
-            self.counts.roots[offset
-                ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
-                .iter()
-                .any(|root| root == path)
-        })
+            || self.buffer.missing.is_some();
+        (filtered && self.search_counts.failed)
+            || self.counts.failed.iter().any(|&offset| {
+                self.counts.roots[offset
+                    ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
+                    .iter()
+                    .any(|root| root == path)
+            })
     }
 
     pub(super) fn buffer(&self) -> &LibraryViewBuffer {
@@ -801,6 +808,97 @@ impl LibraryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn load_root_totals(
+        library: &mut LibraryBrowser,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+    ) {
+        let (generation, offsets) = library.begin_root_counts(roots, revisions.structure);
+        for offset in offsets {
+            library.accept_root_counts(
+                generation,
+                offset,
+                roots
+                    .iter()
+                    .map(|path| rivu_protocol::model::LibraryRootCount {
+                        path: path.clone(),
+                        total: 3,
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_counts_expose_dependency_failure_until_explicit_retry() {
+        for filter in 0..3 {
+            let mut library = LibraryBrowser::default();
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let revisions = QueryRevisions::default();
+            match filter {
+                0 => {
+                    library.refresh_search("needle".into());
+                }
+                1 => library.buffer.favorite = Some(true),
+                _ => library.buffer.missing = Some(true),
+            }
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+            library.fail_root_counts(generation, offsets[0]);
+            assert!(library.root_count_failed(&roots[0]));
+            assert!(!library.root_count_failed(std::path::Path::new("/unrelated")));
+            assert!(
+                library
+                    .begin_root_counts(&roots, revisions.structure)
+                    .1
+                    .is_empty()
+            );
+            library.refresh_search("changed".into());
+            assert!(library.root_count_failed(&roots[0]));
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            library.retry_root_counts();
+            load_root_totals(&mut library, &roots, revisions);
+            let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+            assert!(library.accept_search_counts(
+                request,
+                &roots,
+                revisions,
+                Some(search_count_result(&roots[0], (1, 3))),
+            ));
+            assert!(!library.root_count_failed(&roots[0]));
+            assert_eq!(library.search_counts(), Some((1, 3)));
+        }
+    }
+
+    #[test]
+    fn search_counts_wait_for_current_batched_totals_across_filter_and_structure_changes() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let mut revisions = QueryRevisions::default();
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(!library.search_counts_pending());
+        let (old_generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        library.refresh_search("needle".into());
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        revisions.structure += 1;
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        library.accept_root_counts(
+            old_generation,
+            offsets[0],
+            vec![rivu_protocol::model::LibraryRootCount {
+                path: roots[0].clone(),
+                total: 99,
+            }],
+        );
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        load_root_totals(&mut library, &roots, revisions);
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert_eq!(request.root_totals.get(&roots[0]), Some(&3));
+        assert!(matches!(
+            request.query,
+            Query::LibraryRootPage { query: Some(_), .. }
+        ));
+    }
     fn search_count_result(root: &std::path::Path, totals: (usize, usize)) -> SearchCountResult {
         SearchCountResult {
             totals,
@@ -849,9 +947,9 @@ mod tests {
         assert!(!library.prepare_search_counts(&roots, revisions).0);
         assert_eq!(library.search_counts(), Some((1, 4)));
         revisions.structure += 1;
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert!(request.root_totals.is_empty());
-        assert_eq!(request.other_total, None);
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(library.counts.totals.is_empty());
+        assert_eq!(library.search_counts.other_total, None);
         assert_eq!(library.search_counts(), None);
     }
 
@@ -860,6 +958,7 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let revisions = QueryRevisions::default();
+        load_root_totals(&mut library, &roots, revisions);
         let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
         assert!(library.publish_search_counts(&old, &roots, revisions, None));
         assert!(library.search_counts_pending());
@@ -894,6 +993,7 @@ mod tests {
                 let mut library = LibraryBrowser::default();
                 let mut roots = vec![std::path::PathBuf::from("/music")];
                 let mut revisions = QueryRevisions::default();
+                load_root_totals(&mut library, &roots, revisions);
                 let (changed, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(changed);
                 let request = request.unwrap();
@@ -920,6 +1020,7 @@ mod tests {
                 let stale = search_count_result(&request.roots[0], (99, 99));
                 assert!(!library.accept_search_counts(request, &roots, revisions, Some(stale)));
                 assert!(!library.search_counts_pending());
+                load_root_totals(&mut library, &roots, revisions);
                 assert_eq!(library.search_counts(), None);
                 assert!(!library.root_count_failed(&roots[0]));
                 let (_, current) = library.prepare_search_counts(&roots, revisions);
@@ -943,6 +1044,7 @@ mod tests {
             let roots = vec![std::path::PathBuf::from("/music")];
             let revisions = QueryRevisions::default();
             library.refresh_search("needle".into());
+            load_root_totals(&mut library, &roots, revisions);
             let (_, request) = library.prepare_search_counts(&roots, revisions);
             let request = request.unwrap();
             library.cancel_pending_reads();
@@ -974,6 +1076,7 @@ mod tests {
         let roots = vec![std::path::PathBuf::from("/music")];
         let revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
+        load_root_totals(&mut library, &roots, revisions);
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
         assert!(!library.search_counts_pending());
@@ -1017,6 +1120,7 @@ mod tests {
                 if filtered {
                     library.refresh_search("needle".into());
                 }
+                load_root_totals(&mut library, &roots, revisions);
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
                 assert!(library.other_count_failed());
@@ -1059,6 +1163,7 @@ mod tests {
                 }
                 library.refresh_search("needle".into());
                 let mut revisions = QueryRevisions::default();
+                load_root_totals(&mut library, &roots, revisions);
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(!library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
@@ -1078,6 +1183,7 @@ mod tests {
                 library.select_node(&LibraryNode::OtherTracks, true);
 
                 revisions.structure += 1;
+                load_root_totals(&mut library, &roots, revisions);
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(!library.other_tracks_empty());
                 assert!(library.accept_search_counts(
@@ -1108,6 +1214,7 @@ mod tests {
                 assert!(library.other_tracks_empty());
 
                 revisions.structure += 1;
+                load_root_totals(&mut library, &roots, revisions);
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(!library.other_tracks_empty());
                 assert!(library.accept_search_counts(

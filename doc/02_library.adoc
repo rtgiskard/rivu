@@ -133,7 +133,9 @@ by default; choices survive restart. Hover truncated rows for full metadata and 
 
 Root totals include missing files and tracks in unloaded or collapsed directories.
 See <<desktop-list-search,Desktop list search>> for filtered counts. If a count
-fails, the directory action retries it before returning to Rescan.
+fails, the directory action retries it before returning to Rescan, including when
+filtered counts are waiting for a failed root total. Changing filters does not
+retry that failed dependency.
 
 Dragging a directory adds its full contents, regardless of display filters. To add
 only matching, favorite, or missing tracks, select and drag the track rows.

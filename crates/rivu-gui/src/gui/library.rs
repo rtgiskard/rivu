@@ -308,16 +308,6 @@ impl Library {
             .update(cx, |search, cx| search.escape(window, cx))
     }
 
-    pub(super) fn directory_row_selected(&self, row: &DirectoryRow) -> bool {
-        match row {
-            DirectoryRow::OtherTracks => self.library.selected_nodes().contains(&LibraryNode::OtherTracks),
-            DirectoryRow::Directory { path } => self.library.selected_nodes().iter().any(|node| {
-                matches!(node, LibraryNode::Directory(selected) if selected.as_ref() == path.as_path())
-            }),
-            DirectoryRow::Track(row) => self.library.selected().contains(&row.id),
-        }
-    }
-
     pub(super) fn open_object_menu(
         &self,
         request: crate::gui::ContentMenuRequest,

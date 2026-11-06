@@ -207,6 +207,8 @@ Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
 Library matching counts depend on filters and data revisions, not row sort order.
+The batched root-count owner supplies unfiltered root totals; matching-count reads
+wait for its complete current snapshot rather than querying those totals again.
 Unfiltered root and Other totals follow roots/structure freshness independently;
 warm totals are reused across filter changes. Overlapping configured roots count
 each track once. Sorting neither cancels a valid in-flight count nor refetches
