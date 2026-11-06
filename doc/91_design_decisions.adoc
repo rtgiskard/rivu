@@ -279,6 +279,19 @@ Do not route retiring terminal events through ordinary dispatch, which can
 recursively Stop or advance navigation. Evidence and resolution:
 link:90_open_issues.adoc#retiring-settings-failures[retiring settings failures].
 
+[[DEC-012]]
+=== DEC-012: Retire unreachable model boundaries before inference output allocation
+
+Status: implemented, 2026-11-06.
+
+After a model input is materialized, traverse remaining graph demand with that
+model as a cut point and retire unreachable PCM boundaries and original source.
+Other branches keep their reachable boundaries; an aliased input pins its own
+backing storage. Apply the same reachability ownership after model completion.
+This changes PCM lifetime, not the budget, graph result or model execution policy.
+Evidence and resolution:
+link:90_open_issues.adoc#model-boundary-retirement[model-boundary retirement].
+
 == Unapproved candidates
 
 Status: not adopted or authorized, 2026-11-06. These are investigation candidates,

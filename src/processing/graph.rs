@@ -621,6 +621,26 @@ fn release_unreachable_source(
     Ok(())
 }
 
+fn release_unreachable_pcm(
+    graph: &ProcessingGraph,
+    target: GraphPort,
+    boundaries: &mut BTreeMap<GraphPort, GraphPcm>,
+    stop_at: Option<u64>,
+    input: &mut Option<audio::PcmAudio>,
+) -> Result<()> {
+    let mut retained = std::collections::BTreeSet::new();
+    reachable_boundaries(
+        graph,
+        target,
+        boundaries,
+        &mut std::collections::BTreeSet::new(),
+        &mut retained,
+        stop_at,
+    )?;
+    boundaries.retain(|port, _| retained.contains(port));
+    release_unreachable_source(graph, target, boundaries, stop_at, input)
+}
+
 pub(super) fn execute(
     input: audio::PcmAudio,
     budget: Arc<audio::PcmBudget>,
@@ -739,7 +759,7 @@ pub(super) fn execute(
                     // This model now owns its materialized input. Future graph
                     // traversals stop at its outputs before inference allocates
                     // them; a bypass alias still retains its own PCM storage.
-                    release_unreachable_source(&graph, target, &boundaries, Some(id), &mut input)?;
+                    release_unreachable_pcm(&graph, target, &mut boundaries, Some(id), &mut input)?;
                     let outcome = neural::run(
                         ModelRequest {
                             task_id: status.id,
@@ -796,19 +816,9 @@ pub(super) fn execute(
             graph.node(id)?.kind,
             GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
         ) {
-            let mut retained = std::collections::BTreeSet::new();
-            reachable_boundaries(
-                &graph,
-                target,
-                &boundaries,
-                &mut std::collections::BTreeSet::new(),
-                &mut retained,
-                None,
-            )?;
-            boundaries.retain(|port, _| retained.contains(port));
             // Boundaries terminate every future PCM traversal, but profile
             // validation still uses the immutable original format and length.
-            release_unreachable_source(&graph, target, &boundaries, None, &mut input)?;
+            release_unreachable_pcm(&graph, target, &mut boundaries, None, &mut input)?;
         }
     }
     let outcome = (|| {
@@ -1292,6 +1302,187 @@ mod tests {
         engine
             .render(index, Arc::clone(budget), &AtomicBool::new(false))
             .unwrap()
+    }
+
+    #[test]
+    fn model_input_cut_preserves_other_separation_output() {
+        let data = vec![0.125; 40000];
+        let layout: Arc<[audio::Channel]> =
+            Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]);
+        let make_pcm = |budget: &Arc<audio::PcmBudget>| {
+            let mut builder =
+                audio::PcmBuilder::new(48000, Arc::clone(&layout), Arc::clone(budget)).unwrap();
+            builder.push(&data).unwrap();
+            builder.finish().unwrap()
+        };
+        let probe_budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let bytes = make_pcm(&probe_budget).retained_bytes();
+        let budget = audio::PcmBudget::new(3 * bytes);
+        let mut graph = chain(vec![
+            GraphNodeKind::Separate {
+                config: Default::default(),
+            },
+            GraphNodeKind::Equalizer {
+                config: rivu_dsp::equalizer::config::EqualizerConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                implementation: EqImplementation::Iir,
+            },
+            GraphNodeKind::Speech {
+                config: Default::default(),
+            },
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+        ]);
+        graph.edges.push(GraphEdge {
+            from: GraphPort { node: 3, port: 1 },
+            to: GraphPort { node: 6, port: 1 },
+        });
+        let mut boundaries = BTreeMap::from([
+            (
+                GraphPort { node: 3, port: 0 },
+                GraphPcm {
+                    pcm: make_pcm(&budget),
+                    start_frame: 0,
+                },
+            ),
+            (
+                GraphPort { node: 3, port: 1 },
+                GraphPcm {
+                    pcm: make_pcm(&budget),
+                    start_frame: 0,
+                },
+            ),
+        ]);
+        let cancel = AtomicBool::new(false);
+        let mut engine = Engine::for_retained(None, 48000, Arc::clone(&layout));
+        let index = engine
+            .compile(
+                &graph,
+                GraphPort { node: 4, port: 0 },
+                &boundaries,
+                &BTreeMap::new(),
+                &cancel,
+            )
+            .unwrap();
+        let upstream = engine.render(index, Arc::clone(&budget), &cancel).unwrap();
+        assert_eq!(budget.used_bytes(), 3 * bytes);
+        release_unreachable_pcm(
+            &graph,
+            GraphPort { node: 2, port: 0 },
+            &mut boundaries,
+            Some(5),
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(budget.used_bytes(), 2 * bytes);
+        let output = make_pcm(&budget);
+        let mut actual = vec![0.0; data.len()];
+        assert_eq!(
+            boundaries[&GraphPort { node: 3, port: 1 }]
+                .pcm
+                .read_frames(0, &mut actual),
+            20000
+        );
+        assert_eq!(actual, data);
+        assert!(!boundaries.contains_key(&GraphPort { node: 3, port: 0 }));
+        drop(output);
+        drop(upstream);
+        drop(boundaries);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn model_input_cut_releases_only_unreachable_boundary_storage() {
+        for alias in [false, true] {
+            for bypass in [false, true] {
+                let data = vec![0.125; 20000];
+                let probe_budget = audio::PcmBudget::new(MEMORY_LIMIT);
+                let bytes = pcm(&data, &probe_budget).retained_bytes();
+                let budget = audio::PcmBudget::new(if bypass { 3 } else { 2 } * bytes);
+                let old = pcm(&data, &budget);
+                let rate = old.sample_rate();
+                let layout = Arc::clone(old.layout());
+                let mut graph = chain(vec![
+                    GraphNodeKind::Speech {
+                        config: Default::default(),
+                    },
+                    GraphNodeKind::Equalizer {
+                        config: rivu_dsp::equalizer::config::EqualizerConfig {
+                            enabled: !alias,
+                            ..Default::default()
+                        },
+                        implementation: EqImplementation::Iir,
+                    },
+                    GraphNodeKind::Speech {
+                        config: Default::default(),
+                    },
+                ]);
+                if bypass {
+                    graph.nodes.push(GraphNode {
+                        id: 6,
+                        kind: GraphNodeKind::Mix {
+                            gains_db: vec![0.0; 2],
+                            muted: vec![false; 2],
+                            solo: vec![false; 2],
+                        },
+                        position: [0.0; 2],
+                    });
+                    graph.edges.last_mut().unwrap().from = GraphPort { node: 6, port: 0 };
+                    for (node, port) in [(5, 0), (3, 1)] {
+                        graph.edges.push(GraphEdge {
+                            from: GraphPort { node, port: 0 },
+                            to: GraphPort { node: 6, port },
+                        });
+                    }
+                }
+                let boundary = GraphPort { node: 3, port: 0 };
+                let mut boundaries = BTreeMap::from([(
+                    boundary,
+                    GraphPcm {
+                        pcm: old,
+                        start_frame: 0,
+                    },
+                )]);
+                let cancel = AtomicBool::new(false);
+                let mut engine = Engine::for_retained(None, rate, layout);
+                let index = engine
+                    .compile(
+                        &graph,
+                        GraphPort { node: 4, port: 0 },
+                        &boundaries,
+                        &BTreeMap::new(),
+                        &cancel,
+                    )
+                    .unwrap();
+                let upstream = engine.render(index, Arc::clone(&budget), &cancel).unwrap();
+                release_unreachable_pcm(
+                    &graph,
+                    GraphPort { node: 2, port: 0 },
+                    &mut boundaries,
+                    Some(5),
+                    &mut None,
+                )
+                .unwrap();
+                assert_eq!(
+                    budget.used_bytes(),
+                    if bypass && !alias { 2 } else { 1 } * bytes
+                );
+                let output = pcm(&data, &budget);
+                assert_eq!(samples(&upstream.pcm), data);
+                if bypass {
+                    assert_eq!(samples(&boundaries[&boundary].pcm), data);
+                }
+                drop(output);
+                drop(upstream);
+                drop(boundaries);
+                assert_eq!(budget.used_bytes(), 0);
+            }
+        }
     }
 
     #[test]

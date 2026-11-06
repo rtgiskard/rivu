@@ -81,6 +81,26 @@ source replacement and shared-state publication. Neither check exercises a real
 output device. Design:
 link:91_design_decisions.adoc#DEC-011[DEC-011].
 
+[[model-boundary-retirement]]
+=== Obsolete neural PCM boundaries retained through inference
+
+Status: resolved in implementation, 2026-11-06.
+
+Materializing a model input previously released only unreachable original source;
+obsolete model boundaries remained charged until the next inference completed.
+The same reachability traversal now retires both before inference output allocation,
+without dropping boundaries reachable through other branches or storage pinned by
+an aliased input. A standalone probe using the production Engine and real budgeted
+PCM reproduced 164,514 retained bytes where only 82,257 were needed before correction;
+after correction, independent/aliased inputs with and without bypass branches all
+matched expected ownership. This proves PCM lifetime, not model inference or RSS.
+Permanent graph regressions also cover a surviving separation output on another
+port. Application library suites passed with default features and with no default
+features; the checks use synthetic PCM and do not run neural inference.
+The PCM budget and model behavior remain unchanged. Design:
+link:91_design_decisions.adoc#DEC-012[DEC-012].
+
+
 [[denoise-hum-work-admission]]
 === Denoise hum arithmetic-work admission
 

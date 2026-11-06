@@ -556,10 +556,12 @@ the decoded source length, including FIR tails longer than their latency. A prof
 selection beyond the source is invalid. Cancellation or failed source/destination
 validation discards the temporary file; Core alone publishes the completed WAV.
 
-Graphs with neural nodes retain budgeted PCM at model boundaries. Original source
-storage retires once no remaining operation can reach it; source forks and profile
-capture retain it only while needed. Original format and frame metadata remain
-available after that storage retires. Inputs are limited to 8 GiB.
+Graphs with neural nodes retain budgeted PCM at model boundaries. Once a model's
+input is materialized, old boundaries unreachable by remaining branches retire
+before inference allocates output. An input alias keeps its backing storage alive;
+source forks and other branches retain the PCM they still need. Original source
+storage follows the same reachability rule, while its format and frame metadata
+remain available after storage retires. Inputs are limited to 8 GiB.
 
 Neural input must be nonempty and no longer than four hours; each Python source
 context window is bounded to 128 MiB. Model weights/workspace remain additional
