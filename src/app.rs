@@ -366,13 +366,10 @@ impl Drop for ShutdownSignals {
 mod tests {
     use super::*;
 
-    // Full applications share the process-wide logging session.
-    static APP_SESSION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-
     // CLOEXEC sockets can still be inherited between another test's fork and
     // exec. An isolated harness process makes reacquisition test App's cleanup,
     // not that transient foreign ownership. Keep the pinned socket fixture too.
-    fn run_startup_test_in_child() -> bool {
+    fn run_socket_retirement_test_in_child() -> bool {
         let current = thread::current();
         let name = current
             .name()
@@ -380,8 +377,8 @@ mod tests {
         crate::test_support::run_in_subprocess(name, std::time::Duration::from_secs(20))
     }
 
-    fn runtime_fixture() -> (tempfile::TempDir, CoreRuntime) {
-        let directory = tempfile::tempdir().unwrap();
+    fn runtime_fixture() -> (crate::test_support::ipc::SocketTestDirectory, CoreRuntime) {
+        let directory = crate::test_support::ipc::socket_test_directory();
         let config = directory.path().join("config.toml");
         crate::config::Config {
             media_read_buffer_mib: 1,
@@ -396,7 +393,7 @@ mod tests {
 
     #[test]
     fn invalid_host_config_path_fails_before_logging_and_retires_socket() {
-        if run_startup_test_in_child() {
+        if run_socket_retirement_test_in_child() {
             return;
         }
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -426,8 +423,10 @@ mod tests {
 
     #[test]
     fn ipc_shutdown_ack_survives_app_teardown_before_socket_retirement() {
-        let _session = APP_SESSION.lock();
-        let directory = tempfile::tempdir().unwrap();
+        if run_socket_retirement_test_in_child() {
+            return;
+        }
+        let directory = crate::test_support::ipc::socket_test_directory();
         let data_dir = directory.path().to_path_buf();
         let config_path = data_dir.join("config.toml");
         crate::config::Config {
@@ -458,13 +457,16 @@ mod tests {
         let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
-        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+        let _owner = ipc::SocketOwner::acquire(directory.path())
+            .unwrap_or_else(|error| panic!("Reacquiring after successful shutdown: {error:#}"));
     }
 
     #[test]
     fn accepted_shutdown_returns_final_save_failure_after_services_retire() {
-        let _session = APP_SESSION.lock();
-        let directory = tempfile::tempdir().unwrap();
+        if run_socket_retirement_test_in_child() {
+            return;
+        }
+        let directory = crate::test_support::ipc::socket_test_directory();
         let config_path = directory.path().join("config.toml");
         crate::config::Config {
             media_read_buffer_mib: 1,
@@ -508,7 +510,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), invalid);
         // App's error is observable only after transport/core teardown, including
         // the accepted IPC reply. Ownership can immediately be reacquired.
-        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+        let _owner = ipc::SocketOwner::acquire(directory.path())
+            .unwrap_or_else(|error| panic!("Reacquiring after failed final save: {error:#}"));
         let database = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         database
             .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
@@ -517,7 +520,7 @@ mod tests {
 
     #[test]
     fn duplicate_start_does_not_touch_runtime_storage_or_configuration() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
@@ -538,7 +541,7 @@ mod tests {
 
     #[test]
     fn failed_config_load_retires_its_bound_socket() {
-        if run_startup_test_in_child() {
+        if run_socket_retirement_test_in_child() {
             return;
         }
         let directory = crate::test_support::ipc::socket_test_directory();

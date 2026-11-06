@@ -316,7 +316,9 @@ fn run_model(
                             match event["type"].as_str() {
                                 Some("progress") => {
                                     #[cfg(test)]
-                                    if super::PANIC_ON_NEURAL_PROGRESS.replace(false) {
+                                    if let Some(triggered) = super::PANIC_ON_NEURAL_PROGRESS.take()
+                                    {
+                                        triggered.store(true, std::sync::atomic::Ordering::Release);
                                         panic!("injected neural worker progress panic");
                                     }
                                     progress.report(

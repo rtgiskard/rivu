@@ -11,6 +11,12 @@ use rivu_protocol::{
 
 #[test]
 fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots() {
+    if crate::test_support::run_in_subprocess(
+        "ipc::tests::pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots",
+        std::time::Duration::from_secs(20),
+    ) {
+        return;
+    }
     use std::io::{Read, Write};
     use std::time::Duration;
 

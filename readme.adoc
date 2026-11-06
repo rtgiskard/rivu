@@ -234,6 +234,10 @@ tests use private session buses and require no display server or audio device.
 Use the shared `socket_test_directory` helper for IPC fixtures that run alongside
 subprocess tests. It pins directory inodes across fork so temporary-directory
 cleanup cannot recycle an address while a pre-exec child still holds its listener.
+In test binaries that spawn subprocesses, rebind checks and Drop-driven EOF tests
+must additionally run in a bounded single-test subprocess via
+`test_support::run_in_subprocess`. Directory pins do not prevent listening or
+connected sockets from being inherited by unrelated tests' pre-exec children.
 
 Python tests require NumPy, SciPy, soundfile, and jsonschema:
 `sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema`.

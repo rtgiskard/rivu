@@ -780,6 +780,12 @@ mod tests {
 
     #[test]
     fn query_wait_eof_and_shutdown_cancel_the_core_reply_receiver() {
+        if crate::test_support::run_in_subprocess(
+            "ipc::server::tests::query_wait_eof_and_shutdown_cancel_the_core_reply_receiver",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
         for (shutdown_connection, pipeline, retained) in [
             (false, false, None),
             (true, false, None),
@@ -1353,6 +1359,12 @@ mod tests {
 
     #[test]
     fn watch_coalesces_notifications_and_releases_on_each_exit() {
+        if crate::test_support::run_in_subprocess(
+            "ipc::server::tests::watch_coalesces_notifications_and_releases_on_each_exit",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
         for exit in 0..4 {
             async_io::block_on(async {
                 let (handle, _queries) = CoreHandle::test_query_port();

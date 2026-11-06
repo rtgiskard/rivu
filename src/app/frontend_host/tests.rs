@@ -137,6 +137,12 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
 
 #[test]
 fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
+    if crate::test_support::run_in_subprocess(
+        "app::frontend_host::tests::cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
     let directory = socket_test_directory();
     let config = directory.path().join("unused-config.toml");
     let address = rivu_protocol::wire::address(directory.path()).unwrap();

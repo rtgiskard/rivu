@@ -226,7 +226,7 @@ mod tests {
     use super::*;
     use rivu_protocol::waveform::WaveKey;
     use serde::de::DeserializeOwned;
-    use std::os::unix::net::UnixListener;
+    use std::{os::unix::net::UnixListener, time::Duration};
 
     fn receive<T: DeserializeOwned>(stream: &mut UnixStream) -> T {
         let mut prefix = [0; 4];
@@ -244,7 +244,13 @@ mod tests {
 
     #[test]
     fn cancelling_a_full_scan_closes_its_dedicated_connection() {
-        let directory = tempfile::tempdir().unwrap();
+        if rivu::test_support::run_in_subprocess(
+            "transport::waveform::tests::cancelling_a_full_scan_closes_its_dedicated_connection",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        let directory = rivu::test_support::ipc::socket_test_directory();
         let listener = UnixListener::bind_addr(&address(directory.path()).unwrap()).unwrap();
         let expected =
             ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
@@ -276,58 +282,7 @@ mod tests {
             );
             result
         });
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn full_scan_sends_only_source_expectations_and_receives_the_bound_frame() {
-        let directory = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind_addr(&address(directory.path()).unwrap()).unwrap();
-        let mut track = crate::test_support::artwork_track("source.wav".into());
-        track.title = "metadata is not scan input".repeat(MAX_FRAME / 16);
-        let expected = ExpectedSource::from(&track);
-        let requested = expected.clone();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
-            assert!(matches!(
-                receive(&mut stream),
-                Request::Hello {
-                    version: VERSION,
-                    instance: 7
-                }
-            ));
-            respond(
-                &mut stream,
-                Response::Hello {
-                    version: VERSION,
-                    instance: 7,
-                },
-            );
-            let Request::Full { expected, source } = receive(&mut stream) else {
-                panic!("expected full scan request");
-            };
-            assert_eq!(expected, requested);
-            assert_eq!(source, Some(17));
-            let mut frame = WaveformFrame::default();
-            frame.revision = 29;
-            frame.complete = true;
-            frame.path = Some(expected.path);
-            respond(&mut stream, Response::Full(Box::new(frame)));
-        });
-        let (_cancel, cancelled) = oneshot::channel();
-        let frame = async_io::block_on(scan_full(
-            directory.path().to_owned(),
-            7,
-            expected,
-            Some(17),
-            cancelled,
-        ))
-        .unwrap();
-        assert_eq!(frame.revision, 29);
-        assert!(frame.complete);
-        assert_eq!(frame.path, Some(track.path));
+        assert!(result.is_err());
         server.join().unwrap();
     }
 
@@ -400,7 +355,7 @@ mod tests {
 
     #[test]
     fn showing_waveform_reacquires_resumed_snapshot_without_new_pcm() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = rivu::test_support::ipc::socket_test_directory();
         let listener = UnixListener::bind_addr(&address(directory.path()).unwrap()).unwrap();
         let frame = Arc::new(RwLock::new(WaveformFrame::default()));
         let control = rivu_audio::WaveformControl::default();

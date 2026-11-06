@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn service_can_activate_after_desktop_disconnect() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let owner = crate::ipc::SocketOwner::acquire(directory.path()).unwrap();
         let mut runtime = crate::core::CoreRuntime::start(
             directory.path(),

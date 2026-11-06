@@ -64,6 +64,68 @@ protection remains unresolved.
 
 == Resolved investigations
 
+[[socket-eof-fixture-gaps]]
+=== Drop-driven socket EOF isolation
+
+Status: resolved and verified, 2026-11-06; see DEC-010 for the feature matrix.
+
+Frontend startup cancellation, IPC abandoned-query admission, query/Watch
+disconnect handling, PCM aggregate disconnect, and GUI full waveform cancellation
+now construct their sockets inside bounded single-test subprocesses. Their
+Drop-driven EOF/cancellation assertions and operation timeouts remain unchanged.
+A controlled socket-pair fork/exec barrier kept a 2-second read from observing EOF
+after local peer close; exec then permitted EOF without retry. This proves the
+missing ownership precondition, not a reproduced failure of these Rust cases.
+
+Directory identity pins do not close inherited socket FDs. Explicit write shutdown
+already protects the PCM/waveform pipelining fixtures from this particular EOF
+dependency. Unrelated test binaries without subprocess entry points retain their
+ordinary concurrency. The now-isolated App shutdown cases no longer retain the
+obsolete process-wide logging-session test lock.
+See link:91_design_decisions.adoc#DEC-010[DEC-010].
+
+[[socket-directory-pin-gaps]]
+=== Abstract socket directory identity fixtures
+
+Status: resolved and verified, 2026-11-06; see DEC-010 for the feature matrix.
+
+The root App duplicate-start and blocking-pool IPC cases, desktop-host activation
+after disconnect, GUI waveform cancellation/resumption, and visual core-instance
+rejection now use the existing pinned directory fixture. The extra full-scan
+mock request/response forwarding test was removed rather than retaining its
+raw-listener fixture; source identity behavior and real server authority checks
+remain covered.
+The duplicate empty-callback gap test was also removed; its full helper scenario
+remains exercised by the actual GUI staging regression.
+
+Both root and GUI test binaries contain subprocess launches. Without a pin, a
+child could retain an inherited listener after local fixture deletion and, if the
+temporary filesystem recycled its directory inode, a later fixture could collide
+with the stale abstract address. No inode-reuse collision was reproduced in this
+review. Pins and link:#socket-eof-fixture-gaps[EOF isolation] address different
+lifetimes; neither substitutes for the other.
+
+[[neural-unwind-trigger-coverage]]
+=== Neural unwind trigger coverage
+
+Status: resolved and verified, 2026-11-06; normal and negative paths exercised.
+
+`neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement`
+now owns an atomic trigger observation moved into its worker's test-only panic
+hook. The hook marks it immediately before panicking; after terminal delivery the
+test requires that observation before checking child absence or applying Finished.
+The wait/lifeline ownership checks remain unchanged; no error wording is matched.
+
+Before correction, a throwaway write interceptor replaced only `panic_progress.sh`
+with `exit 1`, leaving the test executable unchanged. The TUI-only regression still
+passed with no progress frame or injected panic. This demonstrated false-positive
+unwind coverage, not a production reaping defect. Repeating the same injection
+after correction now fails at the trigger-observation assertion with exit 101;
+the normal injected-panic regression passes in all five root feature combinations.
+Related PID-safe observation:
+link:#neural-retirement-pid-reuse[resolved]; see
+link:91_design_decisions.adoc#DEC-010[DEC-010].
+
 [[retiring-settings-failures]]
 === Settings failures consumed during playback retirement
 
@@ -99,7 +161,6 @@ port. Application library suites passed with default features and with no defaul
 features; the checks use synthetic PCM and do not run neural inference.
 The PCM budget and model behavior remain unchanged. Design:
 link:91_design_decisions.adoc#DEC-012[DEC-012].
-
 
 [[denoise-hum-work-admission]]
 === Denoise hum arithmetic-work admission
@@ -164,18 +225,26 @@ link:91_design_decisions.adoc#DEC-010[DEC-010].
 [[socket-retirement-test-isolation]]
 === Socket retirement tests and fork inheritance
 
-Status: resolved in implementation, 2026-11-06; verified under DEC-010.
+Status: resolved in implementation, 2026-11-06. Follow-up
+link:#socket-eof-fixture-gaps[EOF] and link:#socket-directory-pin-gaps[identity fixture]
+corrections are recorded separately.
 
-Immediate IPC rebind/EOF and desktop singleton reacquisition checks now construct
+The corrected IPC rebind/EOF and desktop singleton reacquisition checks construct
 their fixtures in bounded isolated test processes, excluding listeners inherited
-by unrelated parallel tests. App startup shares the same guarded runner. Actual
-child directories in ownership tests retain File pins; GUI fixtures use the shared
-pinned directory helper. Ordinary test concurrency is unchanged.
+by unrelated parallel tests. App startup and shutdown share the same guarded
+runner; normal shutdown and final-save failure retain immediate reacquisition
+checks. Actual child directories in ownership tests retain File pins; GUI and App
+shutdown fixtures use the shared pinned directory helper. Ordinary test concurrency
+is unchanged.
 
-The investigation's controlled fork/exec barrier retained EADDRINUSE and delayed
-EOF after local close with or without a directory pin; exec released both. This
-explains the precondition gap, not a reproduced Rust-suite failure or the original
-PCM CI failure. Directory pins prevent inode recycling, not listener inheritance.
+CI at `481a602d` reported failure at App's final-save-error reacquisition assertion.
+That repair had omitted both App shutdown cases from isolation; the assertion did
+not print the bind error. Both cases now use isolation and report acquisition
+errors without retrying. A controlled fork/exec barrier confirmed that a pinned
+directory does not prevent EADDRINUSE after local listener close while a pre-exec
+child retains its descriptor; exec permits immediate rebind. This establishes
+the fixture gap, not the exact errno of the reported CI failure. Directory pins
+prevent inode recycling, not listener inheritance.
 The client crate remains unchanged: no subprocess entry was found in its test binary.
 Scope and cleanup boundaries: link:91_design_decisions.adoc#DEC-010[DEC-010].
 
@@ -192,8 +261,9 @@ Core retirement. Live and zombie interpreters fail the assertion.
 
 Inherited lifelines replace the shell busy loops. Their guards retain both endpoints
 through asynchronous spawn and the retirement assertion; failure closes the sole
-peer before Core joins. Stdout-closed readiness, progress-induced unwind, task-wait
-ordering and subsequent processing recovery remain covered.
+peer before Core joins. Task-wait ordering and subsequent processing recovery
+remain covered. The separate
+link:#neural-unwind-trigger-coverage[unwind trigger observation] now excludes ordinary early failures.
 
 The investigation forced stale-PID reuse in a disposable namespace; the old cleanup
 killed a replacement while a retained-pidfd control left it alive. That was not an

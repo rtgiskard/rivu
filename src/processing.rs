@@ -33,7 +33,7 @@ pub(crate) const WORKER_EVENT_VERSION: u64 = 2;
 
 #[cfg(test)]
 thread_local! {
-    static PANIC_ON_NEURAL_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PANIC_ON_NEURAL_PROGRESS: std::cell::Cell<Option<Arc<AtomicBool>>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +178,7 @@ pub(crate) struct Service {
     #[cfg(test)]
     pub(crate) panic_after_mix: bool,
     #[cfg(test)]
-    pub(crate) panic_on_neural_progress: bool,
+    pub(crate) panic_on_neural_progress: Option<Arc<AtomicBool>>,
 }
 impl Service {
     pub fn new() -> Self {
@@ -199,7 +199,7 @@ impl Service {
             #[cfg(test)]
             panic_after_mix: false,
             #[cfg(test)]
-            panic_on_neural_progress: false,
+            panic_on_neural_progress: None,
         }
     }
     #[cfg(test)]

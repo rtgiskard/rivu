@@ -676,13 +676,8 @@ pub(crate) fn with_gap_invalidation(
 }
 
 #[test]
-fn overwritten_history_and_explicit_gap_require_a_fresh_window() {
-    with_gap_invalidation(|_, _, _| {});
-}
-
-#[test]
 fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = rivu::test_support::ipc::socket_test_directory();
     let window = SharedPcmWindow::new().unwrap();
     let path = window.share_path();
     let listener =

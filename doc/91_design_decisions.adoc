@@ -212,9 +212,21 @@ an fd reused for a socket need not support that open. This restores coverage los
 when the original path-unopenable assertion was removed, without extra isolation.
 
 Isolate socket retirement checks from unrelated forking tests, keeping immediate
-rebind/EOF assertions inside the live isolated case. Directory pins prevent inode
-recycling, not listener inheritance; preserve existing pins without treating them
-as isolation. Scope any shared runner access to these tests, not the whole suite.
+rebind/EOF assertions inside the live isolated case. This includes App startup,
+normal shutdown and final-save failure: `481a602d` omitted the two shutdown cases,
+and subsequent CI exposed a reacquisition failure in the final-save-error case.
+Both now enter isolation before constructing App or its pinned directory fixture;
+reacquisition errors retain their diagnostics rather than becoming boolean failures.
+Directory pins prevent inode recycling, not listener inheritance; preserve existing
+pins without treating them as isolation. Scope any shared runner access to these
+tests, not the whole suite.
+
+A subsequent global review found additional Drop-dependent EOF cases and unpinned
+abstract-listener fixtures. Those cases now use bounded single-test isolation and
+the existing pinned fixture without retries or relaxed operation deadlines. Keep
+their evidence in link:90_open_issues.adoc#socket-eof-fixture-gaps[EOF fixtures] and
+link:90_open_issues.adoc#socket-directory-pin-gaps[directory identity fixtures].
+Do not infer exclusive socket ownership merely from a passing feature matrix.
 
 For the two neural regressions, the isolated case must own only its interpreter as
 a direct child and retain ordinary SIGCHLD wait semantics, without an independent
@@ -224,6 +236,14 @@ children fail without transferring production wait ownership. Preserve the
 stdout-closed readiness barrier; remove stale numeric-PID checks and cleanup.
 If exclusive child-set ownership cannot be established, a pidfd acquired before
 retirement remains an alternative, not the default.
+
+Child absence must be paired with evidence that the intended failure path ran.
+Fault injection made the old neural unwind regression pass after replacing its
+worker script with an ordinary early exit. A test-owned atomic observation now
+records execution immediately before the injected progress panic and is checked
+before applying Finished or retiring Core. This hook is test-only; production
+processing and protocols are unchanged. See
+link:90_open_issues.adoc#neural-unwind-trigger-coverage[unwind trigger coverage].
 
 Replace the fixtures' busy loops with a blocking builtin read on an inherited
 lifeline endpoint. Create its guard only inside the isolated case; both endpoints
@@ -237,8 +257,8 @@ named FIFO's startup race: if its last writer dies before the shell opens the FI
 a blocking open can wait forever.
 
 `src/test_support.rs` exposes the bounded runner through the existing `test-support`
-boundary for GUI cases; app startup uses the same helper. A guard kills and waits
-for the owned runner on timeout or unwind. The foreground process group is unchanged:
+boundary for GUI cases; App startup and shutdown use the same helper. A guard kills
+and waits for the owned runner on timeout or unwind. The foreground process group is unchanged:
 a new group needs explicit terminal-signal forwarding, and group kill plus leader
 wait does not prove descendant reaping. Lifeline EOF lets these fixtures terminate
 when their runner dies, even before the first read; it is failure cleanup, not a
@@ -251,9 +271,21 @@ on the same connection. Buffered revision-zero status cannot admit enabled PCM.
 Preserve this ordering rather than adding instance metadata or FD transfer solely
 because the advertised path can be reused.
 
-`make lint` and `make test-rust` passed, including default/all/disabled workspace
-features and GUI-only/TUI-only test runs. The checks retain immediate socket
-retirement assertions and exercise both neural retirement regressions.
+`make lint` and `make test-rust` passed after integrating the App shutdown fixes,
+global-review corrections and test cleanup. Coverage includes default/all/disabled
+workspace features and GUI-only/TUI-only root runs. Both neural retirement
+regressions passed in all five root combinations; the affected EOF assertions and
+the retained GUI gap/staging integration also passed. Repeating the ordinary
+early-exit injector now fails on missing trigger evidence with exit 101, while the
+normal progress-panic case passes. Immediate socket retirement assertions remain
+intact; neither retries nor relaxed operation deadlines were introduced.
+
+After identifying the omitted App shutdown cases, a controlled fork/exec probe
+again distinguished retained pre-exec listeners from immediate post-exec rebind,
+with the directory inode pinned. An existing debug CLI artifact exercised normal
+and failed final saves: both quit acknowledgements succeeded, the service exited
+with 0 and 1 respectively, invalid config remained untouched, and immediate IPC
+rebind plus an exclusive SQLite transaction succeeded after each exit.
 
 The cross-process PCM regression checks descriptor retirement and retained native
 samples together. A real SharedPcmWindow smoke distinguished owner leaks, close

@@ -1612,7 +1612,8 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
         config.neural.speech_interpreter = "/bin/sh".into();
         config.neural.speech_manifest = Some(manifest);
     });
-    core.processing.panic_on_neural_progress = true;
+    let panic_triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    core.processing.panic_on_neural_progress = Some(Arc::clone(&panic_triggered));
     core.command(Command::StartProcessing {
         track_id: 1,
         operation: ProcessingOperation::Speech,
@@ -1626,6 +1627,10 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
         requests.try_recv().unwrap(),
     ));
     let event = completion(&mut core);
+    assert!(
+        panic_triggered.load(std::sync::atomic::Ordering::Acquire),
+        "neural progress must trigger the injected panic before terminal delivery"
+    );
     // The validated descriptor and retained peer keep the shell alive until a
     // real progress event triggers unwind. Reaping must precede this failure
     // event, not just the next admission or final owner shutdown.

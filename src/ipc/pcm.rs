@@ -449,6 +449,12 @@ mod tests {
 
     #[test]
     fn aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect() {
+        if crate::test_support::run_in_subprocess(
+            "ipc::pcm::tests::aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         let directory = crate::test_support::ipc::socket_test_directory();
         let (handle, _queries) = CoreHandle::test_query_port();
         let server = PcmServer::start(directory.path(), handle, 7).unwrap();
