@@ -1170,6 +1170,37 @@ mod tests {
                     _ => panic!("unexpected spectrum content"),
                 }
                 data.prepare_spectrum_presentation(1, moved).unwrap();
+                data.prepare_spectrum_presentation(2, moved).unwrap();
+                data.prepare_spectrum_presentation(3, plot).unwrap();
+                assert!(Arc::ptr_eq(
+                    &data.spectrum.presentations[&1],
+                    &data.spectrum.presentations[&2],
+                ));
+                assert!(Arc::ptr_eq(
+                    &data.spectrum.presentations[&1],
+                    &data.spectrum.presentations[&3],
+                ));
+                // Three equivalent panels require one immutable geometry/publication
+                // and only the first panel's frequency mapping.
+                assert_eq!(data.spectrum.mappings.len(), 1);
+                let retained = Arc::downgrade(&data.spectrum.presentations[&3]);
+                data.spectrum.style = if style == SpectrumStyle::Bars {
+                    SpectrumStyle::Line
+                } else {
+                    SpectrumStyle::Bars
+                };
+                data.prepare_spectrum_presentation(4, plot).unwrap();
+                assert!(!Arc::ptr_eq(
+                    &data.spectrum.presentations[&3],
+                    &data.spectrum.presentations[&4],
+                ));
+                data.spectrum.style = style;
+                data.prepare_spectrum_presentation(4, plot).unwrap();
+                assert!(Arc::ptr_eq(
+                    &data.spectrum.presentations[&3],
+                    &data.spectrum.presentations[&4],
+                ));
+                data.spectrum.presentations.remove(&4);
                 let presentation = &data.spectrum.presentations[&1];
                 assert!(Arc::ptr_eq(presentation.body.as_ref().unwrap(), &body));
                 assert_eq!(presentation.peaks, peaks);
@@ -1191,6 +1222,41 @@ mod tests {
                 assert!(!Arc::ptr_eq(
                     data.spectrum.presentations[&1].body.as_ref().unwrap(),
                     &body,
+                ));
+                assert!(Arc::ptr_eq(
+                    &data.spectrum.presentations[&2],
+                    &data.spectrum.presentations[&3],
+                ));
+                // A new output revision forks only the panel being prepared.
+                data.spectrum.mark_output_changed();
+                data.prepare_spectrum_presentation(2, plot).unwrap();
+                assert!(!Arc::ptr_eq(
+                    &data.spectrum.presentations[&2],
+                    &data.spectrum.presentations[&3],
+                ));
+                assert!(Arc::ptr_eq(
+                    data.spectrum.presentations[&3].body.as_ref().unwrap(),
+                    &body,
+                ));
+                let unique = data
+                    .spectrum
+                    .presentations
+                    .values()
+                    .map(Arc::as_ptr)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(unique.len(), 3);
+                data.spectrum.presentations.remove(&3);
+                assert!(retained.upgrade().is_none());
+                data.prepare_spectrum_presentation(4, plot).unwrap();
+                let before_recolor = data.spectrum.presentations[&2].body.clone().unwrap();
+                data.recolor_spectrum().unwrap();
+                assert!(Arc::ptr_eq(
+                    &data.spectrum.presentations[&2],
+                    &data.spectrum.presentations[&4],
+                ));
+                assert!(!Arc::ptr_eq(
+                    data.spectrum.presentations[&2].body.as_ref().unwrap(),
+                    &before_recolor,
                 ));
             }
         }
@@ -2789,8 +2855,8 @@ mod tests {
         assert_eq!(visuals.data.borrow().spectrogram.presentations.len(), 2);
         visuals.set_enabled(false);
         visuals.retain_presentation_panels(&[2], &[2]);
-        assert!(body.upgrade().is_none());
-        // Shared immutable Spectrogram tiles remain referenced by panel 2.
+        // Equivalent Spectrum bodies and Spectrogram tiles still belong to panel 2.
+        assert!(body.upgrade().is_some());
         assert!(tile.upgrade().is_some());
         assert!(
             !visuals
@@ -2801,6 +2867,7 @@ mod tests {
                 .contains_key(&1)
         );
         visuals.retain_presentation_panels(&[], &[]);
+        assert!(body.upgrade().is_none());
         assert!(tile.upgrade().is_none());
     }
 

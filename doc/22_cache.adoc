@@ -330,10 +330,11 @@ read lock across socket waits.
 
 ==== Spectrum
 
-Spectrum retains frequency mappings and immutable body/peak publications per panel.
-Unchanged output and display settings reuse the body. Content identity includes
-plot size, grouping and appearance, not plot position: local geometry is placed
-at paint time, so translation alone does not rebuild it.
+Spectrum panels with matching output and display settings share one immutable
+body/peak presentation. Each panel retains its own entry, so resizing or removing
+one does not invalidate another's drawing; shared output retires with its last owner.
+Content identity includes plot size, grouping and appearance, not plot position:
+local geometry is placed at paint time, so translation alone does not rebuild it.
 Spectrum and Spectrogram share the selected GPU color map; range, size and style
 do not change its identity. Waveform uses paired endpoints from the same map.
 Body representation belongs to

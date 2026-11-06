@@ -30,7 +30,7 @@ pub(super) struct Spectrum {
     pub(super) points: Vec<Point<Pixels>>,
     pub(super) rectangles: Vec<GpuRectangle>,
     pub(super) mappings: HashMap<u64, SpectrumMapping>,
-    pub(super) presentations: HashMap<u64, SpectrumPresentation>,
+    pub(super) presentations: HashMap<u64, Arc<SpectrumPresentation>>,
     // Advances only when drawable envelope values or labels change. Analysis
     // sequence and hold deadlines are not publication identities.
     pub(super) output_revision: u64,
@@ -89,7 +89,7 @@ impl Spectrum {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) struct SpectrumGroupingKey {
     pub(super) bars: usize,
     pub(super) generation: u64,
@@ -103,6 +103,7 @@ pub(super) struct SpectrumMapping {
     pub(super) samples: Vec<Option<HeatSample>>,
 }
 
+#[derive(Clone)]
 pub(super) struct SpectrumPresentation {
     key: SpectrumPresentationKey,
     pub(super) body: Option<Arc<GpuFrame>>,
@@ -111,7 +112,7 @@ pub(super) struct SpectrumPresentation {
     pub(super) db_labels: [SharedString; 4],
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct SpectrumPresentationKey {
     output_revision: u64,
     plot_size: gpui::Size<Pixels>,
@@ -129,12 +130,23 @@ struct SpectrumPresentationKey {
 
 impl FrequencyState {
     pub(super) fn recolor_spectrum(&mut self) -> Result<(), String> {
+        let mut recolored = HashMap::new();
         for presentation in self.spectrum.presentations.values_mut() {
-            for (_, fraction, color) in &mut presentation.peaks {
+            let identity = Arc::as_ptr(presentation);
+            if let Some(replacement) = recolored.get(&identity) {
+                *presentation = Arc::clone(replacement);
+                continue;
+            }
+            let mut replacement = (**presentation).clone();
+            let output = &mut replacement;
+            for (_, fraction, color) in &mut output.peaks {
                 *color = stop_color(self.palette_lut.lookup_rgb(*fraction));
             }
-            presentation.key.palette = self.palette_lut.palette;
-            let Some(body) = &mut presentation.body else {
+            output.key.palette = self.palette_lut.palette;
+            let Some(body) = &mut output.body else {
+                let replacement = Arc::new(replacement);
+                recolored.insert(identity, Arc::clone(&replacement));
+                *presentation = replacement;
                 continue;
             };
             let palette = self.palette_lut.gpu_palette()?;
@@ -162,6 +174,9 @@ impl FrequencyState {
                 _ => return Err("Spectrum publication has unexpected content".into()),
             }
             .map_err(|error| error.to_string())?;
+            let replacement = Arc::new(replacement);
+            recolored.insert(identity, Arc::clone(&replacement));
+            *presentation = replacement;
         }
         Ok(())
     }
@@ -585,11 +600,24 @@ impl FrequencyState {
         {
             return Ok(());
         }
+        // Plot-local output is immutable; panel entries retain their own lifetime
+        // while equivalent keys share geometry and the GPU publication.
+        if let Some(presentation) = self
+            .spectrum
+            .presentations
+            .values()
+            .find(|presentation| presentation.key == key)
+            .cloned()
+        {
+            self.spectrum.presentations.insert(panel_id, presentation);
+            return Ok(());
+        }
         let body = self.prepare_spectrum_body(panel_id, plot, bars, low, high)?;
         let mut peaks = self
             .spectrum
             .presentations
             .get_mut(&panel_id)
+            .and_then(Arc::get_mut)
             .map(|presentation| std::mem::take(&mut presentation.peaks))
             .unwrap_or_default();
         peaks.clear();
@@ -643,13 +671,13 @@ impl FrequencyState {
         }
         self.spectrum.presentations.insert(
             panel_id,
-            SpectrumPresentation {
+            Arc::new(SpectrumPresentation {
                 key,
                 body,
                 peaks,
                 labels: self.spectrum.labels.clone(),
                 db_labels: self.spectrum.db_labels.clone(),
-            },
+            }),
         );
         Ok(())
     }
