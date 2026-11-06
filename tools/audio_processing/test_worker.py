@@ -59,7 +59,8 @@ class ProducerIdentityTests(unittest.TestCase):
                 source, replacement, original = self.make_sources(root)
                 output = root / "export"
                 request = {**export_request(), "input_path":str(source), "output_dir":str(output)}
-                def process(control, admitted, write, emit):
+                def process(control, admitted, write, emit, *, collect_report):
+                    self.assertTrue(collect_report)
                     if replace:
                         replacement.replace(source)
                         np.testing.assert_array_equal(admitted.window(0, 2), original)
@@ -475,12 +476,69 @@ class ExplicitExportTests(unittest.TestCase):
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             events = []
-            with patch("runtime.worker.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
+            with patch("export.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaises(WorkerError) as error:
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
             self.assertEqual(error.exception.code, "report_capacity")
             self.assertFalse(destination.exists())
             self.assertNotIn("complete", [kind for kind, _ in events])
+
+    def test_encoded_report_boundary_and_completion_after_files_close(self):
+        import export
+        import numpy as np
+        import soundfile as sf
+        for extra in (0, 1):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source, destination = base / "input.wav", base / "result"
+                sf.write(source, np.array([0.25, -0.25], dtype="float32"), 8000, subtype="FLOAT")
+                request = {**export_request(), "input_path":str(source), "output_dir":str(destination)}
+                outputs = {"speech":str(destination / "speech.wav")}
+                report = {"outputs":outputs, "note":"é", "export_request_sha256":canonical_digest(request)}
+                empty_size = len((json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8"))
+                report["note"] += "x" * (export.MAX_REPORT_BYTES-empty_size+extra)
+                expected = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8")
+                self.assertEqual(len(expected), export.MAX_REPORT_BYTES+extra)
+                writers, report_files, events = [], [], []
+                open_soundfile, open_path = sf.SoundFile, Path.open
+                def soundfile(*args, **kwargs):
+                    handle = open_soundfile(*args, **kwargs)
+                    if kwargs.get("mode") == "w":
+                        writers.append(handle)
+                    return handle
+                def path_open(path, *args, **kwargs):
+                    handle = open_path(path, *args, **kwargs)
+                    if path.name == "result.json":
+                        report_files.append(handle)
+                    return handle
+                def process(control, admitted, write, emit, *, collect_report):
+                    self.assertTrue(collect_report)
+                    write("speech", admitted.window(0, 2))
+                    admitted.finish()
+                    emit("complete", outputs={"speech":True}, sample_rate=8000, channels=1, frames=2,
+                         model={"id":"fixture", "sha256":"fixture"})
+                    return {"outputs":{"speech":True}, "note":report["note"]}
+                def emit(kind, **fields):
+                    if kind == "complete":
+                        self.assertTrue(writers and all(handle.closed for handle in writers))
+                        self.assertTrue(report_files and all(handle.closed for handle in report_files))
+                    events.append(kind)
+                with patch("export.worker._process_validated", side_effect=process), \
+                     patch.object(sf, "SoundFile", side_effect=soundfile), patch.object(Path, "open", path_open):
+                    if extra:
+                        with self.assertRaises(WorkerError) as error:
+                            process_export(request, emit)
+                        self.assertEqual(error.exception.code, "report_capacity")
+                    else:
+                        process_export(request, emit)
+                self.assertTrue(writers and all(handle.closed for handle in writers))
+                self.assertTrue(report_files and all(handle.closed for handle in report_files))
+                if extra:
+                    self.assertFalse(destination.exists())
+                    self.assertNotIn("complete", events)
+                else:
+                    self.assertEqual((destination / "result.json").read_bytes(), expected)
+                    self.assertEqual(events[-1], "complete")
 
     def test_dry_speech_still_rejects_invalid_controls_tampered_artifacts_and_bad_samples(self):
         import numpy as np

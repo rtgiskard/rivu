@@ -20,6 +20,8 @@ if __package__:
 else:
     from runtime import worker
 
+MAX_REPORT_BYTES = 8 * 1024**2
+
 
 class FileInput:
     def __init__(self, path, stack):
@@ -110,18 +112,19 @@ def _export_admitted(request, emit, destination, source_input):
         with ExitStack() as stack:
             writers = {stem:stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
                        channels=info.channels, format=output_format, subtype="FLOAT")) for stem, path in outputs.items()}
-            report = worker._process_validated(control, source_input, lambda stem, samples:writers[stem].write(samples), capture)
+            report = worker._process_validated(control, source_input, lambda stem, samples:writers[stem].write(samples),
+                                               capture, collect_report=True)
         for path in outputs.values():
             actual = sf.info(path)
             worker.require((actual.frames, actual.channels, actual.samplerate) == (info.frames, info.channels, info.samplerate),
                            "alignment", "written result format/length mismatch")
         report["outputs"] = outputs
         report["export_request_sha256"] = worker.canonical_digest(request)
-        with (destination/"result.json").open("x") as stream:
+        with (destination/"result.json").open("x", encoding="utf-8", newline="\n") as stream:
             size = 1
             for text in json.JSONEncoder(indent=2, allow_nan=False).iterencode(report):
-                size += len(text.encode())
-                worker.require(size <= worker.MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
+                size += len(text.encode("utf-8"))
+                worker.require(size <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
                 stream.write(text)
             stream.write("\n")
         worker.require(completion is not None, "protocol", "missing PCM completion")

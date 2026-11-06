@@ -402,12 +402,18 @@ trailing bytes fail the task. Diagnostics go to stderr. Completion identifies
 model, format, frames and stems; Rust validates framing, finite/aligned PCM,
 completion and successful exit before publication. Cancellation terminates/reaps
 the child, including after early stdout EOF.
+Application streams collect no export-only PCM hashes, timing/energy statistics
+or detailed report; completion still requires validated input-end and EOF.
 
 Benchmark/corpus tools use the explicit `export.py --request` adapter, separate
 from application execution. Its version-1 file job requires absolute `input_path`
 and `output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must
 be new with an existing parent. It writes stem WAVs and `result.json`, with an
 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
+Detailed hashes and timing/energy evidence are collected only for this explicit
+export. The actual UTF-8 `result.json`, including its final newline, is limited
+to 8 MiB. Completion follows closed and checked audio files and a successfully
+written report; failure removes the new export directory.
 Both Python entrypoints validate inference controls before constructing stream
 input or creating export outputs. File export opens one source descriptor for
 metadata, bounded hashing and PCM reads; replacement or in-place mutation rejects

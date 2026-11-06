@@ -22,7 +22,6 @@ import json
 import math
 import os
 from pathlib import Path
-import resource
 import socket
 import sys
 import time
@@ -36,7 +35,6 @@ CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
 MAX_FRAME_BYTES = 65536
 MAX_WINDOW_BYTES = 128 * 1024**2
-MAX_REPORT_BYTES = 8 * 1024**2
 JSON_FRAME, INPUT_PCM, INPUT_END = 0, 1, 2
 STEM_KINDS = {"speech":17, "vocals":18, "accompaniment":19}
 RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
@@ -258,7 +256,6 @@ class StreamInput:
         self.buffer = None
         self.left = self.right = self.received = 0
         self.pending = memoryview(b"")
-        self.hasher = hashlib.sha256()
 
     def window(self, left, right):
         import numpy as np
@@ -278,7 +275,6 @@ class StreamInput:
                         "protocol", "expected aligned input PCM")
                 self.received += len(payload)//(self.channels*4)
                 require(self.received <= self.frames, "protocol", "input exceeds declared frames")
-                self.hasher.update(payload)
                 self.pending = memoryview(payload)
             count = min(len(target)-offset, len(self.pending))
             target[offset:offset+count] = self.pending[:count]
@@ -294,17 +290,16 @@ class StreamInput:
         require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
         require(not self.stream.read(1), "protocol", "unexpected data after input end marker")
         self.buffer = None
-        return self.hasher.hexdigest()
 
 
-def _process_validated(request, source, write_pcm, emit):
-    """Infer an entrypoint-validated request; emit PCM and return evidence in RAM."""
+def _process_validated(request, source, write_pcm, emit, *, collect_report):
+    """Infer validated PCM; collect detailed evidence only for explicit export."""
     rate, channels, frames = (request[key] for key in ("sample_rate", "channels", "frames"))
     manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = validate_manifest(manifest_path, request["operation"])
-    emit("progress", stage="inspect", completed=1, total=1,
-         model={"id":manifest["id"], "sha256":canonical_digest(manifest)})
+    model = {"id":manifest["id"], "sha256":canonical_digest(manifest)}
+    emit("progress", stage="inspect", completed=1, total=1, model=model)
     controls = request.get("parameters", {})
     require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
@@ -316,51 +311,63 @@ def _process_validated(request, source, write_pcm, emit):
     deny_network()
     import numpy as np
     model_rate = None
-    load_seconds = 0.0
+    if collect_report:
+        load_seconds = 0.0
     if not dry:
         emit("progress", stage="load", completed=0, total=1)
-        start = time.perf_counter()
+        if collect_report:
+            start = time.perf_counter()
         with redirect_stdout(sys.stderr):
             model_rate, infer = build_engine(manifest, manifest_path.parent, request.get("device", "cpu"), controls)
-        load_seconds = time.perf_counter() - start
+        if collect_report:
+            load_seconds = time.perf_counter() - start
     stems = ("vocals", "accompaniment") if request["operation"] == "separate" else ("speech",)
     core_seconds, context_seconds = (8, 2) if manifest["id"] == "MossFormer2_SE_48K" else (CORE_SECONDS, CONTEXT_SECONDS)
     if dry:
         core_seconds, context_seconds = CORE_SECONDS, 0
     require((core_seconds+2*context_seconds)*rate*channels*4 <= MAX_WINDOW_BYTES,
             "memory_capacity", "model context window exceeds 128 MiB")
-    block_times = []
-    sample_io_seconds = resampling_seconds = inference_seconds = 0.0
-    peaks = dict.fromkeys(stems, 0.0)
-    input_energy = output_energy = 0.0
-    wall_start = time.perf_counter()
-    cpu_start = time.process_time()
+    if collect_report:
+        block_times = []
+        sample_io_seconds = resampling_seconds = inference_seconds = 0.0
+        peaks = dict.fromkeys(stems, 0.0)
+        input_energy = output_energy = 0.0
+        wall_start = time.perf_counter()
+        cpu_start = time.process_time()
     step, context = core_seconds*rate, context_seconds*rate
     for begin in range(0, frames, step):
         end = min(frames, begin+step)
         left, right = max(0, begin-context), min(frames, end+context)
-        io_start = time.perf_counter()
+        if collect_report:
+            io_start = time.perf_counter()
         audio = source.window(left, right)
-        sample_io_seconds += time.perf_counter()-io_start
+        if collect_report:
+            sample_io_seconds += time.perf_counter()-io_start
         require(audio.shape == (right-left, channels) and audio.dtype == np.dtype("float32") and np.isfinite(audio).all(),
                 "input_samples", "input changed/truncated or contains nonfinite samples")
-        block_start = time.perf_counter()
+        if collect_report:
+            block_start = time.perf_counter()
         offset = begin-left
         original = audio[offset:offset+end-begin]
         if dry:
             result = original
         else:
-            phase_start = time.perf_counter()
+            if collect_report:
+                phase_start = time.perf_counter()
             converted = resample_exact(audio, rate, model_rate)
-            resampling_seconds += time.perf_counter()-phase_start
-            phase_start = time.perf_counter()
+            if collect_report:
+                resampling_seconds += time.perf_counter()-phase_start
+                phase_start = time.perf_counter()
             with redirect_stdout(sys.stderr):
                 inferred = infer(converted)
-            inference_seconds += time.perf_counter()-phase_start
+            if collect_report:
+                inference_seconds += time.perf_counter()-phase_start
             require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
-            phase_start = time.perf_counter()
+            if collect_report:
+                phase_start = time.perf_counter()
             restored = resample_exact(inferred, model_rate, rate)
-            resampling_seconds += time.perf_counter()-phase_start
+            if collect_report:
+                resampling_seconds += time.perf_counter()-phase_start
             require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
             restored = restored[:len(audio)]
             result = restored[offset:offset+end-begin].astype("float32", copy=False)
@@ -372,24 +379,32 @@ def _process_validated(request, source, write_pcm, emit):
         for stem in stems:
             chunk = original-result if stem == "accompaniment" else result
             require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
-            io_start = time.perf_counter()
+            if collect_report:
+                io_start = time.perf_counter()
             # Transport copies at most 64 KiB, even for a strided model result.
             stride = MAX_FRAME_BYTES//(channels*4)
             for index in range(0, len(chunk), stride):
                 write_pcm(stem, np.ascontiguousarray(chunk[index:index+stride], dtype="<f4"))
-            sample_io_seconds += time.perf_counter()-io_start
-            peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
+            if collect_report:
+                sample_io_seconds += time.perf_counter()-io_start
+                peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
             del chunk
-        block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
-        input_energy += block_energy
-        output_energy += block_energy if dry else float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
-        block_times.append(time.perf_counter()-block_start)
+        if collect_report:
+            block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
+            input_energy += block_energy
+            output_energy += block_energy if dry else float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
+            block_times.append(time.perf_counter()-block_start)
         del audio, result, original
         emit("progress", stage="copy" if dry else "inference", completed=end, total=frames)
     source_hash = source.finish()
+    if not collect_report:
+        emit("complete", outputs=dict.fromkeys(stems, True), sample_rate=rate, channels=channels,
+             frames=frames, model=model)
+        return None
+    import resource
     wall = time.perf_counter()-wall_start
     report = {"outputs":dict.fromkeys(stems, True), "sample_rate":rate, "channels":channels, "frames":frames,
-              "model":{"id":manifest["id"], "sha256":canonical_digest(manifest), "files":manifest["files"],
+              "model":{**model, "files":manifest["files"],
                        "provenance":manifest.get("provenance", {})},
               "source_sha256":source_hash, "request_sha256":canonical_digest(request),
               "worker_sha256":digest(__file__), "python":sys.version, "packages":manifest["packages"],
@@ -412,12 +427,7 @@ def _process_validated(request, source, write_pcm, emit):
                 "block_seconds":block_times,"peak_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(frames*channels)),
                 "target_rms":math.sqrt(output_energy/(frames*channels))}}
-    report_bytes = 0
-    for text in json.JSONEncoder(allow_nan=False).iterencode(report):
-        report_bytes += len(text.encode("utf-8"))
-        require(report_bytes <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
-    emit("complete", outputs=report["outputs"], sample_rate=rate, channels=channels, frames=frames,
-         model={"id":manifest["id"], "sha256":report["model"]["sha256"]})
+    emit("complete", outputs=report["outputs"], sample_rate=rate, channels=channels, frames=frames, model=model)
     return report
 
 
@@ -442,7 +452,7 @@ def main():
             write_frame(output, STEM_KINDS[stem], memoryview(samples).cast("B"))
         # Package diagnostics must never corrupt the binary stdout protocol.
         with redirect_stdout(sys.stderr):
-            _process_validated(request, source, write_pcm, emit)
+            _process_validated(request, source, write_pcm, emit, collect_report=False)
         return 0
     except Exception as exc:
         emit("error", code=exc.code if isinstance(exc, WorkerError) else "worker_failure", message=str(exc)[:8192])

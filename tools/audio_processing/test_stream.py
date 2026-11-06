@@ -21,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[2]
 def encode(kind, payload=b""):
     return struct.pack("<BI", kind, len(payload))+bytes(payload)
 
+def input_stream_pcm(audio):
+    data = memoryview(audio).cast("B")
+    return b"".join(encode(worker.INPUT_PCM, data[offset:offset+8192]) for offset in range(0, len(data), 8192)) + encode(worker.INPUT_END)
+
+
 
 def input_stream(request, audio):
     result = io.BytesIO()
@@ -83,7 +88,7 @@ class FramingTests(unittest.TestCase):
         for left, right in ((0, 1700), (1300, 3000), (2600, 4300), (3900, 5000)):
             np.testing.assert_array_equal(source.window(left, right), audio[left:right])
             self.assertLessEqual(source.buffer.nbytes, 1700*2*4)
-        self.assertEqual(source.finish(), __import__("hashlib").sha256(memoryview(audio).cast("B")).hexdigest())
+        self.assertIsNone(source.finish())
         self.assertIsNone(source.buffer)
 
     def test_input_end_and_sample_counts_are_mandatory(self):
@@ -113,6 +118,47 @@ class FramingTests(unittest.TestCase):
                 source.window(0, 100)
             self.assertEqual(error.exception.code, "memory_capacity")
             allocate.assert_not_called()
+
+    def test_stream_core_skips_export_evidence_and_keeps_completion(self):
+        import numpy as np
+        for operation, dry in (("speech", True), ("speech", False), ("separate", False)):
+            with self.subTest(operation=operation, dry=dry):
+                audio = np.linspace(-1.25, 1.25, 2*(8000+37), dtype="<f4").reshape(-1, 2)
+                request = {"version":worker.VERSION, "task_id":"no-report", "operation":operation,
+                           "sample_rate":8000, "channels":2, "frames":len(audio),
+                           "model_manifest":"/manifest.json", "parameters":{"wet_mix":0} if dry else {}}
+                manifest = {"id":"DeepFilterNet3" if operation == "speech" else "melband_roformer_kim"}
+                expected = audio if dry else audio * np.float32(0.5)
+                events, outputs = [], {}
+                def write(stem, samples):
+                    outputs.setdefault(stem, []).append(samples.copy())
+                with patch.object(worker, "validate_manifest", return_value=manifest), \
+                     patch.object(worker, "canonical_digest", return_value="model-hash"), \
+                     patch.object(worker, "check_packages"), patch.object(worker, "deny_network"), \
+                     patch.object(worker, "CORE_SECONDS", 1), patch.object(worker, "CONTEXT_SECONDS", 1), \
+                     patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * np.float32(0.5))), \
+                     patch.object(worker, "digest", side_effect=AssertionError("export hash I/O")), \
+                     patch.object(worker.hashlib, "sha256", side_effect=AssertionError("stream PCM hashing")), \
+                     patch.object(worker.importlib.metadata, "version", side_effect=AssertionError("export package evidence")), \
+                     patch.object(worker.time, "perf_counter", side_effect=AssertionError("export wall timing")), \
+                     patch.object(worker.time, "process_time", side_effect=AssertionError("export CPU timing")), \
+                     patch.object(np, "einsum", side_effect=AssertionError("export energy")), \
+                     patch.object(np, "min", side_effect=AssertionError("export peak")), \
+                     patch.object(np, "max", side_effect=AssertionError("export peak")), \
+                     patch.object(np, "percentile", side_effect=AssertionError("export latency")), \
+                     patch.object(worker.json.JSONEncoder, "iterencode", side_effect=AssertionError("export report encoding")), \
+                     patch.dict(os.environ):
+                    source = worker.StreamInput(io.BytesIO(input_stream_pcm(audio)), request)
+                    report = worker._process_validated(request, source, write,
+                        lambda kind, **fields: events.append((kind, fields)), collect_report=False)
+                self.assertIsNone(report)
+                self.assertIsNone(source.buffer)
+                np.testing.assert_array_equal(np.concatenate(outputs["speech" if operation == "speech" else "vocals"]), expected)
+                if operation == "separate":
+                    np.testing.assert_array_equal(np.concatenate(outputs["accompaniment"]), audio-expected)
+                self.assertEqual(events[-1], ("complete", {
+                    "outputs":dict.fromkeys(outputs, True), "sample_rate":8000, "channels":2,
+                    "frames":len(audio), "model":{"id":manifest["id"], "sha256":"model-hash"}}))
 
 
 class StreamEntrypointTests(unittest.TestCase):
