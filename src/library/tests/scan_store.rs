@@ -1191,11 +1191,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
             Some(std::slice::from_ref(&root)),
         )
         .await?;
-        let paths: Vec<_> = prepared
-            .items
-            .iter()
-            .map(|item| item.path.clone())
-            .collect();
+        let paths = prepared.paths;
         let imported = crate::library::scan_paths_with_cues(
             workers,
             &paths,

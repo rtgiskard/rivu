@@ -570,13 +570,8 @@ impl Core {
                         .context(
                             "Preparing playlist import; scan not saved, playlist not created",
                         )?;
-                        let paths = prepared
-                            .items
-                            .iter()
-                            .map(|item| item.path.clone())
-                            .collect::<Vec<_>>();
                         import.as_mut().unwrap().1 = prepared.items;
-                        (paths, Some(prepared.sheets), false)
+                        (prepared.paths, Some(prepared.sheets), false)
                     }
                     ScanInput::Paths { paths, force } => (paths, None, force),
                     ScanInput::OtherTracks { .. } => unreachable!("Other check handled above"),

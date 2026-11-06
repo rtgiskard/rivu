@@ -2102,6 +2102,64 @@ fn m3u_roundtrip_preserves_ancestor_sibling_and_descendant_paths() -> Result<()>
 }
 
 #[test]
+fn repeated_missing_import_sources_reach_scan_error_handling_once() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let good = root.join("good.wav");
+        let missing = root.join("missing.wav");
+        wav(&good, 75)?;
+        let playlist = root.join("repeated.m3u8");
+        fs::write(
+            &playlist,
+            "missing.wav\ngood.wav\n./missing.wav\n./good.wav\n",
+        )?;
+        let workers = &crate::execution::BlockingExecutor::new(4);
+        let cancellation = ScanCancellation::default();
+        let prepared = super::prepare_playlist_import(
+            workers,
+            &playlist,
+            &cancellation,
+            Some(std::slice::from_ref(&root)),
+        )
+        .await?;
+        assert_eq!(prepared.paths, [good.clone(), missing.clone()]);
+        assert_eq!(
+            prepared
+                .items
+                .iter()
+                .map(|item| &item.path)
+                .collect::<Vec<_>>(),
+            [&missing, &good, &missing, &good]
+        );
+        assert!(prepared.items.iter().all(|item| item.cue_track.is_none()));
+        let mut looked_up = Vec::new();
+        let result = super::scan_paths_with_cues(
+            workers,
+            &prepared.paths,
+            |paths| {
+                looked_up.extend(paths.iter().cloned());
+                std::future::ready(Ok(vec![None; paths.len()]))
+            },
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: std::slice::from_ref(&root),
+                max_depth: 4,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |_, _, _, _, _| {},
+        )
+        .await?;
+        assert_eq!(result.roots.len(), 2);
+        assert_eq!(result.track_count(), 1);
+        assert_eq!(looked_up, [good]);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("missing.wav"));
+        Ok(())
+    })
+}
+
+#[test]
 fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result<()> {
     futures::executor::block_on(async {
         let directory = tempfile::tempdir()?;
@@ -2113,7 +2171,10 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
         fs::create_dir(&changed)?;
         wav(&changed.join("hidden.wav"), 75)?;
         let playlist = root.join("list.m3u8");
-        fs::write(&playlist, "good.wav\nchanged.wav\n")?;
+        fs::write(
+            &playlist,
+            "good.wav\n./good.wav\nchanged.wav\n./changed.wav\n",
+        )?;
         let cancellation = ScanCancellation::default();
         assert!(
             super::prepare_playlist_import(
@@ -2137,11 +2198,7 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
         fs::remove_file(&changed)?;
         fs::create_dir(&changed)?;
         wav(&changed.join("hidden.wav"), 75)?;
-        let paths: Vec<_> = prepared
-            .items
-            .iter()
-            .map(|item| item.path.clone())
-            .collect();
+        let paths = prepared.paths;
         let mut looked_up = Vec::new();
         let result = super::scan_paths_with_cues(
             workers,
@@ -2199,11 +2256,7 @@ fn import_retained_overflow_after_a_valid_sheet_aborts_the_whole_scan() -> Resul
         )
         .await?;
         let budget = prepared.sheets.budget.clone();
-        let paths: Vec<_> = prepared
-            .items
-            .iter()
-            .map(|item| item.path.clone())
-            .collect();
+        let paths = prepared.paths;
         let mut first_completed = false;
         let result = super::scan_paths_with_cues(
             workers,
@@ -2250,11 +2303,7 @@ fn import_source_fifo_substitution_is_fatal_without_blocking_or_recursion() -> R
             Some(std::slice::from_ref(&root)),
         )
         .await?;
-        let paths: Vec<_> = prepared
-            .items
-            .iter()
-            .map(|item| item.path.clone())
-            .collect();
+        let paths = prepared.paths;
         let mut replaced = false;
         let result = super::scan_paths_with_cues(
             workers,

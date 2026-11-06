@@ -80,6 +80,8 @@ impl ExportWriter<'_> {
 
 pub(crate) struct PlaylistImport {
     pub items: Vec<M3uItem>,
+    /// Unique normalized source paths, independent of playlist occurrences.
+    pub paths: Vec<PathBuf>,
     pub sheets: ImportSheets,
 }
 
@@ -180,6 +182,7 @@ async fn prepare_import(
     let mut builder = ImportBuilder {
         result: PlaylistImport {
             items: Vec::new(),
+            paths: Vec::new(),
             sheets: ImportSheets {
                 sheets: HashMap::new(),
                 budget: Default::default(),
@@ -258,8 +261,25 @@ async fn prepare_import(
             .await
             .context("Playlist import parser panicked")??
     };
+    // Deduplicate on the blocking worker without copying occurrence-sized path
+    // payloads. The scoped index workspace is bounded by MAX_IMPORT_ENTRIES.
+    let (paths, sources, first_sources, _source_order_charge) = workers
+        .execute({
+            let budget = budget.clone();
+            let cancellation = cancellation.clone();
+            move || -> Result<_> {
+                let (sources, first_sources, charge) =
+                    unique_import_sources(&paths, &budget, &cancellation)?;
+                Ok((paths, sources, first_sources, charge))
+            }
+        })
+        .await
+        .context("Playlist import source ordering worker panicked")??;
+    builder.result.paths = sources;
+    let mut first_sources = first_sources.into_iter().peekable();
     for (index, path) in paths.into_iter().enumerate() {
         cancellation.check()?;
+        let first_source = first_sources.next_if_eq(&index).is_some();
         let path_bytes = path.as_os_str().len();
         if is_cue_path(&path) {
             if let Some(roots) = roots {
@@ -303,20 +323,25 @@ async fn prepare_import(
                 .context("Playlist import CUE parser panicked")??;
             path_charge.release(path_bytes);
         } else {
-            let inspected = workers
-                .execute({
-                    let path = path.clone();
-                    move || std::fs::metadata(path)
-                })
-                .await
-                .context("Import source inspection worker panicked")?;
-            if let Ok(metadata) = inspected {
-                ensure!(
-                    metadata.is_file(),
-                    "Import source is not a regular file: {}",
-                    path.display()
-                );
-            }
+            let path = if first_source {
+                let (path, inspected) = workers
+                    .execute(move || {
+                        let inspected = std::fs::metadata(&path);
+                        (path, inspected)
+                    })
+                    .await
+                    .context("Import source inspection worker panicked")?;
+                if let Ok(metadata) = inspected {
+                    ensure!(
+                        metadata.is_file(),
+                        "Import source is not a regular file: {}",
+                        path.display()
+                    );
+                }
+                path
+            } else {
+                path
+            };
             ensure!(
                 builder.result.items.len() < MAX_IMPORT_ENTRIES,
                 "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
@@ -339,6 +364,39 @@ async fn prepare_import(
         "Import playlist contains no entries"
     );
     Ok(builder.result)
+}
+
+/// Select the first occurrence of every normalized source. Only unique sources
+/// receive a retained path copy; the temporary ordering contains indices only.
+fn unique_import_sources(
+    paths: &[PathBuf],
+    budget: &super::import_budget::ImportBudget,
+    cancellation: &ScanCancellation,
+) -> Result<(
+    Vec<PathBuf>,
+    Vec<usize>,
+    super::import_budget::ImportBudgetScope,
+)> {
+    let mut charge = budget.scoped();
+    let mut first_sources = Vec::new();
+    charge.reserve_vec(&mut first_sources, paths.len())?;
+    for index in 0..paths.len() {
+        cancellation.check()?;
+        first_sources.push(index);
+    }
+    first_sources
+        .sort_unstable_by(|left, right| paths[*left].cmp(&paths[*right]).then(left.cmp(right)));
+    first_sources.dedup_by(|later, earlier| paths[*later] == paths[*earlier]);
+    let mut sources = Vec::new();
+    budget.reserve_vec(&mut sources, first_sources.len())?;
+    for &index in &first_sources {
+        cancellation.check()?;
+        budget.reserve(paths[index].as_os_str().len())?;
+        sources.push(paths[index].clone());
+    }
+    first_sources.sort_unstable();
+    cancellation.check()?;
+    Ok((sources, first_sources, charge))
 }
 
 /// Export a database-ordered stream of playlist occurrences atomically.
@@ -585,6 +643,58 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_sources_keep_first_occurrences_and_account_index_workspace() -> Result<()> {
+        let paths: Vec<_> = ["b.wav", "a.wav", "b.wav", "c.wav", "a.wav"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let budget = super::super::import_budget::ImportBudget::default();
+        let before = budget.remaining();
+        let (sources, first_sources, charge) =
+            unique_import_sources(&paths, &budget, &ScanCancellation::default())?;
+        assert_eq!(
+            sources,
+            [
+                PathBuf::from("a.wav"),
+                PathBuf::from("b.wav"),
+                PathBuf::from("c.wav")
+            ]
+        );
+        assert_eq!(first_sources, [0, 1, 3]);
+        let retained = sources.capacity() * std::mem::size_of::<PathBuf>()
+            + sources
+                .iter()
+                .map(|path| path.as_os_str().len())
+                .sum::<usize>();
+        assert_eq!(
+            budget.remaining(),
+            before - retained - first_sources.capacity() * std::mem::size_of::<usize>()
+        );
+        drop(first_sources);
+        drop(charge);
+        assert_eq!(budget.remaining(), before - retained);
+        Ok(())
+    }
+
+    #[test]
+    fn unique_source_ordering_observes_cancellation_and_workspace_limit() -> Result<()> {
+        let paths = [PathBuf::from("audio.wav")];
+        let budget = super::super::import_budget::ImportBudget::default();
+        let cancellation = ScanCancellation::default();
+        cancellation.cancel();
+        let before = budget.remaining();
+        let error = unique_import_sources(&paths, &budget, &cancellation).unwrap_err();
+        assert!(error.to_string().contains("scan cancelled"));
+        assert_eq!(budget.remaining(), before);
+        budget.reserve(before - 1)?;
+        let error =
+            unique_import_sources(&paths, &budget, &ScanCancellation::default()).unwrap_err();
+        assert!(super::super::import_budget::ImportBudget::is_limit(&error));
+        assert_eq!(budget.remaining(), 1);
+        Ok(())
+    }
 
     #[test]
     fn stream_panic_preserves_destination_and_retires_temporary_file() -> Result<()> {

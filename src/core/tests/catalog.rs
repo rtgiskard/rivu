@@ -2041,6 +2041,54 @@ fn cue_playlist_import_preserves_repeated_segments_in_order() {
 }
 
 #[test]
+fn repeated_m3u_sources_scan_once_and_keep_ordered_playlist_occurrences() {
+    let (directory, mut core) = fixture();
+    for name in ["1.wav", "2.wav"] {
+        write_pcm(&directory.path().join(name));
+    }
+    let path = directory.path().join("repeated.m3u8");
+    let repetitions = 512;
+    std::fs::write(
+        &path,
+        "2.wav\n./1.wav\n2.wav\nchild/../1.wav\n".repeat(repetitions),
+    )
+    .unwrap();
+    core.command(Command::ImportPlaylist {
+        path,
+        name: Some("Repeated sources".into()),
+    })
+    .unwrap();
+    let mut looked_up = Vec::new();
+    while core.active_scan.is_some() {
+        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        if let ScanEvent::KnownSources { paths, .. } = &event {
+            looked_up.extend(paths.iter().cloned());
+        }
+        core.scan_event(event);
+    }
+    looked_up.sort();
+    assert_eq!(
+        looked_up,
+        [
+            directory.path().join("1.wav"),
+            directory.path().join("2.wav")
+        ]
+    );
+    let status = core.scan_results.back().unwrap();
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
+    assert_eq!(status.progress.total, Some(2));
+    assert_eq!(status.progress.processed, 2);
+    assert_eq!(status.progress.errors, 0);
+    let playlist = status.playlist_id.unwrap();
+    assert_eq!(
+        core.store
+            .playlist_track_ids(playlist, repetitions * 4)
+            .unwrap(),
+        [2, 1, 2, 1].repeat(repetitions)
+    );
+}
+
+#[test]
 fn import_input_failures_are_terminal_tasks_without_database_changes() {
     for kind in [
         "missing",
