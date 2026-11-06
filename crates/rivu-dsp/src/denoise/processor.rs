@@ -402,6 +402,43 @@ pub struct Denoiser {
 }
 
 impl Denoiser {
+    // Heap payload only: BlockDenoiser charges the containing object once.
+    pub(super) fn estimated_heap_bytes(config: &DenoiseConfig, channels: usize) -> usize {
+        if config.is_bypassed() {
+            return 0;
+        }
+        let mut bytes = channels * size_of::<f32>(); // working frame
+        if config.hum.enabled {
+            bytes +=
+                config.hum.harmonics * (size_of::<HumNotch>() + channels * size_of::<[f64; 2]>());
+        }
+        if config.impulse.enabled {
+            // ImpulseRepair itself is inline in Denoiser, not another allocation.
+            bytes += (2 * config.impulse.radius() + 2) * channels * size_of::<f32>();
+        }
+        let delay = config.lookahead_frames();
+        if config.wet < 1.0 && delay > 0 {
+            bytes += (delay + 1) * channels * size_of::<f32>();
+        }
+        if config.mode != DenoiseMode::Off {
+            let size = config.fft_size;
+            let bins = size / 2 + 1;
+            // Input, overlap, window, weights; channel spectra; seven PSD/gain
+            // arrays, plus five MCRA arrays only in Adaptive mode.
+            bytes += (2 * size * channels + 2 * size + 7 * bins) * size_of::<f32>();
+            bytes += size * channels * size_of::<Complex32>();
+            if config.mode == DenoiseMode::Adaptive {
+                bytes += 5 * bins * size_of::<f32>();
+            }
+            // RustFFT 6 power-of-two plans: reserve 2N complex scratch entries
+            // and 64N bytes for both retained plan trees (twiddles, butterflies,
+            // Arc headers and alignment). This backend-specific allowance is
+            // independent of channel buffers; never multiply the whole estimate.
+            bytes += 2 * size * size_of::<Complex32>() + 64 * size;
+        }
+        bytes
+    }
+
     pub fn new(
         sample_rate: u32,
         channels: usize,
@@ -440,7 +477,14 @@ impl Denoiser {
         let initial_noise = if !spectral {
             Vec::new()
         } else if config.mode == DenoiseMode::Profile {
-            profile.expect("profile validated above").power
+            // Caller spare capacity is not part of the validated profile shape
+            // or the configuration-only state estimate. Exact-capacity input
+            // keeps its allocation; oversized input sheds only unused storage.
+            profile
+                .expect("profile validated above")
+                .power
+                .into_boxed_slice()
+                .into_vec()
         } else {
             let stationary_power =
                 10.0_f32.powf(config.stationary_noise_dbfs / 10.0) * size as f32 / 2.0;
@@ -1275,6 +1319,36 @@ mod tests {
         let processor = Denoiser::new(48_000, 1, config, Some(captured)).unwrap();
         assert_eq!(spectral_capacity(&processor), 0);
         assert!(processor.forward.is_none() && processor.inverse.is_none());
+    }
+
+    #[test]
+    fn profile_state_does_not_retain_unbounded_caller_spare_capacity() {
+        for capacity in [129, 16 * 129] {
+            let mut power = Vec::with_capacity(capacity);
+            power.resize(129, 0.25);
+            let original = power.as_ptr();
+            let profile = NoiseProfile {
+                sample_rate: 48_000,
+                channels: 1,
+                fft_size: 256,
+                captured_frames: 1,
+                power,
+            };
+            let config = DenoiseConfig {
+                mode: DenoiseMode::Profile,
+                fft_size: 256,
+                ..Default::default()
+            };
+            let mut processor = Denoiser::new(48_000, 1, config, Some(profile)).unwrap();
+            assert_eq!(processor.initial_noise.capacity(), 129);
+            assert_eq!(processor.noise.capacity(), 129);
+            assert_eq!(processor.initial_noise, [0.25; 129]);
+            if capacity == 129 {
+                assert_eq!(processor.initial_noise.as_ptr(), original);
+            }
+            processor.reset();
+            assert_eq!(processor.noise, [0.25; 129]);
+        }
     }
 
     #[test]

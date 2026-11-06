@@ -335,6 +335,30 @@ pub struct BlockDenoiser {
 
 #[cfg(feature = "execution")]
 impl BlockDenoiser {
+    /// Conservative retained bytes for a boxed adapter, without constructing DSP.
+    /// Includes the adapter object, all staging and processor buffers, and an FFT
+    /// backend allowance; excludes allocator metadata and caller-owned audio.
+    /// Graphs that replace a bypassed node with a pass-through need not charge it.
+    pub fn estimated_state_bytes(
+        config: &DenoiseConfig,
+        sample_rate: u32,
+        channels: usize,
+        max_block_frames: usize,
+    ) -> Result<usize> {
+        config.validate_for_format(sample_rate, channels)?;
+        ensure!(
+            (1..=MAX_BLOCK_FRAMES).contains(&max_block_frames),
+            "invalid denoise adapter block size"
+        );
+        let delay_samples = config.lookahead_frames() * channels;
+        let block_samples = max_block_frames * channels;
+        // Output burst D+B, queue prefill plus burst 2D+B; the embedded
+        // Denoiser and its inline repair state are already in size_of::<Self>().
+        Ok(size_of::<Self>()
+            + (3 * delay_samples + 2 * block_samples) * size_of::<f32>()
+            + Denoiser::estimated_heap_bytes(config, channels))
+    }
+
     pub fn new(denoiser: Denoiser, max_block_frames: usize) -> Result<Self> {
         ensure!(
             (1..=MAX_BLOCK_FRAMES).contains(&max_block_frames),
@@ -415,6 +439,155 @@ impl BlockDenoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "execution")]
+    mod budget {
+        use super::*;
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        // Thread-local accounting keeps these regressions independent of other
+        // tests and measures retained requested bytes, not allocator/RSS noise.
+        struct Counted;
+        thread_local! {
+            static BYTES: Cell<Option<(usize, isize)>> = const { Cell::new(None) };
+        }
+        fn record(allocated: usize, released: usize) {
+            let _ = BYTES.try_with(|bytes| {
+                if let Some((total, live)) = bytes.get() {
+                    bytes.set(Some((
+                        total + allocated,
+                        live + allocated as isize - released as isize,
+                    )));
+                }
+            });
+        }
+        // SAFETY: all storage operations delegate unchanged to System; the
+        // allocation-free TLS counter neither reads nor mutates that storage.
+        unsafe impl GlobalAlloc for Counted {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                let ptr = unsafe { System.alloc(layout) };
+                if !ptr.is_null() {
+                    record(layout.size(), 0);
+                }
+                ptr
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                let ptr = unsafe { System.alloc_zeroed(layout) };
+                if !ptr.is_null() {
+                    record(layout.size(), 0);
+                }
+                ptr
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                record(0, layout.size());
+                unsafe { System.dealloc(ptr, layout) };
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+                let result = unsafe { System.realloc(ptr, layout, size) };
+                if !result.is_null() {
+                    record(size, layout.size());
+                }
+                result
+            }
+        }
+        #[global_allocator]
+        static ALLOCATOR: Counted = Counted;
+
+        fn measured<T>(f: impl FnOnce() -> T) -> (T, usize, isize) {
+            BYTES.with(|bytes| {
+                assert!(bytes.replace(Some((0, 0))).is_none());
+            });
+            let value = f();
+            let (total, live) = BYTES.with(|bytes| bytes.replace(None).unwrap());
+            (value, total, live)
+        }
+
+        #[test]
+        fn denoise_state_estimate_covers_retained_allocations_and_staging() {
+            const BLOCK: usize = 256;
+            for channels in [1, 2, MAX_CHANNELS] {
+                for fft_size in [256, 512, 1024, 2048, 4096, 8192] {
+                    for mode in [
+                        DenoiseMode::Off,
+                        DenoiseMode::Stationary,
+                        DenoiseMode::Profile,
+                        DenoiseMode::Adaptive,
+                    ] {
+                        for wet in [0.0, 0.5, 1.0] {
+                            for hum in [false, true] {
+                                for repair in [false, true] {
+                                    let mut config = DenoiseConfig {
+                                        mode,
+                                        fft_size,
+                                        wet,
+                                        ..Default::default()
+                                    };
+                                    config.hum.enabled = hum;
+                                    config.hum.harmonics = 32;
+                                    config.impulse.enabled = repair;
+                                    config.impulse.max_width = 8;
+                                    let (estimate, allocated, _) = measured(|| {
+                                        BlockDenoiser::estimated_state_bytes(
+                                            &config, 48_000, channels, BLOCK,
+                                        )
+                                        .unwrap()
+                                    });
+                                    assert_eq!(allocated, 0, "estimation must not prepare DSP");
+                                    let (mut adapter, _, retained) = measured(|| {
+                                        let profile =
+                                            (mode == DenoiseMode::Profile).then(|| NoiseProfile {
+                                                sample_rate: 48_000,
+                                                channels,
+                                                fft_size,
+                                                captured_frames: 1,
+                                                power: vec![0.0; fft_size / 2 + 1],
+                                            });
+                                        Box::new(
+                                            BlockDenoiser::new(
+                                                Denoiser::new(
+                                                    48_000,
+                                                    channels,
+                                                    config.clone(),
+                                                    profile,
+                                                )
+                                                .unwrap(),
+                                                BLOCK,
+                                            )
+                                            .unwrap(),
+                                        )
+                                    });
+                                    assert!(
+                                        retained >= 0 && estimate >= retained as usize,
+                                        "{config:?}, {channels}ch: estimate {estimate}, retained {retained}"
+                                    );
+                                    if mode == DenoiseMode::Off || config.is_bypassed() {
+                                        assert_eq!(
+                                            estimate, retained as usize,
+                                            "time-domain storage must be counted once, without padding"
+                                        );
+                                    }
+                                    let mut block = vec![0.0; BLOCK * channels];
+                                    let (_, allocated, _) = measured(|| {
+                                        adapter
+                                            .process(
+                                                &mut block,
+                                                BLOCK * channels,
+                                                true,
+                                                &mut || false,
+                                            )
+                                            .unwrap();
+                                        adapter.reset();
+                                    });
+                                    assert_eq!(allocated, 0, "admitted staging must not grow");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[cfg(feature = "execution")]
     #[test]

@@ -401,7 +401,7 @@ impl GraphRunner {
             let (extra_state, extra_work) = if is_source || bypassed {
                 (0, 0)
             } else {
-                estimate(&graph_node.kind, channels)
+                estimate(&graph_node.kind, sample_rate, channels)?
             };
             state_bytes =
                 state_bytes.saturating_add(extra_state + GRAPH_BLOCK_FRAMES * channels * 4);
@@ -731,7 +731,7 @@ fn is_bypassed(kind: &GraphNodeKind) -> bool {
     }
 }
 
-fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
+fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(usize, u64)> {
     let (state, work) = match kind {
         GraphNodeKind::Equalizer {
             config,
@@ -769,22 +769,26 @@ fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
             }
         },
         GraphNodeKind::Denoise { config, .. } => {
+            let state = BlockDenoiser::estimated_state_bytes(
+                config,
+                sample_rate,
+                channels,
+                GRAPH_BLOCK_FRAMES,
+            )?;
             let spectral = config.mode != DenoiseMode::Off;
             let fft_size = if spectral { config.fft_size } else { 0 };
-            (
-                fft_size * (channels * 64 + 128),
-                channels as u64 * (fft_size.checked_ilog2().unwrap_or(0) as u64 * 32 + 128)
-                    + if spectral {
-                        config.smoothing_bins as u64 * 16
-                    } else {
-                        0
-                    }
-                    + 256,
-            )
+            let work = channels as u64 * (fft_size.checked_ilog2().unwrap_or(0) as u64 * 32 + 128)
+                + if spectral {
+                    config.smoothing_bins as u64 * 16
+                } else {
+                    0
+                }
+                + 256;
+            (state, work)
         }
         _ => (0, 0),
     };
-    (state, work)
+    Ok((state, work))
 }
 
 #[cfg(test)]
@@ -1016,6 +1020,118 @@ mod tests {
             let runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
             assert_eq!(runner.latency_frames() > 0, repair);
             assert!(runner.estimated_work_per_frame() > 4);
+        }
+    }
+
+    #[test]
+    fn denoise_plan_charges_owned_state_once_for_each_effective_configuration() {
+        for channels in [1, 2] {
+            for mode in [
+                DenoiseMode::Off,
+                DenoiseMode::Stationary,
+                DenoiseMode::Adaptive,
+            ] {
+                for wet in [0.0, 0.5, 1.0] {
+                    for hum in [false, true] {
+                        for repair in [false, true] {
+                            let mut config = DenoiseConfig {
+                                mode,
+                                fft_size: 256,
+                                wet,
+                                ..Default::default()
+                            };
+                            config.hum.enabled = hum;
+                            config.impulse.enabled = repair;
+                            let extra = if config.is_bypassed() {
+                                0
+                            } else {
+                                BlockDenoiser::estimated_state_bytes(
+                                    &config,
+                                    48_000,
+                                    channels,
+                                    GRAPH_BLOCK_FRAMES,
+                                )
+                                .unwrap()
+                            };
+                            let graph = chain_graph(
+                                GraphNodeKind::Denoise {
+                                    config: config.clone(),
+                                    profile: None,
+                                },
+                                1,
+                            );
+                            let plan =
+                                GraphRunner::plan(&graph, port(3, 0), None, 48_000, channels)
+                                    .unwrap();
+                            assert_eq!(
+                                plan.state_bytes,
+                                3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
+                            );
+                            let runner = plan.prepare().unwrap();
+                            assert_eq!(
+                                runner.estimated_state_bytes(),
+                                3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
+                            );
+                            assert_eq!(runner.latency_frames(), config.lookahead_frames());
+                            assert_eq!(
+                                matches!(runner.nodes[1].processor, Processor::Pass),
+                                config.is_bypassed()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn denoise_adapter_state_participates_in_memory_admission_before_preparation() {
+        const CHANNELS: usize = 32;
+        const RATE: u32 = 8000;
+        let config = DenoiseConfig {
+            mode: DenoiseMode::Stationary,
+            fft_size: 8192,
+            ..Default::default()
+        };
+        let extra =
+            BlockDenoiser::estimated_state_bytes(&config, RATE, CHANNELS, GRAPH_BLOCK_FRAMES)
+                .unwrap();
+        let block_bytes = GRAPH_BLOCK_FRAMES * CHANNELS * size_of::<f32>();
+        let delay_bytes = config.lookahead_frames() * CHANNELS * size_of::<f32>();
+        let base = extra + 3 * block_bytes + GRAPH_BLOCK_FRAMES * CHANNELS * size_of::<f64>();
+        let admitted_mixes = (MAX_STATE_BYTES - base) / (block_bytes + delay_bytes);
+        assert!((1..60).contains(&admitted_mixes));
+        for mixes in [admitted_mixes, admitted_mixes + 1] {
+            let mut graph = chain_graph(
+                GraphNodeKind::Denoise {
+                    config: config.clone(),
+                    profile: None,
+                },
+                mixes + 1,
+            );
+            // Each mix combines the preceding delayed path with the original
+            // source. Its source edge owns another full denoiser delay line.
+            for index in 0..mixes {
+                let id = index as u64 + 3;
+                graph.nodes[index + 2].kind = GraphNodeKind::Mix {
+                    gains_db: vec![0.0; 2],
+                    muted: vec![false; 2],
+                    solo: vec![false; 2],
+                };
+                graph.edges.push(GraphEdge {
+                    from: port(1, 0),
+                    to: port(id, 1),
+                });
+            }
+            let result = GraphRunner::plan(&graph, port(mixes as u64 + 3, 0), None, RATE, CHANNELS);
+            if mixes == admitted_mixes {
+                assert_eq!(
+                    result.unwrap().state_bytes,
+                    base + mixes * (block_bytes + delay_bytes)
+                );
+            } else {
+                assert!(result.err().unwrap().to_string().contains("state budget"));
+            }
         }
     }
 
