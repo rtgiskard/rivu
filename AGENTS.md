@@ -21,6 +21,7 @@
 - When feature behavior or conditional compilation changes, MUST validate affected enabled and disabled combinations; all-features checks miss disabled branches
 - For documentation-only changes, check content, links, and command consistency; no lint or build is required
 - In parallel work, run shared full checks once after integration; each agent still performs the local reproduction and behavior checks needed for its changes
+- When investigation evidence, design choices, authorization, or implementation status changes, update the affected entries in [doc/91_design_decisions.adoc](doc/91_design_decisions.adoc) during delivery; keep unresolved defects in [doc/90_open_issues.adoc](doc/90_open_issues.adoc), link rather than duplicate, and distinguish recommendations from accepted or implemented decisions
 
 ## Tests
 

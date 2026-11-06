@@ -1,0 +1,207 @@
+= Engineering conclusions and design decisions
+
+This record explains consequential choices and their evidence boundaries, not
+implementation steps or delivery checklists. Current behavior belongs in the
+linked guides; link:90_open_issues.adoc[open issues] owns defects and resolutions.
+
+== Maintenance
+
+Record a decision when meaningful alternatives, non-obvious costs or long-lived
+constraints would otherwise be lost. A routine fix does not require a new entry.
+Keep the choice, its reason and the evidence needed to distinguish alternatives;
+add reconsideration conditions where useful, without a fixed per-entry template.
+
+Use `DEC-NNN` identifiers and update repository references when renumbering.
+Distinguish implemented behavior, retained choices and unapproved recommendations.
+Update affected entries when their assumptions or status change. Historical checks
+are not new verification; measurements retain workload, baseline and limits.
+Do not retain test totals, temporary paths or delivery transcripts here.
+
+== Decisions
+
+[[DEC-001]]
+=== DEC-001: Optional spectrum publication does not imply invalidation
+
+Status: implemented, 2026-11-06.
+
+An unrequested spectrum is not evidence of invalid audio. Publications carry
+request state; consumers check signal identity and settings independently rather
+than inferring semantic validity from an empty optional payload. A nested-Wayland
+Bars -> playing Oscilloscope -> pause -> Bars check retained drawing without a
+source-generation or seek-revision change; it did not establish physical GPU
+retirement. See link:23_visuals.adoc#ingestion-and-publication[analysis publication].
+
+[[DEC-002]]
+=== DEC-002: Dependency recovery must not become a new scan
+
+Status: implemented, 2026-11-06.
+
+Filtered counts depend on unfiltered root totals. Keep failed dependencies
+retryable under filters; explicit recovery retries counts, while filter changes
+must not automatically retry persistent failures or bypass physical-worker
+ownership. A fault-injected missing table originally routed recovery into scan
+task 1. After correction, isolated nested-Wayland input recovered `0/0` counts
+without changing the system revision or allocating a scan task. This is dependency
+recovery evidence, not an ordinary schema fault or host-desktop acceptance.
+See link:02_library.adoc[Library recovery].
+
+[[DEC-003]]
+=== DEC-003: Admit denoise state at the allocation boundary
+
+Status: implemented, 2026-11-06.
+
+Account for adapter storage and independently enabled hum/impulse processors,
+including spectral Off, instead of applying a blanket multiplier or charging
+storage twice. At 48 kHz stereo with spectral Off and hum enabled, the original
+estimate was 6,144 bytes versus 12,088 net live allocated bytes; bypass retained
+4,424 bytes despite the same estimate. Three repetitions matched and drop returned
+the allocation delta to zero. Allocation regressions and standalone processing
+smoke passed after correction. These counts establish missing state accounting,
+not a process RSS bound or a demonstrated whole-graph 64 MiB overrun.
+See link:27_audio_processing.adoc[Audio processing budgets].
+
+[[DEC-004]]
+=== DEC-004: Bound ready cancellation work without releasing query ownership
+
+Status: implemented, 2026-11-06.
+
+A bounded channel does not bound a polling round when cancellation controls remain
+ready. Use cumulative cooperative work limits while preserving cancellation
+identity and the physical reply slot. Executor regressions cover sustained-ready
+fairness; an actual IPC connection completed a retained query with 128 unmatched
+cancellation controls and kept its next State response aligned. Flood latency
+was not measured; ordinary one-cancel clients were not shown to stall.
+See link:21_ipc.adoc[IPC lifecycle and limits].
+
+[[DEC-005]]
+=== DEC-005: Keyset serves sequential traversal, not arbitrary viewport offsets
+
+Status: retained after consumer review, 2026-11-06; no new API required.
+
+CLI TrackBatch, playlist occurrence continuations and playlist-export snapshots
+already serve sequential traversal. Keep random-access page contracts for GUI/TUI
+viewports and GUI range selection; keyset cannot replace their absolute offsets
+without changing jump semantics. Cursor scope must include ordering, filters and
+revision. Revisit for a new sequential consumer lacking continuation support or
+a measured random-access bottleneck.
+
+An isolated SQLite 3.54.1 experiment used the actual schema/indexes and projection,
+100,000 ASCII tracks and ten pages of 100 rows. Three repetitions returned
+identical rows:
+
+[cols="2,1,1",options="header"]
+|===
+|Workload |Deep OFFSET VM steps |Known-anchor keyset VM steps
+|Unfiltered |2,552,660 |29,140--29,194
+|One-in-ten substring matches |9,071,660 |187,140
+|===
+
+Counts exclude initial anchor acquisition and count queries; they are not
+application latency measurements. See link:21_ipc.adoc[Query contracts].
+
+[[DEC-006]]
+=== DEC-006: Latest PCM snapshots cannot replace continuous analysis
+
+Status: retained after review, 2026-11-06.
+
+A 4096-frame latest snapshot cannot reconstruct a 32768-frame FFT or every sample
+needed by continuous Density accumulation. Retain worker analysis instead of
+substituting the latest snapshot. Full raw streaming would require queue,
+identity, scheduling and release ownership again. Independently retained optional
+payloads must not acquire a shared lifetime solely to reduce type count.
+Revisit only for a concrete consumer with equivalent continuity and bounded
+retention. See link:23_visuals.adoc[Analysis and visualization].
+
+[[DEC-007]]
+=== DEC-007: PCM retention needs conservative prefetch headroom
+
+Status: implemented, 2026-11-06.
+
+Size native retention for bounded output prefetch with conservative headroom,
+not byte-tight minimum capacity; the user explicitly preferred avoiding extreme
+capacity minimization. Preserve finite storage/scheduling bounds without adding
+states merely to save a few blocks.
+
+In a standalone quarter-second stereo publication, the original 32-slot window
+retained all frames at 48 kHz but only 32,640 of 48,000 at 192 kHz and 32,512 of
+96,000 at 384 kHz. After correction it retained every frame at all three rates,
+including fragmented writes. This establishes retention coverage, not measured
+audible dropout, device A/V synchronization or latency. Other corrections from
+the same review belong in link:90_open_issues.adoc#pcm-continuity-and-frontend-readiness-from-branch-review[the resolution record].
+See link:21_ipc.adoc[PCM transport] and link:22_cache.adoc[resource lifecycles].
+
+[[DEC-008]]
+=== DEC-008: Keep GUI cache ownership until cold-path measurements justify change
+
+Status: retained after review, 2026-11-06; redesign not authorized.
+
+Keep disposable content-addressed thumbnails, the reusable decode seat and
+acknowledged pixel retirement. Window animation demand, per-panel rotation and
+source-frame cursors have distinct ownership; global redraw is not an equivalent
+replacement for targeted cached-scene invalidation.
+
+Tier loads read/hash the original before disk reuse; cold generation persists the
+thumbnail before returning pixels, on the same decode seat. Publishing pixels
+first might shorten the critical path but adds retained bytes, cancellation and
+shutdown ownership. No latency or aggregate-memory measurement yet justifies that
+change. Frame-deadline scheduling likewise needs cursor/deadline integration, not
+another independent timer. Revisit with cold-load or animation-load measurements
+and equivalent failure/retirement evidence. Per-image budgets do not establish a
+window-wide decoded/GPU cap. See link:22_cache.adoc[Artwork retention] and
+link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation].
+
+[[DEC-009]]
+=== DEC-009: Stream uncached native exports instead of retaining output PCM
+
+Status: implemented, 2026-11-06.
+
+Use a block sink in the existing native engine for uncached, native-only selected
+output. Do not create a second DSP engine, worker or file protocol. Cached exports
+share existing PCM; model ancestors and retained Hybrid contexts keep their PCM
+requirements. This avoids charging complete file-only output to the 512 MiB PCM
+budget even though it will not remain in an audition slot.
+
+The pre-optimization production PcmBuilder, fed 256-frame stereo blocks at 48 kHz,
+charged the following bytes in three identical repetitions. A 128-frame slice
+retained the whole charge until its final owner dropped:
+
+[cols="1,1,1",options="header"]
+|===
+|Seconds |Raw float32 PCM bytes |Charged retained bytes
+|10 |3,840,000 |3,870,802
+|30 |11,520,000 |11,550,802
+|120 |46,080,000 |46,170,194
+|===
+
+After optimization, native export regressions with a zero-byte PCM budget matched
+retained execution across short EOF, delayed/branched filters, STFT and Profile.
+An isolated 30-second, 48 kHz stereo CLI export matched all 1,440,000 source frames
+and produced the same WAV bytes as the cached route. Repeated destinations were
+rejected; a file-size-limit failure left no export file after shutdown.
+
+Exact decoded EOF owns preroll/tail cropping; estimated duration is insufficient.
+Core, not worker completion, owns cancellation/source/destination revalidation and
+atomic no-clobber publication. Retain these boundaries even if the sink changes.
+For fixed graph/format, output PCM retention is duration-independent; decoder,
+DSP/profile state, delays and existing results still cost memory. This evidence
+is not an RSS or export-latency measurement, nor a promise of unlimited WAV size.
+See link:27_audio_processing.adoc#tasks-retention-and-audition[Processing and export].
+
+== Unapproved candidates
+
+Status: not adopted or authorized, 2026-11-06. These are investigation candidates,
+not defects or implementation commitments; each needs evidence before selection.
+Native streaming export has been adopted separately under <<DEC-009>>.
+
+[cols="1,2",options="header"]
+|===
+|Candidate |Value to establish and cost to preserve
+|Pixels before thumbnail persistence |Cold-display latency versus retained bytes and shutdown ownership; see <<DEC-008>>
+|Dedicated collection write owner |Core tail latency; preserve write leases, revision authority and physical completion
+|Disk-staged scans |Bound library retention; preserve CUE/relocation facts and atomic reconcile
+|Spatial-only snapshot pool |Reduce payload copying; account for slot exhaustion and independently retained payloads
+|Spectrogram capacity compaction |Reduce capacity high-water retention; account for copying and old/new overlap without reducing sampling precision
+|Callback scratch removal or finer scheduling |Measure copy/control costs; preserve wrap/frame atomicity, branches and refill headroom
+|ONNX Session reuse |Repeated short-job startup versus resident arenas; preserve model/config identity, retirement and task-local recurrent state
+|Aggregate artwork/metadata admission; a11y geometry caching |Establish workload pressure; preserve animation/metadata and font/scale/IME invalidation
+|===

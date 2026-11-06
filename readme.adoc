@@ -156,6 +156,7 @@ Client and wire contracts are in link:doc/21_ipc.adoc[IPC].
 ** link:doc/27_audio_processing.adoc#ownership-and-invariants[Audio processing and quality evaluation]
 * Project status
 ** link:doc/90_open_issues.adoc[Open issues and deferred work]
+** link:doc/91_design_decisions.adoc[Engineering conclusions, decisions, and tradeoffs]
 * Agent development skills
 ** https://github.com/rtgiskard/gskd-craft[gskd-craft]: reusable agent development skills
 

@@ -3,6 +3,8 @@
 Each entry records its investigation or resolution date. Resolved entries retain
 the original problem and evidence boundary; they are not new verification runs.
 Current behavior belongs in the linked user guides and design documents.
+Cross-cutting alternatives, accepted tradeoffs and reconsideration conditions are
+maintained in link:91_design_decisions.adoc[Engineering conclusions and design decisions].
 
 == Open and deferred
 
@@ -61,6 +63,29 @@ its transformation under this data-directory exclusion. Database-file alias
 protection remains unresolved.
 
 == Resolved investigations
+
+=== Filtered root-count dependency recovery
+
+Status: resolved, 2026-11-06. A failed root-total dependency remains retryable
+under active filtering. Final integration and real Wayland-input recovery passed:
+restoring the dependency and clicking recovered `0/0` without allocating a scan
+task. Mechanism and evidence boundaries: link:91_design_decisions.adoc#DEC-002[DEC-002].
+
+=== Denoise state admission accounting
+
+Status: resolved, 2026-11-06. State admission includes adapter storage and
+independently enabled hum/repair with spectral Off. Allocation regressions,
+disabled-feature validation and a standalone processing graph passed. Arithmetic
+work policy is unchanged; process RSS is outside this budget.
+See link:91_design_decisions.adoc#DEC-003[DEC-003].
+
+=== Cooperative retained-query waiting
+
+Status: resolved, 2026-11-06. A cumulative cooperation budget bounds ready
+cancellation consumption without releasing physical query ownership. Executor
+fairness and terminal progress regressions passed with and without default
+features; actual IPC retained-query completion and subsequent State alignment
+passed. See link:91_design_decisions.adoc#DEC-004[DEC-004].
 
 === Structural GUI demand reconciliation during transport updates
 
@@ -161,3 +186,39 @@ repetitions and a second import with four unique ordinary/CUE identities. A sepa
 minimum-duration case retained only accepted entries. Database reads checked order
 and multiplicity; these are query counts, not latency or RSS measurements. See
 link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].
+
+=== PCM continuity and frontend readiness from branch review
+
+Status: resolved in implementation, 2026-11-06.
+
+Review of `wip/commit-review-20261104` found unchanged settings revoking PCM
+identity, prefetch exceeding fixed native retention, skipped growing tails and
+unconsumed clearing frames. Terminal entry operations could retry an unchanged
+failed playlist title, and executable bootstrap waited before terminal input
+could cancel readiness. These behaviors were corrected on mainline owners rather
+than by merging the old branch; the already-absorbed palette fix was retained.
+
+Regression checks covered unchanged settings, growing tails, title failures and
+shared-sample overwrite/reconfiguration. Against a stalled Hello in a real PTY,
+`q`, Ctrl-C and SIGTERM each exited, restored terminal settings and left the
+independent socket owner accepting connections. This does not establish device
+A/V synchronization, latency or physical GPU retirement. Retention sizing and
+before/after frame counts are in link:91_design_decisions.adoc#DEC-007[DEC-007];
+current mechanisms belong in link:21_ipc.adoc[PCM transport] and
+link:04_playback.adoc[frontend controls].
+
+The separate GUI complexity review retains cache/animation ownership, with
+independent disk-reload and cached-consumer behavior coverage rather than a
+production redesign; see link:91_design_decisions.adoc#DEC-008[DEC-008].
+
+=== Album menu loading keyboard cancellation
+
+Status: resolved, 2026-11-06.
+
+New playlist's deferred album read restored focus to an unmounted submenu trigger,
+preventing Escape from reaching cancellation. Loading now consumes that restoration
+intent while retaining menu-scope focus. A keyboard-dispatch regression covers
+Escape and Left without releasing the physical reader early. Isolated nested-Wayland
+input also dismissed the loading page; resuming the held Core query did not reopen
+the playlist dialog or create a playlist. This is cancellation evidence, not a query
+latency measurement. See link:02_library.adoc#albums[Album actions].
