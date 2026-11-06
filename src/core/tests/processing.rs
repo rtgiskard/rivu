@@ -3457,3 +3457,49 @@ fn optimization_queue_recovery_failure_preserves_stopped_graph() {
     assert_eq!(selected.output, Some(target));
     assert!(!core.transport.selection_pending);
 }
+
+#[test]
+fn streamed_graph_exports_recheck_publication_and_reclaim_unpublished_files() {
+    for failure in 0..3 {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        core.processing = crate::processing::Service::with_memory_limit(0);
+        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+            .unwrap();
+        complete(&mut core);
+        let export_dir = directory.path().join("exports");
+        std::fs::create_dir(&export_dir).unwrap();
+        let destination = export_dir.join("result.wav");
+        core.processing_graph_export(1, graph_port(2, 0), destination.clone())
+            .unwrap();
+        let event = completion(&mut core);
+        assert!(!destination.exists());
+        match failure {
+            0 => core.cancel_processing(2).unwrap(),
+            1 => std::fs::write(directory.path().join("1.wav"), b"source changed").unwrap(),
+            _ => std::fs::write(&destination, b"existing destination").unwrap(),
+        }
+        core.processing_event(event);
+        let status = core.processing_status(2).unwrap();
+        assert_eq!(
+            status.phase,
+            if failure == 0 {
+                ProcessingPhase::Cancelled
+            } else {
+                ProcessingPhase::Failed
+            }
+        );
+        assert!(status.graph_exported_path.is_none());
+        assert_eq!(core.processing.memory_bytes(), 0);
+        drop(core);
+        if failure == 2 {
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                b"existing destination"
+            );
+            assert_eq!(std::fs::read_dir(export_dir).unwrap().count(), 1);
+        } else {
+            assert_eq!(std::fs::read_dir(export_dir).unwrap().count(), 0);
+        }
+    }
+}

@@ -533,13 +533,23 @@ not another audition slot. `id` identifies the export receipt; `graph_run_id`
 identifies the frozen run used for further audition/export actions.
 See link:22_cache.adoc#processing-output-retention[Processing output retention].
 
-Native denoise and native-only graphs decode in blocks, retaining final PCM and
-bounded DSP/delay state rather than whole-track native intermediates. Profile
-capture reads only the required prefix, including upstream causal context and
-latency in a graph. Early completion validates cancellation and the opened source
-without treating the prefix boundary as EOF or flushing artificial tails. Actual
-decoded frames determine EOF, including unknown-duration streams; real EOF flushes
-the required DSP context, and a selection beyond the source is invalid.
+Native denoise and retained native-only graph runs decode in blocks, retaining
+final PCM and bounded DSP/delay state rather than whole-track native intermediates.
+Uncached file exports whose selected ancestor chain is entirely native instead
+write blocks directly into an unpublished WAV, without retaining complete output
+PCM or consuming another audition slot. Cached exports share their existing PCM;
+model ancestors and retained Hybrid boundaries keep their PCM requirements.
+For a fixed graph and format, streaming export's output memory does not grow with
+duration; decoder, DSP/profile state, delays and existing cached audio remain costs.
+
+Profile capture reads only the required prefix, including upstream causal context
+and latency in a graph. Early completion validates cancellation and the opened
+source without treating the prefix boundary as EOF or flushing artificial tails.
+Actual decoded frames determine EOF, including unknown-duration streams; real EOF
+flushes DSP context. File output discards causal preroll and crops tails to exactly
+the decoded source length, including FIR tails longer than their latency. A profile
+selection beyond the source is invalid. Cancellation or failed source/destination
+validation discards the temporary file; Core alone publishes the completed WAV.
 
 Graphs with neural nodes retain budgeted PCM at model boundaries. Original source
 storage retires once no remaining operation can reach it; source forks and profile

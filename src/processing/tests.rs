@@ -1545,3 +1545,116 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
     );
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn native_file_exports_match_retained_timeline_without_pcm_budget() {
+    use rivu_dsp::{
+        denoise::{DenoiseConfig, DenoiseMode},
+        equalizer::config::{EqBand, EqualizerConfig, FilterKind},
+    };
+    for frames in [1, 63, 257, 4093] {
+        let (_directory, old, track, _) = fixture();
+        drop(old);
+        let mut writer = hound::WavWriter::create(
+            &track.path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 8000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for index in 0..frames {
+            writer
+                .write_sample((index as f32 * 0.17).cos() * 0.3)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let eq = EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                kind: FilterKind::LowPass,
+                frequency_hz: 1500.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let fir = GraphNodeKind::Equalizer {
+            config: eq.clone(),
+            implementation: EqImplementation::LinearPhase { taps: 257 },
+        };
+        let mut cases = vec![
+            vec![],
+            vec![GraphNodeKind::Equalizer {
+                config: eq,
+                implementation: EqImplementation::Iir,
+            }],
+            vec![fir.clone()],
+            vec![fir.clone(), fir.clone()],
+            vec![GraphNodeKind::Denoise {
+                config: DenoiseConfig {
+                    mode: DenoiseMode::Stationary,
+                    fft_size: 256,
+                    ..Default::default()
+                },
+                profile: None,
+            }],
+        ];
+        if frames == 4093 {
+            cases.push(vec![
+                fir,
+                GraphNodeKind::Denoise {
+                    config: DenoiseConfig {
+                        mode: DenoiseMode::Profile,
+                        fft_size: 256,
+                        ..Default::default()
+                    },
+                    profile: Some(NoiseSelection {
+                        start_seconds: 0.01,
+                        end_seconds: 0.04,
+                    }),
+                },
+            ]);
+        }
+        for (case, kinds) in cases.into_iter().enumerate() {
+            let config = graph_config(kinds);
+            let mut reference = Service::new();
+            let result = completed_graph(&mut reference, &track, Arc::clone(&config)).unwrap();
+            let expected = samples(&result.graph_outputs[&GraphPort { node: 2, port: 0 }].pcm);
+            let destination = track.path.with_file_name(format!("export-{case}.wav"));
+            let mut service = Service::with_memory_limit(0);
+            service
+                .start_graph(
+                    track.clone(),
+                    config,
+                    GraphRequest {
+                        target: GraphPort { node: 2, port: 0 },
+                        mode: GraphExecutionMode::Offline,
+                        export_path: Some(destination.clone()),
+                        source_run: None,
+                        cached_output: None,
+                    },
+                )
+                .unwrap();
+            loop {
+                if let Event::Finished { result, .. } = next_event(&mut service) {
+                    service.finish_task(service.active_id().unwrap()).unwrap();
+                    let result = result.unwrap();
+                    assert!(result.graph_outputs.is_empty());
+                    assert_eq!(service.memory_bytes(), 0);
+                    assert_eq!(result.status.frames, Some(frames));
+                    assert!(!destination.exists(), "worker must not publish");
+                    let actual =
+                        hound::WavReader::open(result.pending_export.as_ref().unwrap().0.path())
+                            .unwrap()
+                            .samples::<f32>()
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .unwrap();
+                    assert_eq!(actual, expected, "frames={frames}, case={case}");
+                    break;
+                }
+            }
+        }
+    }
+}

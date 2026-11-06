@@ -212,6 +212,7 @@ pub(super) fn run(
     }
     progress.report(ProcessingPhase::Rendering, 0, None);
     let mut graph_outputs = BTreeMap::new();
+    let mut pending_export = None;
     let outputs = if status.operation == ProcessingOperation::Denoise {
         let pcm = classical_native(
             renderer,
@@ -234,7 +235,7 @@ pub(super) fn run(
             ..Default::default()
         }
     } else if status.operation == ProcessingOperation::Graph && graph::native_only(&status)? {
-        graph_outputs = graph::execute_native(
+        let native_output = graph::execute_native(
             renderer,
             &open_source,
             Arc::clone(&budget),
@@ -242,6 +243,8 @@ pub(super) fn run(
             cancel,
             &mut progress,
         )?;
+        graph_outputs = native_output.outputs;
+        pending_export = native_output.pending_export;
         AudioOutputs::default()
     } else {
         // Whole-signal model boundaries require seekable input. Native-only
@@ -293,12 +296,14 @@ pub(super) fn run(
     {
         validate_output(pcm, native.sample_rate, &native.layout, frames, cancel)?;
     }
-    let pending_export = if let Some(destination) = &status.settings.graph_export_path {
+    if pending_export.is_none()
+        && let Some(destination) = &status.settings.graph_export_path
+    {
         let target = status
             .settings
             .graph_target
             .context("Missing export target")?;
-        Some(prepare_export(
+        pending_export = Some(prepare_export(
             &graph_outputs
                 .get(&target)
                 .context("Missing export output")?
@@ -308,10 +313,8 @@ pub(super) fn run(
             |done, total| {
                 progress.report(ProcessingPhase::Processing, done, Some(total));
             },
-        )?)
-    } else {
-        None
-    };
+        )?);
+    }
     status.phase = ProcessingPhase::Complete;
     status.completed = frames;
     status.total = Some(frames);

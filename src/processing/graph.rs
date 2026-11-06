@@ -448,13 +448,14 @@ impl Engine {
     }
     /// Returns the source frames traversed, or the exact length after real EOF.
     /// A bounded prefix therefore still proves any earlier source selection fits.
+    /// Consumers receive exact source length on every tail block, never an estimate.
     fn decode(
         &mut self,
         target: usize,
         mut renderer: audio::SourceRenderer,
         prefix_end: Option<u64>,
         cancel: &AtomicBool,
-        mut consume: impl FnMut(u64, &[f32]) -> Result<()>,
+        mut consume: impl FnMut(u64, &[f32], Option<u64>) -> Result<()>,
     ) -> Result<u64> {
         ensure!(
             self.streaming,
@@ -488,6 +489,7 @@ impl Engine {
                 consume(
                     position,
                     &self.nodes[self.nodes[target].output_node].output[..count * self.channels],
+                    None,
                 )?;
                 position = position
                     .checked_add(count as u64)
@@ -506,6 +508,7 @@ impl Engine {
             consume(
                 position,
                 &self.nodes[self.nodes[target].output_node].output[..count * self.channels],
+                Some(frames),
             )?;
             position += count as u64;
         }
@@ -901,6 +904,36 @@ pub(super) fn native_only(status: &ProcessingTaskStatus) -> Result<bool> {
     }))
 }
 
+pub(super) struct NativeGraphOutput {
+    pub(super) outputs: BTreeMap<GraphPort, GraphAudioOutput>,
+    pub(super) pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
+}
+
+fn causal_export_block(
+    position: u64,
+    samples: &[f32],
+    channels: usize,
+    latency: u64,
+    source_frames: Option<u64>,
+) -> Result<&[f32]> {
+    let block_end = position
+        .checked_add((samples.len() / channels) as u64)
+        .context("Graph export block timeline overflow")?;
+    let begin = position.max(latency);
+    // Before EOF every block ends at or before N, hence also before latency+N.
+    // Tail blocks require the exact EOF, especially when N is below latency.
+    let end = source_frames.map_or(Ok(block_end), |frames| {
+        latency
+            .checked_add(frames)
+            .map(|end| end.min(block_end))
+            .context("Graph export timeline overflow")
+    })?;
+    if begin >= end {
+        return Ok(&samples[..0]);
+    }
+    Ok(&samples[(begin - position) as usize * channels..(end - position) as usize * channels])
+}
+
 pub(super) fn execute_native(
     renderer: audio::SourceRenderer,
     mut reopen: impl FnMut() -> Result<audio::SourceRenderer>,
@@ -908,7 +941,7 @@ pub(super) fn execute_native(
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
-) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+) -> Result<NativeGraphOutput> {
     let tx = progress.sender;
     let graph = status
         .settings
@@ -973,7 +1006,7 @@ pub(super) fn execute_native(
                     reopen()?,
                     Some(finish),
                     cancel,
-                    |position, samples| {
+                    |position, samples, _| {
                         let from = position.max(begin);
                         let to =
                             (position + (samples.len() / usize::from(channels)) as u64).min(finish);
@@ -999,12 +1032,67 @@ pub(super) fn execute_native(
         active_node = Some(target.node);
         let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
         let index = engine.compile(&graph, target, &BTreeMap::new(), &profiles, cancel)?;
-        let start_frame = -i64::try_from(engine.nodes[index].latency)?;
+        let latency = engine.nodes[index].latency;
         drop(profiles);
-        let mut builder = audio::PcmBuilder::new(rate, layout, budget)?;
-        let frames = engine.decode(index, renderer, None, cancel, |_, block| {
-            builder.push(block)
-        })?;
+        let destination = status
+            .settings
+            .graph_export_path
+            .as_ref()
+            .filter(|_| status.settings.graph_mode == Some(GraphExecutionMode::Offline));
+        let (frames, output, pending_export) = if let Some(destination) = destination {
+            let mut frames = None;
+            let mut written = 0_u64;
+            let pending = super::export::prepare_streaming_export(
+                rate,
+                &layout,
+                destination,
+                cancel,
+                |writer| {
+                    frames = Some(engine.decode(
+                        index,
+                        renderer,
+                        None,
+                        cancel,
+                        |position, samples, source_frames| {
+                            let block = causal_export_block(
+                                position,
+                                samples,
+                                usize::from(channels),
+                                latency,
+                                source_frames,
+                            )?;
+                            writer.write_frames(block)?;
+                            written = written
+                                .checked_add((block.len() / usize::from(channels)) as u64)
+                                .context("Graph export length overflow")?;
+                            progress.report(ProcessingPhase::Processing, written, source_frames);
+                            Ok(())
+                        },
+                    )?);
+                    ensure!(
+                        frames == Some(written),
+                        "Graph export does not cover source timeline"
+                    );
+                    Ok(())
+                },
+            )?;
+            (
+                frames.context("Missing decoded source frame count")?,
+                None,
+                Some(pending),
+            )
+        } else {
+            let start_frame = -i64::try_from(latency)?;
+            let mut builder = audio::PcmBuilder::new(rate, layout, budget)?;
+            let frames = engine.decode(index, renderer, None, cancel, |_, block, _| {
+                builder.push(block)
+            })?;
+            let output = GraphPcm {
+                pcm: builder.finish()?,
+                start_frame,
+            };
+            (frames, Some(output), None)
+        };
         for &id in &order {
             active_node = Some(id);
             if let GraphNodeKind::Denoise {
@@ -1021,17 +1109,19 @@ pub(super) fn execute_native(
         }
         active_node = Some(target.node);
         status.frames = Some(frames);
-        publish(
-            GraphPcm {
-                pcm: builder.finish()?,
-                start_frame,
-            },
-            frames,
-            target,
-            order,
-            status,
-            tx,
-        )
+        let outputs = if let Some(output) = output {
+            publish(output, frames, target, order, status, tx)?
+        } else {
+            status.graph_outputs.clear();
+            for id in order {
+                node_event(status, id, ProcessingPhase::Complete, None, tx);
+            }
+            BTreeMap::new()
+        };
+        Ok(NativeGraphOutput {
+            outputs,
+            pending_export,
+        })
     })();
     if let Err(error) = &outcome
         && let Some(id) = active_node
@@ -1644,7 +1734,7 @@ mod tests {
         let result: Result<audio::PcmAudio> = (|| {
             let mut builder =
                 audio::PcmBuilder::new(48000, Arc::clone(input.layout()), Arc::clone(&budget))?;
-            engine.decode(target, renderer, None, &cancel, |_, block| {
+            engine.decode(target, renderer, None, &cancel, |_, block, _| {
                 builder.push(block)?;
                 blocks += 1;
                 cancel.store(true, Ordering::Release);
@@ -1733,7 +1823,7 @@ mod tests {
         let mut builder =
             audio::PcmBuilder::new(48000, Arc::clone(&renderer.format().layout), budget).unwrap();
         engine
-            .decode(target, renderer, None, &cancel, |_, block| {
+            .decode(target, renderer, None, &cancel, |_, block, _| {
                 builder.push(block)
             })
             .unwrap();
@@ -1827,7 +1917,7 @@ mod tests {
                 let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
                 let mut decoded = Vec::new();
                 let source_frames = engine
-                    .decode(target, renderer, Some(end), &cancel, |_, block| {
+                    .decode(target, renderer, Some(end), &cancel, |_, block, _| {
                         decoded.extend_from_slice(block);
                         Ok(())
                     })
@@ -1885,7 +1975,9 @@ mod tests {
                     )
                     .unwrap();
                     engine
-                        .decode(target, renderer, prefix, &cancel, &mut consume)
+                        .decode(target, renderer, prefix, &cancel, |position, block, _| {
+                            consume(position, block)
+                        })
                         .map(|_| ())
                 } else {
                     engine.stream(target, prefix, &cancel, &mut consume)
@@ -1942,12 +2034,93 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        let result = engine.decode(target, renderer, Some(97), &cancel, |_, block| {
+        let result = engine.decode(target, renderer, Some(97), &cancel, |_, block, _| {
             assert_eq!(block, &[0.125; 97]);
             fs::OpenOptions::new().write(true).open(&path)?.set_len(0)?;
             Ok(())
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn streamed_export_crop_aligns_short_sources_and_unequal_mix_branches() {
+        let mut graph = chain(vec![
+            GraphNodeKind::Equalizer {
+                config: rivu_dsp::equalizer::config::EqualizerConfig {
+                    enabled: true,
+                    preamp_db: 3.0,
+                    ..Default::default()
+                },
+                implementation: EqImplementation::LinearPhase { taps: 65 },
+            },
+            GraphNodeKind::Denoise {
+                config: rivu_dsp::denoise::DenoiseConfig {
+                    mode: DenoiseMode::Adaptive,
+                    fft_size: 256,
+                    ..Default::default()
+                },
+                profile: None,
+            },
+            GraphNodeKind::Mix {
+                gains_db: vec![-3.0, -6.0, -9.0],
+                muted: vec![false; 3],
+                solo: vec![false; 3],
+            },
+        ]);
+        for (node, port) in [(3, 1), (1, 2)] {
+            graph.edges.push(GraphEdge {
+                from: GraphPort { node, port: 0 },
+                to: GraphPort { node: 5, port },
+            });
+        }
+        let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let identity = audio::source_identity_from_metadata(&metadata);
+        let cancel = AtomicBool::new(false);
+        for length in [1, 63, 257, 4093] {
+            let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+            let data: Vec<f32> = (0..length)
+                .map(|i| (i as f32 * 0.037).cos() * 0.3)
+                .collect();
+            let input = pcm(&data, &budget);
+            let retained = render(&graph, &input, &budget);
+            let latency = retained.start_frame.unsigned_abs();
+            assert!(latency > 63);
+            let expected = samples(&retained.pcm.slice_frames(latency, length as u64).unwrap());
+            let mut engine = Engine::for_decoder(48000, Arc::clone(input.layout()));
+            let target = engine
+                .compile(
+                    &graph,
+                    GraphPort { node: 2, port: 0 },
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &cancel,
+                )
+                .unwrap();
+            assert_eq!(engine.nodes[target].latency, latency);
+            let renderer = audio::SourceRenderer::from_pcm(input, identity).unwrap();
+            let mut actual = Vec::new();
+            let mut tail_blocks = 0;
+            let frames = engine
+                .decode(target, renderer, None, &cancel, |position, block, eof| {
+                    if let Some(frames) = eof {
+                        assert_eq!(frames, length as u64);
+                        assert!(position >= frames);
+                        tail_blocks += 1;
+                    } else {
+                        assert!(position < length as u64);
+                    }
+                    actual
+                        .extend_from_slice(causal_export_block(position, block, 1, latency, eof)?);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(frames, length as u64);
+            assert!(tail_blocks > 0);
+            assert_eq!(actual.len(), length);
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-5);
+            }
+        }
     }
 
     #[test]
@@ -2002,7 +2175,7 @@ mod tests {
                 renderer,
                 None,
                 &AtomicBool::new(false),
-                |_, block| {
+                |_, block, _| {
                     decoded.extend_from_slice(block);
                     Ok(())
                 },
