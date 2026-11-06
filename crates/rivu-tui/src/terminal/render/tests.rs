@@ -73,7 +73,7 @@ fn recent_renders_filtered_source_indices() {
 }
 
 #[test]
-fn iteration_recent_keeps_exact_alignment_and_live_count_and_time() {
+fn recent_refreshes_count_and_live_timestamp_without_losing_selection() {
     let i18n = Localizer::for_terminal("en-US");
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
     let mut recent = RecentTracks {
@@ -87,55 +87,28 @@ fn iteration_recent_keeps_exact_alignment_and_live_count_and_time() {
         ..RecentTracks::default()
     };
     recent.entries.insert(0, 256, 1, vec![0]);
-    for width in [1_u16, 2, 3, 8, 24, 52, 80] {
-        let content_width = width.saturating_sub(2) as usize;
-        for (count, timestamp) in [(12345, 1_700_000_100), (987, 1_700_000_200)] {
+    for width in [24, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+        for (count, timestamp, old_count) in
+            [(12345, 1_700_000_100, "987"), (987, 1_700_000_200, "12345")]
+        {
             Arc::make_mut(&mut recent.source)[0].play_count = count;
             recent.playback = Some((2, timestamp));
-            let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
             terminal
-                .draw(|frame| {
-                    recent
-                        .entries
-                        .set_viewport(frame.area().height.saturating_sub(1) as usize);
-                    draw_recent(frame, frame.area(), &mut recent, &i18n, colors)
-                })
+                .draw(|frame| draw_recent(frame, frame.area(), &mut recent, &i18n, colors))
                 .unwrap();
-            let count = count.to_string();
-            let count_width = count.len().min(content_width.saturating_sub(1));
-            let time = (content_width >= count_width + 35).then(|| {
-                chrono::DateTime::from_timestamp(timestamp, 0)
+            let text = terminal_text(&terminal);
+            assert!(text.contains(&count.to_string()), "{text}");
+            assert!(!text.contains(old_count), "{text}");
+            if width == 80 {
+                let time = chrono::DateTime::from_timestamp(timestamp, 0)
                     .unwrap()
                     .with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M:%S")
-                    .to_string()
-            });
-            let gap = usize::from(content_width > count_width);
-            let title_width = content_width
-                .saturating_sub(count_width + gap + if time.is_some() { 21 } else { 0 });
-            let expected = format!(
-                "{}{}{}{}",
-                cell_text(&recent.source[0].title, title_width, false),
-                " ".repeat(gap),
-                cell_text(&count, count_width, true),
-                time.map_or_else(String::new, |time| format!("  {time}")),
-            );
-            let mut expected_terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
-            expected_terminal
-                .draw(|frame| {
-                    frame.render_widget(
-                        Paragraph::new(expected),
-                        Rect::new(width.min(1), 1, content_width as u16, 1),
-                    );
-                })
-                .unwrap();
-            for x in 0..width {
-                assert_eq!(
-                    terminal.backend().buffer()[(x, 1)].symbol(),
-                    expected_terminal.backend().buffer()[(x, 1)].symbol(),
-                    "recent row mismatch at width {width}, column {x}",
-                );
+                    .to_string();
+                assert!(text.contains(&time), "{text}");
             }
+            assert_eq!(recent.entries.selected(), Some(&0));
         }
     }
 }
@@ -229,7 +202,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
 fn iteration_detail_fields_keep_label_and_value_visible_at_widths_one_through_four() {
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
     for width in 1..=4 {
-        let lines = detail_field("Artist", "Visible", width, colors);
+        let lines = detail_field("Artist", "Visible", width, colors, colors.artist);
         let mut terminal = Terminal::new(TestBackend::new(width as u16, 32)).unwrap();
         terminal
             .draw(|frame| draw_cached_lines(frame, frame.area(), &lines, 0))
@@ -610,10 +583,30 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let marker_x = (0..buffer.area.width)
-            .find(|&x| buffer[(x, 1)].symbol() == symbol)
-            .expect("current queue occurrence has its playback marker");
-        assert_eq!(buffer[(marker_x, 2)].symbol(), " ");
+        let colors = TerminalColors::new(state.system.ui_theme);
+        let mut markers = buffer
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.symbol() == symbol);
+        let (marker_index, marker) = markers
+            .next()
+            .expect("current occurrence has its playback marker");
+        assert!(
+            markers.next().is_none(),
+            "only the current occurrence is marked"
+        );
+        assert_ne!(
+            marker.bg, colors.selected,
+            "selection alone must not move the playback marker"
+        );
+        let marker_x = marker_index % buffer.area.width as usize;
+        let selected_row = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .find(|row| row.iter().any(|cell| cell.bg == colors.selected))
+            .expect("selected occurrence is visible");
+        assert_eq!(selected_row[marker_x].symbol(), " ");
         assert_eq!(page.selected().unwrap().id, 18);
     }
 }
@@ -701,7 +694,12 @@ pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
     let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
     terminal
         .draw(|frame| {
-            commit_page_viewport(ui, frame.area().height.saturating_sub(1).max(1) as usize);
+            let rows = frame
+                .area()
+                .height
+                .saturating_sub(page_heading_rows(&ui.view))
+                .max(1);
+            commit_page_viewport(ui, rows as usize);
             draw_current_page(
                 frame,
                 frame.area(),

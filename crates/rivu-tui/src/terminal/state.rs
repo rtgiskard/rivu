@@ -71,7 +71,7 @@ impl TuiState {
         }
         self.ui.sync_details(&next);
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
-            self.ui.set_notice(message, NoticeKind::Information);
+            self.ui.set_notice(message, NoticeKind::Success);
         }
         self.snapshot = next;
         self.ui.reconcile_read(&self.snapshot);
@@ -92,7 +92,7 @@ fn snapshot_message(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum NoticeKind {
-    Information,
+    Success,
     Warning,
     Error,
 }
@@ -1321,9 +1321,9 @@ impl UiState {
     pub(super) fn set_notice(&mut self, text: String, kind: NoticeKind) {
         self.startup_hint_deadline = None;
         // Keep actionable failures visible when an unrelated playback update arrives.
-        if kind == NoticeKind::Information
+        if kind == NoticeKind::Success
             && self.message.as_ref().is_some_and(|notice| {
-                notice.kind != NoticeKind::Information && Instant::now() < notice.expires_at
+                notice.kind != NoticeKind::Success && Instant::now() < notice.expires_at
             })
         {
             return;

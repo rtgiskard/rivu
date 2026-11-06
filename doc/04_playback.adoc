@@ -386,6 +386,9 @@ use `:qa` / `:qall` or `rivu quit` to stop it. Closing only the client does not 
 playback. `Tab` cycles
 Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
 Without a search, each page retains its selection and scroll position.
+The active tab identifies the page; its selection/total counter appears at the
+right of navigation when space permits. The content area adds a heading only for
+context such as a directory path or playlist name, not another copy of the tab.
 `Right` opens a playlist; Enter plays the selected playlist, track, or queue
 occurrence. In Library track lists and playlist details, `e` enqueues the selected
 track. `Alt+e` enqueues the selected Library directory or the complete Other
@@ -395,6 +398,10 @@ Outside search editing, help, and details, press `:` to open the command line on
 the bottom row. Enter executes; Escape cancels. Submitted search results remain
 browsable with command mode, without clearing the search. Commands are bounded
 to 256 UTF-8 bytes and support Backspace.
+Command input is cyan. Confirmed queue additions/removals and successful scans
+use green feedback; ordinary progress is secondary text, warnings orange, and
+errors red. Queue-change confirmations do not replace an unexpired warning or
+error. Messages still share the bottom row rather than adding extra rows.
 
 [cols="1,3",options="header"]
 |===
@@ -465,6 +472,10 @@ Library, Recent, or playlist entries. It never changes a whole directory or
 playlist. Track lists prioritize titles as the terminal narrows and keep compact
 metadata, favorite, playback-state, and missing-file indicators where space permits.
 Truncation does not change stored metadata.
+Artists use cyan; albums and audio-format properties use lavender. Favorites use
+red-purple, while playback markers and enabled shuffle/repeat use green. Duration
+columns and navigation counters remain secondary. Field colors survive row selection
+and compact title/artist presentation; the light preset uses darker variants of these hues.
 
 The status row shows volume, shuffle, repeat, and current-track codec, sample rate,
 and bit depth where space permits. A separate bottom row holds notices, then scan

@@ -404,11 +404,7 @@ fn startup_hint_expires_once_at_its_deadline() {
 
 #[test]
 fn every_notice_permanently_dismisses_startup_hint() {
-    for kind in [
-        NoticeKind::Information,
-        NoticeKind::Warning,
-        NoticeKind::Error,
-    ] {
+    for kind in [NoticeKind::Success, NoticeKind::Warning, NoticeKind::Error] {
         let mut ui = UiState::default();
         ui.set_notice("Operation result".into(), kind);
         assert!(ui.startup_hint_deadline.is_none());
@@ -647,16 +643,16 @@ pub(in crate::terminal) fn full_track(id: i64) -> rivu_protocol::model::Track {
 fn notices_preserve_actionable_failures_across_operation_feedback() {
     let mut ui = UiState::default();
     ui.set_notice("failure".into(), NoticeKind::Error);
-    ui.set_notice("Added to queue".into(), NoticeKind::Information);
+    ui.set_notice("Added to queue".into(), NoticeKind::Success);
     assert!(matches!(
         ui.message.as_ref().unwrap().kind,
         NoticeKind::Error
     ));
     ui.message.as_mut().unwrap().expires_at = Instant::now();
-    ui.set_notice("Added to queue".into(), NoticeKind::Information);
+    ui.set_notice("Added to queue".into(), NoticeKind::Success);
     assert!(matches!(
         ui.message.as_ref().unwrap().kind,
-        NoticeKind::Information
+        NoticeKind::Success
     ));
 }
 
@@ -1978,17 +1974,23 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
             ..UiState::default()
         };
         render_view(&mut ui);
+        let page_rows = ui.page_size;
         load_visible(&mut ui, &state);
-        for _ in 0..3 {
+        for _ in 1..page_rows {
             ui.key_action(KeyEvent::from(KeyCode::Down), &state);
         }
         let rendered = render_view(&mut ui);
         assert!(rendered.contains("row-0"), "{rendered}");
-        assert!(rendered.contains("row-3"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("row-{}", page_rows - 1)),
+            "{rendered}"
+        );
         let selected = ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
         match selected {
-            KeyAction::Command(Command::PlayPlaylist { playlist_id: 3 })
-            | KeyAction::Command(Command::Play { track_id: 3 }) => {}
+            KeyAction::Command(Command::PlayPlaylist { playlist_id })
+                if playlist_id == (page_rows - 1) as i64 => {}
+            KeyAction::Command(Command::Play { track_id })
+                if track_id == (page_rows - 1) as i64 => {}
             _ => panic!("selection did not activate the global row"),
         }
         ui.key_action(KeyEvent::from(KeyCode::Down), &state);
@@ -1996,7 +1998,7 @@ fn every_queried_view_renders_across_batches_without_resetting_scroll() {
         let rendered = render_view(&mut ui);
         assert!(!rendered.contains("row-0"), "{rendered}");
         assert!(rendered.contains("row-1"), "{rendered}");
-        assert!(rendered.contains("row-4"), "{rendered}");
+        assert!(rendered.contains(&format!("row-{page_rows}")), "{rendered}");
     }
 }
 

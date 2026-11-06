@@ -354,7 +354,8 @@ settings editor. Static mode retains rotation parameters.
 Presets are built in; no separate theme files are needed. Choose Theme in
 Settings → Interface → Appearance & layout, then Apply to save and update open
 clients without restarting. Discard leaves the active theme unchanged.
-The TUI uses the selected theme for search highlights and playback-property colors.
+The TUI adapts each preset to semantic track-field, playback-state, input, and
+operation-feedback colors without changing the desktop palette.
 
 [cols="1,2"]
 |===
