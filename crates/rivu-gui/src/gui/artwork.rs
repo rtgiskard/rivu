@@ -2441,6 +2441,271 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_animation_redraws_cached_consumers_without_invalidating_static_siblings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::{
+            artwork_panel::{ArtworkPanel, ArtworkRuntime},
+            layout::{Axis, Node, Panel},
+        };
+        use rivu_format::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, Config};
+        use rivu_protocol::model::PlaybackStatus;
+
+        struct CountedPanel {
+            panel: Entity<ArtworkPanel>,
+            renders: Rc<std::cell::Cell<usize>>,
+        }
+        impl Render for CountedPanel {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                self.panel
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().size_full())
+            }
+        }
+        struct Root {
+            panels: [Entity<CountedPanel>; 2],
+            images: ArtworkImageRegistry,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let images = self.images.clone();
+                div()
+                    .relative()
+                    .flex()
+                    .size_full()
+                    .children(self.panels.iter().map(|panel| {
+                        div().size(gpui::px(128.)).child(
+                            panel
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        )
+                    }))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |_, _, window, _| images.release_retired(window),
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+            }
+        }
+
+        cx.update(|cx| {
+            crate::gui::appearance::theme::set_theme(
+                rivu_presentation::theme::Theme::default(),
+                cx,
+            );
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
+        });
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let manager = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
+        let tracks: Vec<_> = [
+            ("still.wav", static_cover(128, 79)),
+            ("animated.wav", decode::tests::gif()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = directory.path().join(name);
+            cover_wave(&path, &bytes);
+            let mut track = crate::test_support::artwork_track(path);
+            track.fingerprint = Some(name.into());
+            assert!(manager.load(crate::artwork_source(&track)).is_some());
+            track
+        })
+        .collect();
+        let images = ArtworkImageRegistry::default();
+        let owner = cx.update(|cx| {
+            let default = cx
+                .new(|cx| DefaultArtwork::new(&rivu_presentation::i18n::Localizer::new("en"), cx));
+            cx.new(|cx| {
+                ArtworkRuntime::new(
+                    manager,
+                    default,
+                    images.clone(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                )
+            })
+        });
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
+        let mut sync = |track, rotating, cx: &mut gpui::TestAppContext| {
+            let config = Config {
+                artwork_fps: 0,
+                ..Config::default()
+            };
+            panels.reconcile(&crate::gui::layout::Layout {
+                root: Some(Node::Split {
+                    id: 90,
+                    axis: Axis::Horizontal,
+                    boundaries: vec![0.5],
+                    children: [1, 2]
+                        .into_iter()
+                        .map(|id| Node::Tabs {
+                            id: id + 10,
+                            active: id,
+                            panels: vec![Panel {
+                                id,
+                                kind: "artwork".into(),
+                                show_tab_bar: false,
+                                audio_visualizer: None,
+                                artwork: Some(ArtworkOptions {
+                                    mode: if rotating && id == 1 {
+                                        ArtworkMode::Rotating
+                                    } else {
+                                        ArtworkMode::Static
+                                    },
+                                    style: ArtworkStyle::Plain,
+                                    ..(&config).into()
+                                }),
+                            }],
+                        })
+                        .collect(),
+                }),
+                next_id: 200,
+                locked: true,
+            });
+            owner.update(cx, |owner, cx| {
+                owner.sync(
+                    Some(track),
+                    if rotating {
+                        PlaybackStatus::Playing
+                    } else {
+                        PlaybackStatus::Paused
+                    },
+                    &config,
+                    &panels,
+                    true,
+                    cx,
+                );
+            });
+        };
+        sync(&tracks[0], true, cx);
+        let renders: [_; 2] = std::array::from_fn(|_| Rc::new(std::cell::Cell::new(0)));
+        let window = cx.open_window(gpui::size(gpui::px(320.), gpui::px(160.)), {
+            let owner = owner.clone();
+            let images = images.clone();
+            let renders = renders.clone();
+            move |window, cx| {
+                window.activate_window();
+                Root {
+                    panels: std::array::from_fn(|index| {
+                        let panel =
+                            cx.new(|cx| ArtworkPanel::new(index as u64 + 1, owner.clone(), cx));
+                        cx.new(|_| CountedPanel {
+                            panel,
+                            renders: Rc::clone(&renders[index]),
+                        })
+                    }),
+                    images,
+                }
+            }
+        });
+        let redraw = Rc::new(std::cell::Cell::new(false));
+        let consumers = window
+            .read_with(cx, |root, cx| {
+                root.panels
+                    .each_ref()
+                    .map(|panel| panel.read(cx).panel.clone())
+            })
+            .unwrap();
+        cx.update(|cx| {
+            for panel in &consumers {
+                let redraw = Rc::clone(&redraw);
+                cx.observe(panel, move |_, _| redraw.set(true)).detach();
+            }
+        });
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+        let settle = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..16 {
+                redraw.set(false);
+                cx.run_until_parked();
+                draw(cx);
+                cx.run_until_parked();
+                if !redraw.replace(false) {
+                    return;
+                }
+            }
+            panic!("artwork decode/prepaint notifications did not settle");
+        };
+        let tick = |cx: &mut gpui::TestAppContext| {
+            redraw.set(false);
+            let callbacks = cx
+                .update_window(window.into(), |_, window, cx| {
+                    window.simulate_next_frame(cx)
+                })
+                .unwrap();
+            assert!(callbacks > 0, "a native animation frame must be pending");
+            assert!(
+                redraw.get(),
+                "a native tick must invalidate a mounted consumer"
+            );
+            draw(cx);
+        };
+        settle(cx);
+        let before = renders.each_ref().map(|count| count.get());
+        for _ in 0..3 {
+            tick(cx);
+        }
+        assert!(
+            renders[0].get() > before[0],
+            "rotating cached output must be rebuilt"
+        );
+        assert_eq!(renders[1].get(), before[1], "static sibling stays cached");
+        cx.update(|cx| {
+            assert!(owner.read(cx).rotation_angle(1) > 0.);
+            assert_eq!(owner.read(cx).rotation_angle(2), 0.);
+        });
+
+        // Source animation must redraw both cached Static consumers without a root event.
+        sync(&tracks[1], false, cx);
+        settle(cx);
+        cx.update(|cx| {
+            assert_eq!(owner.read(cx).rotation_angle(1), 0.);
+            assert_eq!(owner.read(cx).rotation_angle(2), 0.);
+            assert!(
+                images
+                    .0
+                    .borrow()
+                    .entries
+                    .values()
+                    .filter_map(Weak::upgrade)
+                    .any(|lease| {
+                        lease
+                            .image
+                            .read(cx)
+                            .item
+                            .as_ref()
+                            .and_then(ImageCacheItem::get)
+                            .and_then(Result::ok)
+                            .is_some_and(|image| image.frame_count() == 2)
+                    })
+            );
+        });
+        let before = renders.each_ref().map(|count| count.get());
+        for _ in 0..3 {
+            tick(cx);
+        }
+        assert!(
+            renders
+                .iter()
+                .zip(before)
+                .all(|(renders, before)| renders.get() > before)
+        );
+        cx.update_window(window.into(), |_, window, cx| {
+            owner.update(cx, |owner, cx| owner.release_all_images(window, cx));
+            images.release_all_retired(window, cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
     fn artwork_source_animation_uses_one_owner_gate_across_panels_and_suspension(
         cx: &mut gpui::TestAppContext,
     ) {

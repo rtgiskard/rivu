@@ -534,6 +534,10 @@ mod tests {
         assert!(encoded.windows(4).any(|bytes| bytes == b"VP8L"));
         assert!(!encoded.windows(4).any(|bytes| bytes == b"VP8 "));
         assert_eq!(fs::read(&path).unwrap(), bytes);
+        let expected_pixels = image.as_bytes(0).unwrap().to_vec();
+        let released = Arc::downgrade(&image);
+        drop(image);
+        assert!(released.upgrade().is_none());
         let cached = load(
             &path,
             rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
@@ -542,7 +546,8 @@ mod tests {
         )
         .unwrap()
         .image;
-        assert_eq!(image.as_bytes(0), cached.as_bytes(0));
+        assert_eq!(size(&cached), (256, 128));
+        assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
     }
 
     #[test]
@@ -616,6 +621,10 @@ mod tests {
         }
         assert!(edge_pixels > 0);
         assert_eq!(fs::read(&path).unwrap(), bytes);
+        let expected_pixels = image.as_bytes(0).unwrap().to_vec();
+        let released = Arc::downgrade(&image);
+        drop(image);
+        assert!(released.upgrade().is_none());
         let cached = load(
             &path,
             rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
@@ -624,7 +633,8 @@ mod tests {
         )
         .unwrap()
         .image;
-        assert_eq!(image.as_bytes(0), cached.as_bytes(0));
+        assert_eq!(size(&cached), (256, 32));
+        assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
     }
 
     #[test]
