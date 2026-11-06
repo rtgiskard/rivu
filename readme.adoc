@@ -336,6 +336,9 @@ Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
 
 === Build information
 
+Development builds retain line-table debug information; tests omit debug information.
+For full debugging, set `CARGO_PROFILE_DEV_DEBUG=2` or `CARGO_PROFILE_TEST_DEBUG=2`.
+
 Release builds strip symbols. For troubleshooting, set
 `CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
 
