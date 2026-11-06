@@ -682,7 +682,11 @@ impl View {
                 kind,
                 filter,
                 offset,
-                limit,
+                limit: if matches!(kind, ReadKind::PlaylistSummary(_)) {
+                    1
+                } else {
+                    limit
+                },
             };
             let failed = self.failure(queue, matches!(kind, ReadKind::PlaylistSummary(_)));
             (!failed.is_some_and(|failed| demand.matches(failed, state))).then_some(demand)
@@ -1367,15 +1371,20 @@ impl UiState {
         self.reads.retire();
     }
 
-    // Explicit user/view transitions also permit previously failed demands to retry.
+    // Entry navigation retires submissions and retries entry reads, but cannot
+    // reopen an unchanged failed playlist-title demand.
     fn cancel_query(&mut self) {
         self.retire_query();
         if self.details_active {
             self.details.failed_request = None;
         } else {
             *self.view.failure_slot(&mut self.queue, false) = None;
-            *self.view.failure_slot(&mut self.queue, true) = None;
         }
+    }
+
+    fn reopen_view_queries(&mut self) {
+        self.cancel_query();
+        *self.view.failure_slot(&mut self.queue, true) = None;
     }
 
     pub(super) fn open_search(&mut self) {
@@ -1477,7 +1486,7 @@ impl UiState {
             }),
         };
         self.startup_hint_deadline = None;
-        self.cancel_query();
+        self.reopen_view_queries();
         self.mark_local_change();
     }
 
@@ -1833,7 +1842,7 @@ impl UiState {
                 } else if action == Action::Cancel {
                     self.cached_recent = Some(View::Recent(recent));
                     self.view = View::Queue;
-                    self.cancel_query();
+                    self.reopen_view_queries();
                     self.mark_local_change();
                     return KeyAction::Ignored;
                 } else {
@@ -1936,7 +1945,7 @@ impl UiState {
                     }
                 }
                 self.view = if close {
-                    self.cancel_query();
+                    self.reopen_view_queries();
                     View::Playlists(PagedList {
                         selection: playlists.0,
                         viewport_rows: playlists.1,
@@ -1975,7 +1984,7 @@ impl UiState {
                                 detail,
                             };
                             self.clear_search(state);
-                            self.cancel_query();
+                            self.reopen_view_queries();
                             self.mark_local_change();
                             return KeyAction::Ignored;
                         }
@@ -1988,7 +1997,7 @@ impl UiState {
                     _ => changed = playlists.navigate_action(action, page_size),
                 }
                 self.view = if close {
-                    self.cancel_query();
+                    self.reopen_view_queries();
                     self.cached_playlists = Some(View::Playlists(playlists));
                     View::Queue
                 } else {

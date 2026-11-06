@@ -1418,3 +1418,95 @@ fn container_scan_restores_scroll_and_discards_nonvisible_scan_batches() {
     assert!(tree.entries.pages.contains_key(&8));
     assert!(tree.entries.identity_lookup.is_none());
 }
+
+#[test]
+fn entry_navigation_and_search_do_not_reopen_failed_title_demand() {
+    let mut state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    super::tests::load_visible(&mut tui.ui, &state);
+    state.library.playlist_revision += 1;
+    tui.apply_snapshot(state.clone());
+    let title = tui.ui.query_request(&state).unwrap();
+    assert_eq!(title.demand.kind(), ReadKind::PlaylistSummary(1));
+    assert!(tui.ui.apply_query(
+        &state,
+        &title,
+        Err(QueryError::Message("title unavailable".into()))
+    ));
+
+    for (navigation, offsets, track_id) in [(KeyCode::End, [9, 6], 11), (KeyCode::Home, [0, 3], 0)]
+    {
+        key(&mut tui.ui, &state, navigation);
+        for offset in offsets {
+            let page = tui.ui.query_request(&state).expect("navigated entry page");
+            assert_eq!(page.demand.kind(), ReadKind::Playlist(1));
+            assert_eq!(page.demand.offset, offset);
+            assert!(tui.ui.apply_query(&state, &page, Ok(response(&page, 12))));
+        }
+        assert!(tui.ui.query_request(&state).is_none());
+        assert!(matches!(
+            key(&mut tui.ui, &state, KeyCode::Enter),
+            KeyAction::Command(Command::Play { track_id: id }) if id == track_id
+        ));
+    }
+
+    submit(&mut tui.ui, &state, "song");
+    let lookup = tui.ui.query_request(&state).unwrap();
+    assert_eq!(
+        lookup.demand.kind(),
+        ReadKind::PlaylistSelection {
+            playlist_id: 1,
+            entry_id: 0
+        }
+    );
+    // Explicit navigation cancels the entry locate, not title suppression.
+    key(&mut tui.ui, &state, KeyCode::Down);
+    let filtered = tui.ui.query_request(&state).unwrap();
+    assert_eq!(filtered.demand.kind(), ReadKind::Playlist(1));
+    assert!(
+        matches!(filtered.demand.query(), Query::PlaylistEntries { query: Some(query), .. } if query == "song")
+    );
+    assert!(
+        !tui.ui
+            .apply_query(&state, &lookup, Ok(response(&lookup, 2)))
+    );
+    assert_eq!(tui.ui.reads.requested.as_ref(), Some(&filtered));
+    assert!(
+        tui.ui
+            .apply_query(&state, &filtered, Ok(response(&filtered, 2)))
+    );
+    assert!(tui.ui.query_request(&state).is_none());
+
+    key(&mut tui.ui, &state, KeyCode::Esc);
+    assert!(!tui.ui.search.active);
+    let lookup = tui.ui.query_request(&state).unwrap();
+    assert_eq!(
+        lookup.demand.kind(),
+        ReadKind::PlaylistSelection {
+            playlist_id: 1,
+            entry_id: 0
+        }
+    );
+    assert!(matches!(
+        lookup.demand.query(),
+        Query::PlaylistEntryLocations { query: None, .. }
+    ));
+    assert!(
+        tui.ui
+            .apply_query(&state, &lookup, Ok(response(&lookup, 12)))
+    );
+    for offset in [0, 3] {
+        let page = tui.ui.query_request(&state).unwrap();
+        assert_eq!(page.demand.kind(), ReadKind::Playlist(1));
+        assert_eq!(page.demand.offset, offset);
+        assert!(tui.ui.apply_query(&state, &page, Ok(response(&page, 12))));
+    }
+    assert!(tui.ui.query_request(&state).is_none());
+    let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+        panic!("playlist detail");
+    };
+    assert_eq!(detail.entries.selected().unwrap().track_id, 0);
+    assert_eq!(detail.name, "collection");
+    assert!(detail.summary_dirty);
+}

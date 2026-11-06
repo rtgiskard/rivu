@@ -230,7 +230,10 @@ retain selection indexes rather than traversing all expansions per viewport requ
 
 Foreground Details freshness is independent of its underlying list and page size.
 Page, Details, and playlist-summary failures remain suppressed until their own
-demand or freshness changes, or an explicit view transition resets them.
+demand or freshness changes, or an explicit view transition resets them. Playlist
+titles use a single-summary demand independent of entry batch size. Entry payload
+refreshes, navigation, and search-locate cancellation do not retry an unchanged
+failed title; a new title revision or reopening the view permits a retry.
 
 Pages retain intrinsic column widths and fit them to the viewport on each draw;
 Recent counts and time labels remain live. The TUI retains one help layout and

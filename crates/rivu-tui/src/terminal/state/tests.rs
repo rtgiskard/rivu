@@ -3128,6 +3128,124 @@ fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
 }
 
 #[test]
+fn failed_playlist_title_survives_entry_payload_and_batch_invalidation() {
+    for error in [
+        QueryError::Message("title unavailable".into()),
+        QueryError::RevisionChanged,
+        QueryError::Cancelled,
+    ] {
+        let noisy = matches!(&error, QueryError::Message(_));
+        let mut state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = playlist_view(1);
+        load_visible(&mut tui.ui, &state);
+        state.library.playlist_revision += 1;
+        tui.apply_snapshot(state.clone());
+        let failed = tui.ui.query_request(&state).unwrap();
+        assert_eq!(failed.demand.kind(), ReadKind::PlaylistSummary(1));
+        assert_eq!(failed.demand.limit, 1);
+        assert_eq!(tui.ui.apply_query(&state, &failed, Err(error)), noisy);
+        assert!(tui.ui.reads.requested.is_none());
+        assert_eq!(tui.ui.message.is_some(), noisy);
+        assert!(tui.ui.query_request(&state).is_none());
+
+        state.library.bitrate_revision += 1;
+        tui.apply_snapshot(state.clone());
+        for offset in [0, 3] {
+            let request = tui.ui.query_request(&state).expect("entry payload refresh");
+            assert_eq!(request.demand.kind(), ReadKind::Playlist(1));
+            assert_eq!(request.demand.offset, offset);
+            assert!(
+                tui.ui
+                    .apply_query(&state, &request, Ok(response(&request, 12)))
+            );
+        }
+        assert!(tui.ui.query_request(&state).is_none());
+
+        state.system.query_batch_size = 4;
+        tui.apply_snapshot(state.clone());
+        for offset in [0, 4] {
+            let request = tui.ui.query_request(&state).expect("entry batch resize");
+            assert_eq!(request.demand.kind(), ReadKind::Playlist(1));
+            assert_eq!((request.demand.offset, request.demand.limit), (offset, 4));
+            assert!(
+                tui.ui
+                    .apply_query(&state, &request, Ok(response(&request, 12)))
+            );
+        }
+        assert!(tui.ui.query_request(&state).is_none());
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        assert_eq!(detail.name, "collection");
+        assert!(detail.summary_dirty);
+        let coordinates = page_coordinates(&detail.entries);
+
+        state.library.playlist_revision += 1;
+        tui.apply_snapshot(state.clone());
+        let fresh = tui.ui.query_request(&state).expect("new title freshness");
+        assert_eq!(fresh.demand.kind(), ReadKind::PlaylistSummary(1));
+        assert_ne!(fresh.demand.stamp, failed.demand.stamp);
+        assert!(
+            !tui.ui
+                .apply_query(&state, &failed, Ok(response(&failed, 12)))
+        );
+        assert_eq!(tui.ui.reads.requested.as_ref(), Some(&fresh));
+        assert!(tui.ui.apply_query(
+            &state,
+            &fresh,
+            Ok(QueryResult {
+                revisions: fresh.demand.stamp.revisions(),
+                view: ViewResponse::PlaylistSummary(Some(PlaylistSummary {
+                    id: 1,
+                    name: "Recovered title".into(),
+                    entry_count: 12,
+                })),
+            })
+        ));
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            panic!("playlist detail");
+        };
+        assert_eq!(detail.name, "Recovered title");
+        assert!(!detail.summary_dirty);
+        assert_eq!(page_coordinates(&detail.entries), coordinates);
+        assert!(tui.ui.query_request(&state).is_none());
+    }
+}
+
+#[test]
+fn reopening_playlist_view_retries_failed_title_and_rejects_old_completion() {
+    let mut state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    load_visible(&mut tui.ui, &state);
+    state.library.playlist_revision += 1;
+    tui.apply_snapshot(state.clone());
+    let failed = tui.ui.query_request(&state).unwrap();
+    assert!(tui.ui.apply_query(
+        &state,
+        &failed,
+        Err(QueryError::Message("title unavailable".into()))
+    ));
+    assert!(tui.ui.query_request(&state).is_none());
+    tui.ui.switch_tab(false, &state);
+    tui.ui.switch_tab(true, &state);
+    let reopened = tui.ui.query_request(&state).expect("explicit view reopen");
+    assert_eq!(reopened.demand, failed.demand);
+    assert_ne!(reopened.submission, failed.submission);
+    assert!(
+        !tui.ui
+            .apply_query(&state, &failed, Ok(response(&failed, 12)))
+    );
+    assert_eq!(tui.ui.reads.requested.as_ref(), Some(&reopened));
+    assert!(
+        tui.ui
+            .apply_query(&state, &reopened, Ok(response(&reopened, 12)))
+    );
+    assert!(tui.ui.query_request(&state).is_none());
+}
+
+#[test]
 fn unexpected_query_payload_retires_demand_without_retrying_or_touching_newer_reads() {
     let state = query_snapshot();
     let mut ui = UiState {
