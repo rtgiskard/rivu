@@ -180,8 +180,10 @@ impl App {
     pub fn open_tui(data_dir: PathBuf, config_path: PathBuf) -> Result<()> {
         let data_dir = frontend_host::absolute(data_dir)?;
         let config_path = frontend_host::absolute(config_path)?;
-        frontend_host::ensure_service(&data_dir, &config_path)?;
-        rivu_tui::run(&data_dir, "auto")
+        rivu_tui::run(&data_dir, "auto", async {
+            frontend_host::ensure_service(&data_dir, &config_path).await?;
+            Ok(())
+        })
     }
     pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {
         rivu_utils::logging::init(None)?;
@@ -367,6 +369,33 @@ mod tests {
     // Full applications share the process-wide logging session.
     static APP_SESSION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+    // CLOEXEC sockets can still be inherited between another test's fork and
+    // exec. An isolated harness process makes reacquisition test App's cleanup,
+    // not that transient foreign ownership. Keep the pinned socket fixture too.
+    fn run_startup_test_in_child() -> bool {
+        let current = thread::current();
+        let name = current
+            .name()
+            .expect("test harness must name the test thread");
+        const CHILD_TEST: &str = "RIVU_ISOLATED_STARTUP_TEST";
+        if std::env::var_os(CHILD_TEST).as_deref() == Some(std::ffi::OsStr::new(name)) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD_TEST, name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        true
+    }
+
     fn runtime_fixture() -> (tempfile::TempDir, CoreRuntime) {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
@@ -383,9 +412,12 @@ mod tests {
 
     #[test]
     fn invalid_host_config_path_fails_before_logging_and_retires_socket() {
+        if run_startup_test_in_child() {
+            return;
+        }
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::ipc::socket_test_directory();
         let data_dir = directory.path().join("data");
         let config = directory
             .path()
@@ -393,7 +425,8 @@ mod tests {
         assert!(App::start(data_dir.clone(), config.clone(), Vec::new()).is_err());
         assert!(!config.exists());
         assert!(std::fs::read_dir(&data_dir).unwrap().next().is_none());
-        assert!(ipc::SocketOwner::acquire(&data_dir).is_ok());
+        let _owner = ipc::SocketOwner::acquire(&data_dir)
+            .unwrap_or_else(|error| panic!("Reacquiring after invalid config path: {error:#}"));
     }
 
     #[test]
@@ -520,12 +553,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_runtime_start_retires_its_bound_socket() {
-        let directory = tempfile::tempdir().unwrap();
+    fn failed_config_load_retires_its_bound_socket() {
+        if run_startup_test_in_child() {
+            return;
+        }
+        let directory = crate::test_support::ipc::socket_test_directory();
         let config = directory.path().join("config.toml");
         std::fs::write(&config, b"invalid config intentionally").unwrap();
-        assert!(App::start(directory.path().to_owned(), config, Vec::new()).is_err());
-        assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+        assert!(App::start(directory.path().to_owned(), config.clone(), Vec::new()).is_err());
+        assert_eq!(
+            std::fs::read(config).unwrap(),
+            b"invalid config intentionally"
+        );
+        assert!(!directory.path().join("library.db").exists());
+        let _owner = ipc::SocketOwner::acquire(directory.path())
+            .unwrap_or_else(|error| panic!("Reacquiring after config load failure: {error:#}"));
     }
 
     #[test]
@@ -645,6 +687,36 @@ mod lifetime_tests {
         app.request_shutdown().unwrap();
         assert!(app.raise().is_err());
         runtime.join().unwrap();
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn ipc_activation_ack_admits_intent_without_a_desktop_launcher() {
+        let directory = crate::test_support::ipc::socket_test_directory();
+        let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
+        let mut runtime =
+            CoreRuntime::start(directory.path(), &directory.path().join("config.toml")).unwrap();
+        let app = AppHandle::new(&runtime, directory.path());
+        let server = ipc::Server::start(
+            &owner,
+            runtime.handle.clone(),
+            app.clone(),
+            runtime.test_executor(),
+        )
+        .unwrap();
+        let mut client = rivu_client::client_session(directory.path()).unwrap();
+        assert!(app.activation_requests.is_empty());
+        assert!(
+            client
+                .request_ack(rivu_protocol::AppCommand::ShowWindow)
+                .unwrap()
+                .is_success()
+        );
+        assert_eq!(app.activation_requests.try_recv(), Ok(()));
+        assert!(app.activation_requests.is_empty());
+        app.request_shutdown().unwrap();
+        runtime.join().unwrap();
+        drop(server);
     }
 
     #[cfg(not(feature = "gui"))]

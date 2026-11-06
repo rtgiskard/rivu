@@ -5,7 +5,7 @@ mod worker;
 
 use render::{draw, draw_loading};
 use state::{KeyAction, NoticeKind, TuiState, resolve_key};
-use worker::{Watcher, spawn_command_worker, spawn_query_worker, spawn_watcher};
+use worker::{spawn_command_worker, spawn_query_worker, spawn_watcher};
 
 use crate::projection::TuiSnapshot;
 use anyhow::{Context, Result};
@@ -24,18 +24,25 @@ use signal_hook::{
     consts::{SIGINT, SIGTERM},
 };
 use std::{
+    future::Future,
     io::{self, Stdout},
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context as TaskContext, Poll, Waker},
     time::{Duration, Instant},
 };
 
-/// Connect to an existing core over IPC. This never creates an audio engine and
-/// quitting the screen only restores the terminal; the server keeps playing.
-pub fn run(data_dir: &Path, language: &str) -> Result<()> {
+/// Attach over IPC after executable-owned readiness completes. Startup is polled
+/// after terminal and signal setup; closing the screen drops its waiter, never
+/// the independent Core service it may have started.
+pub fn run(
+    data_dir: &Path,
+    language: &str,
+    startup: impl Future<Output = Result<()>>,
+) -> Result<()> {
     let termination = TerminalTermination::new().context("register terminal shutdown signals")?;
     let i18n = Arc::new(Localizer::for_terminal(language));
     enable_raw_mode().context("enable terminal raw mode")?;
@@ -53,7 +60,20 @@ pub fn run(data_dir: &Path, language: &str) -> Result<()> {
             return Err(error.into());
         }
     };
-    let result = run_loop(data_dir, &mut terminal, i18n, &termination.requested);
+    let result = run_loop(
+        data_dir,
+        &mut terminal,
+        i18n,
+        &termination.requested,
+        startup,
+        |timeout| {
+            if event::poll(timeout)? {
+                event::read().map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+    );
     let cleanup = restore_terminal(&mut terminal);
     match result {
         Err(error) => Err(error),
@@ -116,25 +136,43 @@ impl Drop for TerminalTermination {
     }
 }
 
-fn run_loop(
+fn run_loop<B: ratatui::backend::Backend>(
     data_dir: &Path,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<B>,
     i18n: Arc<Localizer>,
     terminating: &AtomicBool,
-) -> Result<()> {
+    startup: impl Future<Output = Result<()>>,
+    next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
+    let mut startup = std::pin::pin!(startup);
+    let mut updates = None;
     run_loop_with_events(
         data_dir,
         terminal,
         i18n,
         terminating,
-        spawn_watcher(data_dir),
-        |timeout| {
-            if event::poll(timeout)? {
-                event::read().map(Some)
-            } else {
-                Ok(None)
+        || {
+            if updates.is_none() {
+                // Sample completion once per existing input iteration (at most
+                // 50ms idle). I/O stays asynchronous without a waiter thread.
+                match startup
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(Waker::noop()))
+                {
+                    Poll::Pending => return Ok(None),
+                    Poll::Ready(result) => result?,
+                }
+                updates = Some(spawn_watcher(data_dir));
             }
+            updates
+                .as_ref()
+                .expect("Ready startup starts the watcher")
+                .take_update()
         },
+        next_event,
     )
 }
 
@@ -143,7 +181,7 @@ fn run_loop_with_events<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     i18n: Arc<Localizer>,
     terminating: &AtomicBool,
-    updates: Watcher,
+    mut take_update: impl FnMut() -> Result<Option<(u32, rivu_protocol::model::ClientSnapshot)>>,
     mut next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
 ) -> Result<()>
 where
@@ -157,7 +195,7 @@ where
     // Reuse the input loop's existing bounded wait; signals need no extra worker
     // or periodic wakeup and are observed even before the IPC handshake finishes.
     while !terminating.load(Ordering::Relaxed) {
-        if let Some((instance_id, state)) = updates.take_update()? {
+        if let Some((instance_id, state)) = take_update()? {
             // Shutdown belongs to the connection owner, not the projection or
             // query workers. Exit before creating workers or dispatching work,
             // including when shutdown is the loading screen's first snapshot.
@@ -314,4 +352,72 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use std::pin::Pin;
+
+    struct PendingStartup {
+        polled: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Future for PendingStartup {
+        type Output = Result<()>;
+
+        fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            self.polled.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingStartup {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn loading_owner_keeps_close_input_responsive_and_drops_pending_startup() {
+        for close in [
+            Some(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            None,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let polled = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let terminating = AtomicBool::new(false);
+            let mut waits = 0;
+            run_loop(
+                directory.path(),
+                &mut terminal,
+                Arc::new(Localizer::for_terminal("en")),
+                &terminating,
+                PendingStartup {
+                    polled: Arc::clone(&polled),
+                    dropped: Arc::clone(&dropped),
+                },
+                |_| {
+                    assert!(polled.load(Ordering::Relaxed));
+                    waits += 1;
+                    assert_eq!(waits, 1, "pending startup must not consume close input");
+                    if let Some(key) = close {
+                        Ok(Some(Event::Key(key)))
+                    } else {
+                        terminating.store(true, Ordering::Relaxed);
+                        Ok(None)
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(waits, 1);
+            assert!(dropped.load(Ordering::Relaxed));
+        }
+    }
 }

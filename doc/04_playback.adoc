@@ -490,11 +490,11 @@ and errors are distinct; ordinary playback updates do not replace a visible fail
 
 Left goes to a parent directory; Left/Esc leaves playlist details.
 With search closed, Esc returns from Library tree or playlist catalog to Queue.
-`q` closes the client outside the query editor and also works during initial
-connection. Ctrl-C exits
-from every view, including editors, overlays, and connection setup. `SIGINT` and
-`SIGTERM` also close only the client. All these exits restore terminal mode,
-screen, and cursor, leaving the core running.
+`q` closes the client outside the query editor and also works while waiting for
+Core startup or the initial connection. Ctrl-C exits from every view, including
+editors, overlays, and startup waiting. `SIGINT` and `SIGTERM` also close only the
+client. These exits cancel frontend readiness waiting and restore terminal mode,
+screen, and cursor; the independent Core keeps its own lifetime and is not stopped.
 
 Core shutdown exits normally; a lost connection without shutdown state reports an error.
 

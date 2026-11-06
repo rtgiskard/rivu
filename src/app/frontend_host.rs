@@ -120,9 +120,11 @@ pub(super) fn detach_startup_diagnostics() -> Result<()> {
 
 /// Prefer the existing owner, and spawn only when connection proves it absent.
 /// All probing, initialization and Hello I/O share one startup deadline.
-pub(super) fn ensure_service(data_dir: &Path, config_path: &Path) -> Result<u32> {
+/// Dropping this waiter closes its readiness connection, not the independent
+/// service. The frontend owns waiting; the detached process owns Core lifetime.
+pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Result<u32> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
-    match async_io::block_on(probe(data_dir, deadline)) {
+    match probe(data_dir, deadline).await {
         Ok(instance) => return Ok(instance),
         Err(error) if crate::ipc::is_no_instance(&error) => {}
         Err(error) => return Err(error),
@@ -161,7 +163,7 @@ pub(super) fn ensure_service(data_dir: &Path, config_path: &Path) -> Result<u32>
     let mut child = command
         .spawn()
         .context("Starting independent Rivu service")?;
-    let ready = async_io::block_on(async {
+    let ready = async {
         let mut backoff = Duration::from_millis(10);
         let ready = loop {
             match probe(data_dir, deadline).await {
@@ -190,7 +192,8 @@ pub(super) fn ensure_service(data_dir: &Path, config_path: &Path) -> Result<u32>
             let _ = timeout_at(deadline, child.status()).await;
         }
         ready
-    });
+    }
+    .await;
     // async-process reaps dropped children without killing them or tying their
     // lifetime to a frontend-owned waiter thread.
     ready.with_context(|| diagnostics.failure_context())

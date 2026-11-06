@@ -2,7 +2,10 @@ use crate::test_support::{
     frontend::{FrontendFixture, save_config},
     ipc::socket_test_directory,
 };
-use futures_lite::{future, io::AsyncWriteExt};
+use futures_lite::{
+    future,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 use rivu_protocol::{
     response::{StateResponse, StateSections},
     transport::{Elapsed, encode_response_frame_into, read_request_frame, timeout},
@@ -86,13 +89,13 @@ fn ready_service_does_not_validate_unused_frontend_config() {
     std::fs::write(&unused_config, original).unwrap();
 
     assert_eq!(
-        super::ensure_service(directory.path(), &unused_config).unwrap(),
+        async_io::block_on(super::ensure_service(directory.path(), &unused_config)).unwrap(),
         expected
     );
     assert_eq!(std::fs::read(&unused_config).unwrap(), original);
     let missing_config = directory.path().join("unused-missing.toml");
     assert_eq!(
-        super::ensure_service(directory.path(), &missing_config).unwrap(),
+        async_io::block_on(super::ensure_service(directory.path(), &missing_config)).unwrap(),
         expected
     );
     assert!(!missing_config.exists());
@@ -130,4 +133,69 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
             "invalid handshake waited for the deadline instead of being rejected: {error:#}"
         );
     }
+}
+
+#[test]
+fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
+    let directory = socket_test_directory();
+    let config = directory.path().join("unused-config.toml");
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
+    let listener = async_io::Async::new(UnixListener::bind_addr(&address).unwrap()).unwrap();
+    async_io::block_on(async {
+        let mut startup = Box::pin(super::ensure_service(directory.path(), &config));
+        let mut stream = timeout(
+            Duration::from_secs(2),
+            future::or(
+                async {
+                    let result = startup.as_mut().await;
+                    panic!("silent existing owner must leave startup pending: {result:?}");
+                },
+                async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request = read_request_frame(&mut stream, &mut bytes::BytesMut::new())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(matches!(request, WireRequest::Hello(_)));
+                    stream
+                },
+            ),
+        )
+        .await
+        .expect("startup did not reach the existing listener");
+        drop(startup);
+        assert_eq!(
+            timeout(Duration::from_secs(2), stream.read(&mut [0]))
+                .await
+                .unwrap()
+                .unwrap(),
+            0,
+            "cancelling startup must close its in-flight Hello connection",
+        );
+        // The same owner can finish initialization and accept another frontend;
+        // cancelling one waiter neither replaces nor retires its listener.
+        let instance = timeout(
+            Duration::from_secs(2),
+            future::or(super::ensure_service(directory.path(), &config), async {
+                let (mut next, _) = listener.accept().await.unwrap();
+                let request = read_request_frame(&mut next, &mut bytes::BytesMut::new())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(request, WireRequest::Hello(_)));
+                next.write_all(&hello_frame(42)).await.unwrap();
+                future::pending().await
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(instance, 42);
+    });
+    assert!(
+        !config.exists(),
+        "existing owner must not load frontend config"
+    );
+    let error = UnixListener::bind_addr(&address).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 }

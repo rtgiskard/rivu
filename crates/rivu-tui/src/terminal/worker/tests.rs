@@ -76,7 +76,7 @@ fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
         &mut terminal,
         Arc::new(rivu_presentation::i18n::Localizer::for_terminal("en")),
         &AtomicBool::new(false),
-        watcher,
+        || watcher.take_update(),
         |_| panic!("shutdown must not wait for keyboard input"),
     )
     .unwrap();
@@ -117,7 +117,7 @@ fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
         &mut terminal,
         Arc::new(rivu_presentation::i18n::Localizer::for_terminal("en")),
         &AtomicBool::new(false),
-        watcher,
+        || watcher.take_update(),
         |_| {
             assert!(
                 pending.is_none(),
@@ -161,7 +161,7 @@ fn watcher_failure_and_disconnection_exit_without_polling_and_preserve_the_cause
             &mut terminal,
             Arc::new(rivu_presentation::i18n::Localizer::for_terminal("en")),
             &AtomicBool::new(false),
-            watcher,
+            || watcher.take_update(),
             |_| {
                 input_waits += 1;
                 assert_eq!(
