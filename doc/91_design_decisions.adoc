@@ -60,6 +60,13 @@ smoke passed after correction. These counts establish missing state accounting,
 not a process RSS bound or a demonstrated whole-graph 64 MiB overrun.
 See link:27_audio_processing.adoc[Audio processing budgets].
 
+Keep arithmetic policy in the graph planner, separate from this memory accounting:
+charge active hum per harmonic and repair per configured width without raising
+the work limit. Heavy valid graphs may require Hybrid/Offline execution;
+bypassed effects still undergo format validation. The resolved
+link:90_open_issues.adoc#denoise-hum-work-admission[arithmetic admission investigation]
+records the counterexample and verification boundaries.
+
 [[DEC-004]]
 === DEC-004: Bound ready cancellation work without releasing query ownership
 

@@ -658,6 +658,15 @@ DSP construction, realtime/offline planning and status use the same configuratio
 predicate. Validation and Profile requirements still apply; enabled flat FIR
 retains convolution latency, and active hum/repair is not bypassed by spectral Off.
 
+Active restoration work includes each enabled hum harmonic and the configured
+impulse-repair width, independently of spectral mode. Hum adds 12 units per
+harmonic/channel/frame. For repair width `W`, radius `R=W+2` and `K=W+3` median
+differences, repair adds `4*R + K*K + 24*W + 32` units per channel/frame for context,
+sorting and worst-case search/interpolation, in addition to common restoration
+work. These are conservative planning allowances, not instruction counts or
+measured CPU time. The total limit remains 300,000,000 units/second; heavier
+graphs can require Hybrid/Offline execution even when their state fits in memory.
+
 The state estimate covers DSP objects/buffers, graph PCM blocks, wide summation
 scratch and edge delay lines. It is not total retained process memory or RSS:
 graph topology/configuration containers, allocator metadata and decoder/device

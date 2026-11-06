@@ -64,6 +64,51 @@ protection remains unresolved.
 
 == Resolved investigations
 
+[[denoise-hum-work-admission]]
+=== Denoise hum arithmetic-work admission
+
+Status: resolved, 2026-11-06. Realtime admission now charges active hum harmonics
+and width-dependent impulse repair. No measured device underrun or audible dropout.
+
+The original realtime estimate did not depend on enabled hum harmonic count,
+although each frame/channel executed every configured notch even with spectral
+Off. The pre-fix public `GraphRunner::plan` / prepare / process probe used
+48 kHz, 18 channels, two serial full-wet Denoise nodes, hum at 50 Hz, spectral
+Off and repair disabled. All configurations were admitted and processed a
+256-frame block with finite output:
+
+[cols="1,1,1",options="header"]
+|===
+|Harmonics per node |Estimated work units/second |Hum scalar arithmetic operations/second
+|1 |248,352,000 |15,552,000
+|8 |248,352,000 |124,416,000
+|32 |248,352,000 |497,664,000
+|===
+
+The final column counts five multiplications and four add/subtracts per notch,
+excluding validation, blending and buffer work. Identical charges despite
+independently increasing notch work exposed the admission gap; these source-derived
+counts are not hardware FLOPs, timings or proof of a device-deadline failure.
+The pre-fix probe linked a locked, no-default-features audio build with SHA-256
+prefixes `c380c04c82f43702` for `crates/rivu-audio/src/graph.rs` and
+`2c2aa07e76bc6336` for `crates/rivu-dsp/src/denoise/processor.rs`.
+
+The corrected planner charges active hum harmonics and width-dependent repair;
+the 300,000,000-unit limit, state admission, format validation, bypass and explicit
+execution-mode semantics are unchanged. Current allowances are documented in
+link:27_audio_processing.adoc[Audio processing budgets].
+
+A standalone post-fix execution admitted the one-harmonic graph at 269,088,000
+units/second and matched 4,096 frames exactly against two direct DSP processors.
+The eight- and 32-harmonic graphs were rejected. At 48 kHz stereo with six repair
+nodes, width 1 remained admissible while width 8 was rejected. Behavioral
+regressions cover disabled effects, Wet=0 and independently disabled hum/repair
+with spectral processing still active; existing bypass format/Profile rejection
+coverage remains unchanged. These are admission and sample-equivalence checks,
+not CPU-time or device-deadline measurements.
+The separate state-budget decision remains
+link:91_design_decisions.adoc#DEC-003[DEC-003].
+
 [[pcm-owner-retirement-coverage]]
 === PCM owner-drop descriptor retirement
 

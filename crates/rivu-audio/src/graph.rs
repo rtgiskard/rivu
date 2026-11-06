@@ -777,7 +777,25 @@ fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(
             )?;
             let spectral = config.mode != DenoiseMode::Off;
             let fft_size = if spectral { config.fft_size } else { 0 };
-            let work = channels as u64 * (fft_size.checked_ilog2().unwrap_or(0) as u64 * 32 + 128)
+            // A hum notch has five multiplies and four adds/subtracts; use the
+            // IIR stage allowance (12 units) to include validation and conversion.
+            let hum = if config.hum.enabled {
+                config.hum.harmonics as u64 * 12
+            } else {
+                0
+            };
+            let repair = if config.impulse.enabled {
+                let width = config.impulse.max_width as u64;
+                let radius = width + 2;
+                let differences = width + 3;
+                // Per-channel context movement/differences, quadratic allowance
+                // for the small median sort, and worst-case search/interpolation.
+                4 * radius + differences * differences + 24 * width + 32
+            } else {
+                0
+            };
+            let work = channels as u64
+                * (fft_size.checked_ilog2().unwrap_or(0) as u64 * 32 + 128 + hum + repair)
                 + if spectral {
                     config.smoothing_bins as u64 * 16
                 } else {
@@ -1080,6 +1098,118 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn denoise_harmonics_control_realtime_work_admission() {
+        for (harmonics, wet, enabled, admitted) in [
+            (1, 1.0, true, true),
+            (32, 1.0, true, false),
+            (32, 0.0, true, true),
+            (32, 1.0, false, true),
+        ] {
+            let mut config = DenoiseConfig {
+                wet,
+                ..Default::default()
+            };
+            config.hum.enabled = enabled;
+            config.hum.harmonics = harmonics;
+            let bypassed = config.is_bypassed();
+            let graph = chain_graph(
+                GraphNodeKind::Denoise {
+                    config,
+                    profile: None,
+                },
+                2,
+            );
+            let plan = GraphRunner::plan(&graph, port(4, 0), None, 48_000, 18);
+            if admitted {
+                let mut runner = plan.unwrap().prepare().unwrap();
+                let mut samples = vec![0.25; GRAPH_BLOCK_FRAMES * 18];
+                runner.process_interleaved(&mut samples).unwrap();
+                if bypassed {
+                    assert!(samples.iter().all(|sample| *sample == 0.25));
+                }
+            } else {
+                assert!(
+                    plan.err()
+                        .unwrap()
+                        .to_string()
+                        .contains("arithmetic work budget")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn denoise_repair_width_controls_realtime_work_admission() {
+        for (max_width, wet, enabled, admitted) in [
+            (1, 1.0, true, true),
+            (8, 1.0, true, false),
+            (8, 0.0, true, true),
+            (8, 1.0, false, true),
+        ] {
+            let mut config = DenoiseConfig {
+                wet,
+                ..Default::default()
+            };
+            config.impulse.enabled = enabled;
+            config.impulse.max_width = max_width;
+            let graph = chain_graph(
+                GraphNodeKind::Denoise {
+                    config,
+                    profile: None,
+                },
+                6,
+            );
+            let plan = GraphRunner::plan(&graph, port(8, 0), None, 48_000, 2);
+            if admitted {
+                plan.unwrap();
+            } else {
+                assert!(
+                    plan.err()
+                        .unwrap()
+                        .to_string()
+                        .contains("arithmetic work budget")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_restoration_controls_preserve_spectral_work_admission() {
+        for (hum, repair, admitted) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let mut config = DenoiseConfig {
+                mode: DenoiseMode::Stationary,
+                ..Default::default()
+            };
+            config.hum.enabled = hum;
+            config.hum.harmonics = 32;
+            config.impulse.enabled = repair;
+            config.impulse.max_width = 8;
+            let graph = chain_graph(
+                GraphNodeKind::Denoise {
+                    config,
+                    profile: None,
+                },
+                2,
+            );
+            let plan = GraphRunner::plan(&graph, port(4, 0), None, 48_000, 4);
+            if admitted {
+                plan.unwrap();
+            } else {
+                assert!(
+                    plan.err()
+                        .unwrap()
+                        .to_string()
+                        .contains("arithmetic work budget")
+                );
             }
         }
     }
