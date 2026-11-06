@@ -132,6 +132,7 @@ async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
 }
 
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_WAIT_BUDGET: usize = 32;
 
 #[derive(Default)]
 struct RequestReader {
@@ -255,7 +256,7 @@ impl RequestReader {
 }
 
 async fn wait_for_query(
-    stream: &mut UnixStream,
+    stream: &mut (impl AsyncRead + Unpin),
     reader: &mut RequestReader,
     handle: &CoreHandle,
     query: Query,
@@ -273,10 +274,12 @@ async fn wait_for_query(
     }
     .fuse();
     futures::pin_mut!(query);
+    let mut remaining = QUERY_WAIT_BUDGET;
     loop {
         // This control frame never owns a reply. A late cancellation can be
         // consumed during the next read, but its identity cannot retire it.
-        while reader.next_is_query_cancel() {
+        while remaining > 0 && reader.next_is_query_cancel() {
+            remaining -= 1;
             let WireRequest::QueryCancel(id) = reader.read(stream).await?? else {
                 unreachable!("query cancellation tag decoded as another request");
             };
@@ -284,10 +287,22 @@ async fn wait_for_query(
                 owner.cancel();
             }
         }
-        futures::select! {
+        futures::select_biased! {
             response = query => return Ok(Some(response)),
             _ = shutdown.recv().fuse() => return Ok(None),
-            read = reader.read_ahead(stream).fuse() => read?,
+            read = async {
+                if remaining == 0 {
+                    // Buffered cancellation and ready sockets share one budget.
+                    // Yield inside the select so replies and shutdown still win
+                    // while a cancellation backlog waits for its next batch.
+                    futures_lite::future::yield_now().await;
+                    remaining = QUERY_WAIT_BUDGET;
+                    Ok(())
+                } else {
+                    remaining -= 1;
+                    reader.read_ahead(stream).await
+                }
+            }.fuse() => read?,
         }
     }
 }
@@ -816,6 +831,139 @@ mod tests {
                 }
                 assert!(reply.is_cancelled());
             });
+        }
+    }
+
+    #[test]
+    fn query_cancel_flood_yields_to_executor_peers_and_keeps_terminal_progress() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CancelFlood {
+            frame: Vec<u8>,
+            consumed: Arc<AtomicUsize>,
+            limit: usize,
+        }
+
+        impl AsyncRead for CancelFlood {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _context: &mut TaskContext<'_>,
+                output: &mut [u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                let this = self.get_mut();
+                let consumed = this.consumed.load(Ordering::Relaxed);
+                // Always ready, but fail finitely if a missing yield monopolizes
+                // one executor tick. No timer or competing OS thread is needed.
+                if consumed >= this.limit {
+                    return std::task::Poll::Ready(Err(std::io::Error::other(
+                        "query cancellation flood exceeded its cooperative budget",
+                    )));
+                }
+                let offset = consumed % this.frame.len();
+                let count = output
+                    .len()
+                    .min(this.frame.len() - offset)
+                    .min(this.limit - consumed);
+                output[..count].copy_from_slice(&this.frame[offset..offset + count]);
+                this.consumed.store(consumed + count, Ordering::Relaxed);
+                std::task::Poll::Ready(Ok(count))
+            }
+        }
+
+        for shutdown_connection in [false, true] {
+            let executor = async_executor::Executor::new();
+            let (handle, queries) = CoreHandle::test_query_port();
+            let (stop, shutdown) = async_channel::bounded(1);
+            let mut encoded = Vec::new();
+            encode_request_frame_into(&WireRequest::QueryCancel(40), &mut encoded).unwrap();
+            let buffered = encoded.repeat(QUERY_WAIT_BUDGET * 4);
+            let mut reader = RequestReader {
+                pending: BytesMut::from(buffered.as_slice()),
+                complete: buffered.len(),
+                deadline: None,
+            };
+            encode_request_frame_into(&WireRequest::QueryCancel(41), &mut encoded).unwrap();
+            let consumed = Arc::new(AtomicUsize::new(0));
+            let mut flood = CancelFlood {
+                limit: encoded.len() * QUERY_WAIT_BUDGET * 16,
+                frame: encoded,
+                consumed: consumed.clone(),
+            };
+            let waiting = executor.spawn(async move {
+                wait_for_query(
+                    &mut flood,
+                    &mut reader,
+                    &handle,
+                    Query::LibraryStats,
+                    Some(41),
+                    &shutdown,
+                )
+                .await
+            });
+
+            assert!(executor.try_tick());
+            assert!(!waiting.is_finished());
+            assert_eq!(
+                consumed.load(Ordering::Relaxed),
+                0,
+                "one tick must not drain the buffered cancellation backlog"
+            );
+            let reply = queries
+                .receive()
+                .now_or_never()
+                .expect("buffered stale cancellations must not starve query admission");
+            assert!(reply.ticket_is_current());
+            for _ in 0..8 {
+                assert!(executor.try_tick());
+                if consumed.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+            }
+            assert!(consumed.load(Ordering::Relaxed) > 0);
+            assert!(!reply.ticket_is_current());
+
+            // The cancellation source remains ready throughout these ticks.
+            // A distinct task on the same executor must still finish.
+            let sibling = executor.spawn(async {});
+            for _ in 0..4 {
+                assert!(executor.try_tick());
+            }
+            assert!(sibling.now_or_never().is_some());
+            assert!(!waiting.is_finished());
+            assert!(
+                !reply.is_cancelled(),
+                "logical cancellation must keep the physical reply slot"
+            );
+
+            let reply = if shutdown_connection {
+                stop.close();
+                Some(reply)
+            } else {
+                reply.respond(QueryResponse {
+                    revisions: Default::default(),
+                    result: Err(rivu_protocol::response::QueryError::Cancelled),
+                });
+                None
+            };
+            for _ in 0..4 {
+                let _ = executor.try_tick();
+            }
+            let result = waiting
+                .now_or_never()
+                .expect("query reply and shutdown must progress during cancellation flood")
+                .unwrap();
+            if let Some(reply) = reply {
+                assert!(result.is_none());
+                assert!(reply.is_cancelled());
+            } else {
+                assert!(matches!(
+                    result.unwrap().unwrap().result,
+                    Err(rivu_protocol::response::QueryError::Cancelled)
+                ));
+            }
         }
     }
 

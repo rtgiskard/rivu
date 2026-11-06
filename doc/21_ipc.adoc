@@ -277,6 +277,13 @@ frames wait untimed and in order behind earlier replies; incomplete tails retain
 their deadline even when the buffer is full. A framing failure drops the pending
 reply receiver, without interrupting or replaying SQL.
 
+Query waits share a cooperative budget of 32 read-ahead or cancellation steps,
+including runs of already-buffered `QueryCancel` frames. They yield when that
+budget is exhausted and check query completion and shutdown between batches, so
+continuously ready cancellation traffic cannot monopolize the shared executor.
+Cancellation still revokes only the matching retained read and keeps its physical
+reply slot until that read retires; yielding does not admit a replacement query.
+
 Frame limits bound encoded bytes, not decoded heap usage. Current nonrecursive
 schemas and decoder length checks make allocation and iteration scale with actual
 input, rather than arbitrary declared collection lengths. Decoded messages can
