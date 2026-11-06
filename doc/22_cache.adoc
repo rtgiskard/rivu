@@ -150,9 +150,12 @@ validity is independent of operation progress.
 Core's current-track projection. Inline text and field-specific save acceptance
 have a separate owner; reads never overwrite the active input.
 |Collection resolution
-|One cancellable paged reader for album-menu favorite actions. Whole-collection
-Queue/Playlist copies instead submit versioned source identity for transactional
-Core resolution, without a GUI collection-sized ID buffer.
+|Opening an album menu retains its identity, not all member IDs. Favorite,
+Unfavorite, and New playlist use one cancellable paged reader only after selection.
+Queue/Playlist copies submit versioned source identity for transactional Core
+resolution. The loading page keeps menu-scope focus instead of restoring an
+unmounted submenu trigger. Cancellation preserves the physical reader gate until
+completion; retirement notifies the window even when its logical result is stale.
 |Duplicate review
 |Stable selected identities survive reference refreshes, but commands require
 current facts. Dismissal requests task cancellation without joining the worker;

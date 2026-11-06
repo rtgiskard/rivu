@@ -19,7 +19,6 @@ enum RemoveTarget {
 
 pub(in crate::gui) struct ContentMenu {
     source: TrackSource,
-    album: Option<rivu_protocol::model::AlbumKey>,
     album_revision: u64,
     nodes: Option<Vec<LibraryNode>>,
     tracks_only: bool,
@@ -117,7 +116,7 @@ impl ContentMenu {
     }
 
     pub(in crate::gui) fn focus_playlist_return(&mut self, window: &mut Window, cx: &mut App) {
-        if !self.playlists && std::mem::take(&mut self.restore_playlist_trigger) {
+        if std::mem::take(&mut self.restore_playlist_trigger) && !self.playlists && !self.loading {
             self.playlist_trigger.focus(window, cx);
         }
     }
@@ -128,6 +127,7 @@ enum ContentAction {
     Play,
     Queue,
     Playlist(i64),
+    CreatePlaylist(AnyWindowHandle),
     Favorite(bool),
     Remove,
     RemoveLibraryRoot,
@@ -150,6 +150,7 @@ impl WindowView {
         }
         self.sync_transfer_state(cx);
         self.refresh(cx);
+        cx.notify();
         read.ticket.is_current() && self.window_visible && !self.state.system.shutting_down
     }
 
@@ -239,17 +240,6 @@ impl WindowView {
             cx.notify();
             return;
         }
-        if matches!(request.source, TrackSource::Album(_)) && self.content_resolution.pending() {
-            self.replace_content_menu(None, cx);
-            self.error = Some(self.i18n.text("li-source-busy").to_owned());
-            cx.notify();
-            return;
-        }
-        let loading = matches!(request.source, TrackSource::Album(_));
-        let album = match &request.source {
-            TrackSource::Album(key) => Some(key.clone()),
-            _ => None,
-        };
         self.panel_menu = None;
         self.playlists
             .update(cx, |playlists, cx| playlists.clear_action(cx));
@@ -267,17 +257,16 @@ impl WindowView {
         };
         let menu = Some(ContentMenu {
             source: request.source,
-            album: album.clone(),
             album_revision: self.state.library.album_revision,
             nodes,
             tracks_only,
-            guard: guard.clone(),
+            guard,
             position: request.position,
             play: request.play,
             remove,
             remove_label,
             root,
-            loading,
+            loading: false,
             confirm_remove: None,
             playlists: false,
             playlist_targets: PlaylistTargets::new(cx),
@@ -285,68 +274,87 @@ impl WindowView {
             restore_playlist_trigger: false,
         });
         self.replace_content_menu(menu, cx);
-        if let Some(key) = album {
-            let Some(read) = self.begin_content_resolution(cx) else {
-                self.replace_content_menu(None, cx);
-                return;
-            };
-            let ticket = read.ticket.clone();
-            let query = Query::AlbumTracks {
-                key: key.clone(),
-                query: None,
-                offset: 0,
-                limit: rivu_protocol::model::MAX_QUERY_ROWS,
-            };
-            let stamp = query.stamp(self.state.query_revisions(None));
-            let handle = self.handle.clone();
-            cx.spawn(async move |this, cx| {
-                let result = crate::gui::query::run(
-                    handle,
-                    cx,
-                    move |handle| async move {
-                        resolve_album(
-                            |query, ticket| {
-                                let handle = handle.clone();
-                                async move { handle.query_if_current(query, ticket).await }
-                            },
-                            key,
-                            stamp,
-                            &ticket,
-                        )
-                        .await
-                    },
-                    |response, cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            let current = guard.current(&this.state);
-                            this.timeout_content_resolution(&read, response, current, cx);
-                        });
-                    },
-                )
-                .await;
-                let _ = this.update(cx, |this, cx| {
-                    if !this.finish_content_resolution(&read, cx) {
-                        return;
+        cx.notify();
+    }
+
+    // Only favorites and creating a playlist need concrete IDs. Keep the menu's
+    // cancellation owner alive until the complete, revision-fenced read finishes.
+    fn resolve_content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
+        let Some(menu) = self.content_menu.as_ref() else {
+            return;
+        };
+        let TrackSource::Album(key) = &menu.source else {
+            return;
+        };
+        let key = key.clone();
+        let guard = menu.guard.clone();
+        let album_revision = menu.album_revision;
+        let Some(read) = self.begin_content_resolution(cx) else {
+            return;
+        };
+        self.set_content_menu_playlists(false, cx);
+        self.content_menu.as_mut().unwrap().loading = true;
+        let ticket = read.ticket.clone();
+        let query = Query::AlbumTracks {
+            key: key.clone(),
+            query: None,
+            offset: 0,
+            limit: rivu_protocol::model::MAX_QUERY_ROWS,
+        };
+        let stamp = query.stamp(self.state.query_revisions(None));
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let result = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| async move {
+                    resolve_album(
+                        |query, ticket| {
+                            let handle = handle.clone();
+                            async move { handle.query_if_current(query, ticket).await }
+                        },
+                        key,
+                        stamp,
+                        &ticket,
+                    )
+                    .await
+                },
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let current = guard.current(&this.state)
+                            && album_revision == this.state.library.album_revision;
+                        this.timeout_content_resolution(&read, response, current, cx);
+                    });
+                },
+            )
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.finish_content_resolution(&read, cx) {
+                    return;
+                }
+                match result {
+                    Ok(ids)
+                        if guard.current(&this.state)
+                            && album_revision == this.state.library.album_revision =>
+                    {
+                        let menu = this.content_menu.as_mut().unwrap();
+                        menu.source = TrackSource::Tracks(ids);
+                        menu.loading = false;
+                        this.content_action(action, cx);
                     }
-                    match result {
-                        Ok(ids) if guard.current(&this.state) => {
-                            let menu = this.content_menu.as_mut().unwrap();
-                            menu.source = TrackSource::Tracks(ids);
-                            menu.loading = false;
-                        }
-                        Ok(_) => {
-                            this.replace_content_menu(None, cx);
-                            this.error = Some(this.i18n.text("li-source-changed").to_owned());
-                        }
-                        Err(error) => {
-                            this.replace_content_menu(None, cx);
-                            this.error = Some(error.to_string());
-                        }
+                    Ok(_) => {
+                        this.replace_content_menu(None, cx);
+                        this.error = Some(this.i18n.text("li-source-changed").to_owned());
                     }
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
+                    Err(error) => {
+                        this.replace_content_menu(None, cx);
+                        this.error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -492,17 +500,28 @@ impl WindowView {
                 return;
             }
         }
-        let Some(menu) = self.replace_content_menu(None, cx) else {
+        let Some(menu) = self.content_menu.as_ref() else {
             return;
         };
-        if menu.loading || !menu.guard.current(&self.state) {
+        if menu.loading
+            || !menu.guard.current(&self.state)
+            || (matches!(menu.source, TrackSource::Album(_))
+                && menu.album_revision != self.state.library.album_revision)
+        {
+            self.replace_content_menu(None, cx);
             self.error = Some(self.i18n.text("li-source-changed").to_owned());
             cx.notify();
             return;
         }
-        let TrackSource::Tracks(mut track_ids) = menu.source else {
+        if matches!(
+            action,
+            ContentAction::Favorite(_) | ContentAction::CreatePlaylist(_)
+        ) && matches!(menu.source, TrackSource::Album(_))
+        {
+            self.resolve_content_action(action, cx);
             return;
-        };
+        }
+        let menu = self.replace_content_menu(None, cx).unwrap();
         match action {
             ContentAction::Play => {
                 if let Some(command) = menu.play {
@@ -522,18 +541,26 @@ impl WindowView {
                     self.library.update(cx, |library, cx| {
                         library.resolve_library_drag(&nodes, destination, cx);
                     });
-                } else if let Some(key) = menu.album {
-                    let revision = menu.album_revision;
-                    self.send_content_collection(
-                        rivu_protocol::model::CollectionSource::Album { key, revision },
-                        destination,
-                        cx,
-                    );
                 } else {
-                    self.send_content_tracks(track_ids, destination, cx);
+                    match menu.source {
+                        TrackSource::Album(key) => self.send_content_collection(
+                            rivu_protocol::model::CollectionSource::Album {
+                                key,
+                                revision: menu.album_revision,
+                            },
+                            destination,
+                            cx,
+                        ),
+                        TrackSource::Tracks(track_ids) => {
+                            self.send_content_tracks(track_ids, destination, cx);
+                        }
+                    }
                 }
             }
             ContentAction::Favorite(favorite) => {
+                let TrackSource::Tracks(mut track_ids) = menu.source else {
+                    unreachable!("album favorites resolve before dispatch");
+                };
                 let mut seen = HashSet::new();
                 track_ids.retain(|id| seen.insert(*id));
                 if !track_ids.is_empty() {
@@ -545,6 +572,24 @@ impl WindowView {
                         cx,
                     );
                 }
+            }
+            ContentAction::CreatePlaylist(window) => {
+                let TrackSource::Tracks(track_ids) = menu.source else {
+                    unreachable!("album playlist creation resolves before dispatch");
+                };
+                let playlists = self.playlists.clone();
+                cx.defer(move |cx| {
+                    let _ = window.update(cx, |_, window, cx| {
+                        playlists.update(cx, |playlists, cx| {
+                            playlists.begin_playlist_name(
+                                playlists::PlaylistNameAction::Create { track_ids },
+                                String::new(),
+                                window,
+                                cx,
+                            );
+                        });
+                    });
+                });
             }
             ContentAction::Remove => {
                 if let Some(command) = menu.remove {
@@ -723,26 +768,10 @@ impl WindowView {
                     self.tr("playlist-create"),
                     cx,
                     |this, window, cx| {
-                        this.refresh(cx);
-                        let Some(menu) = this.replace_content_menu(None, cx) else {
-                            return;
-                        };
-                        if !menu.guard.current(&this.state) {
-                            this.error = Some(this.i18n.text("li-source-changed").to_owned());
-                            cx.notify();
-                            return;
-                        }
-                        let TrackSource::Tracks(track_ids) = menu.source else {
-                            return;
-                        };
-                        this.playlists.update(cx, |playlists, cx| {
-                            playlists.begin_playlist_name(
-                                playlists::PlaylistNameAction::Create { track_ids },
-                                String::new(),
-                                window,
-                                cx,
-                            );
-                        });
+                        this.content_action(
+                            ContentAction::CreatePlaylist(window.window_handle()),
+                            cx,
+                        );
                     },
                 ));
             }
@@ -993,5 +1022,363 @@ impl WindowView {
             DragDestination::Queue,
             cx,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        gui::layout::persistence::{LayoutPersistence, LoadedLayouts},
+        test_support::{ConfigFixture, CoreRuntime},
+    };
+    use core::prelude::v1::test;
+    use rivu_protocol::{model::AlbumKey, response::ViewResponse};
+    use std::sync::Arc;
+
+    struct Fixture {
+        app: Entity<WindowView>,
+        window: AnyWindowHandle,
+        _save: LayoutPersistence,
+        runtime: CoreRuntime,
+        _directory: tempfile::TempDir,
+        album: AlbumKey,
+        other: AlbumKey,
+        member: i64,
+    }
+
+    fn fixture(cx: &mut TestAppContext) -> Fixture {
+        cx.executor().allow_parking();
+        cx.update(rivu_ui::input::Input::init);
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config)
+        .unwrap();
+        let album = AlbumKey {
+            directory: directory.path().join("album"),
+            title: "Album".into(),
+        };
+        let other = AlbumKey {
+            directory: directory.path().join("other"),
+            title: album.title.clone(),
+        };
+        let paths = [
+            album.directory.join("one.wav"),
+            album.directory.join("two.wav"),
+            album.directory.join("three.wav"),
+            other.directory.join("outside.wav"),
+        ];
+        let catalog =
+            rivu::test_support::catalog::CatalogFixture::open(&directory.path().join("library.db"))
+                .unwrap();
+        catalog
+            .seed_tracks(
+                directory.path().to_owned(),
+                paths
+                    .iter()
+                    .map(|path| (path.clone(), "Track".into()))
+                    .collect(),
+            )
+            .unwrap();
+        let ids = paths.map(|path| catalog.track_id(&path).unwrap().unwrap());
+        drop(catalog);
+        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
+        for track_id in ids {
+            let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EditTrack {
+                track_id,
+                title: None,
+                artist: None,
+                album: Some(album.title.clone()),
+                decoder_hint: None,
+            }))
+            .ack;
+            assert!(ack.is_success(), "{:?}", ack.error);
+        }
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::CreatePlaylist {
+                name: "Target".into(),
+            }))
+            .ack;
+        assert!(ack.is_success(), "{:?}", ack.error);
+        let save =
+            LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layouts.json")));
+        let save_handle = save.handle();
+        let handle = runtime.handle.clone();
+        let artwork = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
+        let window = cx.add_window(move |window, cx| {
+            let mut app = WindowView::new(
+                handle,
+                save_handle,
+                artwork,
+                Default::default(),
+                Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
+                window,
+                cx,
+            );
+            // Keep real Core wakeups off GPUI's deterministic scheduler. Tests
+            // enable the window only when an explicitly chosen read must finish.
+            app.handle.set_wakeup(|| {});
+            app.window_visible = false;
+            app.reconcile_feature_demand(cx);
+            app
+        });
+        let app = window.root(cx).unwrap();
+        Fixture {
+            _directory: directory,
+            runtime,
+            _save: save,
+            app,
+            window: window.into(),
+            album,
+            other,
+            member: ids[0],
+        }
+    }
+
+    fn open_album(app: &mut WindowView, album: &AlbumKey, cx: &mut Context<WindowView>) {
+        app.refresh(cx);
+        app.open_content_menu(
+            ContentMenuRequest {
+                source: TrackSource::Album(album.clone()),
+                position: point(px(10.), px(10.)),
+                play: Some(Command::PlayAlbum { key: album.clone() }),
+            },
+            cx,
+        );
+        let menu = app.content_menu.as_ref().unwrap();
+        assert!(!menu.loading);
+        assert!(matches!(&menu.source, TrackSource::Album(key) if key == album));
+        assert_eq!(app.content_favorite_actions(cx), (true, true));
+    }
+
+    fn favorites(runtime: &CoreRuntime, album: &AlbumKey) -> Vec<bool> {
+        // Commands and queries have independent queues. Observe a harmless
+        // command after the action before asserting its real catalog effects.
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success(), "{:?}", ack.error);
+        let ViewResponse::AlbumTracks(page) = runtime
+            .handle
+            .query(Query::AlbumTracks {
+                key: album.clone(),
+                query: None,
+                offset: 0,
+                limit: rivu_protocol::model::MAX_QUERY_ROWS,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected album tracks");
+        };
+        assert_eq!(page.total, page.rows.len());
+        page.rows.into_iter().map(|row| row.favorite).collect()
+    }
+
+    #[gpui::test]
+    fn album_open_dismiss_and_scoped_actions_do_not_claim_a_collection_worker(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = fixture(cx);
+        fixture.app.update(cx, |app, cx| {
+            open_album(app, &fixture.album, cx);
+            assert!(!app.content_resolution.pending());
+            app.back_content_menu(cx);
+            assert!(app.content_menu.is_none());
+            assert!(!app.content_resolution.pending());
+
+            // Even a cancelled read that has not physically retired must not
+            // block opening a menu or dispatching its album-scoped commands.
+            let retired = app.content_resolution.begin().unwrap();
+            for action in [
+                ContentAction::Play,
+                ContentAction::Queue,
+                ContentAction::Playlist(1),
+            ] {
+                open_album(app, &fixture.album, cx);
+                assert!(!retired.ticket.is_current());
+                app.content_action(action, cx);
+                assert!(app.content_menu.is_none());
+                assert!(app.content_resolution.pending());
+            }
+            assert!(app.content_resolution.finish(&retired));
+        });
+    }
+
+    #[gpui::test]
+    async fn album_favorites_resolve_on_selection_and_preserve_full_album_scope(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = fixture(cx);
+        for favorite in [true, false] {
+            fixture.app.update(cx, |app, cx| {
+                open_album(app, &fixture.album, cx);
+                assert!(!app.content_resolution.pending());
+                app.window_visible = true;
+                app.content_action(ContentAction::Favorite(favorite), cx);
+                assert!(app.content_resolution.pending());
+                assert!(app.content_menu.as_ref().unwrap().loading);
+            });
+            cx.condition(&fixture.app, |app, _| {
+                !app.content_resolution.pending() && app.content_menu.is_none()
+            })
+            .await;
+            assert_eq!(favorites(&fixture.runtime, &fixture.album), [favorite; 3]);
+            assert_eq!(favorites(&fixture.runtime, &fixture.other), [false]);
+        }
+    }
+
+    #[gpui::test]
+    async fn creating_a_playlist_from_an_album_resolves_only_after_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = fixture(cx);
+        fixture.app.update(cx, |app, cx| {
+            open_album(app, &fixture.album, cx);
+            app.set_content_menu_playlists(true, cx);
+            assert!(!app.content_resolution.pending());
+            app.window_visible = true;
+            app.content_action(ContentAction::CreatePlaylist(fixture.window), cx);
+            assert!(app.content_resolution.pending());
+            assert!(app.content_menu.as_ref().unwrap().loading);
+        });
+        cx.condition(&fixture.app, |app, cx| {
+            !app.content_resolution.pending()
+                && app.content_menu.is_none()
+                && app.playlists.read(cx).editor_open()
+        })
+        .await;
+        assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 3]);
+    }
+
+    #[gpui::test]
+    async fn dismissing_chosen_album_id_actions_cancels_without_early_worker_retirement(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = fixture(cx);
+        for action in [
+            ContentAction::Favorite(true),
+            ContentAction::CreatePlaylist(fixture.window),
+        ] {
+            fixture.app.update(cx, |app, cx| {
+                open_album(app, &fixture.album, cx);
+                app.window_visible = true;
+                app.set_content_menu_playlists(true, cx);
+                app.content_action(action, cx);
+                assert!(app.content_resolution.pending());
+                assert!(app.content_menu.as_ref().unwrap().loading);
+                app.back_content_menu(cx);
+                assert!(app.content_menu.is_none());
+                assert!(app.content_resolution.pending());
+            });
+            cx.condition(&fixture.app, |app, _| !app.content_resolution.pending())
+                .await;
+            assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 3]);
+            assert!(
+                !fixture
+                    .app
+                    .read_with(cx, |app, cx| app.playlists.read(cx).editor_open())
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn loading_album_actions_keep_keyboard_cancellation_until_worker_retirement(
+        cx: &mut TestAppContext,
+    ) {
+        fn draw(handle: AnyWindowHandle, cx: &mut TestAppContext) {
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.simulate_next_frame(cx);
+                window.refresh();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+
+        let fixture = fixture(cx);
+        for key in ["escape", "left"] {
+            fixture.app.update(cx, |app, cx| {
+                open_album(app, &fixture.album, cx);
+                app.set_content_menu_playlists(true, cx);
+            });
+            draw(fixture.window, cx);
+            // Hold the physical reader deterministically, without racing a real
+            // AlbumTracks response against the loading page's deferred focus.
+            let read = fixture.app.update(cx, |app, cx| {
+                let read = app.begin_content_resolution(cx).unwrap();
+                app.set_content_menu_playlists(false, cx);
+                app.content_menu.as_mut().unwrap().loading = true;
+                cx.notify();
+                read
+            });
+            draw(fixture.window, cx);
+            cx.update_window(fixture.window, |_, window, cx| {
+                let keystroke = Keystroke::parse(key).unwrap();
+                window.dispatch_event(
+                    KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+            })
+            .unwrap();
+            fixture.app.update(cx, |app, cx| {
+                assert!(app.content_menu.is_none(), "{key} must dismiss loading");
+                assert!(!read.ticket.is_current());
+                assert!(app.content_resolution.pending());
+                assert!(!app.finish_content_resolution(&read, cx));
+                assert!(!app.content_resolution.pending());
+                assert!(!app.playlists.read(cx).editor_open());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn stale_album_favorite_action_rejects_without_resolving_or_mutating(cx: &mut TestAppContext) {
+        let fixture = fixture(cx);
+        fixture.app.update(cx, |app, cx| {
+            open_album(app, &fixture.album, cx);
+        });
+        let ack =
+            futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
+                track_id: fixture.member,
+                title: None,
+                artist: None,
+                album: Some("Changed".into()),
+                decoder_hint: None,
+            }))
+            .ack;
+        assert!(ack.is_success(), "{:?}", ack.error);
+        fixture.app.update(cx, |app, cx| {
+            app.content_action(ContentAction::Favorite(true), cx);
+            assert!(app.content_menu.is_none());
+            assert!(!app.content_resolution.pending());
+            assert_eq!(
+                app.error.as_deref(),
+                Some(app.i18n.text("li-source-changed"))
+            );
+        });
+        assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 2]);
+        assert_eq!(favorites(&fixture.runtime, &fixture.other), [false]);
     }
 }

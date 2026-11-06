@@ -243,6 +243,13 @@ individually. Transfers reject changed album membership rather than copying a
 stale or partial list. External database edits while Rivu
 is running are unsupported.
 
+Opening an album menu does not load its complete track list. Playback and transfers
+to Queue or an existing playlist use the album identity directly. Favorite,
+Unfavorite, and New playlist resolve the complete album only after selection;
+changed membership rejects the action instead of using partial or stale results.
+Esc or Left cancels the pending resolution, including New playlist's loading page;
+a cancelled read cannot later open the playlist dialog or apply favorites.
+
 Search matches album titles or member artists across the library. An artist match
 keeps the complete album, including other artists' tracks. The sort icon switches
 between title and artist order. Search and sort changes return to the top; Back,
