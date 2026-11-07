@@ -4,13 +4,13 @@ use anyhow::Result;
 use rivu_format::config::Config;
 use std::path::Path;
 
-/// Runs the same command, PCM and waveform services as the application, without
+/// Runs the same command and two PCM services as the application, without
 /// process-wide logging, signals, desktop launching or desktop-bus services.
 pub struct FrontendFixture {
     server: Option<ipc::Server>,
-    waveform: Option<ipc::waveform::WaveServer>,
+    audio: Option<ipc::audio::AudioServer>,
     pcm: Option<ipc::pcm::PcmServer>,
-    // The runtime owns the executor that drains command and waveform sessions.
+    // The runtime owns the executor that drains command and audio sessions.
     runtime: CoreRuntime,
     // Storage authority outlives every service, including partial teardown.
     _owner: ipc::SocketOwner,
@@ -23,7 +23,7 @@ impl FrontendFixture {
         let app = AppHandle::new(&runtime, data_dir);
         let pcm =
             ipc::pcm::PcmServer::start(data_dir, runtime.handle.clone(), owner.instance_id())?;
-        let waveform = ipc::waveform::WaveServer::start(
+        let audio = ipc::audio::AudioServer::start(
             data_dir,
             runtime.handle.clone(),
             owner.instance_id(),
@@ -37,7 +37,7 @@ impl FrontendFixture {
             .query(rivu_protocol::model::Query::ScanTask { id: 0 })?;
         Ok(Self {
             server: Some(server),
-            waveform: Some(waveform),
+            audio: Some(audio),
             pcm: Some(pcm),
             runtime,
             _owner: owner,
@@ -52,7 +52,7 @@ impl FrontendFixture {
 impl Drop for FrontendFixture {
     fn drop(&mut self) {
         // Cancel transport-owned work while Core's executor is still running.
-        drop(self.waveform.take());
+        drop(self.audio.take());
         drop(self.pcm.take());
         drop(self.server.take());
         let _ = self.runtime.control.request_shutdown();

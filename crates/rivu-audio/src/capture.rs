@@ -199,6 +199,12 @@ pub(crate) struct PcmAudioIdentity {
     capture: u64,
     sample_rate: u32,
 }
+#[cfg(test)]
+impl PcmAudioIdentity {
+    pub(crate) fn sample_rate(self) -> u32 {
+        self.sample_rate
+    }
+}
 pub(crate) struct PcmProducer {
     control: Arc<PcmControl>,
     layout: [u32; MAX_PCM_CHANNELS],
@@ -230,16 +236,43 @@ impl PcmProducer {
         self.identity = None;
         self.discontinuity();
     }
+    #[cfg(test)]
     pub(crate) fn push(&mut self, output_frame: u64, pcm: &[f32]) {
         let Some(identity) = self.identity() else {
             return;
         };
-        self.push_samples_for(identity, output_frame, pcm.iter().copied());
+        self.push_samples_for(
+            identity,
+            output_frame,
+            output_frame as f64 / f64::from(identity.sample_rate),
+            f64::from(identity.sample_rate).recip(),
+            pcm.iter().copied(),
+        );
+    }
+    pub(crate) fn push_mapped(
+        &mut self,
+        output_frame: u64,
+        media_start: f64,
+        media_step: f64,
+        pcm: &[f32],
+    ) {
+        let Some(identity) = self.identity() else {
+            return;
+        };
+        self.push_samples_for(
+            identity,
+            output_frame,
+            media_start,
+            media_step,
+            pcm.iter().copied(),
+        );
     }
     pub(crate) fn push_samples_for(
         &mut self,
         identity: PcmAudioIdentity,
         mut output_frame: u64,
+        mut media_start: f64,
+        media_step: f64,
         mut samples: impl ExactSizeIterator<Item = f32>,
     ) {
         if self.identity() != Some(identity) {
@@ -268,6 +301,8 @@ impl PcmProducer {
                 capture: identity.capture,
                 start_frame: self.frame,
                 output_frame,
+                media_start,
+                media_step,
                 sample_rate: identity.sample_rate,
                 gap: self.gap == Some(identity),
             };
@@ -280,6 +315,7 @@ impl PcmProducer {
             for _ in block {}
             self.frame = self.frame.wrapping_add(frames as u64);
             output_frame = output_frame.wrapping_add(frames as u64);
+            media_start += frames as f64 * media_step;
             self.gap = (!published).then_some(identity);
         }
         self.control.notify();
@@ -370,6 +406,7 @@ impl TestCapture {
             }
             header.start_frame += self.offset as u64;
             header.output_frame += self.offset as u64;
+            header.media_start += self.offset as f64 * header.media_step;
             header.gap &= self.offset == 0;
             self.offset += count;
             if self.offset == block.len() && (block.len() == PCM_BLOCK_FRAMES || self.next < latest)
@@ -557,11 +594,11 @@ mod tests {
         assert!(producer.identity().is_none());
         assert!(consumer.read(&mut output).is_none());
         control.apply_audio_intents(1);
-        producer.push_samples_for(old, 16, [1.0; 16].into_iter());
+        producer.push_samples_for(old, 16, 0.0, 1.0 / 96_000.0, [1.0; 16].into_iter());
         assert!(consumer.read(&mut output).is_none());
         let new = producer.identity().unwrap();
         assert!(new != old);
-        producer.push_samples_for(new, 24, [0.5; 8].into_iter());
+        producer.push_samples_for(new, 24, 0.0, 1.0 / 96_000.0, [0.5; 8].into_iter());
         let (header, _) = consumer.read(&mut output).unwrap();
         assert_eq!(header.intent, 1);
         assert_eq!(header.start_frame, 0);
@@ -599,8 +636,35 @@ mod tests {
             updates.try_recv().unwrap();
             assert!(producer.identity().unwrap() != old);
             assert!(consumer.read(&mut output).is_none());
-            producer.push_samples_for(old, 16, [1.0; 32].into_iter());
+            producer.push_samples_for(old, 16, 0.0, 1.0 / 96_000.0, [1.0; 32].into_iter());
             assert!(consumer.read(&mut output).is_none());
         }
+    }
+    #[test]
+    fn media_mapping_comes_from_admitted_pcm_and_offsets_follow_it() {
+        let (control, mut producer, mut consumer) = capture();
+        producer.push_mapped(123, 0.25, 1.0 / 96_000.0, &[0.25; 32]);
+        let first = consumer.try_pop().unwrap();
+        assert_eq!(first.header.media_start, 0.25);
+        let second = consumer.try_pop().unwrap();
+        assert_eq!(second.header.media_start, 0.25 + 1.0 / 96_000.0);
+        producer.push_mapped(139, 1.5, 1.0 / 96_000.0, &[0.5; 16]);
+        let window = control.window();
+        assert_eq!(
+            window
+                .block(window.sequence())
+                .unwrap()
+                .header()
+                .media_start,
+            1.5
+        );
+        assert_eq!(
+            window
+                .block(window.sequence())
+                .unwrap()
+                .header()
+                .output_frame,
+            139
+        );
     }
 }

@@ -2,6 +2,83 @@
 use rivu_protocol::model::Track;
 use std::path::PathBuf;
 
+/// Reduce a lossless finite stream immediately; only one chunk's folded stereo
+/// and a bounded summary are retained, never a song-sized sample buffer.
+pub(in crate::gui) async fn load(
+    data_dir: PathBuf,
+    instance: u32,
+    expected: rivu_protocol::audio::ExpectedSource,
+    source: Option<u64>,
+    signal: rivu_format::config::VisualizationSignal,
+    cancelled: futures::channel::oneshot::Receiver<()>,
+    mut progress: impl FnMut(&rivu_visuals::WaveformFrame) -> anyhow::Result<()>,
+) -> anyhow::Result<rivu_visuals::WaveformFrame> {
+    use rivu_protocol::audio::{PlaybackRange, Response};
+    let path = expected.path.clone();
+    let range = expected.cue.as_ref().map(|cue| PlaybackRange {
+        start_seconds: cue.start_seconds(),
+        end_seconds: cue.end_seconds(),
+    });
+    let hint = expected.decoder_hint;
+    let mut summary = rivu_visuals::WaveformSummary::default();
+    let mut weights = Vec::new();
+    let mut folded = Vec::new();
+    crate::transport::audio::read_stream(
+        data_dir,
+        instance,
+        expected,
+        source,
+        signal,
+        None,
+        cancelled,
+        |event| {
+            match event {
+                Response::Start {
+                    source,
+                    identity,
+                    sample_rate,
+                    layout,
+                    duration,
+                } => {
+                    summary.select(
+                        &path,
+                        range,
+                        hint,
+                        duration,
+                        sample_rate,
+                        source,
+                        Some(identity),
+                    );
+                    weights = rivu_dsp::channels::analysis_weights(layout);
+                }
+                Response::Pcm {
+                    media_start,
+                    media_step,
+                    samples,
+                    ..
+                } => {
+                    folded.clear();
+                    folded.extend(samples.chunks_exact(weights.len()).map(|frame| {
+                        let mut stereo = [0.0; 2];
+                        for (&sample, weight) in frame.iter().zip(&weights) {
+                            stereo[0] += sample * weight[0];
+                            stereo[1] += sample * weight[1];
+                        }
+                        stereo
+                    }));
+                    summary.push_mapped(media_start, media_step, &folded);
+                    progress(&summary.frame)?;
+                }
+                Response::Complete { duration, .. } => summary.finish(duration),
+                _ => unreachable!("Generic stream admission rejects control/error events"),
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(summary.frame)
+}
+
 #[derive(Default)]
 pub(in crate::gui) struct FullWaveformRequest {
     generation: u64,
@@ -31,6 +108,7 @@ impl FullWaveformTarget {
     }
 
     fn matches(&self, track: &Track) -> bool {
+        // Saved hint commits retire through saved_hint_changed, not metadata sync.
         self.track_id == track.id && self.matches_source(track)
     }
 }

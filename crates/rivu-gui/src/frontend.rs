@@ -2,7 +2,6 @@
 //! Logical query deadlines notify the view without releasing its physical wait.
 use crate::projection::GuiSnapshot;
 use crate::transport::visual::VisualClient;
-use crate::transport::waveform::WaveClient;
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
 use futures::channel::oneshot;
@@ -13,7 +12,6 @@ use rivu_client::{
 };
 use rivu_format::config::Config;
 use rivu_protocol::query_tracking::{QueryEpoch, QueryTicket};
-use rivu_protocol::waveform::WaveformFrame;
 use rivu_protocol::{
     ADMISSION_TIMEOUT, AppCommand, REPLY_TIMEOUT,
     model::{Command, ConfigMutation, ConfigPatch, Query},
@@ -21,6 +19,7 @@ use rivu_protocol::{
         Ack, AckStatus, ObservedState, QueryError, QueryResponse, StateResponse, StateSections,
     },
 };
+use rivu_visuals::WaveformFrame;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -69,7 +68,6 @@ struct Shared {
     wakeup: RwLock<Option<Wakeup>>,
     disconnect: Mutex<ConnectionState>,
     visual: Arc<VisualClient>,
-    wave: Arc<WaveClient>,
 }
 
 fn analysis_invalidated_by_config(previous: &Config, next: &Config) -> bool {
@@ -103,6 +101,7 @@ impl Shared {
             connection.callback.clone()
         };
         self.stop.cancel();
+        self.visual.stop();
         if let Some(callback) = callback {
             callback();
         }
@@ -139,7 +138,7 @@ impl Shared {
     }
 
     fn merge(&self, response: StateResponse) -> bool {
-        let (shutdown, refresh_waveform) = {
+        let shutdown = {
             let mut published = self.published.write();
             if self.stop.is_cancelled() {
                 return false;
@@ -147,8 +146,6 @@ impl Shared {
             let device_changed = response.system.as_ref().is_some_and(|next| {
                 next.selected_device != published.observed.snapshot().system.selected_device
             });
-            let refresh_waveform =
-                response.playback.is_some() || response.configuration.is_some() || device_changed;
             let invalidate_analysis = response.playback.as_ref().is_some_and(|next| {
                 next.source_generation != published.observed.snapshot().source_generation
                     || next.playback.seek_revision
@@ -166,15 +163,15 @@ impl Shared {
             published.observed.apply(self.instance_id, response);
             self.visual
                 .configure(&published.observed.snapshot().configuration.config);
+            let state = published.observed.snapshot();
+            self.visual.configure_source(
+                state.current_track.as_deref(),
+                state.source_generation,
+                state.playback.duration,
+            );
             published.publication = published.publication.wrapping_add(1);
-            (
-                published.observed.snapshot().system.shutting_down,
-                refresh_waveform,
-            )
+            published.observed.snapshot().system.shutting_down
         };
-        if refresh_waveform {
-            self.wave.refresh();
-        }
         if shutdown {
             self.disconnected();
         }
@@ -333,10 +330,14 @@ impl FrontendRuntime {
             .context("GUI Hello did not bind an instance")?;
         watcher.bind_instance(instance_id)?;
         let visual = Arc::new(VisualClient::connect(data_dir, instance_id)?);
-        let wave = Arc::new(WaveClient::connect(data_dir, instance_id)?);
         let mut observed = ObservedState::new(instance_id);
         observed.apply(instance_id, initial);
         visual.configure(&observed.snapshot().configuration.config);
+        visual.configure_source(
+            observed.snapshot().current_track.as_deref(),
+            observed.snapshot().source_generation,
+            observed.snapshot().playback.duration,
+        );
         let shared = Arc::new(Shared {
             data_dir: data_dir.to_owned(),
             instance_id,
@@ -351,7 +352,6 @@ impl FrontendRuntime {
             wakeup: RwLock::new(None),
             disconnect: Mutex::new(ConnectionState::default()),
             visual: Arc::clone(&visual),
-            wave: Arc::clone(&wave),
         });
         let weak = Arc::downgrade(&shared);
         visual.set_wakeup(Arc::new(move || {
@@ -360,19 +360,7 @@ impl FrontendRuntime {
             }
         }));
         let weak = Arc::downgrade(&shared);
-        wave.set_wakeup(Arc::new(move || {
-            if let Some(shared) = weak.upgrade() {
-                shared.wake();
-            }
-        }));
-        let weak = Arc::downgrade(&shared);
         visual.set_error_callback(Arc::new(move |message| {
-            if let Some(shared) = weak.upgrade() {
-                shared.error(message, true);
-            }
-        }));
-        let weak = Arc::downgrade(&shared);
-        wave.set_error_callback(Arc::new(move |message| {
             if let Some(shared) = weak.upgrade() {
                 shared.error(message, true);
             }
@@ -386,7 +374,7 @@ impl FrontendRuntime {
                 queries,
                 query_timeout: None,
                 analysis: Arc::clone(&visual.analysis),
-                waveform: Arc::clone(&wave.waveform),
+                waveform: Arc::clone(&visual.waveform),
             },
             workers: Vec::with_capacity(QUERY_WORKERS + 2),
         };
@@ -447,8 +435,6 @@ impl Drop for FrontendRuntime {
         self.handle.commands.close();
         self.handle.queries.close();
         self.handle.shared.disconnected();
-        self.handle.shared.visual.stop();
-        self.handle.shared.wave.stop();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -770,7 +756,7 @@ impl FrontendHandle {
         self.shared.visual.set_display_demand(demand);
     }
     pub(crate) fn set_waveform_demand(&self, enabled: bool) {
-        self.shared.wave.set_enabled(enabled);
+        self.shared.visual.set_waveform_demand(enabled);
     }
     pub(crate) fn consume_current_analysis(
         &self,

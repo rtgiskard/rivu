@@ -326,11 +326,11 @@ impl Core {
             } => {
                 self.register_task_wait(target, registration);
             }
-            Operation::WaveformSnapshot { source, reply } => {
+            Operation::RenderSnapshot { source, reply } => {
                 if self.state.source_generation == source {
-                    let _ = self.engine.send(AudioCommand::WaveformSnapshot(reply));
+                    let _ = self.engine.send(AudioCommand::RenderSnapshot(reply));
                 } else {
-                    let _ = reply.send(Err("Full waveform source changed before capture".into()));
+                    let _ = reply.send(Err("Audio source changed before capture".into()));
                 }
             }
             Operation::Command(command) => {

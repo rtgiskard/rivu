@@ -25,7 +25,7 @@ consumer behavior is described here; a proposal there does not change it.
 localized `VisualLabels`, without depending on the application root, layout tree,
 localizer or playback commands. The GUI presentation owner reconciles demand,
 accepts source/seek identities and owns scheduling; the host routes Waveform seek,
-scan and decoder-hint events through existing playback and scan owners. Rendering
+load and decoder-hint events through existing playback and finite-render owners. Rendering
 introduces no additional analysis worker, PCM pool or animation loop. Constructors
 share configuration-projection defaults; history and GPU allocation are demand-driven.
 Frequency views ingest shared analysis only while Spectrum or Spectrogram is
@@ -56,7 +56,7 @@ covers bounded output prefetch, observer headroom and the maximum FFT span; exac
 resource limits belong to link:22_cache.adoc#visualization-caching[Visualization caching].
 Each refill admits at most 16,384 frames before returning to control handling.
 DSP and monitor EQ process converted fragments once; later edits do not reprocess
-pending output. Rolling waveform capture remains decoder-driven.
+pending output. Progressive waveform capture follows GUI-admitted PCM.
 
 After and bypass taps borrow admitted PCM. A processed Before tap needs a
 source-aligned FIFO bounded by graph latency plus one converted fragment
@@ -224,8 +224,8 @@ source or an unmatched close clears the drawing rather than guessing continuity.
 Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
 clear incompatible retained results even while paused or hidden. These semantic
 facts are independent of producer continuity generation and seek previews.
-Disabling visualizations discards the views rather than freezing them; its
-waveform and re-enablement consequences are in <<visualization-enablement,Visualization enablement>>.
+Disabling visualizations discards live-analysis views rather than freezing them;
+the retained waveform summary follows <<visualization-enablement,Visualization enablement>>.
 
 ==== Appearance changes without new audio
 
@@ -273,21 +273,23 @@ retains only the latest publication until visibility is revoked.
 
 == Visualization enablement
 
-Visualization enablement gates both GUI demand and the audio-worker tap. Disabling discards shared
-analysis, Spectrogram history, stereo fields, fractal scenes, waveform bins and
-completed full-waveform previews. FFT plans and working storage remain reusable,
-but resumption needs a new complete audio window. Settings, source identity,
-playback and accounting survive. Transition generations reject queued samples
-and late scan results even across quick on/off switches or while hidden.
+Visualization enablement gates GUI demand and the audio-worker tap. Disabling
+discards shared analysis, Spectrogram history, stereo fields and fractal scenes,
+and releases waveform display/interaction caches, but retains the bounded session
+waveform summary and already-completed preview. FFT plans and working storage
+remain reusable; live analysis needs a new complete audio window on resumption.
+Settings, source identity, playback and accounting survive. Transition generations
+reject queued samples and late full-load results, including quick on/off switches.
 Submitted graphics retain their independent
 link:22_cache.adoc#resource-boundaries[completion-aware lifetime].
 
-Discarded waveform coverage cannot become complete at EOF. Only fresh decoded
-PCM fills bins; there is no automatic backfill or rescan. A fresh uninterrupted
-traversal from zero can complete the envelope. Disabling cancels explicit scans in
-the audio worker. Decode loops observe cancellation between packets, but cannot
-interrupt a blocking file/container/codec call. Cancellation is not reported as
-a load failure, and re-enabling visualizations neither restores previews nor starts a scan.
+Disabling collects no additional waveform coverage and performs no backfill.
+Retained intervals remain available on re-enablement; subsequent admitted PCM
+fills unknown intervals or overwrites revisited bins. Disabling cancels the GUI's explicit
+finite-render requests. Decode loops observe cancellation between packets, but
+cannot interrupt a blocking file/container/codec call; physical admission remains
+held until worker exit. Cancellation is not a load failure. Re-enabling restores
+the retained waveform display but does not restart an interrupted full load.
 The menu toggle changes only visualization enablement through the core's serialized request
 path, preserving pending playback and device settings.
 The disabled-state icon and controls are described in
@@ -296,72 +298,52 @@ link:01_config.adoc#visualization-enablement[Visualization enablement].
 
 == Waveform
 
-Playback builds a progressive waveform from decoded PCM, not from the FFT tap.
-It retains at most 1024 bins rather than whole-track PCM. Unknown or underestimated
-timelines expand by coarsening existing bins, preserving bounded memory at the
-cost of preview resolution. Normal decoder EOF corrects the timeline end even
-when coverage is incomplete; only capacity beyond that endpoint is removed.
-Unknown intervals inside the timeline remain blank and eligible for later
-playback updates. Complete coverage requires a traversal from zero without seeks
-or discarded PCM. For both native and FFmpeg decoding, its timestamp-continuity
-check allows one container tick when timestamps are coarser than samples;
-sample-accurate sources retain a half-sample threshold. Gaps within the container's
-timestamp precision cannot be distinguished reliably from quantization.
-An undecoded interval is distinct from decoded silence. A new traversal, signal
-selection or EQ change retains the old display until PCM visits an interval;
-that bin's peak, RMS, channel energy and sample counts are then replaced by the
-new traversal's statistics. Lower gain can therefore decrease old peaks and RMS.
-Successive contiguous packets in the same traversal accumulate without counting
-overlapping samples twice; unvisited bins keep their prior values.
+The GUI session owns the waveform summary, with at most 1024 bins and no disk
+persistence. Core and audio execution know only PCM capture/rendering, not
+waveform statistics or display geometry. One GUI background reader admits the
+shared realtime PCM once and folds it for both live analysis and Waveform; panels
+do not open independent readers or replay the same samples into the summary.
 
-An integer sample-to-bin ratio keeps statistics stable through EOF correction
-and pairwise coarsening. Playback batches publication without waiting for the
-shared write lock, then flushes pending statistics at EOF and retirement.
-Identity/revision checks reject stale updates without replacing scan-cancellation
-controls.
+Progressive collection is the default. Only admitted PCM fills bins; undecoded,
+skipped or overwritten intervals remain blank, distinct from known silence.
+Collection therefore follows the GUI subscription, not decoder activity alone.
+Unknown or underestimated timelines coarsen existing bins to preserve the bound.
+Source changes clear the summary. Seeking the same source and changing signal,
+processing or EQ preserve the old display until newly visited intervals overwrite
+their statistics, allowing lower gain to reduce old Peak and RMS values.
+Contiguous fragments accumulate without counting an accepted prefix twice.
+PCM media start and step locate samples relative to the selected source/CUE;
+offset reads advance that start by the accepted frame offset times the step.
+Epochs, gaps and applied intent fence traversal and mapping boundaries rather
+than deriving positions from Core progress notifications.
 
-Native and FFmpeg decoding use a finite work budget across packet skipping,
-seek discard, codec buffering and retained fragments. Exhaustion yields control,
-not EOF. Conversion is bounded to 16,384 frames and 256 KiB per float-PCM
-fragment; internal codec allocation and blocking calls are outside that bound.
+An explicit full load supplies a baseline for the same display. The previous
+display remains visible during its Track query and finite render, and on failure.
+The request specifies Before/After and optional selected-source-relative range.
+Core captures the immutable actual source, admitted graph and monitor EQ when
+servicing it, including retained PCM for memory-backed audition. Without active
+playback, rendering opens the selected original source with its saved decoder
+hint, not a persisted graph. Reconstruction failures are errors, never fallback.
+After is a rerender of the captured state, not a recording of past audible output.
+Subsequent configuration edits do not mutate that capture.
 
-An explicit full-track scan supplies a baseline for the same rolling display.
-The previous display remains visible during its Track query and decode, and on
-failure. The GUI sends only expected source identity and optional playback source
-generation; clicking does not freeze signal or EQ settings. While servicing the
-Full request, the IPC handler reads Core's configuration and asks Core for the
-audio snapshot identifying the actual active audition source/graph, including
-retained PCM for a memory-backed source. The scan uses that frozen capture; subsequent
-signal or EQ edits do not alter or cancel it. Without active playback, it opens
-the selected original source with its saved decoder hint, not a persisted graph.
-When the captured graph specifies a published frame count, the scan stops once
-that timeline is filled, without decoding or processing unrelated cached suffixes.
-Preguard and processing latency are discarded before counting published frames;
-real upstream EOF still drains necessary graph output if the timeline is not yet filled.
+The GUI folds finite PCM into a bounded summary, never retains whole-track PCM,
+and installs it only for the current source/request. A per-bucket order fence
+preserves realtime intervals visited after the full request began; a late baseline
+cannot erase them. Subsequent playback can overwrite the installed baseline.
+Different geometries map by time overlap and sample-weighted energy. There is
+one rolling display and no automatic full rescan. The finite protocol and physical
+worker cancellation lifetime are authoritative in
+link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering].
 
-Each progressive bin carries its last PCM revision. Installing a scan overlays
-only playback bins newer than the request; a late baseline cannot erase PCM
-visited since the click. Subsequent playback can overwrite the installed full
-result. Different full/progressive geometries map by time overlap with
-sample-weighted RMS, retaining bounded bins without another whole-track PCM
-copy. There is one rolling display, with no automatic full rescan.
-
-Explicit preview identity includes the file, optional playback range, library
-content fingerprint and captured opened-source provenance. Changed content,
-target or committed decoder hint retires affected requests/results; ordinary
-metadata and panel visibility changes retain them. A newer explicit request
-supersedes the old request without dropping the current display. Request and
-suspension generations reject stale completion independently of playback's
-statistics revisions. Disabling visualizations cancels scans and discards the display.
-
-Progressive identity belongs to the opened source, not the latest library
-fingerprint. File content uses opened-file identity; memory-backed audition uses
-immutable PCM storage and slice identity. Backend, initial timeline and audio
-format also participate. Replacement content or a changed format retires the
-envelope; seeking the same source retains it, with revisited bins replacing old
-statistics even after complete coverage. No per-frame filesystem lookup or
-extra whole-track scan is needed. Library refreshes and saved-hint changes cannot
-relabel audio already opened for playback.
+Explicit preview identity includes file or immutable PCM identity, optional range,
+library fingerprint and decoder hint. Changed source, content or committed hint
+retires affected requests/results; metadata-only edits and panel hiding retain
+them. A newer explicit request supersedes the previous request without clearing
+the display. Pause and hidden panels retain the bounded session summary.
+Request and suspension generations reject stale completion. The GUI can gate
+full-load requests when visualizations are disabled; this is presentation policy,
+not a restriction of the generic audio endpoint.
 
 Display aggregation keeps left and right statistics separate. Peak takes the
 maximum known value; RMS uses decoded-sample-weighted energy,

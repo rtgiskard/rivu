@@ -32,6 +32,8 @@ fn fixture() -> Fixture {
         }))),
         error: Mutex::new(ErrorState::default()),
         stopped: AtomicBool::new(false),
+        summary: Mutex::new(WaveformSummary::default()),
+        waveform: Arc::new(RwLock::new(WaveformFrame::default())),
     });
     let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
     let worker_state = state.clone();
@@ -53,6 +55,7 @@ fn fixture() -> Fixture {
         window,
         client: VisualClient {
             analysis,
+            waveform: Arc::clone(&state.waveform),
             state,
             notifications,
             socket,
@@ -71,6 +74,8 @@ fn header(state: PcmState, start_frame: u64) -> PcmHeader {
         capture: state.capture,
         start_frame,
         output_frame: start_frame,
+        media_start: start_frame as f64 / f64::from(state.sample_rate.max(1)),
+        media_step: f64::from(state.sample_rate.max(1)).recip(),
         sample_rate: state.sample_rate,
         ..PcmHeader::default()
     }
@@ -696,4 +701,78 @@ fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window
     });
     assert!(VisualClient::connect(directory.path(), 42).is_err());
     server.join().unwrap();
+}
+
+#[test]
+fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        let mut track = crate::test_support::artwork_track("source.wav".into());
+        track.sample_rate = 48_000;
+        track.duration = Some(1.0);
+        f.client.configure_source(Some(&track), 1, track.duration);
+        let mut control = ControlReader::<REQUEST_SIZE>::new();
+        let configured = control.read(&mut f.server).await.unwrap();
+        assert_eq!(configured[1], 0, "source selection alone requests no PCM");
+        f.client.set_waveform_demand(true);
+        let request = control.read(&mut f.server).await.unwrap();
+        assert_eq!(
+            request[1], 1,
+            "waveform-only enables the shared PCM producer"
+        );
+        let revision = rivu_protocol::pcm::word(&request[8..]);
+        let state = PcmState {
+            epoch: 2,
+            generation: 1,
+            active: true,
+            sample_rate: 48_000,
+            heard_frame: u64::MAX,
+            ..Default::default()
+        };
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().audio_epoch != 2 {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        stereo(&f.window, header(state, 0), 0.5, 256);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.waveform.read().left_rms_counts.iter().sum::<u64>() != 256 {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        stereo(&f.window, header(state, 256), 0.25, 128);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.waveform.read().left_rms_counts.iter().sum::<u64>() != 384 {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let analysis = f.client.analysis.read();
+        assert!(analysis.settings.is_none());
+        assert!(analysis.spectrum_db.is_empty());
+        assert!(analysis.visualizer.pcm.is_empty());
+        drop(analysis);
+        let retained = f.client.waveform.read().peaks.clone();
+        track.decoder_hint = rivu_format::decoder_hint::DecoderHint::Ffmpeg;
+        track.title = "metadata only".into();
+        f.client.configure_source(Some(&track), 1, track.duration);
+        f.client.invalidate();
+        assert_eq!(f.client.waveform.read().peaks, retained);
+        f.client.configure_source(Some(&track), 2, track.duration);
+        assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
+    });
 }

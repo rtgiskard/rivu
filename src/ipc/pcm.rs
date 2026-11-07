@@ -377,6 +377,8 @@ mod tests {
                     sample_rate: shared.sample_rate,
                     start_frame,
                     output_frame: start_frame,
+                    media_start: start_frame as f64 / f64::from(shared.sample_rate),
+                    media_step: f64::from(shared.sample_rate).recip(),
                     ..Default::default()
                 },
                 &[0, 1],

@@ -107,8 +107,8 @@ pub(super) fn mapping(source: &[Channel], device: &[Channel]) -> Result<Vec<Opti
         .collect())
 }
 
-// Visualization paths fold decoded channels into two logical sides. Real
-// output still uses the original permutation with independent speakers.
+// Test observers fold native PCM on the reader side; playback preserves speakers.
+#[cfg(test)]
 pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
     rivu_dsp::channels::analysis_weights(layout.iter().map(|channel| channel.standard_index()))
 }

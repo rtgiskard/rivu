@@ -16,6 +16,7 @@ pub use frequency_views::FrequencyViews;
 pub use labels::VisualLabels;
 pub use parameters::VisualParameters;
 pub use style_coordinator::StyleCoordinator;
+pub use waveform::summary::{WaveformFrame, WaveformIdentity, WaveformSummary};
 pub use waveform::{Waveform, WaveformEvent, WaveformViewState};
 
 use gpui::{Div, SharedString, div, prelude::*, rgb};

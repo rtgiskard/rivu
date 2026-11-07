@@ -20,6 +20,15 @@ remains untouched. See <<configuration-schema,Configuration schema>> for version
 rules and <<configuration-compatibility,Configuration compatibility>> for manual
 setting changes.
 
+Moving waveform ownership to the GUI changes local side-channel
+compatibility, not database or saved visualization configuration. Frontend and
+Core must be upgraded together: realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6,
+and generic finite PCM rendering uses `.audio.v1`. The former waveform-summary
+socket is not a compatibility path. GUI-session summaries are not persisted or
+migrated. Waveform style, display settings and seek controls retain their keys;
+see link:23_visuals.adoc#waveform[Waveform] and
+link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
+
 To inspect or upgrade a supported database before application startup, stop Rivu
 and run the tool with the intended data directory and configuration:
 

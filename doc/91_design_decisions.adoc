@@ -113,11 +113,71 @@ Status: retained after review, 2026-11-06.
 
 A 4096-frame latest snapshot cannot reconstruct a 32768-frame FFT or every sample
 needed by continuous Density accumulation. Retain worker analysis instead of
-substituting the latest snapshot. Full raw streaming would require queue,
-identity, scheduling and release ownership again. Independently retained optional
-payloads must not acquire a shared lifetime solely to reduce type count.
-Revisit only for a concrete consumer with equivalent continuity and bounded
-retention. See link:23_visuals.adoc[Analysis and visualization].
+substituting the latest snapshot. The PCM cutover (implemented,
+2026-11-07) retains one continuous GUI reader/fold for live analysis and bounded
+session waveform summaries. Explicit whole-source reads use a separate bounded,
+lossless finite stream with backpressure and physical worker ownership; they do
+not reconstruct missing realtime history. Independently retained optional payloads
+must not acquire a shared lifetime solely to reduce type count. See
+link:23_visuals.adoc#waveform[Waveform ownership] and
+link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
+
+Finite Before/After reads reuse the audio renderer rather than a waveform scan.
+The GUI reduces PCM off the foreground executor and coalesces bounded progress
+publications; display changes neither decode audio nor clear session statistics.
+
+Progressive summaries share the GUI PCM reader instead of a dedicated
+waveform-client thread. This reduces waveform-specific coupling, but moving
+statistics does not by itself reduce total CPU or RSS. Finite reads transport PCM
+instead of summaries: a
+60-second 48 kHz stereo `f32` source sends 23,040,000 sample bytes, consumed and
+discarded incrementally. Finite transport batches contiguous render events into
+at most 4096 frames and 32 KiB of samples per packet. Four reusable PCM buffers
+retain at most 128 KiB per render, with two packets queued; this permits filling
+one while another is written and two await sending. This replaces three
+1024-frame buffers and per-render-event sends. Decoder/graph memory,
+encoded/socket buffers and shared-window residency remain separate costs.
+
+Delivery review removed migration-local allocation and computation waste. A
+1024-bin snapshot retains 114,688 array bytes; the summary also keeps 24,576
+energy bytes. A standalone allocator-counted smoke observed zero allocations
+for ingestion and warmed snapshot publication. For one 4096-frame block at
+30 seconds in that 60-second timeline, two bins are touched: finalizing RMS
+per touched bin reduces the new reducer's square-root evaluations from 12,288
+to 6 without changing energy/count/peak results. These are capacity and operation
+counts, not a timing or RSS comparison against the old architecture.
+
+An actual Core smoke delivered all 2,880,000 frames of a 60-second stereo source
+and 240,000 frames of its 10–15 second range for both signals, with continuous
+media positions and concurrent seek leaving the captured stream unchanged.
+Source/seek mapping, replay replacement, late full/live overlap and physical
+cancellation retirement are covered by the affected behavior suites.
+
+An isolated 1280×800 nested-niri GUI check started capture at 30 seconds and left
+the earlier timeline blank. The actual full-load menu filled the complete source;
+a waveform click sought from 41.37 to 20.06 seconds without discarding its display.
+Closing the window preserved Core and playback state; reopening while paused
+showed no inherited summary. Input used Wayland virtual pointer events, not direct
+business-method calls. This does not establish desktop-shell, IME or multi-output
+behavior.
+
+After rebasing onto `fc4bb47b`, `make lint` and `make test-rust` passed, including
+default/all/disabled workspace features and GUI-only/TUI-only root combinations.
+The cutover's default-feature application artifact also built successfully.
+Subsequent ownership/cost cleanup passed `make lint` and the affected audio,
+GUI and visuals suites with all features and with default features disabled.
+The standalone reducer smoke also checked midtrack blank coverage, independent
+scalar peak/RMS/count results, and replay replacement preserving untouched bins.
+
+The four-buffer batching update passed `make lint`, finite-IPC tests with default
+features enabled and disabled, and a default-feature application build. An
+isolated Core smoke read 48,017 frames at 48 kHz: stereo used 12 packets and
+18-channel PCM used 106, respecting the byte limit. Before/After and selected
+ranges preserved every sample and media position; source mutation returned the
+valid partial tail before Error, never Complete. Regressions cover media jumps,
+step changes, partial tails, cancellation and backpressured worker retirement.
+These establish batching and lifecycle behavior, not CPU, RSS or latency gains.
+
 
 [[DEC-007]]
 === DEC-007: PCM retention needs conservative prefetch headroom

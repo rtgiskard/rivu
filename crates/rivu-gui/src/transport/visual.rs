@@ -9,11 +9,13 @@ use futures::{
 use parking_lot::{Mutex, RwLock};
 use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand};
 use rivu_format::config::Config;
+use rivu_protocol::model::Track;
 use rivu_protocol::pcm::{
     ControlReader, DEADLINE, MAGIC, PcmPosition, PcmState, STATUS_SIZE, address, decode_status,
     request,
 };
 use rivu_shm::{PCM_QUEUE_BLOCKS, SharedPcmWindow};
+use rivu_visuals::{WaveformFrame, WaveformSummary};
 use std::{
     io::{Read, Write},
     net::Shutdown,
@@ -36,6 +38,8 @@ struct Desired {
     display_token: u64,
     settings: AnalysisSettings,
     visualization_enabled: bool,
+    waveform_enabled: bool,
+    source_generation: Option<u64>,
 }
 impl Default for Desired {
     fn default() -> Self {
@@ -46,6 +50,8 @@ impl Default for Desired {
             display_token: 0,
             settings: AnalysisSettings::from(&config),
             visualization_enabled: config.visualization_enabled,
+            waveform_enabled: false,
+            source_generation: None,
         }
     }
 }
@@ -68,6 +74,8 @@ struct ClientState {
     wakeup: RwLock<Option<Wakeup>>,
     error: Mutex<ErrorState>,
     stopped: AtomicBool,
+    summary: Mutex<WaveformSummary>,
+    waveform: Arc<RwLock<WaveformFrame>>,
 }
 impl ClientState {
     fn wake(&self) {
@@ -92,6 +100,7 @@ impl ClientState {
 /// Independent-process client. Only this local staging object is exposed to GUI readers.
 pub(crate) struct VisualClient {
     pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
+    pub(crate) waveform: Arc<RwLock<WaveformFrame>>,
     state: Arc<ClientState>,
     notifications: Sender<()>,
     socket: UnixStream,
@@ -132,6 +141,8 @@ impl VisualClient {
             wakeup: RwLock::new(None),
             error: Mutex::new(ErrorState::default()),
             stopped: AtomicBool::new(false),
+            summary: Mutex::new(WaveformSummary::default()),
+            waveform: Arc::new(RwLock::new(WaveformFrame::default())),
         });
         let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
         let (notifications, receiver) = async_channel::bounded(1);
@@ -172,6 +183,7 @@ impl VisualClient {
         }
         Ok(Self {
             analysis,
+            waveform: Arc::clone(&state.waveform),
             state,
             notifications,
             socket,
@@ -183,7 +195,9 @@ impl VisualClient {
         if desired.demand == demand {
             return;
         }
-        if desired.demand.enabled != demand.enabled {
+        if (desired.demand.enabled || desired.waveform_enabled)
+            != (demand.enabled || desired.waveform_enabled)
+        {
             desired.revision = desired.revision.wrapping_add(1).max(1);
         }
         desired.demand = demand;
@@ -191,6 +205,66 @@ impl VisualClient {
         drop(desired);
         *self.state.current.write() = None;
         let _ = self.notifications.try_send(());
+    }
+    pub(crate) fn set_waveform_demand(&self, enabled: bool) {
+        let mut desired = self.state.desired.lock();
+        if desired.waveform_enabled == enabled {
+            return;
+        }
+        if (desired.demand.enabled || desired.waveform_enabled)
+            != (desired.demand.enabled || enabled)
+        {
+            desired.revision = desired.revision.wrapping_add(1).max(1);
+        }
+        desired.waveform_enabled = enabled;
+        drop(desired);
+        let _ = self.notifications.try_send(());
+    }
+
+    pub(crate) fn configure_source(
+        &self,
+        track: Option<&Track>,
+        generation: u64,
+        duration: Option<f64>,
+    ) {
+        let mut desired = self.state.desired.lock();
+        if self.state.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let source_generation = track.map(|_| generation);
+        let unchanged = desired.source_generation == source_generation;
+        if unchanged {
+            return;
+        }
+        desired.source_generation = source_generation;
+        desired.revision = desired.revision.wrapping_add(1).max(1);
+        let mut summary = self.state.summary.lock();
+        if let Some(track) = track {
+            let range = track
+                .cue
+                .as_ref()
+                .map(|cue| rivu_protocol::audio::PlaybackRange {
+                    start_seconds: cue.start_seconds(),
+                    end_seconds: cue.end_seconds(),
+                });
+            summary.select(
+                &track.path,
+                range,
+                track.decoder_hint,
+                duration.or(track.duration),
+                track.sample_rate.max(1),
+                Some(generation),
+                None,
+            );
+        } else {
+            summary.clear();
+        }
+        self.state.waveform.write().clone_from(&summary.frame);
+        drop(summary);
+        drop(desired);
+        *self.state.current.write() = None;
+        let _ = self.notifications.try_send(());
+        self.state.wake();
     }
     /// Revoke cached acceptance before the command/watch state changes become visible.
     pub(crate) fn invalidate(&self) {
@@ -212,6 +286,11 @@ impl VisualClient {
         let incompatible = !desired.settings.signal_compatible_with(settings)
             || desired.visualization_enabled != config.visualization_enabled;
         desired.settings = settings;
+        if desired.visualization_enabled && !config.visualization_enabled {
+            let mut summary = self.state.summary.lock();
+            summary.frame.request_epoch = summary.frame.request_epoch.wrapping_add(1);
+            self.state.waveform.write().clone_from(&summary.frame);
+        }
         desired.visualization_enabled = config.visualization_enabled;
         if incompatible {
             desired.revision = desired.revision.wrapping_add(1).max(1);
@@ -269,6 +348,12 @@ impl VisualClient {
     pub(crate) fn stop(&self) {
         self.state.stopped.store(true, Ordering::Release);
         *self.state.current.write() = None;
+        let desired = self.state.desired.lock();
+        let mut summary = self.state.summary.lock();
+        summary.clear();
+        self.state.waveform.write().clone_from(&summary.frame);
+        drop(summary);
+        drop(desired);
         self.notifications.close();
         let _ = self.socket.shutdown(Shutdown::Both);
         let worker = self.worker.lock().take();
@@ -302,6 +387,8 @@ async fn run_client(
     let mut frame = AnalysisFrame::default();
     let mut layout = Vec::new();
     let mut weights = Vec::new();
+    let mut folded = Vec::with_capacity(rivu_protocol::pcm::PCM_BLOCK_FRAMES);
+    let mut waveform_key = None;
     let mut drain_again = false;
     let mut capture_revision = 0;
     loop {
@@ -341,7 +428,7 @@ async fn run_client(
         if state.stopped.load(Ordering::Acquire) {
             return Ok(());
         }
-        let (demand, revision, display_token, settings) = {
+        let (demand, revision, display_token, settings, pcm_enabled, waveform_enabled) = {
             let desired = state.desired.lock();
             let mut demand = desired.demand;
             demand.enabled &= desired.visualization_enabled;
@@ -350,6 +437,9 @@ async fn run_client(
                 desired.revision,
                 desired.display_token,
                 desired.settings,
+                (desired.demand.enabled || desired.waveform_enabled)
+                    && desired.visualization_enabled,
+                desired.waveform_enabled && desired.visualization_enabled,
             )
         };
         if revision != sent_revision {
@@ -357,7 +447,7 @@ async fn run_client(
             // display identity stay local; revision fences subscription changes.
             rivu_protocol::transport::timeout(
                 DEADLINE,
-                writer.write_all(&request(1, u8::from(demand.enabled), revision)),
+                writer.write_all(&request(1, u8::from(pcm_enabled), revision)),
             )
             .await??;
             sent_revision = revision;
@@ -379,9 +469,10 @@ async fn run_client(
             // even when another GUI keeps global capture enabled.
             position = window.frontier();
             capture_revision = revision;
+            waveform_key = None;
         }
         drain_again = false;
-        if admitted && demand.enabled && pcm_state.active {
+        if admitted && pcm_enabled && pcm_state.active {
             let latest = window.sequence();
             position = position.max(minimum_position).max(PcmPosition {
                 sequence: latest
@@ -435,6 +526,7 @@ async fn run_client(
                 }
                 header.start_frame += offset as u64;
                 header.output_frame += offset as u64;
+                header.media_start += offset as f64 * header.media_step;
                 header.gap &= offset == 0;
                 // Coarse following allows a block of lead. Samples stay in the
                 // Core window until the audible cursor approaches their span.
@@ -450,7 +542,8 @@ async fn run_client(
                     layout.extend_from_slice(block.layout());
                     weights = rivu_dsp::channels::analysis_weights(layout.iter().copied());
                 }
-                let samples = (offset..block.len()).map(|index| {
+                folded.clear();
+                folded.extend((offset..block.len()).map(|index| {
                     let mut stereo = [0.0; 2];
                     for (channel, weight) in weights.iter().enumerate() {
                         let sample = block.sample(index, channel);
@@ -458,22 +551,39 @@ async fn run_client(
                         stereo[1] += sample * weight[1];
                     }
                     stereo
-                });
-                let mut current = true;
-                let ingested = engine.ingest_checked(
-                    header,
-                    samples,
-                    || {
-                        current = block.still_current();
-                        current
-                    },
-                    &mut frame,
-                );
-                if !current {
-                    // The engine retired all potentially mixed samples. Keep
-                    // our pre-read position so a completed append can be retried
-                    // without skipping its tail or double-counting audio time.
+                }));
+                // No analysis or summary may see samples until the SHM read
+                // lease has validated its complete native-channel read.
+                if !block.still_current() {
                     break;
+                }
+                let ingested =
+                    engine.ingest_checked(header, folded.iter().copied(), || true, &mut frame);
+                if waveform_enabled {
+                    let desired = state.desired.lock();
+                    if desired.revision == revision
+                        && desired.waveform_enabled
+                        && desired.visualization_enabled
+                        && desired.source_generation == Some(header.generation)
+                        && !state.stopped.load(Ordering::Acquire)
+                    {
+                        let mut summary = state.summary.lock();
+                        let key = (
+                            header.generation,
+                            header.epoch,
+                            header.intent,
+                            header.capture,
+                        );
+                        if waveform_key != Some(key) || header.gap {
+                            summary.begin_traversal();
+                        }
+                        waveform_key = Some(key);
+                        summary.push_mapped(header.media_start, header.media_step, &folded);
+                        state.waveform.write().clone_from(&summary.frame);
+                        drop(summary);
+                        drop(desired);
+                        state.wake();
+                    }
                 }
                 if ingested {
                     engine.request_frame();

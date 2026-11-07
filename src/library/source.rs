@@ -2,7 +2,7 @@ use super::ScanCancellation;
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{MediaInfo, probe_file, source_identity_from_metadata};
-use rivu_protocol::{model::CueSegment, waveform::SourceIdentity};
+use rivu_protocol::{audio::SourceIdentity, model::CueSegment};
 use rivu_utils::regular_file::open_regular_file;
 use std::collections::HashMap;
 use std::fs;

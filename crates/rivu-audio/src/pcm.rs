@@ -448,12 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn waveform_reads_pcm_without_opening_the_metadata_path() {
+    fn render_reads_pcm_without_opening_the_metadata_path() {
         let directory = tempfile::tempdir().unwrap();
         let budget = PcmBudget::new(128 * 1024);
         let mut builder = PcmBuilder::new(8000, mono(), Arc::clone(&budget)).unwrap();
         builder.push(&[0.25; 800]).unwrap();
-        let mut snapshot = crate::WaveformScanSnapshot::original(
+        let mut snapshot = crate::AudioRenderSnapshot::original(
             directory.path().join("metadata-only.wav"),
             Some(crate::PlaybackRange {
                 start_seconds: 100.0,
@@ -464,29 +464,15 @@ mod tests {
             Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
         );
         snapshot.pcm = Some(builder.finish().unwrap());
-        let frame = crate::waveform(
+        let frame = crate::render::collect_stream(
             &snapshot,
             1,
             false,
             &std::sync::atomic::AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(frame.path, Some(snapshot.path.clone()));
-        assert!(frame.complete);
         assert_eq!(frame.duration, Some(0.1));
-        assert_eq!(frame.span_seconds, 0.1);
-        assert_eq!(frame.rms_counts.iter().sum::<u64>(), 800);
-        for values in [
-            &frame.peaks,
-            &frame.rms,
-            &frame.left_peaks,
-            &frame.right_peaks,
-            &frame.left_rms,
-            &frame.right_rms,
-        ] {
-            assert_eq!(values.len(), 800);
-            assert!(values.iter().all(|value| *value == Some(0.25)));
-        }
+        assert_eq!(frame.samples, vec![0.25; 800]);
         drop(snapshot);
         assert_eq!(budget.used_bytes(), 0);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);

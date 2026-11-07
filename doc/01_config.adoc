@@ -318,7 +318,7 @@ changes only the draft until Apply. Empty field hints are not submitted values;
 clearing an optional numeric override restores inheritance on Apply. Untouched
 numbers retain their TOML precision even if Settings displays fewer decimal places.
 
-Media read buffering affects future opens, including waveform scans, without
+Media read buffering affects future opens, including finite PCM reads, without
 reopening the current track. The application-menu Visualizations toggle applies
 immediately; see <<visualization-enablement,Visualization enablement>>.
 Draft merging, validation, Discard and save failures follow
@@ -661,8 +661,8 @@ belong only to `audio_visualizer` panels. Animation FPS remains global.
 == Visualizations
 
 Live analysis requires playback, enabled visualizations, and a visible live-analysis
-style. Waveform instead uses progressive decoding or an explicitly requested
-track preview. Analysis and presentation have independent rates:
+style. Waveform instead folds admitted PCM progressively in the GUI session or
+loads an explicitly requested track preview.
 
 [cols="2,1,3",options="header"]
 |===
@@ -694,8 +694,9 @@ Switching one panel does not interrupt other visible views; losing focus alone
 does not suspend analysis. If the platform does not report visibility reliably,
 compositor throttling can slow animation while the independent analysis timer
 continues. Closing the window releases its presentation; reopening does not
-restore old frames. Waveform keeps its track preview when hidden but discards it
-when visualizations are disabled. Scheduling and continuity details are in
+restore old live-analysis frames. Waveform keeps its bounded session summary when
+hidden or globally disabled; disabled display/interaction caches are released.
+Scheduling and continuity details are in
 link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
 
 `visualizations.general.palette` sets the Spectrum, Spectrogram, and Waveform colors:
@@ -723,9 +724,9 @@ Shared visualization settings apply as follows:
   Changing the signal resets realtime analysis history, but does not clear the
   rolling waveform or automatically start a full waveform scan. Equalizer changes
   preserve realtime history; newly visited waveform intervals replace their old data.
-  An explicit full waveform scan uses the signal and processing captured when the
-  service handles it, not necessarily at the click. The prior display remains
-  visible; see link:23_visuals.adoc#waveform[Waveform capture].
+  An explicit full waveform request sends the selected signal; processing and EQ
+  are captured when the service handles it, not necessarily at the click. The
+  prior display remains visible; see link:23_visuals.adoc#waveform[Waveform capture].
 
 * `visualizations.general.background` sets the background for all views (default
   `"#08090C"`). Radial, stereo-analysis, fractal, and Oscilloscope styles use the
@@ -764,24 +765,24 @@ existing panels retain their layout-local choices. See
 === Visualization enablement
 
 `visualizations.general.enabled` defaults to `true`. Disabling it
-replaces audio-visualizer content with a large centered snowflake icon, stops
-analysis sampling and FFT work, and discards all visualization results.
+replaces audio-visualizer content with a large centered snowflake icon and stops
+analysis sampling and FFT work. Live-analysis results are discarded; the bounded
+session waveform summary and completed preview are retained, without collecting
+new coverage. Waveform display/interaction caches are released.
 The Settings snowflake toggle is active when visualizations are disabled.
-Progressive waveform collection stops; any running full-waveform request is
-cancelled, and new requests are unavailable.
+Any running full-waveform request is cancelled, and new GUI requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
 library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
 Layout and visualization settings are preserved.
 
-Re-enabling visualizations starts the visible views fresh, without reopening audio
-output or the decoder. Views rebuild from new audio; enabling while
-paused does not restore an old picture. Waveform starts
-accumulating from subsequently decoded PCM, with discarded and skipped intervals
-left blank. An interrupted traversal is not marked complete. Full-waveform
-requests do not restart automatically; request one explicitly after re-enabling
-if needed. Ordinary playback pause remains different: it freezes the current
-visualizations without discarding their results.
+Re-enabling visualizations rebuilds live-analysis views from new audio without
+reopening output or the decoder; paused live analysis has no old picture to restore.
+Waveform restores its retained session summary and resumes collection from
+subsequently admitted PCM. Missing intervals remain blank until visited.
+Full-waveform requests do not restart automatically; request one explicitly if
+needed. Ordinary playback pause freezes the current visualizations without
+discarding their results.
 
 === Visualization dB ranges
 
@@ -819,8 +820,9 @@ override equal to the current resolved value leaves the display unchanged.
 
 Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
 above the centerline, right below; the filled body is RMS amplitude and the outer
-line is peak amplitude. Unknown intervals remain blank. Playback builds the
-preview progressively; `Load full waveform now` requests the complete preview.
+line is peak amplitude. Unknown intervals remain blank. The GUI session builds
+the preview progressively from admitted PCM; `Load full waveform now` explicitly
+requests a complete preview. Summaries are bounded to 1024 bins and not persisted.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
 Seeking gestures stay bound to the queue entry at press time. If playback moves

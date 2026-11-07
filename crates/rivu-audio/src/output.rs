@@ -1491,6 +1491,7 @@ mod pcm_tests {
                     let mut header = block.header();
                     header.start_frame += offset as u64;
                     header.output_frame += offset as u64;
+                    header.media_start += offset as f64 * header.media_step;
                     header.gap &= offset == 0;
                     if header.output_frame
                         > state.heard_frame + rivu_protocol::pcm::PCM_BLOCK_FRAMES as u64

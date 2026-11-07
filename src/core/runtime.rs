@@ -276,8 +276,6 @@ impl CoreRuntime {
         let handle = CoreHandle {
             state: shared.clone(),
             pcm: Arc::clone(&engine.pcm),
-            waveform: Arc::clone(&engine.waveform),
-            waveform_control: Arc::clone(&engine.waveform_control),
             sender,
             revision_updates: Arc::clone(&revision_updates),
             task_waiters: Arc::clone(&task_waiters),

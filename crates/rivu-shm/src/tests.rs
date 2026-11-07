@@ -30,6 +30,8 @@ fn header(position: u64) -> PcmHeader {
         capture: 3,
         start_frame: position * PCM_BLOCK_FRAMES as u64,
         output_frame: 8192 + position * PCM_BLOCK_FRAMES as u64,
+        media_start: position as f64 * PCM_BLOCK_FRAMES as f64 / 96000.0,
+        media_step: 1.0 / 96000.0,
         sample_rate: 96000,
         gap: position == 77,
     }
@@ -249,6 +251,7 @@ fn partial_native_blocks_publish_immediately_and_fill_before_advancing() {
     let mut tail = start;
     tail.start_frame = 257;
     tail.output_frame = 257;
+    tail.media_start = start.media_start + 257.0 * start.media_step;
     tail.gap = false;
     assert!(owner.publish(tail, &[17, 5, 0], (0..1024 * 3).map(|_| 0.75)));
     assert!(!first.still_current());
@@ -265,6 +268,11 @@ fn partial_native_blocks_publish_immediately_and_fill_before_advancing() {
     assert_eq!(remainder.len(), 257);
     assert_eq!(remainder.header().start_frame, 1024);
     assert_eq!(remainder.header().output_frame, 1024);
+    assert_eq!(
+        remainder.header().media_start,
+        tail.media_start + 767.0 * tail.media_step
+    );
+    assert_eq!(remainder.header().media_step, start.media_step);
     assert!(!remainder.header().gap);
     assert_eq!(
         reader.frontier(),
@@ -275,6 +283,7 @@ fn partial_native_blocks_publish_immediately_and_fill_before_advancing() {
     );
     tail.start_frame = 1281;
     tail.output_frame = 1281;
+    tail.media_start = remainder.header().media_start + 257.0 * tail.media_step;
     assert!(owner.publish(tail, &[17, 5, 0], [0.5; 3].into_iter()));
     assert_eq!(
         reader.frontier(),
@@ -304,6 +313,8 @@ fn fragmented_high_rate_prefetch_preserves_every_native_frame_in_order() {
             next.sample_rate = rate;
             next.start_frame = written as u64;
             next.output_frame = 8192 + written as u64;
+            next.media_start = written as f64 / f64::from(rate);
+            next.media_step = f64::from(rate).recip();
             assert!(owner.publish(
                 next,
                 &[17, 0],
@@ -372,6 +383,7 @@ fn write_fenced_append_keeps_the_last_completed_frontier() {
     let mut tail = start;
     tail.start_frame += 256;
     tail.output_frame += 256;
+    tail.media_start += 256.0 * tail.media_step;
     assert!(owner.publish(
         tail,
         &[0, 1],
@@ -679,4 +691,77 @@ fn sealed_owner_cannot_resize_and_readers_cannot_create_writable_mappings() {
         panic!("sealed PCM window accepted a new writable mapping");
     }
     assert!(owner.publish(header(1), &[0], [0.5].into_iter()));
+}
+
+#[test]
+fn differing_media_mapping_starts_a_new_logical_block() {
+    for change_step in [false, true] {
+        let owner = SharedPcmWindow::new().unwrap();
+        let start = header(0);
+        assert!(owner.publish(start, &[0], [0.25; 256].into_iter()));
+        let mut next = start;
+        next.start_frame += 256;
+        next.output_frame += 256;
+        next.media_start += 256.0 * next.media_step;
+        if change_step {
+            next.media_step *= 2.0;
+        } else {
+            next.media_start += 0.5;
+        }
+        assert!(owner.publish(next, &[0], [0.75; 128].into_iter()));
+        assert_eq!(owner.block(1).unwrap().len(), 256);
+        let block = owner.block(2).unwrap();
+        assert_eq!(block.len(), 128);
+        assert_eq!(
+            block.header().media_start.to_bits(),
+            next.media_start.to_bits()
+        );
+        assert_eq!(
+            block.header().media_step.to_bits(),
+            next.media_step.to_bits()
+        );
+    }
+}
+
+#[test]
+fn rounded_contiguous_media_positions_preserve_fragmented_retention() {
+    let owner = SharedPcmWindow::new().unwrap();
+    let mut next = header(0);
+    next.output_frame = 100;
+    next.media_start = 100.0 / f64::from(next.sample_rate);
+    assert!(owner.publish(next, &[0], [0.25; 3].into_iter()));
+    for offset in 3..512 {
+        next.start_frame = offset;
+        next.output_frame = 100 + offset;
+        next.media_start = next.output_frame as f64 / f64::from(next.sample_rate);
+        assert!(owner.publish(next, &[0], [0.5].into_iter()));
+    }
+    let block = owner.block(1).unwrap();
+    assert_eq!(owner.sequence(), 1);
+    assert_eq!(block.len(), 512);
+    assert_eq!(block.sample(511, 0), 0.5);
+    // A real one-sample timeline jump must still form a distinct segment.
+    next.start_frame = 512;
+    next.output_frame = 612;
+    next.media_start = 613.0 / f64::from(next.sample_rate);
+    assert!(owner.publish(next, &[0], [0.75].into_iter()));
+    let shifted = owner.block(2).unwrap();
+    assert_eq!(shifted.header().media_start, next.media_start);
+    assert_eq!(shifted.sample(0, 0), 0.75);
+}
+
+#[test]
+fn nonfinite_and_nonpositive_media_mappings_are_rejected() {
+    let owner = SharedPcmWindow::new().unwrap();
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid = header(0);
+        invalid.media_start = value;
+        assert!(!owner.publish(invalid, &[0], [0.0].into_iter()));
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+        let mut invalid = header(0);
+        invalid.media_step = value;
+        assert!(!owner.publish(invalid, &[0], [0.0].into_iter()));
+    }
+    assert_eq!(owner.sequence(), 0);
 }

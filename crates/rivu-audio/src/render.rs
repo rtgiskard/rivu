@@ -35,6 +35,50 @@ impl RenderFormat {
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct CollectedPcm {
+    pub samples: Vec<f32>,
+    pub duration: Option<f64>,
+    pub source_identity: Option<SourceIdentity>,
+    pub spans: Vec<(f64, f64, usize)>,
+}
+
+#[cfg(test)]
+impl CollectedPcm {
+    pub(crate) fn emit(&mut self, event: super::RenderEvent<'_>) -> Result<()> {
+        match event {
+            super::RenderEvent::Start(format) => {
+                self.source_identity = Some(format.source_identity)
+            }
+            super::RenderEvent::Pcm {
+                media_start,
+                media_step,
+                samples,
+            } => {
+                self.spans.push((media_start, media_step, samples.len()));
+                self.samples.extend_from_slice(samples);
+            }
+            super::RenderEvent::Complete { duration, .. } => self.duration = Some(duration),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn collect_stream(
+    snapshot: &super::AudioRenderSnapshot,
+    buffer: u32,
+    ffmpeg: bool,
+    cancelled: &AtomicBool,
+) -> Result<CollectedPcm> {
+    let mut collected = CollectedPcm::default();
+    super::render_stream(snapshot, buffer, ffmpeg, cancelled, |event| {
+        collected.emit(event)
+    })?;
+    Ok(collected)
+}
+
 /// Owns one opened decoder, so admission and rendering inspect the same source.
 pub struct SourceRenderer {
     source: Source,

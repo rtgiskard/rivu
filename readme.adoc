@@ -5,6 +5,16 @@ access to a shared playback instance that can also run headless.
 
 image:https://github.com/user-attachments/assets/d99d5eec-313a-49a1-9f77-c8fb92f7703b[Rivu desktop,width=100%]
 
+== Why Rivu
+
+Inspired by DeaDBeeF's efficiency and modular UI, Rivu aims to combine practical
+local music management and playback statistics with a customizable modern
+interface, audio visualizations, and simple audio analysis—while keeping CPU
+use, memory use, and background work low.
+
+The core and TUI form a practical terminal-only setup; the CLI offers quick control,
+and the optional GUI adds a visual workspace—all sharing the same playback instance.
+
 == Features
 
 * *Resource use:* on-demand analysis and bounded caches limit background work and

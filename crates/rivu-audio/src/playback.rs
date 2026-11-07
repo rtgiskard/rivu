@@ -1,16 +1,14 @@
 //! One track's decode-to-output pipeline and audible playback accounting.
 
 use super::{
-    MediaInfo, PlaybackMetadata, PlaybackRange, WaveformFrame,
+    MediaInfo, PlaybackMetadata, PlaybackRange,
     graph::GraphRunner,
     output::{Output, OutputError, OutputOptions},
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
-    waveform::{WaveformAccumulator, WaveformBuffer, WaveformControl, WaveformCoverage},
 };
 use crate::capture::{PcmAudioIdentity, PcmControl, PcmProducer};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
-use parking_lot::RwLock;
 use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
 use rivu_format::config::VisualizationSignal;
 use rivu_format::decoder_hint::DecoderHint;
@@ -58,6 +56,8 @@ pub(super) struct Playback {
     // Explicit source boundaries in latency-trimmed output frame coordinates.
     // Preguard-only boundaries are never published.
     graph_gaps: VecDeque<u64>,
+    graph_mapping: VecDeque<(u64, f64)>,
+    graph_media: (u64, f64),
     source_eof: bool,
     // Audition keeps the selected source's metadata/timeline, not PCM metadata.
     source_info: Option<MediaInfo>,
@@ -76,17 +76,10 @@ pub(super) struct Playback {
     eof: bool,
     paused: bool,
     visualization: VisualizationCapture,
-    scan_source: super::WaveformScanSnapshot,
+    render_source: super::AudioRenderSnapshot,
 }
 
 struct VisualizationCapture {
-    waveform: Arc<RwLock<WaveformFrame>>,
-    waveform_control: Arc<WaveformControl>,
-    accumulator: Option<WaveformAccumulator>,
-    // Captured at load/Still boundaries, so first PCM never needs a GUI lock.
-    seed: Option<WaveformBuffer>,
-    weights: Vec<[f32; 2]>,
-    coverage: WaveformCoverage,
     visualization_enabled: bool,
     producer: Option<PcmProducer>,
     signal: VisualizationSignal,
@@ -100,50 +93,6 @@ struct VisualizationCapture {
 }
 
 impl VisualizationCapture {
-    fn begin_traversal(&mut self) {
-        if let Some(accumulator) = &mut self.accumulator {
-            accumulator.begin_traversal();
-        }
-    }
-
-    fn push(&mut self, start: f64, pcm: &[f32], rate: u32, channels: usize, gap: bool) {
-        if pcm.is_empty() {
-            return;
-        }
-        if gap {
-            self.begin_traversal();
-        }
-        if !self.visualization_enabled {
-            self.coverage.skip();
-            return;
-        }
-        self.coverage.record(start, pcm.len() / channels, rate);
-        let accumulator = self.accumulator.get_or_insert_with(|| {
-            let mut frame = self.seed.take().expect("active waveform seed");
-            frame.prepare_bins(rate);
-            let mut accumulator = WaveformAccumulator::new(frame);
-            accumulator.set_channel_weights(&self.weights);
-            accumulator
-        });
-        accumulator.push(start, pcm, rate, channels);
-        self.try_publish();
-    }
-
-    fn try_publish(&mut self) {
-        if let Some(accumulator) = &mut self.accumulator
-            && let Some(mut waveform) = self.waveform.try_write()
-        {
-            accumulator.publish_to(&mut waveform, &self.waveform_control);
-        }
-    }
-
-    // Control/teardown boundaries must not discard an unpublished dirty range.
-    fn flush(&mut self) {
-        if let Some(accumulator) = &mut self.accumulator {
-            accumulator.publish_to(&mut self.waveform.write(), &self.waveform_control);
-        }
-    }
-
     fn reset_tap(&mut self) {
         self.before = VecDeque::new();
         self.tap_identity = None;
@@ -183,11 +132,35 @@ impl VisualizationCapture {
         Ok(())
     }
 
+    #[cfg(test)]
     fn submit_tap(
         &mut self,
         tap: PendingTap,
         position: u64,
         output_frame: u64,
+        pcm: &[f32],
+        channels: usize,
+    ) {
+        let rate = self
+            .producer
+            .as_ref()
+            .and_then(PcmProducer::identity)
+            .map_or(1, |identity| identity.sample_rate());
+        self.submit_mapped_tap(
+            tap,
+            position,
+            output_frame,
+            (position as f64 / f64::from(rate), f64::from(rate).recip()),
+            pcm,
+            channels,
+        );
+    }
+    fn submit_mapped_tap(
+        &mut self,
+        tap: PendingTap,
+        position: u64,
+        output_frame: u64,
+        (media_start, media_step): (f64, f64),
         pcm: &[f32],
         channels: usize,
     ) {
@@ -200,7 +173,7 @@ impl VisualizationCapture {
         let producer = self.producer.as_mut().expect("active tap producer");
         match tap {
             PendingTap::Direct(signal) if signal == self.signal => {
-                producer.push(output_frame, pcm);
+                producer.push_mapped(output_frame, media_start, media_step, pcm);
             }
             PendingTap::Before if self.signal == VisualizationSignal::Before => {
                 let frames = pcm.len() / channels;
@@ -220,6 +193,8 @@ impl VisualizationCapture {
                 producer.push_samples_for(
                     identity,
                     output_frame + lead as u64,
+                    media_start + lead as f64 * media_step,
+                    media_step,
                     self.before.drain(..count * channels),
                 );
                 self.before_position += count as u64;
@@ -231,27 +206,13 @@ impl VisualizationCapture {
             _ => producer.discontinuity(),
         }
     }
-
-    fn finish(&mut self) {
-        if let Some(accumulator) = &mut self.accumulator {
-            accumulator.finish(&self.coverage);
-            accumulator.publish_to(&mut self.waveform.write(), &self.waveform_control);
-        }
-    }
 }
 
-impl Drop for VisualizationCapture {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
 impl Playback {
     pub(super) fn from_source(
         source: Source,
         options: PlaybackOptions,
         analyzer: &Arc<PcmControl>,
-        waveform: Arc<RwLock<WaveformFrame>>,
-        waveform_control: Arc<WaveformControl>,
     ) -> Result<Self> {
         let PlaybackOptions {
             path,
@@ -305,39 +266,16 @@ impl Playback {
             },
             analyzer,
         )?;
-        let waveform_weights = super::channels::analysis_weights(source.layout());
-        let waveform_seed = {
-            let mut waveform = waveform.write();
-            waveform_control.set_visualization_enabled(&mut waveform, visualization_enabled);
-            waveform_control.capture(&mut waveform, visualization_enabled, |waveform| {
-                if let Some(info) = &source_info {
-                    let display_path = waveform.path.clone().unwrap_or_else(|| path.clone());
-                    let display_range = waveform.range;
-                    let display_hint = waveform.decoder_hint;
-                    waveform.select_audition_source(
-                        &display_path,
-                        display_range,
-                        display_hint,
-                        &source,
-                        info.duration,
-                    );
-                } else {
-                    waveform.select_source(&path, range, decoder_hint, &source);
-                }
-            })
-        };
-        let timestamp_tolerance = source.waveform_timestamp_tolerance();
-        let waveform_coverage = WaveformCoverage::new(start, timestamp_tolerance);
-        let mut scan_source = super::WaveformScanSnapshot::original(
+        let mut render_source = super::AudioRenderSnapshot::original(
             path,
             range,
             decoder_hint,
             analyzer.signal(),
             scan_equalizer,
         );
-        scan_source.expected_identity = Some(source.identity());
-        scan_source.pcm = source.pcm().cloned();
-        scan_source.graph = graph.as_ref().map(GraphRunner::snapshot);
+        render_source.expected_identity = Some(source.identity());
+        render_source.pcm = source.pcm().cloned();
+        render_source.graph = graph.as_ref().map(GraphRunner::snapshot);
         let before_skip_frames = graph.as_ref().map_or(0, GraphRunner::source_lead_frames);
         Ok(Self {
             source,
@@ -349,6 +287,8 @@ impl Playback {
             graph_output_frames: 0,
             graph_output_remaining,
             graph_gaps: VecDeque::new(),
+            graph_mapping: VecDeque::new(),
+            graph_media: (0, start),
             source_eof: false,
             source_info,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
@@ -366,12 +306,6 @@ impl Playback {
             eof: false,
             paused,
             visualization: VisualizationCapture {
-                waveform,
-                waveform_control,
-                accumulator: None,
-                seed: waveform_seed,
-                weights: waveform_weights,
-                coverage: waveform_coverage,
                 visualization_enabled,
                 producer: Some(analyzer.audio_producer()),
                 signal: analyzer.signal(),
@@ -380,7 +314,7 @@ impl Playback {
                 before: VecDeque::new(),
                 before_position: 0,
             },
-            scan_source,
+            render_source,
         })
     }
     // Explicit input rejection leaves the source and current output/analysis epoch intact.
@@ -443,6 +377,8 @@ impl Playback {
         self.graph_input_frames = 0;
         self.graph_output_frames = 0;
         self.graph_gaps = VecDeque::new();
+        self.graph_mapping = VecDeque::new();
+        self.graph_media = (0, position);
         self.source_eof = false;
         let output = create(&self.source, self.paused)?;
         self.output = output;
@@ -460,9 +396,6 @@ impl Playback {
         self.base_position = position;
         self.prior_heard = heard;
         self.eof = false;
-        self.visualization.coverage =
-            WaveformCoverage::new(position, self.source.waveform_timestamp_tolerance());
-        self.visualization.begin_traversal();
         Ok(())
     }
 
@@ -510,23 +443,21 @@ impl Playback {
             return Ok(());
         }
         self.equalizer.reconfigure(config)?;
-        self.scan_source.equalizer = Arc::new(config.clone());
-        self.visualization.begin_traversal();
+        self.render_source.equalizer = Arc::new(config.clone());
         Ok(())
     }
 
     pub(super) fn set_signal(&mut self, signal: VisualizationSignal) {
         if self.visualization.signal != signal {
             self.visualization.signal = signal;
-            self.scan_source.signal = signal;
+            self.render_source.signal = signal;
             self.pending_tap = PendingTap::None;
             self.visualization.reset_tap();
-            self.visualization.begin_traversal();
         }
     }
 
-    pub(super) fn waveform_snapshot(&self) -> super::WaveformScanSnapshot {
-        self.scan_source.clone()
+    pub(super) fn render_snapshot(&self) -> super::AudioRenderSnapshot {
+        self.render_source.clone()
     }
 
     pub(super) fn set_metadata(&mut self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
@@ -542,22 +473,9 @@ impl Playback {
             return;
         }
         if !enabled {
-            self.visualization.flush();
-            self.visualization.accumulator = None;
-            // Discarding the prefix invalidates coverage even when no PCM is
-            // decoded during a quick on/off transition.
-            self.visualization.coverage.skip();
             self.visualization.reset_tap();
             self.visualization.before = VecDeque::new();
         }
-        let mut waveform = self.visualization.waveform.write();
-        self.visualization
-            .waveform_control
-            .set_visualization_enabled(&mut waveform, enabled);
-        self.visualization.seed =
-            self.visualization
-                .waveform_control
-                .capture(&mut waveform, enabled, |_| {});
         self.visualization.visualization_enabled = enabled;
     }
 
@@ -585,7 +503,6 @@ impl Playback {
     }
 
     fn fill_with(&mut self, mut after_packet: impl FnMut()) -> Result<bool> {
-        self.visualization.try_publish();
         self.output.check_timing()?;
         if self.paused {
             return Ok(false);
@@ -607,7 +524,6 @@ impl Playback {
             }
             if !self.eof && self.graph_output_remaining == Some(0) {
                 self.eof = true;
-                self.visualization.finish();
             }
             if self.eof || remaining_frames == 0 || remaining_packets == 0 {
                 break;
@@ -628,9 +544,6 @@ impl Playback {
                 self.publish_graph_pending(channels)?;
                 remaining_packets -= 1;
                 self.eof = frames == 0 || self.graph_output_remaining == Some(0);
-                if self.eof {
-                    self.visualization.finish();
-                }
                 continue;
             }
             match self
@@ -647,6 +560,25 @@ impl Playback {
                     }
                     let borrowed = self.graph.is_none() && self.equalizer.is_bypassed();
                     if let Some(graph) = &self.graph {
+                        let lead = graph.source_lead_frames() as u64;
+                        let skip = lead
+                            .saturating_sub(self.graph_input_frames)
+                            .min((frames.len() / channels) as u64);
+                        if skip < (frames.len() / channels) as u64 {
+                            let frame = (self.graph_input_frames + skip).saturating_sub(lead);
+                            let media = start_seconds
+                                + (skip as f64 - lead as f64) / f64::from(sample_rate);
+                            let anchor = self
+                                .graph_mapping
+                                .back()
+                                .copied()
+                                .unwrap_or(self.graph_media);
+                            let expected = anchor.1
+                                + frame.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
+                            if (media - expected).abs() > 0.5 / f64::from(sample_rate) {
+                                self.graph_mapping.push_back((frame, media));
+                            }
+                        }
                         if self.graph_input_frames > graph.source_lead_frames() as u64
                             && discontinuity
                         {
@@ -664,20 +596,11 @@ impl Playback {
                             );
                             samples = &samples[..samples.len().min(remaining as usize * channels)];
                         }
-                        let start = self.base_position
-                            + self.before_output_frames as f64 / sample_rate as f64;
                         if self.visualization.signal == VisualizationSignal::Before {
                             let limit = frames.len() / channels
                                 + graph
                                     .latency_frames()
                                     .saturating_sub(graph.source_lead_frames());
-                            self.visualization.push(
-                                start,
-                                samples,
-                                sample_rate,
-                                channels,
-                                discontinuity,
-                            );
                             self.visualization.stage_before(
                                 self.before_output_frames,
                                 samples,
@@ -686,41 +609,16 @@ impl Playback {
                             )?;
                         }
                         self.before_output_frames += (samples.len() / channels) as u64;
-                    } else if self.visualization.signal == VisualizationSignal::Before {
-                        if borrowed {
-                            self.visualization.push(
-                                start_seconds,
-                                frames,
-                                sample_rate,
-                                channels,
-                                discontinuity,
-                            );
-                        } else {
-                            self.visualization.push(
-                                start_seconds,
-                                frames,
-                                sample_rate,
-                                channels,
-                                discontinuity,
-                            );
-                            self.visualization.stage_before(
-                                position,
-                                frames,
-                                channels,
-                                frames.len() / channels,
-                            )?;
-                        }
+                    } else if self.visualization.signal == VisualizationSignal::Before && !borrowed
+                    {
+                        self.visualization.stage_before(
+                            position,
+                            frames,
+                            channels,
+                            frames.len() / channels,
+                        )?;
                     }
                     if borrowed {
-                        if self.visualization.signal == VisualizationSignal::After {
-                            self.visualization.push(
-                                start_seconds,
-                                frames,
-                                sample_rate,
-                                channels,
-                                discontinuity,
-                            );
-                        }
                         // Settled disabled EQ keeps the original borrowed fast path.
                         let prefix = frames.len().min(remaining_frames * channels);
                         let output_frame = self.output.submitted();
@@ -735,10 +633,11 @@ impl Playback {
                             }
                             self.pending_discontinuity = false;
                         }
-                        self.visualization.submit_tap(
+                        self.visualization.submit_mapped_tap(
                             self.pending_tap,
                             position,
                             output_frame,
+                            (start_seconds, f64::from(sample_rate).recip()),
                             &frames[..count * channels],
                             channels,
                         );
@@ -767,11 +666,6 @@ impl Playback {
                 }
                 DecodeStep::Yield => break,
                 DecodeStep::Eof => {
-                    if self.graph.is_none()
-                        || self.visualization.signal == VisualizationSignal::Before
-                    {
-                        self.visualization.finish();
-                    }
                     self.source_eof = true;
                     if self.graph.is_some() {
                         if self.graph_output_remaining.is_none() {
@@ -790,6 +684,7 @@ impl Playback {
         if self.eof && self.offset_frames == self.pending.len() / channels {
             self.visualization.reset_tap();
             self.graph_gaps = VecDeque::new();
+            self.graph_mapping = VecDeque::new();
         }
         Ok(
             (!self.eof || self.offset_frames < self.pending.len() / channels)
@@ -800,9 +695,27 @@ impl Playback {
     fn submit_pending(&mut self, max_frames: usize, channels: usize) -> usize {
         let start = self.offset_frames;
         let mut end = (start + max_frames).min(self.pending.len() / channels);
+        let mut media_start =
+            self.pending_start + start as f64 / f64::from(self.source.info().sample_rate);
         if self.graph.is_some() {
             let submitted =
                 self.graph_output_frames - (self.pending.len() / channels) as u64 + start as u64;
+            while self
+                .graph_mapping
+                .front()
+                .is_some_and(|mapping| mapping.0 <= submitted)
+            {
+                self.graph_media = self
+                    .graph_mapping
+                    .pop_front()
+                    .expect("present media boundary");
+            }
+            media_start = self.graph_media.1
+                + submitted.saturating_sub(self.graph_media.0) as f64
+                    / f64::from(self.source.info().sample_rate);
+            if let Some(mapping) = self.graph_mapping.front() {
+                end = end.min(start + (mapping.0 - submitted) as usize);
+            }
             while self.graph_gaps.front().is_some_and(|gap| *gap <= submitted) {
                 self.graph_gaps.pop_front();
                 if let Some(producer) = &mut self.visualization.producer {
@@ -823,10 +736,14 @@ impl Playback {
             }
             self.pending_discontinuity = false;
         }
-        self.visualization.submit_tap(
+        self.visualization.submit_mapped_tap(
             self.pending_tap,
             self.pending_position + start as u64,
             output_frame,
+            (
+                media_start,
+                f64::from(self.source.info().sample_rate).recip(),
+            ),
             &self.pending[start * channels..(start + count) * channels],
             channels,
         );
@@ -877,15 +794,6 @@ impl Playback {
         }
         // Monitor EQ remains separate from the persisted processing graph.
         self.equalizer.process(&mut self.pending)?;
-        if self.visualization.signal == VisualizationSignal::After {
-            self.visualization.push(
-                start,
-                &self.pending,
-                self.source.info().sample_rate,
-                channels,
-                self.pending_discontinuity,
-            );
-        }
         Ok(())
     }
     pub(super) fn finished(&self) -> bool {
@@ -917,8 +825,7 @@ pub(super) mod tests {
         for processing in 0..3 {
             for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
                 let file = pcm_samples(64_000);
-                let (mut playback, _) =
-                    test_playback_with_waveform(file.path(), None, Arc::default());
+                let (mut playback, _) = test_playback_selected(file.path(), None);
                 if processing == 2 {
                     let mut graph = GraphRunner::compile(
                         &unity_fir_graph(),
@@ -1009,7 +916,7 @@ pub(super) mod tests {
     fn before_staging_keeps_native_frames_bounded_and_preserves_output_gaps() {
         use crate::Channel::{FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight};
         let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let worker = Arc::new(PcmControl::default());
         worker.set_playback_active(true);
         worker.set_enabled(true);
@@ -1082,7 +989,7 @@ pub(super) mod tests {
     fn before_staging_rejects_old_identity_and_releases_on_pause_or_hidden_fill() {
         let file = pcm();
         for pause in [false, true] {
-            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let (mut playback, _) = test_playback_selected(file.path(), None);
             let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
             worker.set_enabled(true);
@@ -1122,7 +1029,7 @@ pub(super) mod tests {
             assert_eq!(first.header.output_frame, 32);
             assert_eq!(
                 first.samples,
-                playback.visualization.weights[0].map(|w| w * 0.25)
+                crate::channels::analysis_weights(playback.source.layout())[0].map(|w| w * 0.25)
             );
             assert!(!first.gap);
             assert_eq!(captured.pop_iter().count(), 31);
@@ -1141,7 +1048,7 @@ pub(super) mod tests {
     #[test]
     fn before_staging_survives_redundant_enable_without_a_gap() {
         let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let worker = Arc::new(PcmControl::default());
         worker.set_playback_active(true);
         worker.set_enabled(true);
@@ -1160,11 +1067,8 @@ pub(super) mod tests {
         let frames: Vec<_> = captured.pop_iter().collect();
         assert_eq!(frames.len(), 32);
         assert!(frames.iter().all(|frame| !frame.gap));
-        assert!(
-            frames
-                .iter()
-                .all(|frame| frame.samples == playback.visualization.weights[0].map(|w| w * 0.5))
-        );
+        assert!(frames.iter().all(|frame| frame.samples
+            == crate::channels::analysis_weights(playback.source.layout())[0].map(|w| w * 0.5)));
     }
 
     pub(crate) fn pcm() -> tempfile::NamedTempFile {
@@ -1225,37 +1129,16 @@ pub(super) mod tests {
         file
     }
 
-    fn assert_mono_waveform_bin(frame: &WaveformFrame, bin: usize, samples: &[f32]) {
-        let span = frame.rms_spans[bin].as_ref().unwrap();
-        let samples = &samples[span.start as usize..span.end as usize];
-        assert_eq!(frame.rms_counts[bin], samples.len() as u64);
-        let peak = samples
-            .iter()
-            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-        assert_eq!(frame.peaks[bin], Some(peak));
-        let energy: f64 = samples
-            .iter()
-            .map(|sample| f64::from(*sample).powi(2))
-            .sum();
-        let rms = (energy / samples.len() as f64).sqrt() as f32;
-        assert!((frame.rms[bin].unwrap() - rms).abs() < 1e-6);
-    }
-
     fn test_playback(
         path: &std::path::Path,
         range: PlaybackRange,
     ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
-        test_playback_with_waveform(
-            path,
-            Some(range),
-            Arc::new(RwLock::new(WaveformFrame::default())),
-        )
+        test_playback_selected(path, Some(range))
     }
 
-    pub(crate) fn test_playback_with_waveform(
+    pub(crate) fn test_playback_selected(
         path: &std::path::Path,
         range: Option<PlaybackRange>,
-        waveform: Arc<RwLock<WaveformFrame>>,
     ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
         let mut source = Source::begin_open(
             path,
@@ -1266,15 +1149,8 @@ pub(super) mod tests {
         )
         .unwrap();
         while !source.poll_open().unwrap() {}
-        let waveform_control = Arc::new(WaveformControl::for_snapshot(&waveform.read()));
-        let waveform_seed = waveform_control.capture(&mut waveform.write(), true, |buffer| {
-            buffer.select_source(path, range, DecoderHint::Auto, &source);
-        });
         let rate = source.info().sample_rate;
         let (output, render) = crate::output::test_backend(rate, false, source.layout());
-        let waveform_weights = crate::channels::analysis_weights(source.layout());
-        let timestamp_tolerance = source.waveform_timestamp_tolerance();
-        let waveform_coverage = WaveformCoverage::new(0.0, timestamp_tolerance);
         let equalizer =
             Equalizer::new(&EqualizerConfig::default(), rate, source.layout().len()).unwrap();
         let playback = Playback {
@@ -1287,6 +1163,8 @@ pub(super) mod tests {
             graph_output_frames: 0,
             graph_output_remaining: None,
             graph_gaps: VecDeque::new(),
+            graph_mapping: VecDeque::new(),
+            graph_media: (0, 0.0),
             source_eof: false,
             source_info: None,
             pending: Vec::new(),
@@ -1304,12 +1182,6 @@ pub(super) mod tests {
             eof: false,
             paused: false,
             visualization: VisualizationCapture {
-                waveform,
-                waveform_control,
-                accumulator: None,
-                seed: waveform_seed,
-                weights: waveform_weights,
-                coverage: waveform_coverage,
                 visualization_enabled: true,
                 producer: None,
                 signal: VisualizationSignal::After,
@@ -1318,7 +1190,7 @@ pub(super) mod tests {
                 before: VecDeque::new(),
                 before_position: 0,
             },
-            scan_source: crate::WaveformScanSnapshot::original(
+            render_source: crate::AudioRenderSnapshot::original(
                 path.to_owned(),
                 range,
                 DecoderHint::Auto,
@@ -1335,8 +1207,7 @@ pub(super) mod tests {
             let file = large_packet_flac(rate);
             for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
                 for processed in [false, true] {
-                    let (mut playback, _) =
-                        test_playback_with_waveform(file.path(), None, Arc::default());
+                    let (mut playback, _) = test_playback_selected(file.path(), None);
                     let worker = Arc::new(PcmControl::default());
                     worker.reset(rate, playback.source.layout());
                     worker.set_playback_active(true);
@@ -1369,18 +1240,6 @@ pub(super) mod tests {
                     assert_eq!(playback.output.vacant_frames(), capacity - admitted);
                     assert!(!playback.eof);
                     assert!(!playback.finished());
-                    // A legal large codec block may be converted in finite
-                    // fragments; admitted PCM already has a rolling envelope.
-                    assert!(
-                        playback
-                            .visualization
-                            .waveform
-                            .read()
-                            .rms_counts
-                            .iter()
-                            .sum::<u64>()
-                            >= admitted as u64
-                    );
                     let mut pcm = [[0.0; 2]; rivu_protocol::pcm::PCM_BLOCK_FRAMES];
                     let mut captured_frames = 0;
                     let mut power = [0.0_f64; 2];
@@ -1400,7 +1259,7 @@ pub(super) mod tests {
                     } else {
                         0.25
                     };
-                    let weights = &playback.visualization.weights;
+                    let weights = crate::channels::analysis_weights(playback.source.layout());
                     for channel in 0..2 {
                         let rms = (power[channel] / captured_frames as f64).sqrt() as f32;
                         assert!((rms - expected * weights[0][channel]).abs() < 1e-5);
@@ -1426,51 +1285,9 @@ pub(super) mod tests {
                     }
                     playback.fill().unwrap();
                     assert!(playback.eof);
-                    let waveform = playback.visualization.waveform.read();
-                    assert!(waveform.complete);
-                    assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 65_535);
                 }
             }
         }
-    }
-
-    #[test]
-    fn waveform_readers_do_not_stall_refill_or_lose_deferred_coverage() {
-        use std::time::Duration;
-
-        let file = pcm_level(16_000, 8192);
-        let shared = Arc::new(RwLock::new(WaveformFrame::default()));
-        let (mut playback, mut render) =
-            test_playback_with_waveform(file.path(), None, shared.clone());
-        let initial_revision = shared.read().revision;
-        let (ready, locked) = crossbeam_channel::bounded(1);
-        let (release, released) = crossbeam_channel::bounded(1);
-        let reader = std::thread::spawn(move || {
-            let frame = shared.read();
-            ready.send(()).unwrap();
-            let result = released.recv_timeout(Duration::from_secs(2));
-            assert_eq!(frame.revision, initial_revision);
-            drop(frame);
-            result.unwrap();
-        });
-        locked.recv_timeout(Duration::from_secs(2)).unwrap();
-        playback.fill().unwrap();
-        let mut audio = [0.0; 160];
-        render(&mut audio, 0);
-        assert!(audio.iter().all(|sample| *sample == 0.25));
-        playback.fill().unwrap();
-        release.send(()).unwrap();
-        reader.join().unwrap();
-        for block in 1..100 {
-            playback.fill().unwrap();
-            render(&mut audio, block * 20);
-            assert!(audio.iter().all(|sample| *sample == 0.25));
-        }
-        playback.fill().unwrap();
-        let waveform = playback.visualization.waveform.read();
-        assert!(waveform.complete);
-        assert!(waveform.revision > initial_revision);
-        assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 16_000);
     }
 
     #[test]
@@ -1479,7 +1296,7 @@ pub(super) mod tests {
 
         let file = pcm_level(149, 8192);
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
-            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let (mut playback, _) = test_playback_selected(file.path(), None);
             let mut graph =
                 GraphRunner::compile(&unity_fir_graph(), GraphPort { node: 2, port: 0 }, 8_000, 1)
                     .unwrap();
@@ -1512,7 +1329,7 @@ pub(super) mod tests {
                 17,
             );
             playback.output = output;
-            let weights = playback.visualization.weights[0];
+            let weights = crate::channels::analysis_weights(playback.source.layout())[0];
             let mut submitted = 0;
             for step in 0..64 {
                 playback.fill().unwrap();
@@ -1550,16 +1367,6 @@ pub(super) mod tests {
             playback.fill().unwrap();
             assert!(playback.eof);
             assert!(captured.try_pop().is_none());
-            assert_eq!(
-                playback
-                    .visualization
-                    .waveform
-                    .read()
-                    .rms_counts
-                    .iter()
-                    .sum::<u64>(),
-                117
-            );
         }
     }
 
@@ -1569,7 +1376,7 @@ pub(super) mod tests {
 
         let file = pcm_samples(24_000);
         for published in [0, 117] {
-            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let (mut playback, _) = test_playback_selected(file.path(), None);
             let mut graph =
                 GraphRunner::compile(&unity_fir_graph(), GraphPort { node: 2, port: 0 }, 8_000, 1)
                     .unwrap();
@@ -1687,8 +1494,7 @@ pub(super) mod tests {
 
             for processing in 0..3 {
                 for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
-                    let (mut playback, _) =
-                        test_playback_with_waveform(&path, None, Arc::default());
+                    let (mut playback, _) = test_playback_selected(&path, None);
                     if processing == 2 {
                         let mut graph = GraphRunner::compile(
                             &unity_fir_graph(),
@@ -1728,7 +1534,7 @@ pub(super) mod tests {
                         73,
                     );
                     playback.output = output;
-                    let weights = playback.visualization.weights[0];
+                    let weights = crate::channels::analysis_weights(playback.source.layout())[0];
                     let mut taps = Vec::new();
                     for step in 0..(total / 73 + 16) {
                         playback.fill().unwrap();
@@ -1874,8 +1680,7 @@ pub(super) mod tests {
             (2, 1100, 400),
         ] {
             for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
-                let (mut playback, _) =
-                    test_playback_with_waveform(file.path(), None, Arc::default());
+                let (mut playback, _) = test_playback_selected(file.path(), None);
                 if processing == 2 {
                     let mut graph = GraphRunner::compile(
                         &unity_fir_graph(),
@@ -1915,7 +1720,7 @@ pub(super) mod tests {
                     73,
                 );
                 playback.output = output;
-                let weights = playback.visualization.weights[0];
+                let weights = crate::channels::analysis_weights(playback.source.layout())[0];
                 let mut taps = Vec::new();
                 for step in 0..96 {
                     playback.fill().unwrap();
@@ -1966,336 +1771,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn same_path_replacement_retires_complete_envelopes_but_not_an_open_decoder() {
-        let file = pcm_level(320, 3277);
-        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        let (mut first, mut render) =
-            test_playback_with_waveform(file.path(), None, waveform.clone());
-        first.fill().unwrap();
-        render(&mut [0.0; 320], 0);
-        render(&mut [0.0; 160], 100);
-        assert!(first.finished());
-        let completed = waveform.read().clone();
-        assert!(completed.complete);
-        assert!(
-            completed
-                .peaks
-                .iter()
-                .all(|peak| *peak == Some(3277.0 / 32768.0))
-        );
-
-        // An unchanged Load reuses the completed result without a PCM scan or
-        // allocating a playback accumulator before ordinary playback needs it.
-        let (mut reopened, _) = test_playback_with_waveform(file.path(), None, waveform.clone());
-        assert_eq!(waveform.read().revision, completed.revision);
-        assert_eq!(waveform.read().identity, completed.identity);
-        assert!(reopened.visualization.accumulator.is_none());
-        assert!(!reopened.eof);
-
-        let replacement = pcm_level(320, 26214);
-        std::fs::rename(replacement.path(), file.path()).unwrap();
-        // The decoder already holds A, even though the path now names B.
-        reopened.fill().unwrap();
-        assert!(waveform.read().revision > completed.revision);
-        assert_eq!(waveform.read().peaks, completed.peaks);
-        let (output, mut render) =
-            crate::output::test_backend(8_000, false, reopened.source.layout());
-        reopened
-            .restart_output_with(Some(0.0), |_, _| Ok(output))
-            .unwrap();
-        reopened.fill().unwrap();
-        let mut samples = [0.0; 320];
-        render(&mut samples, 0);
-        assert!(samples.iter().all(|sample| *sample == 3277.0 / 32768.0));
-        assert_eq!(waveform.read().identity, completed.identity);
-        assert_eq!(waveform.read().rms_counts, completed.rms_counts);
-
-        let (mut fresh, mut render) =
-            test_playback_with_waveform(file.path(), None, waveform.clone());
-        assert!(waveform.read().revision > completed.revision);
-        assert_ne!(waveform.read().identity, completed.identity);
-        assert!(!waveform.read().complete);
-        assert!(waveform.read().peaks.is_empty());
-        fresh.fill().unwrap();
-        render(&mut samples, 0);
-        render(&mut [0.0; 160], 100);
-        assert!(fresh.finished());
-        assert!(samples.iter().all(|sample| *sample == 26214.0 / 32768.0));
-        assert!(waveform.read().complete);
-        assert!(
-            waveform
-                .read()
-                .peaks
-                .iter()
-                .all(|peak| *peak == Some(26214.0 / 32768.0))
-        );
-        assert!(waveform.read().revision > completed.revision);
-    }
-
-    #[test]
-    fn seeking_retains_decoded_coverage_without_reidentifying_the_path() {
-        let file = pcm_level(16_000, 3277);
-        let (mut playback, _) = test_playback(
-            file.path(),
-            PlaybackRange {
-                start_seconds: 0.0,
-                end_seconds: Some(2.0),
-            },
-        );
-        playback.fill().unwrap();
-        let before = playback.visualization.waveform.read().clone();
-        assert!(!before.complete);
-        assert!(before.peaks.iter().any(Option::is_some));
-        let replacement = pcm_level(16_000, 26214);
-        std::fs::rename(replacement.path(), file.path()).unwrap();
-        let (output, mut render) =
-            crate::output::test_backend(8_000, false, playback.source.layout());
-        playback
-            .restart_output_with(Some(1.0), |_, _| Ok(output))
-            .unwrap();
-        assert_eq!(
-            playback.visualization.waveform.read().identity,
-            before.identity
-        );
-        assert_eq!(
-            playback.visualization.waveform.read().revision,
-            before.revision
-        );
-        assert_eq!(playback.visualization.waveform.read().peaks, before.peaks);
-        playback.fill().unwrap();
-        let mut samples = [0.0; 160];
-        render(&mut samples, 0);
-        assert!(samples.iter().all(|sample| *sample == 3277.0 / 32768.0));
-        let after = playback.visualization.waveform.read();
-        assert_eq!(after.identity, before.identity);
-        assert!(!after.complete);
-        for (old, new) in before.peaks.iter().zip(&after.peaks) {
-            if old.is_some() {
-                assert_eq!(new, old);
-            }
-        }
-        assert!(
-            after.peaks.iter().filter(|peak| peak.is_some()).count()
-                > before.peaks.iter().filter(|peak| peak.is_some()).count()
-        );
-    }
-
-    fn assert_waveform_absent(playback: &Playback) {
-        assert!(playback.visualization.accumulator.is_none());
-        assert_eq!(
-            playback
-                .visualization
-                .waveform
-                .read()
-                .retained_capacity_bytes(),
-            0
-        );
-    }
-
-    #[test]
-    fn disabling_visualization_preserves_pcm_and_never_completes_an_interrupted_envelope() {
-        let file = pcm();
-        for resume_before_eof in [false, true] {
-            let (mut playback, mut render) = test_playback(
-                file.path(),
-                PlaybackRange {
-                    start_seconds: 0.0,
-                    end_seconds: Some(2.0),
-                },
-            );
-            assert_waveform_absent(&playback);
-            playback.fill().unwrap();
-            let initial = playback.visualization.waveform.read().clone();
-            assert!(!initial.complete);
-            let pending = playback.pending.clone();
-            let offset = playback.offset_frames;
-            let position = playback.position();
-            let heard = playback.heard();
-            playback.set_visualization_enabled(false);
-            let suspended_revision = playback.visualization.waveform.read().revision;
-            assert!(suspended_revision > initial.revision);
-            assert_waveform_absent(&playback);
-            assert_eq!(playback.pending, pending);
-            assert_eq!(playback.offset_frames, offset);
-            assert_eq!(playback.position(), position);
-            assert_eq!(playback.heard(), heard);
-            let mut data = [0.0; 160];
-            for block in 0..100 {
-                if resume_before_eof && block == 30 {
-                    assert_eq!(
-                        playback.visualization.waveform.read().revision,
-                        suspended_revision
-                    );
-                    assert_waveform_absent(&playback);
-                    playback.set_visualization_enabled(true);
-                    assert_waveform_absent(&playback);
-                }
-                playback.fill().unwrap();
-                render(&mut data, block * 20);
-                for (offset, sample) in data.iter().enumerate() {
-                    assert_eq!(*sample, (block as usize * 160 + offset) as f32 / 32768.0);
-                }
-            }
-            playback.fill().unwrap();
-            assert!(playback.eof);
-            let interrupted = playback.visualization.waveform.read().clone();
-            assert!(!interrupted.complete);
-            if resume_before_eof {
-                assert!(interrupted.revision > suspended_revision);
-                assert!(interrupted.rms_counts.iter().sum::<u64>() < 16_000);
-                for (old, fresh) in initial.peaks.iter().zip(&interrupted.peaks) {
-                    if old.is_some() {
-                        assert!(fresh.is_none());
-                    }
-                }
-                assert!(interrupted.retained_capacity_bytes() <= initial.retained_capacity_bytes());
-            } else {
-                assert_eq!(interrupted.revision, suspended_revision);
-                assert_waveform_absent(&playback);
-                playback.set_visualization_enabled(true);
-                playback.fill().unwrap();
-                assert!(!playback.visualization.waveform.read().complete);
-                assert_waveform_absent(&playback);
-            }
-        }
-    }
-
-    #[test]
-    fn repeated_paused_still_roundtrips_do_not_restore_or_complete_old_coverage() {
-        let file = pcm();
-        let (mut playback, mut render) = test_playback(
-            file.path(),
-            PlaybackRange {
-                start_seconds: 0.0,
-                end_seconds: Some(2.0),
-            },
-        );
-        playback.fill().unwrap();
-        playback.pause(true);
-        let retained_revision = playback.visualization.waveform.read().revision;
-        let pending = playback.pending.clone();
-        let pending_capacity = playback.pending.capacity();
-        for pass in 0..32 {
-            playback.set_visualization_enabled(false);
-            let revision = playback.visualization.waveform.read().revision;
-            assert_eq!(revision, retained_revision + pass + 1);
-            playback.set_visualization_enabled(false);
-            playback.fill().unwrap();
-            assert_eq!(playback.visualization.waveform.read().revision, revision);
-            assert_waveform_absent(&playback);
-            playback.set_visualization_enabled(true);
-            playback.fill().unwrap();
-            assert!(playback.paused());
-            assert_eq!(playback.pending, pending);
-            assert_eq!(playback.pending.capacity(), pending_capacity);
-            assert_waveform_absent(&playback);
-        }
-        playback.pause(false);
-        let mut data = [0.0; 160];
-        for block in 0..100 {
-            playback.fill().unwrap();
-            render(&mut data, block * 20);
-            for (offset, sample) in data.iter().enumerate() {
-                assert_eq!(*sample, (block as usize * 160 + offset) as f32 / 32768.0);
-            }
-        }
-        playback.fill().unwrap();
-        assert!(playback.eof);
-        assert!(!playback.visualization.waveform.read().complete);
-        assert!(
-            playback
-                .visualization
-                .waveform
-                .read()
-                .rms_counts
-                .iter()
-                .sum::<u64>()
-                < 16_000
-        );
-    }
-
-    #[test]
-    fn visualization_enabled_output_restarts_keep_gaps_but_a_fresh_scan_recovers() {
-        let file = pcm();
-        let (mut playback, _) = test_playback(
-            file.path(),
-            PlaybackRange {
-                start_seconds: 0.0,
-                end_seconds: Some(2.0),
-            },
-        );
-        playback.fill().unwrap();
-        let capacity_bound = playback
-            .visualization
-            .waveform
-            .read()
-            .retained_capacity_bytes();
-        playback.set_visualization_enabled(false);
-        for target in [None, Some(0.0), Some(0.5)] {
-            let initial_revision = playback.visualization.waveform.read().revision;
-            let (output, mut render) =
-                crate::output::test_backend(8_000, false, playback.source.layout());
-            playback
-                .restart_output_with(target, |_, _| Ok(output))
-                .unwrap();
-            playback.fill().unwrap();
-            assert_waveform_absent(&playback);
-            playback.set_visualization_enabled(false);
-            assert_waveform_absent(&playback);
-            assert_eq!(
-                playback.visualization.waveform.read().revision,
-                initial_revision
-            );
-            playback.set_visualization_enabled(true);
-            assert_waveform_absent(&playback);
-            let mut data = [0.0; 160];
-            for block in 0..110 {
-                playback.fill().unwrap();
-                render(&mut data, block * 20);
-            }
-            assert!(playback.eof);
-            assert!(!playback.visualization.waveform.read().complete);
-            assert!(
-                playback
-                    .visualization
-                    .waveform
-                    .read()
-                    .retained_capacity_bytes()
-                    <= capacity_bound
-            );
-            playback.set_visualization_enabled(false);
-            assert_waveform_absent(&playback);
-        }
-        playback.set_visualization_enabled(true);
-        let (output, mut render) =
-            crate::output::test_backend(8_000, false, playback.source.layout());
-        playback
-            .restart_output_with(Some(0.0), |_, _| Ok(output))
-            .unwrap();
-        let mut data = [0.0; 160];
-        for block in 0..110 {
-            playback.fill().unwrap();
-            render(&mut data, block * 20);
-        }
-        assert!(playback.eof);
-        assert!(playback.visualization.waveform.read().complete);
-        let waveform = playback.visualization.waveform.read();
-        for (bin, rms) in waveform.rms.iter().enumerate() {
-            let first = (bin * 16_000).div_ceil(waveform.peaks.len());
-            let end = ((bin + 1) * 16_000).div_ceil(waveform.peaks.len());
-            let count = (end - first) as u64;
-            assert_eq!(waveform.rms_counts[bin], count);
-            assert_eq!(waveform.left_rms_counts[bin], count);
-            assert_eq!(waveform.right_rms_counts[bin], count);
-            let energy: f64 = (first..end)
-                .map(|index| (index as f64 / 32768.0).powi(2))
-                .sum();
-            let expected = (energy / count as f64).sqrt() as f32;
-            assert!((rms.unwrap() - expected).abs() < 1e-6);
-        }
-    }
-
-    #[test]
     fn refill_snapshot_yields_to_consumption_and_preserves_the_packet_tail() {
         let file = pcm();
         let (mut playback, mut render) = test_playback(
@@ -2342,16 +1817,6 @@ pub(super) mod tests {
         assert!(data.iter().all(|sample| *sample == 0.0));
         assert!(playback.finished());
         assert_eq!(playback.heard(), 2.0);
-        assert_eq!(
-            playback
-                .visualization
-                .waveform
-                .read()
-                .rms_counts
-                .iter()
-                .sum::<u64>(),
-            16_000
-        );
     }
 
     #[test]
@@ -2377,10 +1842,6 @@ pub(super) mod tests {
         assert!(128_000 - playback.output.vacant_frames() <= MAX_REFILL_FRAMES);
         assert!(playback.output.vacant_frames() > 0);
         assert!(!playback.eof);
-        assert!(
-            !playback.visualization.waveform.read().complete,
-            "yield is not decoder EOF"
-        );
         loop {
             let vacant = playback.output.vacant_frames();
             let mut packets = 0;
@@ -2406,16 +1867,6 @@ pub(super) mod tests {
         render(&mut [0.0; 8], 12_020);
         assert!(playback.finished());
         assert_eq!(playback.heard(), 12.0);
-        assert_eq!(
-            playback
-                .visualization
-                .waveform
-                .read()
-                .rms_counts
-                .iter()
-                .sum::<u64>(),
-            96_000
-        );
     }
 
     #[test]
@@ -2496,7 +1947,7 @@ pub(super) mod tests {
     fn seek_marks_only_new_admitted_pcm_and_rejecting_seek_keeps_old_output() {
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             let file = pcm();
-            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let (mut playback, _) = test_playback_selected(file.path(), None);
             let worker = Arc::new(PcmControl::default());
             worker.set_playback_active(true);
             worker.set_enabled(true);
@@ -2566,8 +2017,7 @@ pub(super) mod tests {
             for paused in [false, true] {
                 for target in [None, Some(0.125)] {
                     let file = pcm();
-                    let (mut playback, _) =
-                        test_playback_with_waveform(file.path(), None, Arc::default());
+                    let (mut playback, _) = test_playback_selected(file.path(), None);
                     if memory {
                         let budget = crate::PcmBudget::new(128 * 1024);
                         let mut builder = crate::PcmBuilder::new(
@@ -2640,10 +2090,8 @@ pub(super) mod tests {
         };
         let (mut playback, mut old_render) = test_playback(file.path(), range);
         playback.fill().unwrap();
-        let initial = playback.visualization.waveform.read().clone();
         playback.pause(true);
         for target in [0.75, 0.125, 1.0, 0.0] {
-            let prior_revision = playback.visualization.waveform.read().revision;
             let (output, mut render) =
                 crate::output::test_backend(8_000, true, playback.source.layout());
             playback
@@ -2658,15 +2106,10 @@ pub(super) mod tests {
             old_render(&mut data, 0);
             assert_eq!(data, [0.0; 64]);
             playback.fill().unwrap();
-            assert_eq!(
-                playback.visualization.waveform.read().revision,
-                prior_revision
-            );
             render(&mut data, 0);
             assert_eq!(data, [0.0; 64]);
             playback.pause(false);
             playback.fill().unwrap();
-            assert!(playback.visualization.waveform.read().revision > prior_revision);
             render(&mut data, 1);
             let first = ((target + 0.25) * 8_000.0).round() as usize;
             for (offset, sample) in data.iter().enumerate() {
@@ -2674,25 +2117,12 @@ pub(super) mod tests {
             }
             playback.pause(true);
         }
-        let rolling = playback.visualization.waveform.read();
-        assert!(rolling.revision > initial.revision);
-        assert_eq!(rolling.path, initial.path);
-        let count = rolling.rms_counts.iter().sum::<u64>();
-        assert!(count > 0 && count <= 12_000);
-        let expected: Vec<f32> = (2_000..14_000)
-            .map(|frame| frame as f32 / 32768.0)
-            .collect();
-        for bin in 0..rolling.peaks.len() {
-            if rolling.rms_counts[bin] > 0 {
-                assert_mono_waveform_bin(&rolling, bin, &expected);
-            }
-        }
     }
 
     #[test]
     fn before_pcm_stays_continuous_across_monitor_eq_bypass_roundtrip() {
         let file = pcm_samples(24_000);
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let worker = Arc::new(PcmControl::default());
         worker.reset(8_000, playback.source.layout());
         worker.set_playback_active(true);
@@ -2704,7 +2134,7 @@ pub(super) mod tests {
         let (output, mut render) =
             crate::output::test_backend_with_capacity(8_000, false, playback.source.layout(), 512);
         playback.output = output;
-        let weights = playback.visualization.weights[0];
+        let weights = crate::channels::analysis_weights(playback.source.layout())[0];
         let mut taps = Vec::new();
         let mut audible = Vec::new();
         for first in (0..24_000).step_by(512) {
@@ -2775,8 +2205,7 @@ pub(super) mod tests {
         );
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             for volume in [0.0, 0.25, 1.0] {
-                let (mut playback, mut render) =
-                    test_playback_with_waveform(file.path(), None, Arc::default());
+                let (mut playback, mut render) = test_playback_selected(file.path(), None);
                 let worker = Arc::new(PcmControl::default());
                 worker.set_playback_active(true);
                 worker.set_enabled(true);
@@ -2805,19 +2234,12 @@ pub(super) mod tests {
                 for (actual, expected) in audible.iter().zip(&processed) {
                     assert_eq!(*actual, expected * crate::volume::gain(volume));
                 }
-                let frame = playback.visualization.waveform.read();
-                assert_eq!(frame.rms_counts.iter().sum::<u64>(), 320);
-                for bin in 0..frame.peaks.len() {
-                    if frame.rms_counts[bin] > 0 {
-                        assert_mono_waveform_bin(&frame, bin, expected);
-                    }
-                }
             }
         }
     }
 
     #[test]
-    fn full_scan_captures_active_graph_guard_mapping_eq_and_source() {
+    fn render_snapshot_captures_active_graph_guard_mapping_eq_and_source() {
         use rivu_format::config::processing_graph::GraphPort;
         let file = pcm_level(149, 8192);
         let mut graph =
@@ -2830,7 +2252,7 @@ pub(super) mod tests {
             preamp_db: 6.0,
             ..Default::default()
         });
-        let mut snapshot = crate::WaveformScanSnapshot::original(
+        let mut snapshot = crate::AudioRenderSnapshot::original(
             file.path().to_owned(),
             None,
             DecoderHint::Native,
@@ -2840,87 +2262,35 @@ pub(super) mod tests {
         snapshot.expected_identity = Some(source.identity());
         snapshot.graph = Some(graph.snapshot());
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let before = crate::waveform(&snapshot, 2, false, &cancelled).unwrap();
+        let before = crate::render::collect_stream(&snapshot, 2, false, &cancelled).unwrap();
         assert_eq!(before.duration, Some(117.0 / 8_000.0));
-        assert_eq!(before.rms_counts.iter().sum::<u64>(), 117);
+        assert_eq!(before.samples.len(), 117);
         assert!(
             before
-                .peaks
+                .samples
                 .iter()
-                .flatten()
-                .all(|peak| (*peak - 0.25).abs() < 1e-6)
-        );
-        assert!(
-            before
-                .rms
-                .iter()
-                .flatten()
-                .all(|rms| (*rms - 0.25).abs() < 1e-6)
+                .all(|sample| (*sample - 0.25).abs() < 1e-6)
         );
         snapshot.signal = VisualizationSignal::After;
-        let after = crate::waveform(&snapshot, 2, false, &cancelled).unwrap();
+        let after = crate::render::collect_stream(&snapshot, 2, false, &cancelled).unwrap();
         assert_eq!(after.duration, before.duration);
-        assert_eq!(after.rms_counts.iter().sum::<u64>(), 117);
+        assert_eq!(after.samples.len(), 117);
         let expected = 0.25 * 10.0_f32.powf(6.0 / 20.0);
         assert!(
             after
-                .peaks
+                .samples
                 .iter()
-                .flatten()
-                .all(|peak| (*peak - expected).abs() < 1e-5)
-        );
-        assert!(
-            after
-                .rms
-                .iter()
-                .flatten()
-                .all(|rms| (*rms - expected).abs() < 1e-5)
+                .all(|sample| (*sample - expected).abs() < 1e-5)
         );
         let replacement = pcm_level(149, 16384);
         snapshot.path = replacement.path().to_owned();
-        assert!(crate::waveform(&snapshot, 2, false, &cancelled).is_err());
-    }
-
-    #[test]
-    fn unchanged_equalizer_preserves_waveform_accumulation() {
-        let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
-        playback
-            .visualization
-            .push(0.0, &[0.25; 4], 8_000, 1, false);
-        playback.visualization.flush();
-        playback.set_equalizer(&EqualizerConfig::default()).unwrap();
-        playback
-            .visualization
-            .push(4.0 / 8_000.0, &[0.5; 4], 8_000, 1, false);
-        playback.visualization.flush();
-        {
-            let waveform = playback.visualization.waveform.read();
-            assert_eq!(waveform.rms_counts[0], 8);
-            assert_eq!(waveform.peaks[0], Some(0.5));
-            assert!((waveform.rms[0].unwrap() - (0.15625_f32).sqrt()).abs() < 1e-6);
-        }
-        playback
-            .set_equalizer(&EqualizerConfig {
-                enabled: true,
-                preamp_db: 6.0,
-                ..Default::default()
-            })
-            .unwrap();
-        playback
-            .visualization
-            .push(0.0, &[0.75; 4], 8_000, 1, false);
-        playback.visualization.flush();
-        let waveform = playback.visualization.waveform.read();
-        assert_eq!(waveform.rms_counts[0], 4);
-        assert_eq!(waveform.peaks[0], Some(0.75));
-        assert_eq!(waveform.rms[0], Some(0.75));
+        assert!(crate::render::collect_stream(&snapshot, 2, false, &cancelled).is_err());
     }
 
     #[test]
     fn equalizer_processes_packet_once_across_updates_pause_and_ring_wrap() {
         let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let config = EqualizerConfig {
             enabled: true,
             preamp_db: 6.0,
@@ -2960,20 +2330,12 @@ pub(super) mod tests {
         }
         playback.fill().unwrap();
         assert!(playback.eof);
-        let waveform = playback.visualization.waveform.read();
-        let count = waveform.rms_counts.iter().sum::<u64>();
-        assert!(count > 0 && count <= 16_000);
-        for bin in 0..waveform.peaks.len() {
-            if waveform.rms_counts[bin] > 0 {
-                assert_mono_waveform_bin(&waveform, bin, &expected);
-            }
-        }
     }
 
     #[test]
     fn equalizer_seek_and_device_restart_discard_filter_history() {
         let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let config = EqualizerConfig {
             enabled: true,
             bands: vec![rivu_dsp::equalizer::config::EqBand {
@@ -3096,8 +2458,7 @@ pub(super) mod tests {
             }
             let runner =
                 GraphRunner::compile(&graph, GraphPort { node: 2, port: 0 }, 8_000, 1).unwrap();
-            let (mut playback, mut render) =
-                test_playback_with_waveform(file.path(), None, Arc::default());
+            let (mut playback, mut render) = test_playback_selected(file.path(), None);
             playback.graph_skip_frames = runner.latency_frames();
             playback.graph = Some(runner);
             for _ in 0..16 {
@@ -3126,8 +2487,7 @@ pub(super) mod tests {
     fn graph_short_source_discards_latency_flushes_eof_and_counts_only_source_frames() {
         use rivu_format::config::processing_graph::GraphPort;
         let file = pcm_samples(117);
-        let (mut playback, mut render) =
-            test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, mut render) = test_playback_selected(file.path(), None);
         let graph = unity_fir_graph();
         let runner =
             GraphRunner::compile(&graph, GraphPort { node: 2, port: 0 }, 8_000, 1).unwrap();
@@ -3156,7 +2516,7 @@ pub(super) mod tests {
     fn graph_seek_discards_all_node_and_alignment_histories() {
         use rivu_format::config::processing_graph::GraphPort;
         let file = pcm();
-        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, _) = test_playback_selected(file.path(), None);
         let graph = unity_fir_graph();
         let runner =
             GraphRunner::compile(&graph, GraphPort { node: 2, port: 0 }, 8_000, 1).unwrap();
@@ -3180,8 +2540,7 @@ pub(super) mod tests {
     #[test]
     fn disabled_equalizer_keeps_exact_pcm_despite_saved_gain() {
         let file = pcm_samples(320);
-        let (mut playback, mut render) =
-            test_playback_with_waveform(file.path(), None, Arc::default());
+        let (mut playback, mut render) = test_playback_selected(file.path(), None);
         playback.equalizer = Equalizer::new(
             &EqualizerConfig {
                 preamp_db: 24.0,
@@ -3200,31 +2559,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn audition_visualizes_actual_pcm_and_retains_source_metadata() {
+    fn audition_renders_actual_pcm_and_retains_source_metadata() {
         let original = pcm_level(320, 3277);
-        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        let (mut source, _) = test_playback_with_waveform(original.path(), None, waveform.clone());
+        let (mut source, _) = test_playback_selected(original.path(), None);
         source.fill().unwrap();
-        let envelope = waveform.read().clone();
         let info = source.info().clone();
         let processed = pcm_level(320, 26214);
-        let (mut audition, mut render) =
-            test_playback_with_waveform(processed.path(), None, Arc::default());
-        audition.visualization.waveform = waveform.clone();
+        let (mut audition, mut render) = test_playback_selected(processed.path(), None);
         audition.source_info = Some(info.clone());
-        audition.visualization.seed =
-            audition
-                .visualization
-                .waveform_control
-                .capture(&mut waveform.write(), true, |frame| {
-                    frame.select_audition_source(
-                        original.path(),
-                        None,
-                        DecoderHint::Auto,
-                        &audition.source,
-                        info.duration,
-                    );
-                });
         audition.prior_heard = 1.25;
         audition.fill().unwrap();
         let mut samples = [0.0; 320];
@@ -3232,16 +2574,6 @@ pub(super) mod tests {
         assert!(samples.iter().all(|sample| *sample == 26214.0 / 32768.0));
         assert_eq!(audition.info().codec, info.codec);
         assert_eq!(audition.info().duration, info.duration);
-        assert_ne!(waveform.read().identity, envelope.identity);
-        assert!(
-            waveform
-                .read()
-                .peaks
-                .iter()
-                .flatten()
-                .all(|peak| (*peak - 26214.0 / 32768.0).abs() < 1e-6)
-        );
-        assert!(waveform.read().revision > envelope.revision);
         assert!(audition.heard() >= 1.25);
         assert_eq!(audition.completed_bitrate(), None);
     }
@@ -3286,5 +2618,133 @@ pub(super) mod tests {
                 "queued future PCM is not yet heard"
             );
         }
+    }
+    #[test]
+    fn render_read_range_preserves_selected_cue_coordinates_and_processing_context() {
+        let file = pcm();
+        let mut snapshot = crate::AudioRenderSnapshot::original(
+            file.path().to_owned(),
+            Some(PlaybackRange {
+                start_seconds: 0.25,
+                end_seconds: Some(1.75),
+            }),
+            DecoderHint::Native,
+            VisualizationSignal::After,
+            Arc::new(EqualizerConfig {
+                enabled: true,
+                preamp_db: 6.0,
+                ..Default::default()
+            }),
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let full = crate::render::collect_stream(&snapshot, 1, false, &cancelled).unwrap();
+        snapshot.read_range = Some(PlaybackRange {
+            start_seconds: 0.125,
+            end_seconds: Some(0.25),
+        });
+        let selected = crate::render::collect_stream(&snapshot, 1, false, &cancelled).unwrap();
+        assert_eq!(selected.samples, full.samples[1_000..2_000]);
+        assert_eq!(selected.duration, Some(1.5));
+        assert_eq!(selected.spans[0].0, 0.125);
+        assert!(selected.spans.iter().all(|span| span.1 == 1.0 / 8_000.0));
+        snapshot.read_range = Some(PlaybackRange {
+            start_seconds: 3.0,
+            end_seconds: None,
+        });
+        let empty = crate::render::collect_stream(&snapshot, 1, false, &cancelled).unwrap();
+        assert!(empty.samples.is_empty());
+        assert_eq!(empty.duration, Some(1.5));
+    }
+
+    #[test]
+    fn render_rejects_in_place_source_mutation_before_complete() {
+        let file = pcm();
+        let snapshot = crate::AudioRenderSnapshot::original(
+            file.path().to_owned(),
+            None,
+            DecoderHint::Native,
+            VisualizationSignal::Before,
+            Arc::default(),
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let mut mutated = false;
+        let mut complete = false;
+        let error = crate::render_stream(&snapshot, 1, false, &cancelled, |event| {
+            match event {
+                crate::RenderEvent::Pcm { .. } if !mutated => {
+                    let mut writer = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(file.path())
+                        .unwrap();
+                    writer.seek(SeekFrom::End(0)).unwrap();
+                    writer.write_all(&[0, 0]).unwrap();
+                    mutated = true;
+                }
+                crate::RenderEvent::Complete { .. } => complete = true,
+                _ => {}
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("changed while decoding"));
+        assert!(mutated);
+        assert!(!complete);
+    }
+
+    #[test]
+    fn capture_switches_preserve_pending_pcm_and_audible_timeline() {
+        let file = pcm();
+        let (mut playback, mut render) = test_playback_selected(file.path(), None);
+        playback.fill().unwrap();
+        playback.pause(true);
+        let pending = playback.pending.clone();
+        let position = playback.position();
+        for _ in 0..32 {
+            playback.set_visualization_enabled(false);
+            playback.set_visualization_enabled(true);
+            playback.fill().unwrap();
+            assert_eq!(playback.pending, pending);
+            assert_eq!(playback.position(), position);
+        }
+        playback.pause(false);
+        for block in 0..100 {
+            if block == 30 {
+                playback.set_visualization_enabled(false);
+            }
+            if block == 60 {
+                playback.set_visualization_enabled(true);
+            }
+            playback.fill().unwrap();
+            let mut samples = [0.0; 160];
+            render(&mut samples, block * 20);
+            for (offset, sample) in samples.iter().enumerate() {
+                assert_eq!(*sample, (block as usize * 160 + offset) as f32 / 32768.0);
+            }
+        }
+        playback.fill().unwrap();
+        assert!(playback.eof);
+    }
+
+    #[test]
+    fn open_decoder_seek_keeps_original_pcm_after_path_replacement() {
+        let file = pcm_level(320, 3277);
+        let (mut playback, _) = test_playback_selected(file.path(), None);
+        let identity = playback.source.identity();
+        let replacement = pcm_level(320, 26214);
+        std::fs::rename(replacement.path(), file.path()).unwrap();
+        let (output, mut render) =
+            crate::output::test_backend(8_000, false, playback.source.layout());
+        playback
+            .restart_output_with(Some(0.0), |_, _| Ok(output))
+            .unwrap();
+        playback.fill().unwrap();
+        let mut samples = [0.0; 320];
+        render(&mut samples, 0);
+        assert!(samples.iter().all(|sample| *sample == 3277.0 / 32768.0));
+        assert_eq!(playback.source.identity(), identity);
+        let (mut fresh, mut render) = test_playback_selected(file.path(), None);
+        fresh.fill().unwrap();
+        render(&mut samples, 0);
+        assert!(samples.iter().all(|sample| *sample == 26214.0 / 32768.0));
     }
 }

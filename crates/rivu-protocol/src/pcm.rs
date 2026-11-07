@@ -24,7 +24,7 @@ impl PcmState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PcmHeader {
     /// Logical block identity: a partial block can grow without a new sequence.
     /// Consumers retain a frame offset to admit only its newly published tail.
@@ -36,6 +36,10 @@ pub struct PcmHeader {
     pub start_frame: u64,
     /// First frame in the current output instance, before hardware volume or routing.
     pub output_frame: u64,
+    /// Selected-source relative media seconds for the first PCM frame.
+    pub media_start: f64,
+    /// Media seconds advanced per PCM frame.
+    pub media_step: f64,
     pub sample_rate: u32,
     pub gap: bool,
 }
@@ -58,7 +62,7 @@ use std::{
     time::Duration,
 };
 pub const DEADLINE: Duration = Duration::from_secs(5);
-pub const MAGIC: &[u8; 8] = b"RIVUPCM5";
+pub const MAGIC: &[u8; 8] = b"RIVUPCM6";
 pub const REQUEST_SIZE: usize = 16;
 pub const STATUS_SIZE: usize = 72;
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
@@ -67,7 +71,7 @@ pub fn address(data_dir: &Path) -> Result<SocketAddr> {
         .as_abstract_name()
         .context("PCM requires an abstract command socket")?
         .to_vec();
-    name.extend_from_slice(b".pcm.v5");
+    name.extend_from_slice(b".pcm.v6");
     Ok(SocketAddr::from_abstract_name(name)?)
 }
 pub fn request(operation: u8, bits: u8, value: u64) -> [u8; REQUEST_SIZE] {

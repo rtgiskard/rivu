@@ -183,9 +183,11 @@ Channel targets are `all`, or selected channels numbered from 1 in GUI text and
 from 0 in JSON (`{"selected":[0,1]}`). Any enabled solo band excludes enabled
 non-solo bands globally, even across differing channel targets. Monitor edits
 and bypass crossfade complete banks over 10 ms; settled bypass preserves samples.
-Reapplying the already accepted monitor configuration preserves the current fade
-and waveform traversal; a changed configuration starts a new traversal only after
-successful acceptance. Graph edits affect future snapshots, not an admitted run.
+Reapplying the already accepted monitor configuration preserves the current fade.
+Accepted EQ changes affect subsequent PCM; the GUI preserves old waveform bins
+until revisited intervals overwrite them. Graph edits affect future immutable
+render snapshots, not an admitted run. Explicit Before/After preview semantics are
+defined in link:23_visuals.adoc#waveform[Waveform].
 
 Save/load/delete named presets or import/export EqualizerConfig JSON. Save new
 preset is create-only. Overwrite, same-name import and deletion require desktop

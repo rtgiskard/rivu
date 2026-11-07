@@ -1,2 +1,2 @@
+pub(crate) mod audio;
 pub(crate) mod visual;
-pub(crate) mod waveform;

@@ -11,7 +11,7 @@ use super::{
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_metadata::{Tags, read_tags};
-use rivu_protocol::waveform::SourceIdentity;
+use rivu_protocol::audio::SourceIdentity;
 use rivu_utils::regular_file::open_regular_file;
 use std::{
     fs::File,
@@ -135,7 +135,7 @@ fn native_error(error: SymphoniaError) -> anyhow::Error {
 
 pub(super) fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
     if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
-        bail!("Waveform loading cancelled");
+        bail!("Audio render cancelled");
     }
     Ok(())
 }
@@ -1283,7 +1283,7 @@ impl Source {
 
     /// Adjacent quantized packet timestamps can differ by one container tick.
     /// Sample-accurate timelines retain the half-sample coverage threshold.
-    pub(super) fn waveform_timestamp_tolerance(&self) -> f64 {
+    pub(super) fn timestamp_tolerance(&self) -> f64 {
         if self.timestamp_tick > f64::from(self.info.sample_rate).recip() {
             self.timestamp_tick
         } else {
@@ -1291,21 +1291,29 @@ impl Source {
         }
     }
 
-    pub(super) fn waveform(
-        snapshot: &super::WaveformScanSnapshot,
+    pub(super) fn render_stream(
+        snapshot: &super::AudioRenderSnapshot,
         media_read_buffer_mib: u32,
         ffmpeg_enabled: bool,
         cancelled: &AtomicBool,
-    ) -> Result<super::WaveformFrame> {
+        mut emit: impl FnMut(super::RenderEvent<'_>) -> Result<()>,
+    ) -> Result<()> {
         check_cancelled(Some(cancelled))?;
         let buffer_len = usize::try_from(media_read_buffer_mib)
-            .context("Waveform media buffer size does not fit usize")?
+            .context("Audio render media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
+        let mut identity_file = None;
         let mut source = if let Some(pcm) = &snapshot.pcm {
             Self::from_pcm(pcm.clone(), 0.0)?
         } else {
-            Self::open_with_cancel(
+            let file = open_regular_file(&snapshot.path)?;
+            identity_file = Some(
+                file.try_clone()
+                    .context("Retaining render source identity")?,
+            );
+            Self::open_file_with_cancel(
                 &snapshot.path,
+                file,
                 buffer_len,
                 snapshot.decoder_hint,
                 ffmpeg_enabled,
@@ -1322,7 +1330,7 @@ impl Source {
             .expected_identity
             .is_some_and(|expected| expected != source.identity())
         {
-            bail!("Waveform source differs from the captured active source");
+            bail!("Render source differs from the captured active source");
         }
         let context = snapshot
             .graph
@@ -1337,47 +1345,134 @@ impl Source {
         } else {
             None
         };
-        source.scan_waveform_processed(snapshot, cancelled, graph, context)
+        let identity = source.identity();
+        source.render_processed(snapshot, cancelled, graph, context, |event| {
+            if matches!(&event, super::RenderEvent::Complete { .. })
+                && let Some(file) = &identity_file
+                && source_identity(file)? != identity
+            {
+                bail!("Audio render source changed while decoding");
+            }
+            emit(event)
+        })
     }
 
     #[cfg(test)]
-    fn scan_waveform(
+    fn collect_pcm(
         &mut self,
         path: &Path,
         range: Option<super::PlaybackRange>,
         decoder_hint: DecoderHint,
         cancelled: &AtomicBool,
-    ) -> Result<super::WaveformFrame> {
-        let snapshot = super::WaveformScanSnapshot::original(
+    ) -> Result<super::render::CollectedPcm> {
+        let snapshot = super::AudioRenderSnapshot::original(
             path.to_owned(),
             range,
             decoder_hint,
             rivu_format::config::VisualizationSignal::Before,
-            std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
+            std::sync::Arc::default(),
         );
-        self.scan_waveform_processed(&snapshot, cancelled, None, None)
+        let mut collected = super::render::CollectedPcm::default();
+        self.render_processed(&snapshot, cancelled, None, None, |event| {
+            collected.emit(event)
+        })?;
+        Ok(collected)
     }
 
-    fn scan_waveform_processed(
+    fn render_processed(
         &mut self,
-        snapshot: &super::WaveformScanSnapshot,
+        snapshot: &super::AudioRenderSnapshot,
         cancelled: &AtomicBool,
         mut graph: Option<super::GraphRunner>,
         context: Option<(usize, Option<u64>)>,
-    ) -> Result<super::WaveformFrame> {
-        let mut frame = super::waveform::WaveformBuffer::default();
+        mut emit: impl FnMut(super::RenderEvent<'_>) -> Result<()>,
+    ) -> Result<()> {
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
-        frame.select(
-            &snapshot.path,
-            snapshot.range,
-            snapshot.decoder_hint,
-            self.info.duration,
+        if let Some(range) = snapshot.read_range
+            && (!range.start_seconds.is_finite()
+                || range.start_seconds < 0.0
+                || range
+                    .end_seconds
+                    .is_some_and(|end| !end.is_finite() || end < range.start_seconds))
+        {
+            bail!("Invalid selected-source read range");
+        }
+        let exact_duration = context
+            .and_then(|context| context.1)
+            .map(|frames| frames as f64 / f64::from(sample_rate))
+            .or_else(|| match &self.decode {
+                Decode::Memory { pcm, .. } => Some(pcm.frames() as f64 / f64::from(sample_rate)),
+                _ if !self.mpeg_packets => self.expected_samples.map(|frames| {
+                    let end = frames as f64 / f64::from(sample_rate);
+                    (self.range_end.unwrap_or(end).min(end) - self.range_start).max(0.0)
+                }),
+                _ => None,
+            });
+        // Unknown or estimated source duration requires EOF: an early range read
+        // must not fabricate the selected source's full duration from a hint.
+        let stop_frame = snapshot
+            .read_range
+            .and_then(|range| range.end_seconds)
+            .filter(|_| exact_duration.is_some())
+            .map(|end| (end * f64::from(sample_rate)).round() as u64);
+        emit(super::RenderEvent::Start(super::RenderFormat {
+            source_identity: self.identity(),
             sample_rate,
-        );
-        frame.scan_source_identity = Some(self.identity());
-        let weights = super::channels::analysis_weights(&self.layout);
-        frame.set_channel_weights(&weights);
+            layout: self.shared_layout(),
+            duration: exact_duration.or(self.info.duration),
+        }))?;
+        let mut emitted_frames = 0_u64;
+        let mut emit_pcm = |frame: u64,
+                            samples: &[f32],
+                            mappings: &mut std::collections::VecDeque<(u64, f64)>,
+                            anchor: &mut (u64, f64)|
+         -> Result<u64> {
+            let mut offset = 0;
+            let count = samples.len() / channels;
+            let mut end_frames = 0;
+            while offset < count {
+                let position = frame + offset as u64;
+                while mappings
+                    .front()
+                    .is_some_and(|mapping| mapping.0 <= position)
+                {
+                    *anchor = mappings.pop_front().expect("present render media boundary");
+                }
+                let start =
+                    anchor.1 + position.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
+                let length = mappings.front().map_or(count - offset, |mapping| {
+                    (count - offset).min((mapping.0 - position) as usize)
+                });
+                let block = &samples[offset * channels..(offset + length) * channels];
+                let (first, end) = snapshot.read_range.map_or((0, length), |range| {
+                    let first = ((range.start_seconds - start) * f64::from(sample_rate))
+                        .round()
+                        .max(0.0)
+                        .min(length as f64) as usize;
+                    let end = range.end_seconds.map_or(length, |end| {
+                        ((end - start) * f64::from(sample_rate))
+                            .round()
+                            .max(0.0)
+                            .min(length as f64) as usize
+                    });
+                    (first, end)
+                });
+                if first < end {
+                    emit(super::RenderEvent::Pcm {
+                        media_start: start + first as f64 / f64::from(sample_rate),
+                        media_step: f64::from(sample_rate).recip(),
+                        samples: &block[first * channels..end * channels],
+                    })?;
+                    emitted_frames += (end - first) as u64;
+                }
+                end_frames = end_frames.max(
+                    ((start * f64::from(sample_rate)).round() + length as f64).max(0.0) as u64,
+                );
+                offset += length;
+            }
+            Ok(end_frames)
+        };
         let processed = snapshot.signal == rivu_format::config::VisualizationSignal::After;
         let mut equalizer = processed
             .then(|| {
@@ -1392,11 +1487,13 @@ impl Source {
         let mut input_frames = 0_u64;
         let mut published_frames = 0_u64;
         let mut pending = Vec::new();
-        // Match waveform placement: round timestamps to PCM frames before
-        // adding decoded lengths, and convert to seconds only at EOF.
+        // Round decoded timestamps to PCM frames before adding decoded lengths.
         let mut end_frames = 0_u64;
+        let lead = context.map_or(0, |context| context.0) as u64;
+        let mut mappings = std::collections::VecDeque::new();
+        let mut media_anchor = (0_u64, 0.0_f64);
         // Completing a captured timeline does not require upstream EOF or its tail.
-        while remaining != Some(0) {
+        while remaining != Some(0) && stop_frame.is_none_or(|end| end_frames < end) {
             let mut budget = DECODE_WORK_BUDGET;
             let span = match self.next_frames_with_cancel(Some(cancelled), &mut budget)? {
                 DecodeStep::Frames(span) => span,
@@ -1406,14 +1503,24 @@ impl Source {
             let samples = span.samples;
             let start_seconds = span.media_start;
             if !samples.len().is_multiple_of(channels) {
-                bail!("Waveform PCM contains an incomplete frame");
+                bail!("Rendered PCM contains an incomplete frame");
+            }
+            let discard = lead
+                .saturating_sub(input_frames)
+                .min((samples.len() / channels) as u64);
+            if discard < (samples.len() / channels) as u64 {
+                let frame = (input_frames + discard).saturating_sub(lead);
+                let media = start_seconds + (discard as f64 - lead as f64) / f64::from(sample_rate);
+                let anchor = mappings.back().copied().unwrap_or(media_anchor);
+                let expected =
+                    anchor.1 + frame.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
+                if (media - expected).abs() > 0.5 / f64::from(sample_rate) {
+                    mappings.push_back((frame, media));
+                }
             }
             input_frames += (samples.len() / channels) as u64;
-            for (index, block) in samples
-                .chunks(super::graph::GRAPH_BLOCK_FRAMES * channels)
-                .enumerate()
-            {
-                if remaining == Some(0) {
+            for block in samples.chunks(super::graph::GRAPH_BLOCK_FRAMES * channels) {
+                if remaining == Some(0) || stop_frame.is_some_and(|end| end_frames >= end) {
                     break;
                 }
                 check_cancelled(Some(cancelled))?;
@@ -1430,19 +1537,13 @@ impl Source {
                         block = &block[..frames * channels];
                         *remaining -= frames as u64;
                     }
-                    let start = if context.is_some() {
-                        published_frames as f64 / sample_rate as f64
-                    } else {
-                        start_seconds
-                            + (index * super::graph::GRAPH_BLOCK_FRAMES + discard) as f64
-                                / sample_rate as f64
-                    };
-                    frame.push(start, block, sample_rate, channels);
+                    end_frames = end_frames.max(emit_pcm(
+                        published_frames,
+                        block,
+                        &mut mappings,
+                        &mut media_anchor,
+                    )?);
                     published_frames += (block.len() / channels) as u64;
-                    end_frames = end_frames.max(
-                        ((start * f64::from(sample_rate)).round() + (block.len() / channels) as f64)
-                            as u64,
-                    );
                     continue;
                 }
                 pending.clear();
@@ -1461,23 +1562,21 @@ impl Source {
                 if let Some(equalizer) = &mut equalizer {
                     equalizer.process(&mut pending)?;
                 }
-                let start = if context.is_some() {
-                    published_frames as f64 / f64::from(sample_rate)
-                } else {
-                    start_seconds
-                        + (index * super::graph::GRAPH_BLOCK_FRAMES) as f64 / f64::from(sample_rate)
-                };
-                frame.push(start, &pending, sample_rate, channels);
+                end_frames = end_frames.max(emit_pcm(
+                    published_frames,
+                    &pending,
+                    &mut mappings,
+                    &mut media_anchor,
+                )?);
                 published_frames += (pending.len() / channels) as u64;
-                end_frames = end_frames.max(
-                    ((start * f64::from(sample_rate)).round() + (pending.len() / channels) as f64)
-                        as u64,
-                );
             }
         }
-        if processed && let Some(graph) = &mut graph {
+        if processed
+            && stop_frame.is_none_or(|end| end_frames < end)
+            && let Some(graph) = &mut graph
+        {
             let mut remaining = remaining.unwrap_or(input_frames.saturating_sub(published_frames));
-            while remaining > 0 {
+            while remaining > 0 && stop_frame.is_none_or(|end| end_frames < end) {
                 check_cancelled(Some(cancelled))?;
                 pending.resize(super::graph::GRAPH_BLOCK_FRAMES * channels, 0.0);
                 let produced = graph.finish_interleaved(&mut pending)?;
@@ -1494,20 +1593,26 @@ impl Source {
                     .as_mut()
                     .expect("processed scan EQ")
                     .process(&mut pending)?;
-                frame.push(
-                    published_frames as f64 / f64::from(sample_rate),
+                end_frames = end_frames.max(emit_pcm(
+                    published_frames,
                     &pending,
-                    sample_rate,
-                    channels,
-                );
+                    &mut mappings,
+                    &mut media_anchor,
+                )?);
                 published_frames += frames as u64;
                 remaining -= frames as u64;
-                end_frames = published_frames;
             }
         }
         check_cancelled(Some(cancelled))?;
-        frame.finish_scan(end_frames as f64 / f64::from(sample_rate));
-        Ok(frame.data)
+        emit(super::RenderEvent::Complete {
+            frames: emitted_frames,
+            duration: if stop_frame.is_some_and(|end| end_frames >= end) {
+                exact_duration.expect("early stop requires exact source duration")
+            } else {
+                end_frames as f64 / f64::from(sample_rate)
+            },
+        })?;
+        Ok(())
     }
 
     // Both backends supply codec-trimmed interleaved PCM and an absolute timestamp.
@@ -1523,7 +1628,7 @@ impl Source {
         // Keep this judgement here for every backend and every consumer.
         if let Some(expected) = self.next_media_start {
             let tolerance = self
-                .waveform_timestamp_tolerance()
+                .timestamp_tolerance()
                 .max(0.5 / f64::from(self.info.sample_rate));
             if (packet_start - expected).abs() <= tolerance + 1e-9 {
                 packet_start = expected;
@@ -1961,7 +2066,7 @@ fn update_layout(channels: &Channels, layout: &mut Arc<[Channel]>) -> Result<()>
     Ok(())
 }
 
-/// Decoder conversions clear invalid PCM before waveform, analysis and output.
+/// Decoder conversions clear invalid PCM before analysis and output.
 /// Preserve every finite f32 value, including peaks above nominal full scale.
 pub(super) fn finite_sample(sample: f32) -> f32 {
     if sample.is_finite() { sample } else { 0.0 }
@@ -2627,7 +2732,7 @@ pub(super) mod tests {
             assert_eq!(actual.len(), reference.len() - offset);
             // Resetting Opus and decoding preroll does not reproduce every
             // adaptive decoder state from uninterrupted playback. Compare
-            // temporal alignment, not a pinned waveform-error tolerance.
+            // temporal alignment, not a pinned signal-error tolerance.
             // Include the entire 80 ms preroll in the candidate range so that
             // an early packet prefix cannot masquerade as the requested audio.
             let window = &actual[..960];
@@ -3214,8 +3319,8 @@ pub(super) mod tests {
                             continue;
                         }
                         assert!(Source::open(path, PROBE_BUFFER_LEN, hint, enabled).is_err());
-                        Source::waveform(
-                            &crate::WaveformScanSnapshot::original(
+                        crate::render::collect_stream(
+                            &crate::AudioRenderSnapshot::original(
                                 (path).to_owned(),
                                 None,
                                 hint,
@@ -3248,7 +3353,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn regular_symlink_preserves_native_ffmpeg_and_waveform_source() {
+    fn regular_symlink_preserves_native_ffmpeg_and_rendered_source() {
         let file = pcm_file();
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("alias.wav");
@@ -3267,8 +3372,8 @@ pub(super) mod tests {
                 assert_eq!(source.identity(), identity);
                 assert_eq!(decode_remaining(&mut source), expected);
                 let frame =
-                    Source::waveform(
-                        &crate::WaveformScanSnapshot::original(
+                    crate::render::collect_stream(
+                        &crate::AudioRenderSnapshot::original(
                             alias.to_owned(),
                             None,
                             hint,
@@ -3282,14 +3387,14 @@ pub(super) mod tests {
                         &cancelled,
                     )
                     .unwrap();
-                assert!(frame.complete);
+                assert!(frame.duration.is_some());
                 assert_eq!(frame.duration, Some(2.0));
             }
         }
     }
 
     #[test]
-    fn underestimated_metadata_does_not_limit_seek_cue_or_completed_waveform() {
+    fn underestimated_metadata_does_not_limit_seek_cue_or_completed_render() {
         let file = pcm_file();
         let cancelled = AtomicBool::new(false);
         for hint in [DecoderHint::Native, DecoderHint::Ffmpeg] {
@@ -3302,11 +3407,9 @@ pub(super) mod tests {
             assert_eq!(decode_remaining(&mut source).len(), 44_100);
             source.seek(0.0).unwrap();
             let frame = source
-                .scan_waveform(file.path(), None, hint, &cancelled)
+                .collect_pcm(file.path(), None, hint, &cancelled)
                 .unwrap();
-            assert!(frame.complete);
             assert_eq!(frame.duration, Some(2.0));
-            assert!(frame.span_seconds >= 2.0);
             let mut source = Source::open_file_unprimed(
                 file.path(),
                 open_regular_file(file.path()).unwrap(),
@@ -3358,9 +3461,8 @@ pub(super) mod tests {
         source.seek(0.0).unwrap();
         let cancelled = AtomicBool::new(false);
         let frame = source
-            .scan_waveform(file.path(), None, DecoderHint::Native, &cancelled)
+            .collect_pcm(file.path(), None, DecoderHint::Native, &cancelled)
             .unwrap();
-        assert!(frame.complete);
         assert_eq!(frame.duration, Some(2.0));
     }
 
@@ -3389,7 +3491,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn sampled_adts_duration_never_truncates_decoding_or_full_waveform() {
+    fn sampled_adts_duration_never_truncates_decoding_or_full_render() {
         let file = variable_adts_file();
         let actual_frames = 1100 * 1024;
         let actual_duration = actual_frames as f64 / 44_100.0;
@@ -3398,8 +3500,8 @@ pub(super) mod tests {
         assert!(source.info.duration.unwrap() < actual_duration / 2.0);
         assert_eq!(decode_remaining(&mut source).len(), actual_frames);
         let cancelled = AtomicBool::new(false);
-        let waveform = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let rendered = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Native,
@@ -3411,10 +3513,9 @@ pub(super) mod tests {
             &cancelled,
         )
         .unwrap();
-        assert!(waveform.complete);
-        assert_eq!(waveform.duration, Some(actual_duration));
-        assert!(waveform.span_seconds >= actual_duration);
-        assert!(waveform.peaks.len() <= 1024);
+        assert!(rendered.duration.is_some());
+        assert_eq!(rendered.duration, Some(actual_duration));
+        assert_eq!(rendered.samples.len(), actual_frames);
         let mut source = open_selected(
             file.path(),
             DecoderHint::Native,
@@ -3625,8 +3726,8 @@ pub(super) mod tests {
         assert!(!crate::ffmpeg::load_attempted());
         assert!(Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, false).is_err());
         assert!(
-            Source::waveform(
-                &crate::WaveformScanSnapshot::original(
+            crate::render::collect_stream(
+                &crate::AudioRenderSnapshot::original(
                     file.path().to_owned(),
                     None,
                     DecoderHint::Ffmpeg,
@@ -3652,8 +3753,8 @@ pub(super) mod tests {
         native.seek(0.0).unwrap();
         assert!(!native.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut native), expected);
-        let envelope = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let rendered = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Native,
@@ -3665,7 +3766,7 @@ pub(super) mod tests {
             &cancelled,
         )
         .unwrap();
-        assert!(envelope.complete);
+        assert!(rendered.duration.is_some());
 
         let mut unsupported = tempfile::NamedTempFile::new().unwrap();
         unsupported.write_all(&[0; 4096]).unwrap();
@@ -3689,8 +3790,8 @@ pub(super) mod tests {
             .err()
             .expect("Forced FFmpeg must fail when the extension is not compiled");
         let cancelled = AtomicBool::new(false);
-        Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Ffmpeg,
@@ -3773,7 +3874,7 @@ pub(super) mod tests {
 
     #[cfg(feature = "ffmpeg")]
     #[test]
-    fn forced_ffmpeg_waveform_matches_native_pcm_cue_envelope() {
+    fn forced_ffmpeg_render_matches_native_pcm_cue_samples() {
         let file = pcm_file();
         let cancelled = AtomicBool::new(false);
         for range in [
@@ -3783,8 +3884,8 @@ pub(super) mod tests {
                 end_seconds: Some(80.0 / 75.0),
             }),
         ] {
-            let native = Source::waveform(
-                &crate::WaveformScanSnapshot::original(
+            let native = crate::render::collect_stream(
+                &crate::AudioRenderSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Native,
@@ -3796,8 +3897,8 @@ pub(super) mod tests {
                 &cancelled,
             )
             .unwrap();
-            let forced = Source::waveform(
-                &crate::WaveformScanSnapshot::original(
+            let forced = crate::render::collect_stream(
+                &crate::AudioRenderSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Ffmpeg,
@@ -3810,10 +3911,8 @@ pub(super) mod tests {
             )
             .unwrap();
             assert!(crate::ffmpeg::load_attempted());
-            assert!(forced.complete);
-            assert!(forced.matches(file.path(), range, DecoderHint::Ffmpeg));
-            assert!(native.matches(file.path(), range, DecoderHint::Native));
-            assert_eq!(forced.peaks, native.peaks);
+            assert!(forced.duration.is_some());
+            assert_eq!(forced.samples, native.samples);
         }
     }
 
@@ -3872,7 +3971,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn linked_audio_keeps_logical_metadata_and_waveform_identity() {
+    fn linked_audio_keeps_logical_metadata_and_rendered_identity() {
         let file = pcm_file();
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("Logical title.wav");
@@ -3881,8 +3980,8 @@ pub(super) mod tests {
         assert_eq!(source.info().title, "Logical title");
         assert_eq!(decode_remaining(&mut source).len(), 88_200);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let waveform = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let rendered = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 alias.to_owned(),
                 None,
                 DecoderHint::Auto,
@@ -3894,13 +3993,15 @@ pub(super) mod tests {
             &cancelled,
         )
         .unwrap();
-        assert!(waveform.complete);
-        assert!(waveform.matches(&alias, None, DecoderHint::Auto));
-        assert!(!waveform.matches(file.path(), None, DecoderHint::Auto));
+        assert!(rendered.duration.is_some());
+        assert_eq!(
+            rendered.source_identity,
+            Some(crate::source_identity(file.as_file()).unwrap())
+        );
     }
 
     #[test]
-    fn waveform_covers_the_full_file_and_exact_cue_boundaries() {
+    fn rendered_covers_the_full_file_and_exact_cue_boundaries() {
         let file = pcm_file();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
@@ -3917,14 +4018,8 @@ pub(super) mod tests {
                 end_seconds: end.map(|end| end as f64 / 75.0),
             });
             let samples = &reference[start * 588..end.map_or(reference.len(), |end| end * 588)];
-            let count = 1024.min(samples.len());
-            let mut expected = vec![0.0_f32; count];
-            for (index, sample) in samples.iter().enumerate() {
-                let bin = index * count / samples.len();
-                expected[bin] = expected[bin].max(sample.abs());
-            }
-            let actual = Source::waveform(
-                &crate::WaveformScanSnapshot::original(
+            let actual = crate::render::collect_stream(
+                &crate::AudioRenderSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Auto,
@@ -3936,18 +4031,13 @@ pub(super) mod tests {
                 &cancelled,
             )
             .unwrap();
-            assert_eq!(
-                actual.peaks,
-                expected.into_iter().map(Some).collect::<Vec<_>>(),
-                "CUE range {start}..{end:?}"
-            );
-            assert!(actual.complete);
-            assert!(actual.matches(file.path(), range, DecoderHint::Auto));
+            assert_eq!(actual.samples, samples, "CUE range {start}..{end:?}");
+            assert!(actual.duration.is_some());
         }
     }
 
     #[test]
-    fn waveform_keeps_channel_peaks_and_does_not_pad_short_clips() {
+    fn render_preserves_all_channels_and_does_not_pad_short_clips() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let frames: [[i16; 2]; 6] = [
             [8192, -8192],
@@ -3973,8 +4063,8 @@ pub(super) mod tests {
             }
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let rendered = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Auto,
@@ -3987,15 +4077,12 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(
-            envelope.peaks,
-            [
-                Some(0.25),
-                Some(0.5),
-                Some(0.75),
-                Some(0.0),
-                Some(0.125),
-                Some(1.0)
-            ]
+            rendered.samples,
+            frames
+                .into_iter()
+                .flatten()
+                .map(|sample| sample as f32 / 32768.0)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -4048,7 +4135,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn waveform_preserves_float_peaks_above_full_scale() {
+    fn render_preserves_float_samples_above_full_scale() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let samples = [0.25_f32, -1.0, 1.5, -2.0, f32::NAN, f32::INFINITY];
         let bytes = samples.len() as u32 * 4;
@@ -4063,8 +4150,8 @@ pub(super) mod tests {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let rendered = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Auto,
@@ -4076,25 +4163,14 @@ pub(super) mod tests {
             &cancelled,
         )
         .unwrap();
-        assert_eq!(
-            envelope.peaks,
-            [
-                Some(0.25),
-                Some(1.0),
-                Some(1.5),
-                Some(2.0),
-                Some(0.0),
-                Some(0.0)
-            ]
-        );
-        assert_eq!(envelope.max_peak, 2.0);
+        assert_eq!(rendered.samples, [0.25, -1.0, 1.5, -2.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn waveform_cancellation_precedes_opening_the_file() {
+    fn rendered_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
-        let error = Source::waveform(
-            &crate::WaveformScanSnapshot::original(
+        let error = crate::render::collect_stream(
+            &crate::AudioRenderSnapshot::original(
                 (Path::new("")).to_owned(),
                 None,
                 DecoderHint::Auto,
@@ -4106,7 +4182,7 @@ pub(super) mod tests {
             &cancelled,
         )
         .unwrap_err();
-        assert_eq!(error.to_string(), "Waveform loading cancelled");
+        assert_eq!(error.to_string(), "Audio render cancelled");
     }
 
     #[test]
@@ -4152,36 +4228,18 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn decoded_timestamps_place_cue_seeks_in_the_correct_preview_bins() {
+    fn decoded_cue_seek_timestamps_are_selected_source_relative() {
         let file = pcm_file();
         let range = crate::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
         };
         let mut source = open_selected(file.path(), DecoderHint::Auto, false, Some(range));
-        let rate = source.info.sample_rate;
-        let channels = source.layout.len();
-        let mut frame = crate::waveform::WaveformBuffer::default();
-        frame.select(
-            file.path(),
-            Some(range),
-            DecoderHint::Auto,
-            source.info.duration,
-            rate,
-        );
         for target in [0.2, 0.0] {
             source.seek(target).unwrap();
             let (samples, timestamp) = source.next_frames().unwrap().unwrap();
             assert!((timestamp - target).abs() < 1e-9);
-            frame.push(timestamp, samples, rate, channels);
-            if target > 0.0 {
-                let first = (target * rate as f64).round() as usize * frame.peaks.len()
-                    / (frame.duration.unwrap() * rate as f64).round() as usize;
-                assert!(frame.peaks[..first].iter().all(Option::is_none));
-                assert!(frame.peaks[first].is_some());
-            } else {
-                assert!(frame.peaks[0].is_some());
-            }
+            assert!(!samples.is_empty());
         }
     }
 
@@ -4193,20 +4251,15 @@ pub(super) mod tests {
         source.info.duration = None;
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let frame = source
-            .scan_waveform(file.path(), None, DecoderHint::Auto, &cancelled)
+            .collect_pcm(file.path(), None, DecoderHint::Auto, &cancelled)
             .unwrap();
-        assert!(frame.complete);
         assert_eq!(frame.duration, Some(2.0));
-        let bin_seconds =
-            frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(source.info.sample_rate);
-        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.0 + bin_seconds);
-        assert!(frame.peaks.len() <= 1024);
-        assert!(frame.peaks.iter().all(Option::is_some));
-        assert!(frame.peaks.iter().flatten().any(|peak| *peak >= 0.49));
+        assert_eq!(frame.samples.len(), 88_200);
+        assert!(frame.samples.iter().any(|sample| sample.abs() >= 0.49));
     }
 
     #[test]
-    fn continuous_playback_finalizes_known_and_unknown_cue_previews_at_eof() {
+    fn known_and_unknown_cue_durations_decode_the_same_contiguous_timeline() {
         let file = pcm_file();
         let cue = crate::PlaybackRange {
             start_seconds: 30.0 / 75.0,
@@ -4221,33 +4274,12 @@ pub(super) mod tests {
                 }
                 let rate = source.info.sample_rate;
                 let channels = source.layout.len();
-                let mut frame = crate::waveform::WaveformBuffer::default();
-                frame.select(
-                    file.path(),
-                    range,
-                    DecoderHint::Auto,
-                    source.info.duration,
-                    rate,
-                );
-                let mut coverage = crate::waveform::WaveformCoverage::new(
-                    0.0,
-                    source.waveform_timestamp_tolerance(),
-                );
+                let mut count = 0;
                 while let Some((samples, timestamp)) = source.next_frames().unwrap() {
-                    coverage.record(timestamp, samples.len() / channels, rate);
-                    frame.push(timestamp, samples, rate, channels);
+                    assert!((timestamp - count as f64 / f64::from(rate)).abs() < 1e-9);
+                    count += samples.len() / channels;
                 }
-                coverage.finish(&mut frame);
-                assert!(frame.complete);
-                assert!((frame.duration.unwrap() - expected_duration).abs() < 1e-9);
-                assert!(frame.span_seconds >= expected_duration);
-                let bin_seconds =
-                    frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(rate);
-                assert!(frame.span_seconds - expected_duration < bin_seconds);
-                assert!(frame.peaks.iter().all(Option::is_some));
-                let revision = frame.revision;
-                coverage.finish(&mut frame);
-                assert_eq!(frame.revision, revision);
+                assert!((count as f64 / f64::from(rate) - expected_duration).abs() < 1e-9);
             }
         }
     }
@@ -4598,7 +4630,7 @@ pub(super) mod tests {
     // Embedded so this regression needs the decoder runtime, not an ffmpeg CLI.
     #[cfg(feature = "ffmpeg")]
     #[test]
-    fn ffmpeg_quantized_timestamps_complete_without_hiding_missing_pcm() {
+    fn ffmpeg_quantized_timestamps_preserve_contiguous_pcm() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/quantized-aac.mka"))
             .unwrap();
@@ -4606,59 +4638,37 @@ pub(super) mod tests {
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = crate::waveform::WaveformBuffer::default();
-        frame.select(file.path(), None, DecoderHint::Ffmpeg, None, rate);
-        let tolerance = source.waveform_timestamp_tolerance();
-        let mut coverage = crate::waveform::WaveformCoverage::new(0.0, tolerance);
-        let mut missing_pcm = crate::waveform::WaveformCoverage::new(0.0, tolerance);
+        let mut end = 0.0;
         let mut packet = 0;
         while let Some((samples, timestamp)) = source.next_frames().unwrap() {
-            coverage.record(timestamp, samples.len() / channels, rate);
-            if packet != 3 {
-                missing_pcm.record(timestamp, samples.len() / channels, rate);
-            }
-            frame.push(timestamp, samples, rate, channels);
+            assert!(
+                (timestamp - end).abs() < 1e-9,
+                "quantized packets remain contiguous"
+            );
+            end = timestamp + (samples.len() / channels) as f64 / f64::from(rate);
             packet += 1;
         }
-        let mut incomplete = frame.clone();
-        coverage.finish(&mut frame);
-        missing_pcm.finish(&mut incomplete);
-        assert!(frame.complete, "container quantization is not missing PCM");
-        assert!(!incomplete.complete, "a missing AAC frame is a real gap");
-        assert_eq!(frame.duration, incomplete.duration);
+        assert!(packet > 3);
+        assert!(end >= 0.2);
     }
 
     #[test]
-    fn seeked_decoder_eof_keeps_cached_peaks_and_unknown_intervals_incomplete() {
+    fn unknown_duration_seek_decodes_the_exact_remaining_timeline() {
         let file = pcm_file();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source.info.duration = None;
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = crate::waveform::WaveformBuffer::default();
-        frame.select(file.path(), None, DecoderHint::Auto, None, rate);
-        let (samples, timestamp) = source.next_frames().unwrap().unwrap();
-        let first_count = samples.len().min(441 * channels);
-        frame.push(timestamp, &samples[..first_count], rate, channels);
-        let first_peak = frame.peaks[0];
-        assert!(first_peak.is_some());
+        let first = source.next_frames().unwrap().unwrap().0.to_vec();
         source.seek(1.0).unwrap();
-        let mut coverage =
-            crate::waveform::WaveformCoverage::new(1.0, source.waveform_timestamp_tolerance());
+        let mut frames = 0;
         while let Some((samples, timestamp)) = source.next_frames().unwrap() {
-            coverage.record(timestamp, samples.len() / channels, rate);
-            frame.push(timestamp, samples, rate, channels);
+            assert!((timestamp - (1.0 + frames as f64 / f64::from(rate))).abs() < 1e-9);
+            frames += samples.len() / channels;
         }
-        coverage.finish(&mut frame);
-        assert!(!frame.complete);
-        assert_eq!(frame.duration, Some(2.0));
-        let bin_seconds = frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(rate);
-        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.0 + bin_seconds);
-        assert_eq!(frame.peaks[0], first_peak);
-        let resumed_bin = (1.0 / bin_seconds) as usize;
-        assert!(frame.peaks[1..resumed_bin].iter().all(Option::is_none));
-        assert!(frame.peaks[resumed_bin].is_some());
+        assert!(!first.is_empty());
+        assert_eq!(frames, rate as usize);
     }
 
     #[test]

@@ -236,8 +236,6 @@ fn navigation_runtime(
     let handle = CoreHandle {
         state: core.shared.clone(),
         pcm: core.engine.pcm.clone(),
-        waveform: core.engine.waveform.clone(),
-        waveform_control: Arc::clone(&core.engine.waveform_control),
         sender,
         revision_updates: core.revision_updates.clone(),
         task_waiters: core.task_waiters.clone(),
@@ -281,10 +279,6 @@ fn pcm_fixture() -> (
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),
         pcm: Arc::clone(&pcm),
-        waveform: Arc::new(RwLock::new(
-            rivu_protocol::waveform::WaveformFrame::default(),
-        )),
-        waveform_control: Arc::new(audio::WaveformControl::default()),
         sender,
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),

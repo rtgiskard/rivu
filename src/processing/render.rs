@@ -124,7 +124,7 @@ pub(super) fn run(
             track
                 .cue
                 .as_ref()
-                .map(|cue| rivu_protocol::waveform::PlaybackRange {
+                .map(|cue| rivu_protocol::audio::PlaybackRange {
                     start_seconds: cue.start_seconds(),
                     end_seconds: cue.end_seconds(),
                 }),

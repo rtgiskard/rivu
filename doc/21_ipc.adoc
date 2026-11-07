@@ -72,9 +72,9 @@ High-rate audio uses a separate bounded shared-memory PCM window. Core owns
 capture and audio identity; `rivu-analysis` runs display DSP in the GUI background
 worker. GUI analysis reads native channels directly and uses the observed output
 frame cursor to avoid consuming far-ahead samples. Overwrites discard old realtime
-data without blocking playback. Waveform envelopes and explicit complete scans
-remain Core-owned and use a separate instance-bound service; complete PCM
-streaming is not implemented.
+data without blocking playback. The GUI session owns waveform summaries and folds
+the same admitted PCM as live analysis; Core and audio execution publish no waveform
+statistics. Explicit previews consume the generic finite PCM endpoint below.
 `rivu-presentation` supplies localization, keyboard semantics, theme mapping and
 shared images without GPUI, audio execution or database dependencies.
 
@@ -126,6 +126,10 @@ clients map that same window read-only. The `/proc/<pid>/fd/<fd>` path identifie
 a live descriptor, not a permanent window: after close, its number can be reused.
 Existing mappings survive Core retirement, but a new command session must attach
 to its own instance's window.
+Each block carries selected-source-relative `media_start` and `media_step`.
+An offset reader advances media start by offset times step; producers split blocks
+at mapping boundaries. Generation identifies the Core source, applied intent
+identifies accepted audio/seek state, and epoch/gap fences mapping discontinuities.
 
 The window uses blocks of at most 1024 frames and 18 native float channels,
 including standard speaker indices. Output setup sizes active retention for its
@@ -159,17 +163,37 @@ Metadata and post-read revision/configuration fences reject overwritten observat
 the window is not a lossless snapshot. Slow consumers resume from retained data
 rather than extending storage or reconstructing overwritten history.
 
-Waveform envelopes use their own socket protocol, whose version is defined by
-`VERSION` in link:../crates/rivu-protocol/src/waveform.rs[the waveform contract],
-with at most eight clients, 1 MiB frames, a one-second Hello deadline and
-five-second control I/O deadlines.
-Progressive results retain at most 1024 bins. Full requests carry only expected
-source identity (track ID, path, CUE segment, fingerprint and decoder hint) plus
-the optional playback source generation. Core resolves the authoritative Track
-and checks that identity before scanning; clients do not submit display metadata.
-A full scan returns an envelope, not a complete PCM stream. Disconnect requests
-cancellation but physical decoding must retire before its blocking-work lease
-is released.
+[[finite-pcm-rendering]]
+Finite PCM rendering uses an instance-bound endpoint independently of visualization
+enablement. Its version and address suffix are defined by `VERSION` and `address`
+in link:../crates/rivu-protocol/src/audio.rs[the finite PCM contract].
+Frames are bounded to 256 KiB. A `Read` request carries expected source identity
+(track ID, path, CUE segment, fingerprint
+and decoder hint), optional playback source generation, explicit Before/After
+signal and optional selected-source-relative range. Core reloads the authoritative
+Track and checks that expectation; clients do not supply authoritative metadata.
+
+`Start` identifies the captured source, native sample rate, channel layout and
+optional full-source duration. Ordered `Pcm` chunks carry sequence, media start,
+media seconds per frame and interleaved float samples; `Complete` carries rendered
+frame count and duration. A CUE selection is the origin for range and media time.
+The renderer captures immutable actual source, graph and monitor EQ state. After
+rerenders that snapshot; it does not retrieve historical output. Reconstruction
+errors are explicit, never a fallback to a different source or graph.
+
+The sender batches adjacent render events into packets of at most 4096 frames
+and 32 KiB of sample data, aligned to whole native-channel frames. A media-step
+change or a noncontiguous media position starts a new packet. Completion and
+render failure flush valid partial PCM before the terminal response; cancellation
+discards unsent PCM. Packet sizing does not change DSP or realtime-window blocks.
+
+Four reusable PCM buffers (at most 128 KiB per render) feed a two-packet queue.
+Backpressure keeps finite rendering lossless without retaining whole-track PCM;
+encoded, socket, decoder and processing storage are additional costs. Disconnect
+or cancellation requests retirement; the physical blocking-work lease remains
+held until the render worker exits, including while a blocking decoder call is
+outstanding. GUI preview policy and summary ownership are defined in
+link:23_visuals.adoc#waveform[Waveform].
 
 Both side-channel accept and session loops yield cooperatively between requests,
 including when buffered control input and output complete without waiting. Frame
@@ -429,7 +453,7 @@ bitrate-bearing payload queries also depend on the committed bitrate revision.
 Playback state includes the authoritative `source_generation` and optional
 `ProcessingAudition` run, output port and execution mode. These describe the
 accepted audio source, not the latest processing task or current editor draft.
-Desktop analysis and waveform requests use those facts to reject results from a
+Desktop analysis and finite PCM requests use those facts to reject results from a
 retired source; path equality alone does not establish source identity.
 
 The codec and positional payload schema are not negotiated. Changes require

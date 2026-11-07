@@ -116,8 +116,9 @@ pub(crate) struct WindowView {
 struct PendingWaveformScan {
     generation: u64,
     display_generation: u64,
-    expected: rivu_protocol::waveform::ExpectedSource,
+    expected: rivu_protocol::audio::ExpectedSource,
     source: Option<u64>,
+    signal: rivu_format::config::VisualizationSignal,
     cancelled: futures::channel::oneshot::Receiver<()>,
 }
 
@@ -1161,8 +1162,9 @@ impl WindowView {
         self.pending_full_waveform = Some(PendingWaveformScan {
             generation,
             display_generation,
-            expected: rivu_protocol::waveform::ExpectedSource::from(&track),
+            expected: rivu_protocol::audio::ExpectedSource::from(&track),
             source,
+            signal: self.state.system.config.visualization_signal,
             cancelled,
         });
         self.dispatch_full_waveform_scan(cx);
@@ -1182,15 +1184,56 @@ impl WindowView {
         }
         let data_dir = self.handle.data_dir().to_path_buf();
         let instance = self.handle.instance_id();
-        cx.spawn(async move |this, cx| {
-            let result = crate::transport::waveform::scan_full(
+        let display_generation = pending.display_generation;
+        let latest = Arc::new(parking_lot::RwLock::new(
+            rivu_visuals::WaveformFrame::default(),
+        ));
+        let output = Arc::clone(&latest);
+        let (progress, updates) = async_channel::bounded(1);
+        let worker = cx.background_executor().spawn(async move {
+            let mut published = None::<std::time::Instant>;
+            visualization::full_waveform::load(
                 data_dir,
                 instance,
                 pending.expected,
                 pending.source,
+                pending.signal,
                 pending.cancelled,
+                |frame| {
+                    let now = std::time::Instant::now();
+                    if published.is_none_or(|previous| {
+                        now.duration_since(previous) >= std::time::Duration::from_millis(100)
+                    }) {
+                        output.write().clone_from(frame);
+                        let _ = progress.try_send(());
+                        published = Some(now);
+                    }
+                    Ok(())
+                },
             )
-            .await;
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            while updates.recv().await.is_ok() {
+                let _ = this.update(cx, |this, cx| {
+                    this.sync_full_waveform_request(cx);
+                    if !this.state.system.shutting_down
+                        && this.full_waveform_request.accepts(
+                            generation,
+                            this.state
+                                .current_track()
+                                .or(this.metadata.read(cx).track()),
+                        )
+                    {
+                        this.waveform.update(cx, |waveform, cx| {
+                            waveform.progress_full(display_generation, &latest.read(), cx);
+                        });
+                    }
+                });
+            }
+            // Closing/canceling the UI's logical request never frees its slot
+            // before the background stream future has physically exited.
+            let result = worker.await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 this.sync_full_waveform_request(cx);
@@ -1211,7 +1254,7 @@ impl WindowView {
                     this.error = Some(error.to_string());
                 }
                 this.waveform.update(cx, |waveform, cx| {
-                    waveform.complete_full(pending.display_generation, result, cx);
+                    waveform.complete_full(display_generation, result, cx);
                 });
                 this.full_waveform_request.invalidate();
                 cx.notify();

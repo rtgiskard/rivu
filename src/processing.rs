@@ -3,8 +3,8 @@ use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use async_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
+use rivu_protocol::audio::SourceIdentity;
 use rivu_protocol::model::*;
-use rivu_protocol::waveform::SourceIdentity;
 use std::{
     collections::BTreeMap,
     fs,

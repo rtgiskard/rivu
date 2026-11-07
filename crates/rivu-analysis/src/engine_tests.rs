@@ -32,6 +32,8 @@ fn header(state: PcmState, sequence: u64, start_frame: u64) -> PcmHeader {
         sequence,
         start_frame,
         output_frame: start_frame,
+        media_start: start_frame as f64 / state.sample_rate.max(1) as f64,
+        media_step: 1.0 / state.sample_rate.max(1) as f64,
         epoch: state.epoch,
         intent: state.intent,
         generation: state.generation,

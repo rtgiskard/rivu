@@ -5,7 +5,7 @@ use gpui::{AppContext, Bounds, Context, point, px, size};
 use rivu_format::config::Config;
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_protocol::model::Track;
-use rivu_protocol::waveform::WaveformFrame;
+use rivu_visuals::WaveformFrame;
 use std::{path::PathBuf, sync::atomic::Ordering};
 
 fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
@@ -13,29 +13,30 @@ fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
         .iter()
         .map(|value| u64::from(value.is_some()))
         .collect();
-    let mut frame = WaveformFrame::default();
-    frame.revision = 1;
-    frame.path = Some(PathBuf::from("track.flac"));
-    frame.duration = Some(10.0);
-    frame.span_seconds = 10.0;
-    frame.bin_frames = 80_000;
-    frame.bin_count = peaks.len() as u64;
-    frame.identity = Some(rivu_protocol::waveform::WaveformIdentity::FullScan {
+    WaveformFrame {
+        revision: 1,
+        path: Some(PathBuf::from("track.flac")),
         duration: Some(10.0),
-        sample_rate: 8_000,
-    });
-    frame.max_peak = peaks.iter().flatten().copied().fold(1.0, f32::max);
-    frame.bin_revisions = counts.clone();
-    frame.rms_counts = counts.clone();
-    frame.left_rms_counts = counts.clone();
-    frame.right_rms_counts = counts;
-    frame.rms = peaks.clone();
-    frame.left_peaks = peaks.clone();
-    frame.right_peaks = peaks.clone();
-    frame.left_rms = peaks.clone();
-    frame.right_rms = peaks.clone();
-    frame.peaks = peaks;
-    frame
+        span_seconds: 10.0,
+        bin_frames: 80_000,
+        bin_count: peaks.len() as u64,
+        identity: Some(rivu_visuals::WaveformIdentity {
+            content: None,
+            sample_rate: 8_000,
+        }),
+        max_peak: peaks.iter().flatten().copied().fold(1.0, f32::max),
+        bin_revisions: counts.clone(),
+        rms_counts: counts.clone(),
+        left_rms_counts: counts.clone(),
+        right_rms_counts: counts,
+        rms: peaks.clone(),
+        left_peaks: peaks.clone(),
+        right_peaks: peaks.clone(),
+        left_rms: peaks.clone(),
+        right_rms: peaks.clone(),
+        peaks,
+        ..WaveformFrame::default()
+    }
 }
 
 fn track(path: &str, decoder_hint: DecoderHint) -> Track {
@@ -270,7 +271,7 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
         owner.update(cx, |owner, cx| {
             sync(owner, Arc::new(disabled), true, true, cx)
         });
-        assert!(waveform.read(cx).test_full_peaks().is_none());
+        assert!(waveform.read(cx).test_full_peaks().is_some());
         assert!(!waveform.read(cx).test_pending_full());
     });
 }

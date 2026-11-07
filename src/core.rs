@@ -98,9 +98,9 @@ enum Operation {
         queue_id: u64,
         offset: i64,
     },
-    WaveformSnapshot {
+    RenderSnapshot {
         source: u64,
-        reply: oneshot::Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>,
+        reply: oneshot::Sender<std::result::Result<Option<audio::AudioRenderSnapshot>, String>>,
     },
     WaitTask {
         target: TaskTarget,
@@ -124,8 +124,6 @@ struct Request {
 pub struct CoreHandle {
     state: Arc<RwLock<CoreState>>,
     pub(crate) pcm: Arc<PcmControl>,
-    pub(crate) waveform: Arc<RwLock<rivu_protocol::waveform::WaveformFrame>>,
-    pub(crate) waveform_control: Arc<audio::WaveformControl>,
     sender: mpsc::Sender<Request>,
     revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
@@ -152,15 +150,15 @@ pub(crate) struct MprisServiceState {
 
 impl CoreHandle {
     /// Capture the active audio source and processing state without waiting on the GUI thread.
-    pub(crate) fn waveform_snapshot(
+    pub(crate) fn render_snapshot(
         &self,
         source: u64,
-    ) -> Result<oneshot::Receiver<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>>
+    ) -> Result<oneshot::Receiver<std::result::Result<Option<audio::AudioRenderSnapshot>, String>>>
     {
         let (reply, receiver) = oneshot::channel();
         self.sender
             .try_send(Request {
-                operation: Operation::WaveformSnapshot { source, reply },
+                operation: Operation::RenderSnapshot { source, reply },
                 reply: None,
             })
             .context("Rivu is busy or stopped")?;

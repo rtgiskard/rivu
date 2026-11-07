@@ -6,8 +6,6 @@ pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) 
     let handle = CoreHandle {
         state: Arc::clone(&core.shared),
         pcm: Arc::clone(&core.engine.pcm),
-        waveform: Arc::clone(&core.engine.waveform),
-        waveform_control: Arc::clone(&core.engine.waveform_control),
         sender,
         revision_updates: Arc::clone(&core.revision_updates),
         task_waiters: Arc::clone(&core.task_waiters),

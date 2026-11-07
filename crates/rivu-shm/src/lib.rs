@@ -33,8 +33,8 @@ const MAX_RETENTION_SAMPLES: usize = MAX_PREFETCH_SAMPLES
     + 4 * PCM_BLOCK_FRAMES * MAX_PCM_CHANNELS;
 const POSITION_BITS: u32 = PCM_BLOCK_FRAMES.ilog2() + 1;
 const POSITION_MASK: u64 = (1 << POSITION_BITS) - 1;
-const MAGIC: u64 = u64::from_le_bytes(*b"RIVUPCM5");
-const VERSION: u32 = 5;
+const MAGIC: u64 = u64::from_le_bytes(*b"RIVUPCM6");
+const VERSION: u32 = 6;
 const REQUIRED_SEALS: libc::c_int =
     libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_FUTURE_WRITE | libc::F_SEAL_SEAL;
 
@@ -63,6 +63,8 @@ struct Slot {
     capture: AtomicU64,
     start_frame: AtomicU64,
     output_frame: AtomicU64,
+    media_start: AtomicU64,
+    media_step: AtomicU64,
     sample_rate: AtomicU32,
     gap: AtomicU32,
     frames: AtomicU32,
@@ -95,7 +97,7 @@ impl SharedPcmWindow {
         // SAFETY: the name is NUL-terminated and memfd_create retains no pointer.
         let fd = unsafe {
             libc::memfd_create(
-                c"rivu-pcm-v5".as_ptr(),
+                c"rivu-pcm-v6".as_ptr(),
                 libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
             )
         };
@@ -340,6 +342,16 @@ impl SharedPcmWindow {
                 && old.sample_rate == header.sample_rate
                 && old.start_frame + previous.len() as u64 == header.start_frame
                 && old.output_frame + previous.len() as u64 == header.output_frame
+                && old.media_step == header.media_step
+                && {
+                    // Division and repeated frame additions can differ by a few
+                    // ulps. Do not spend a descriptor on that rounding noise:
+                    // fragmented prefetch must retain its full audible span.
+                    let end = old.media_start + previous.len() as f64 * old.media_step;
+                    (end - header.media_start).abs()
+                        <= (4.0 * f64::EPSILON * end.abs().max(header.media_start.abs()).max(1.0))
+                            .min(old.media_step * 0.25)
+                }
                 && previous.layout() == layout
                 && previous.len() < PCM_BLOCK_FRAMES
         });
@@ -366,6 +378,7 @@ impl SharedPcmWindow {
             sequence: final_sequence,
             start_frame: incoming.start_frame + first_frames as u64,
             output_frame: incoming.output_frame + first_frames as u64,
+            media_start: incoming.media_start + first_frames as f64 * incoming.media_step,
             gap: false,
             ..incoming
         };
@@ -403,6 +416,10 @@ impl SharedPcmWindow {
                 .store(header.start_frame, Ordering::Relaxed);
             slot.output_frame
                 .store(header.output_frame, Ordering::Relaxed);
+            slot.media_start
+                .store(header.media_start.to_bits(), Ordering::Relaxed);
+            slot.media_step
+                .store(header.media_step.to_bits(), Ordering::Relaxed);
             slot.sample_rate
                 .store(header.sample_rate, Ordering::Relaxed);
             slot.gap.store(u32::from(header.gap), Ordering::Relaxed);
@@ -468,6 +485,8 @@ impl SharedPcmWindow {
             capture: slot.capture.load(Ordering::Relaxed),
             start_frame: slot.start_frame.load(Ordering::Relaxed),
             output_frame: slot.output_frame.load(Ordering::Relaxed),
+            media_start: f64::from_bits(slot.media_start.load(Ordering::Relaxed)),
+            media_step: f64::from_bits(slot.media_step.load(Ordering::Relaxed)),
             sample_rate: slot.sample_rate.load(Ordering::Relaxed),
             gap: gap != 0,
         };
@@ -592,6 +611,10 @@ fn valid_header(header: PcmHeader, frames: usize) -> bool {
     frames != 0
         && frames <= PCM_BLOCK_FRAMES
         && header.sample_rate != 0
+        && header.media_start.is_finite()
+        && header.media_step.is_finite()
+        && header.media_step > 0.0
+        && (header.media_start + frames as f64 * header.media_step).is_finite()
         && header.epoch.is_multiple_of(2)
         && header.start_frame.checked_add(frames as u64).is_some()
         && header.output_frame.checked_add(frames as u64).is_some()

@@ -308,9 +308,9 @@ view releases it; completion-aware retirement is independent of logical demand.
 Artwork and font caches have separate owners and lifetimes, independently
 of visualization enablement.
 
-Disabling visualizations is a destructive suspension, not another cache policy: it stops
-visualization demand and discards results as well as derived graphics. Its
-analysis, waveform-coverage, and late-result invariants are authoritative in
+Disabling visualizations suspends capture rather than merely changing cache policy: it stops
+visualization demand and discards live-analysis results and derived graphics,
+while retaining bounded waveform summaries. Its analysis, coverage and late-result invariants are authoritative in
 link:23_visuals.adoc#visualization-enablement[Visualization Rendering Design]. Graphics that
 have already been submitted still follow the retirement boundary below.
 
@@ -324,16 +324,21 @@ Source revision, amplitude mapping, or effective count requires aggregation;
 changed values or palette replace the publication. Height, position, cursor
 movement, and width changes preserving effective count reuse it.
 
-Progressive PCM updates retain their scan identity; replacement scans remain
-distinct. The Waveform owner holds the full preview, while cached drawings retain
-only identity tokens and cannot pin or restore obsolete previews. All-unknown data
-produces no publication; known silence is drawable. Signal semantics belong to
-link:23_visuals.adoc#waveform[Waveform], and the renderer owns upload retirement.
+The GUI session owns at most 1024 summary bins, shared by all Waveform panels;
+neither Core nor disk caches retain waveform summaries. A single background PCM
+reader folds progressive updates and finite-render chunks. Cached drawings retain
+only identity tokens and cannot pin or restore obsolete summaries. All-unknown
+data produces no publication; known silence is drawable. Pause and hidden panels
+retain the bounded summary. Source changes retire it; seek/configuration changes
+preserve old intervals until revisited. A per-bucket order fence prevents a late
+full baseline from overwriting newer realtime visits. Signal and replacement
+semantics belong to link:23_visuals.adoc#waveform[Waveform].
 
-Each waveform socket session reuses one encoding/decoding scratch buffer, discarding
-capacities above 256 KiB after I/O. Progressive encoding reserves 128 KiB and
-serializes a borrowed audio frame without retaining array copies or holding its
-read lock across socket waits.
+Finite PCM sessions use bounded chunks, reusable framing storage and backpressure,
+not whole-track PCM retention. Physical worker admission survives logical
+cancellation until worker exit; see
+link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering]. The renderer separately
+owns GPU upload retirement.
 
 ==== Spectrum
 
@@ -517,7 +522,7 @@ front covers do not hide other usable pictures. These limits do not bound total
 parser memory; upstream readers may buffer a complete tag before selecting images.
 
 Native audio decoding has a separate Symphonia metadata allowance and does not
-publish descriptive tags. Playback, PCM rendering, and waveform scans do not run
+publish descriptive tags. Playback and PCM rendering do not run
 an additional Lofty tag pass. Native readers skip embedded visuals before payload
 allocation. Their text admission is capped at 1 MiB per encoded item and a 4 MiB
 aggregate charge, with at most 4096 admission operations, eight nesting levels,

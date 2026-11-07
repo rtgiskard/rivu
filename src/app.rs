@@ -153,7 +153,7 @@ pub struct App {
     artwork: Arc<ArtworkManager>,
     server: Option<ipc::Server>,
     visual: Option<ipc::pcm::PcmServer>,
-    waveform: Option<ipc::waveform::WaveServer>,
+    audio: Option<ipc::audio::AudioServer>,
     session: Option<rivu_utils::logging::Session>,
     tasks: TaskRuntime,
     _socket_owner: ipc::SocketOwner,
@@ -217,7 +217,7 @@ impl App {
             runtime.handle.clone(),
             socket_owner.instance_id(),
         )?;
-        let waveform = ipc::waveform::WaveServer::start(
+        let audio = ipc::audio::AudioServer::start(
             &data_dir,
             runtime.handle.clone(),
             socket_owner.instance_id(),
@@ -250,7 +250,7 @@ impl App {
             tasks,
             _socket_owner: socket_owner,
             visual: Some(visual),
-            waveform: Some(waveform),
+            audio: Some(audio),
         };
         app.media = Some(mpris::MprisController::start(
             app.runtime.handle.clone(),
@@ -306,7 +306,7 @@ impl App {
         }
         drop(self.media.take());
         drop(self.server.take());
-        drop(self.waveform.take());
+        drop(self.audio.take());
         drop(self.visual.take());
         drop(self.signals.take());
         if let Some(mut session) = self.session.take() {

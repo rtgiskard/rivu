@@ -2,7 +2,7 @@
 name = "rivu-audio"
 version = "0.2.0"
 edition = "2024"
-description = "Rivu audio decoding, playback, rendering, waveform and PCM capture engine"
+description = "Rivu audio decoding, playback, rendering and PCM capture engine"
 
 [features]
 default = ["ffmpeg"]

@@ -99,7 +99,7 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
-        pub(super) fn identity(&self) -> rivu_protocol::waveform::SourceIdentity {
+        pub(super) fn identity(&self) -> rivu_protocol::audio::SourceIdentity {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
@@ -140,19 +140,17 @@ mod playback;
 pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
 mod render;
 mod source;
-mod waveform;
 mod worker;
 
 pub use channels::Channel;
 pub use graph::{GraphPlan, GraphRunner};
 pub use output::devices;
 pub use render::{RenderFormat, SourceRenderer};
-use rivu_protocol::waveform::{PlaybackRange, SourceIdentity, WaveformFrame};
+use rivu_protocol::audio::{PlaybackRange, SourceIdentity};
 pub use source::{
     AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_with_cancel,
     source_identity, source_identity_from_metadata,
 };
-pub use waveform::WaveformControl;
 
 /// Read the published runtime status without starting or waiting for a load.
 pub fn ffmpeg_status() -> anyhow::Result<String> {
@@ -168,10 +166,12 @@ pub async fn ffmpeg_load_completed() {
 /// Immutable click-time description of the actual source and active processing.
 /// A persisted processing graph is intentionally not consulted by a scan.
 #[derive(Clone, Debug)]
-pub struct WaveformScanSnapshot {
+pub struct AudioRenderSnapshot {
     pub path: PathBuf,
     pub pcm: Option<PcmAudio>,
     pub range: Option<PlaybackRange>,
+    /// Optional read window relative to the selected source, without resetting DSP context.
+    pub read_range: Option<PlaybackRange>,
     pub decoder_hint: DecoderHint,
     pub expected_identity: Option<SourceIdentity>,
     pub signal: rivu_format::config::VisualizationSignal,
@@ -179,7 +179,7 @@ pub struct WaveformScanSnapshot {
     pub(crate) graph: Option<graph::GraphSnapshot>,
 }
 
-impl WaveformScanSnapshot {
+impl AudioRenderSnapshot {
     pub fn original(
         path: PathBuf,
         range: Option<PlaybackRange>,
@@ -191,6 +191,7 @@ impl WaveformScanSnapshot {
             path,
             pcm: None,
             range,
+            read_range: None,
             decoder_hint,
             expected_identity: None,
             signal,
@@ -200,14 +201,34 @@ impl WaveformScanSnapshot {
     }
 }
 
-/// Scan only on an explicit request, preserving the captured signal and graph.
-pub fn waveform(
-    snapshot: &WaveformScanSnapshot,
+/// Bounded, lossless rendering of an immutable source and processing snapshot.
+pub enum RenderEvent<'a> {
+    Start(RenderFormat),
+    Pcm {
+        media_start: f64,
+        media_step: f64,
+        samples: &'a [f32],
+    },
+    Complete {
+        frames: u64,
+        duration: f64,
+    },
+}
+
+pub fn render_stream(
+    snapshot: &AudioRenderSnapshot,
     media_read_buffer_mib: u32,
     ffmpeg_enabled: bool,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<WaveformFrame> {
-    source::Source::waveform(snapshot, media_read_buffer_mib, ffmpeg_enabled, cancelled)
+    emit: impl FnMut(RenderEvent<'_>) -> Result<()>,
+) -> Result<()> {
+    source::Source::render_stream(
+        snapshot,
+        media_read_buffer_mib,
+        ffmpeg_enabled,
+        cancelled,
+        emit,
+    )
 }
 
 use crate::capture::PcmControl;
@@ -218,7 +239,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either},
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use rivu_format::config::VisualizationSignal;
 use std::{
     path::PathBuf,
@@ -337,7 +358,7 @@ pub enum AudioCommand {
     /// Select the captured tap without reopening decoder or output.
     VisualizationSignal(VisualizationSignal),
     /// Capture the actual active source/graph without blocking device callbacks.
-    WaveformSnapshot(oneshot::Sender<std::result::Result<Option<WaveformScanSnapshot>, String>>),
+    RenderSnapshot(oneshot::Sender<std::result::Result<Option<AudioRenderSnapshot>, String>>),
     StopAndSnapshot(oneshot::Sender<AudioSnapshot>),
     Shutdown,
 }
@@ -452,8 +473,6 @@ pub struct AudioEngine {
     command_wake: Sender<()>,
     pub events: Option<async_channel::Receiver<AudioEvent>>,
     pub pcm: Arc<PcmControl>,
-    pub waveform: Arc<RwLock<WaveformFrame>>,
-    pub waveform_control: Arc<WaveformControl>,
     worker: Option<JoinHandle<()>>,
     shutdown: Mutex<Option<AudioShutdown>>,
 }
@@ -463,10 +482,6 @@ impl AudioEngine {
         let (command_wake, commands_ready) = bounded(1);
         let (send_events, events) = async_channel::bounded(128);
         let (shutdown, cancelled) = shutdown_channel();
-        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        let worker_waveform = waveform.clone();
-        let waveform_control = Arc::new(WaveformControl::default());
-        let worker_waveform_control = Arc::clone(&waveform_control);
         let pcm = Arc::new(PcmControl::default());
         let analyzer = Arc::clone(&pcm);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
@@ -481,7 +496,6 @@ impl AudioEngine {
                     send_events,
                     cancelled,
                     analyzer,
-                    (worker_waveform, worker_waveform_control),
                     media_read_buffer_len,
                 )
                 .run()
@@ -492,8 +506,6 @@ impl AudioEngine {
             command_wake,
             events: Some(events),
             pcm,
-            waveform,
-            waveform_control,
             worker: Some(worker),
             shutdown: Mutex::new(Some(shutdown)),
         })

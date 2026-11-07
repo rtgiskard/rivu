@@ -11,7 +11,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use rivu_metadata::Tags;
-use rivu_protocol::waveform::SourceIdentity;
+use rivu_protocol::audio::SourceIdentity;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
     fs::File,
