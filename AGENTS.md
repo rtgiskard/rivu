@@ -13,6 +13,11 @@
 - Keep expensive work outside lock scopes and reuse buffers when ownership is clear
 - When claiming performance gains, provide a stated workload and baseline; report repeated measurements and variability for timing comparisons, or counts and bytes for deterministic allocation or capacity changes; ordinary internal cleanup does not automatically require benchmarks
 
+## GUI Layout
+
+- Prefer GPUI native units and parent layout constraints for style dimensions; do not manually resolve rems or duplicate parent geometry when an equivalent layout expression exists
+- Retain pixel conversion for measured text, input coordinates and combined viewport bounds; simplification MUST preserve clipping, spacing and sizing behavior
+
 ## Validation and Evidence
 
 - For Rust source changes, MUST run `make lint` and relevant existing behavior tests; use a throwaway behavior check if no suitable test exists
@@ -21,7 +26,7 @@
 - When feature behavior or conditional compilation changes, MUST validate affected enabled and disabled combinations; all-features checks miss disabled branches
 - For documentation-only changes, check content, links, and command consistency; no lint or build is required
 - In parallel work, run shared full checks once after integration; each agent still performs the local reproduction and behavior checks needed for its changes
-- When investigation evidence, design choices, authorization, or implementation status changes, update the affected entries in [doc/91_design_decisions.adoc](doc/91_design_decisions.adoc) during delivery; keep unresolved defects in [doc/90_open_issues.adoc](doc/90_open_issues.adoc), link rather than duplicate, and distinguish recommendations from accepted or implemented decisions
+- Update documentation only for consequential changes to lasting contracts, constraints, design tradeoffs, or recorded decisions/issues. Keep decisions in [doc/91_design_decisions.adoc](doc/91_design_decisions.adoc) and unresolved defects in [doc/90_open_issues.adoc](doc/90_open_issues.adoc); link rather than duplicate, and distinguish proposed, accepted, and implemented states. Do not log implementation steps, tool activity, test-pass totals, or session progress; routine fixes and status changes alone do not require documentation updates.
 
 ## Tests
 
