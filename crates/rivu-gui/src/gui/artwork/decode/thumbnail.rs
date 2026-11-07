@@ -114,7 +114,31 @@ impl Drop for WorkspaceGuard {
 #[derive(Clone, Copy)]
 struct SourceInfo {
     longest: u32,
+    dimensions: (u32, u32),
     animated: bool,
+}
+
+impl SourceInfo {
+    fn from_decoder(decoder: &mut impl ImageDecoder, animated: bool) -> image::ImageResult<Self> {
+        let (width, height) = decoder.dimensions();
+        let dimensions = if !animated
+            && matches!(
+                decoder.orientation()?,
+                image::metadata::Orientation::Rotate90
+                    | image::metadata::Orientation::Rotate270
+                    | image::metadata::Orientation::Rotate90FlipH
+                    | image::metadata::Orientation::Rotate270FlipH
+            ) {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        Ok(Self {
+            longest: width.max(height),
+            dimensions,
+            animated,
+        })
+    }
 }
 
 fn read_bounded(path: &Path, max_bytes: usize, bytes: &mut Vec<u8>) -> Result<(), ImageCacheError> {
@@ -136,22 +160,15 @@ fn inspect(bytes: &[u8], budget: Budget) -> image::ImageResult<SourceInfo> {
         preflight_webp(bytes, budget)?;
         let mut decoder = WebPDecoder::new(std::io::Cursor::new(bytes))?;
         budget.configure(&mut decoder)?;
-        let (width, height) = decoder.dimensions();
-        return Ok(SourceInfo {
-            longest: width.max(height),
-            animated: decoder.has_animation(),
-        });
+        let animated = decoder.has_animation();
+        return SourceInfo::from_decoder(&mut decoder, animated);
     }
     let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);
     reader.limits(budget.limits());
     let mut decoder = reader.into_decoder()?;
     budget.configure(&mut decoder)?;
-    let (width, height) = decoder.dimensions();
-    Ok(SourceInfo {
-        longest: width.max(height),
-        // GIF keeps its original path, including one-frame GIFs.
-        animated: format == ImageFormat::Gif,
-    })
+    // GIF keeps its original path, including one-frame GIFs.
+    SourceInfo::from_decoder(&mut decoder, format == ImageFormat::Gif)
 }
 
 fn cached(path: &Path, budget: Budget, tier: u32, bytes: &mut Vec<u8>) -> Option<Arc<RenderImage>> {
@@ -386,6 +403,7 @@ fn load_in_workspace(
         image,
         animated: info.animated,
         source_side: info.longest,
+        source_dimensions: info.dimensions,
     };
     // Do not upscale or create several equivalent files for a small source.
     let tier = if info.animated || tier >= info.longest {
@@ -520,6 +538,7 @@ mod tests {
         .unwrap();
         assert!(!loaded.animated);
         assert_eq!(loaded.source_side, 800);
+        assert_eq!(loaded.source_dimensions, (800, 400));
         let image = loaded.image;
         assert_eq!(size(&image), (256, 128));
         let pixel = &image.as_bytes(0).unwrap()[..4];
@@ -548,6 +567,53 @@ mod tests {
         .image;
         assert_eq!(size(&cached), (256, 128));
         assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
+    }
+
+    #[test]
+    fn source_dimensions_keep_exact_orientation_on_decode_shared_and_disk_tiers() {
+        let directory = tempfile::tempdir().unwrap();
+        let pixels = image::RgbaImage::from_pixel(800, 201, image::Rgba([117, 23, 45, 255]));
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        // Little-endian TIFF with one SHORT orientation tag: rotate 90 degrees.
+        encoder
+            .set_exif_metadata(vec![
+                b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0,
+                0, 0, 0,
+            ])
+            .unwrap();
+        encoder
+            .write_image(pixels.as_raw(), 800, 201, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let hash = blake3::hash(&bytes);
+        let path =
+            rivu_metadata::artwork::cache_paths::original_path(directory.path(), hash, "png");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mut workspace = Workspace::default();
+        let load_tier = |workspace: &mut Workspace| {
+            load_in_workspace(
+                workspace,
+                &path,
+                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
+                Budget::default(),
+                256,
+            )
+            .unwrap()
+        };
+        let first = load_tier(&mut workspace);
+        assert_eq!(first.source_side, 800);
+        assert_eq!(first.source_dimensions, (201, 800));
+        assert_eq!(size(&first.image), (64, 256));
+        let shared = load_tier(&mut workspace);
+        assert_eq!(shared.source_dimensions, (201, 800));
+        assert!(Arc::ptr_eq(&first.image, &shared.image));
+        drop(first);
+        drop(shared);
+        assert!(thumbnail_path(&path, hash, 256).unwrap().is_file());
+        let cached = load_tier(&mut workspace);
+        assert_eq!(cached.source_dimensions, (201, 800));
+        assert_eq!(size(&cached.image), (64, 256));
     }
 
     #[test]

@@ -171,6 +171,23 @@ and equivalent failure/retirement evidence. Per-image budgets do not establish a
 window-wide decoded/GPU cap. See link:22_cache.adoc[Artwork retention] and
 link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation].
 
+The glass-material experiment rebased on 2026-11-06 retains these owners and the
+album-card size cap. Its atmosphere uses the same consumer-owned negative lookup
+identity as ordinary artwork: cache eviction alone must not restart an unchanged
+visible miss. Hiding, disabling or changing its source retires that negative demand;
+an in-flight physical lookup still owns its slot until completion. The desktop/Core
+split also bounds material selections and edits to the desktop process, not Core's
+lifetime. See link:90_open_issues.adoc#material-atmosphere-negative-demand[the regression]
+and link:24_layout.adoc#_session_material_exploration[material session ownership].
+
+The 2026-11-07 material corrections retain the same owners. Material scope follows
+the registered transport/artwork panel kinds. Full-cover demand uses exact oriented
+source dimensions rather than rounded thumbnail dimensions, promoting through the
+existing decode seat after the initial viewport-sized load. This does not add a
+cache or relax decode admission. Resolution records:
+link:90_open_issues.adoc#material-artwork-panel-routing[panel routing] and
+link:90_open_issues.adoc#material-cover-decode-sizing[Cover sizing].
+
 [[DEC-009]]
 === DEC-009: Stream uncached native exports instead of retaining output PCM
 

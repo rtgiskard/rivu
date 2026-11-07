@@ -6,7 +6,17 @@ use rivu_ui::{
 
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window
+            .set_scene_filter_limits(
+                u64::from(self.state.system.config.gpu_filter_budget_mib) * 1024 * 1024,
+                self.state.system.config.gpu_filter_max_depth as usize,
+            )
+            .expect("validated scene filter limits");
         let theme = rivu_ui::theme::palette(cx);
+        let material = appearance::material::Material::current(cx);
+        let material_session = appearance::material::MaterialSession::current(cx);
+        let material_enabled = material_session.enabled;
+        let selected_material = material_session.material;
         self.presentation.update(cx, |presentation, cx| {
             presentation.request_frame(window, cx)
         });
@@ -25,12 +35,14 @@ impl Render for WindowView {
         let docking_view = cx.entity().downgrade();
         let paint_presentation = self.presentation.clone();
         let paint_artwork_images = self.artwork_images.clone();
+        let material_frame =
+            appearance::material::MaterialFrame::sample(&self.atmosphere, window, cx);
         let layouts = self.workspace.layouts.clone();
         let layout_view = layouts
             .current()
             .root
             .as_ref()
-            .map(|root| self.render_node(root, window, cx))
+            .map(|root| self.render_node(root, &material_frame, window, cx))
             .unwrap_or_else(|| {
                 div()
                     .size_full()
@@ -209,6 +221,9 @@ impl Render for WindowView {
                 .absolute()
                 .size_full(),
             );
+        if let Some(backdrop) = material_frame.backdrop(theme) {
+            app = app.child(backdrop);
+        }
 
         let mut footer = row()
             .gap_0()
@@ -300,6 +315,7 @@ impl Render for WindowView {
             footer_popup = Some(
                 Popover::menu(theme, "app-menu-popup", window)
                     .min_w(rems(8.))
+                    .map(|surface| material.floating(surface, theme))
                     .map(|surface| self.menu_surface(surface, cx))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.shell.dismiss(shell::Surface::AppMenu);
@@ -371,6 +387,30 @@ impl Render for WindowView {
                             )),
                         ),
                     )
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(menu_item(
+                        "material-controls",
+                        self.tr("material-menu"),
+                        cx,
+                        |this, _, cx| {
+                            this.toggle_material_controls(cx);
+                        },
+                    ))
+                    .child(rivu_ui::checked_menu_item(
+                        "material-enabled",
+                        self.tr("material-enabled"),
+                        material_enabled,
+                        rivu_ui::surface::MenuIndicator::Check,
+                        cx,
+                        move |this, _, cx| {
+                            this.material_intent(
+                                appearance::material::MaterialIntent::SetEnabled(!material_enabled),
+                                cx,
+                            );
+                            this.shell.dismiss(shell::Surface::AppMenu);
+                            cx.notify();
+                        },
+                    ))
                     .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "app-keyboard-help",
@@ -634,6 +674,16 @@ impl Render for WindowView {
                                     ),
                             ),
                     );
+                }
+                KeyboardSurface::Dialog(DialogSurface::TextureControls) => {
+                    app = app.child(appearance::texture_controls::render(
+                        selected_material,
+                        self.shell.experimental_materials_expanded,
+                        Some(self.shell.scope()),
+                        |id| self.tr(id),
+                        window,
+                        cx,
+                    ));
                 }
                 KeyboardSurface::Dialog(DialogSurface::KeyboardHelp) => {
                     let context = self.shell.help().expect("live keyboard help");

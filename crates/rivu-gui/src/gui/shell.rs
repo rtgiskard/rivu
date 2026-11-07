@@ -33,6 +33,7 @@ pub(super) enum DialogSurface {
     QueueReplacement,
     LayoutManager,
     LayoutAction,
+    TextureControls,
 }
 
 /// Mutually exclusive shell surfaces. Feature-owned confirmations may cover one
@@ -44,6 +45,7 @@ pub(super) enum Surface {
     Settings,
     About,
     Layouts,
+    TextureControls,
 }
 
 pub(super) struct WindowShell {
@@ -55,6 +57,7 @@ pub(super) struct WindowShell {
     focus_epoch: u64,
     help: Option<rivu_presentation::keyboard::Context>,
     help_scroll: std::rc::Rc<ScrollHandle>,
+    experimental_materials_expanded: bool,
 }
 
 impl WindowShell {
@@ -68,6 +71,7 @@ impl WindowShell {
             focus_epoch: 0,
             help: None,
             help_scroll: std::rc::Rc::new(ScrollHandle::new()),
+            experimental_materials_expanded: false,
         }
     }
 
@@ -189,6 +193,23 @@ impl WindowShell {
 }
 
 impl WindowView {
+    pub(in crate::gui) fn toggle_material_controls(&mut self, cx: &mut Context<Self>) {
+        self.shell.toggle(Surface::TextureControls);
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn toggle_experimental_materials(&mut self, cx: &mut Context<Self>) {
+        self.shell.experimental_materials_expanded = !self.shell.experimental_materials_expanded;
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn close_material_controls(&mut self, cx: &mut Context<Self>) {
+        self.shell.dismiss(Surface::TextureControls);
+        cx.notify();
+    }
+}
+
+impl WindowView {
     pub(super) fn menu_surface(
         &self,
         surface: gpui::Stateful<Div>,
@@ -266,6 +287,9 @@ impl WindowView {
             self.shell
                 .is_open(Surface::About)
                 .then_some(Dialog(D::About)),
+            self.shell
+                .is_open(Surface::TextureControls)
+                .then_some(Dialog(D::TextureControls)),
             self.shell.help().map(|_| Dialog(D::KeyboardHelp)),
         ]
         .into_iter()
@@ -383,6 +407,7 @@ mod tests {
         let surfaces = [
             Some(KeyboardSurface::Settings),
             Some(KeyboardSurface::Dialog(DialogSurface::About)),
+            Some(KeyboardSurface::Dialog(DialogSurface::TextureControls)),
             Some(KeyboardSurface::Menu(MenuSurface::App)),
             None,
         ];
@@ -402,18 +427,50 @@ mod tests {
                 }
                 previous = surface;
             }
-            shell.open(Surface::Settings);
-            let surface = Some(KeyboardSurface::Settings);
-            shell.synchronize(surface, window, cx);
-            let epoch = shell.focus_epoch;
-            shell.dismiss(Surface::Settings);
-            shell.open(Surface::Settings);
-            assert!(
-                !shell.native_focus_frame_is_current(epoch, surface, surface),
-                "close/reopen of the same surface invalidates its published native focus"
-            );
+            for (owner, surface) in [
+                (Surface::Settings, Some(KeyboardSurface::Settings)),
+                (
+                    Surface::TextureControls,
+                    Some(KeyboardSurface::Dialog(DialogSurface::TextureControls)),
+                ),
+            ] {
+                shell.open(owner);
+                shell.synchronize(surface, window, cx);
+                let epoch = shell.focus_epoch;
+                shell.dismiss(owner);
+                shell.open(owner);
+                assert!(
+                    !shell.native_focus_frame_is_current(epoch, surface, surface),
+                    "close/reopen of the same surface invalidates its published native focus"
+                );
+            }
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn texture_controls_share_the_exclusive_shell_owner(cx: &mut gpui::TestAppContext) {
+        let mut shell = cx.update(WindowShell::new);
+        for surface in [
+            Surface::AppMenu,
+            Surface::PanelCatalog,
+            Surface::Settings,
+            Surface::About,
+            Surface::Layouts,
+        ] {
+            shell.open(surface);
+            shell.toggle(Surface::TextureControls);
+            assert!(!shell.is_open(surface));
+            assert!(shell.is_open(Surface::TextureControls));
+            shell.dismiss(surface);
+            assert!(shell.is_open(Surface::TextureControls));
+            shell.toggle(Surface::TextureControls);
+            assert!(shell.surface.is_none());
+            shell.open(Surface::TextureControls);
+            shell.open(surface);
+            assert!(!shell.is_open(Surface::TextureControls));
+            assert!(shell.is_open(surface));
+        }
     }
 
     struct FocusRestoreSurface {

@@ -473,3 +473,50 @@ Escape and Left without releasing the physical reader early. Isolated nested-Way
 input also dismissed the loading page; resuming the held Core query did not reopen
 the playlist dialog or create a playlist. This is cancellation evidence, not a query
 latency measurement. See link:02_library.adoc#albums[Album actions].
+
+[[material-atmosphere-negative-demand]]
+=== Material atmosphere repeats completed misses after cache eviction
+
+Status: resolved in the glass-material experiment, 2026-11-06.
+
+After rebasing onto the desktop/Core split, atmosphere acquisition did not adopt
+the shared artwork loader's consumer-owned negative result. Evicting a coverless
+track from the bounded lookup cache admitted another probe for unchanged visible
+demand. A deterministic regression first failed after eviction and then passed
+for both cached and asynchronously completed misses; hiding and revealing the
+consumer still discovers a subsequently repaired source. Existing path-change,
+stale-completion, derivative and retirement suites remain applicable.
+Ownership decision: link:91_design_decisions.adoc#DEC-008[DEC-008].
+
+[[material-artwork-panel-routing]]
+=== Material routing excludes the registered artwork panel
+
+Status: resolved, 2026-11-07.
+
+Material demand and decoration used `album_artwork`, but the registered panel key
+is `artwork`. Artwork-only layouts therefore did not acquire Atmosphere or Stage
+artwork, and their panels missed playback-class material composition. Routing now
+uses the registered panel kinds. Regression coverage exercises artwork-only
+demand and distinguishes Stage treatment from an ordinary reading panel.
+An isolated nested-Wayland artwork-only window reproduced the missing atmosphere;
+the fixed build displayed cover-derived Atmosphere and Stage backgrounds without
+a transport panel.
+
+[[material-cover-decode-sizing]]
+=== Material Cover sampling requests an undersized decode tier
+
+Status: resolved, 2026-11-07.
+
+Material sources requested only the viewport's longest edge, although Cover can
+enlarge a non-square image's shorter edge. Both source-image paths now bootstrap
+at viewport resolution and recalculate demand from exact oriented source
+dimensions after decode. The existing shared owner performs any promotion;
+native-size guards, budgets and retirement fences remain in force. Regression
+coverage includes portrait and landscape images, a rounded-thumbnail aspect-ratio
+boundary, orientation through shared/disk tiers, unchanged square/large-viewport
+demand, and retired handles that cannot restart cold work. The real nested-Wayland
+GUI also exercised Gradient translucency and the Experimental artwork-reflection
+Mirror lake with a 1000-by-4000 source in an 800-by-600 window. Exact decode-tier
+correctness is established by the regression tests, not a pixel-equivalence claim.
+See link:91_design_decisions.adoc#DEC-008[DEC-008].
+

@@ -138,6 +138,8 @@ enum Field {
     ArtworkFileLimitMib,
     ArtworkDecodeBudgetMib,
     GpuMaterialBudgetMib,
+    GpuFilterBudgetMib,
+    GpuFilterMaxDepth,
     Font,
     FontSizePt,
     Scale,
@@ -202,6 +204,8 @@ impl Field {
             Self::ArtworkFileLimitMib => "interface.artwork_file_limit_mib",
             Self::ArtworkDecodeBudgetMib => "interface.artwork_decode_budget_mib",
             Self::GpuMaterialBudgetMib => "interface.gpu_material_budget_mib",
+            Self::GpuFilterBudgetMib => "interface.gpu_filter_budget_mib",
+            Self::GpuFilterMaxDepth => "interface.gpu_filter_max_depth",
             Self::Font => "interface.font",
             Self::FontSizePt => "interface.font_size_pt",
             Self::Scale => "interface.scale",
@@ -293,6 +297,8 @@ impl Field {
             Self::ArtworkFileLimitMib => "settings-artwork-file-limit-mib",
             Self::ArtworkDecodeBudgetMib => "settings-artwork-decode-budget-mib",
             Self::GpuMaterialBudgetMib => "settings-gpu-material-budget-mib",
+            Self::GpuFilterBudgetMib => "settings-gpu-filter-budget-mib",
+            Self::GpuFilterMaxDepth => "settings-gpu-filter-max-depth",
             Self::Font => "settings-font-family",
             Self::FontSizePt => "settings-base-font-size-pt",
             Self::Scale => "settings-interface-scale",
@@ -369,6 +375,8 @@ impl Field {
             Self::ArtworkFileLimitMib => settings.tr("settings-artwork-file-limit-hint"),
             Self::ArtworkDecodeBudgetMib => settings.tr("settings-artwork-decode-budget-hint"),
             Self::GpuMaterialBudgetMib => settings.tr("settings-gpu-material-budget-hint"),
+            Self::GpuFilterBudgetMib => settings.tr("settings-gpu-filter-budget-hint"),
+            Self::GpuFilterMaxDepth => settings.tr("settings-gpu-filter-max-depth-hint"),
             Self::Font => settings.tr("settings-font-hint"),
             Self::FontSizePt => "8–18 pt".into(),
             Self::Scale => "0.75–2.".into(),
@@ -885,6 +893,8 @@ impl Settings {
             Field::ArtworkFileLimitMib,
             Field::ArtworkDecodeBudgetMib,
             Field::GpuMaterialBudgetMib,
+            Field::GpuFilterBudgetMib,
+            Field::GpuFilterMaxDepth,
             Field::Font,
             Field::FontSizePt,
             Field::Scale,
@@ -1434,6 +1444,18 @@ impl Settings {
             unchanged,
             cx,
         );
+        self.set_value(
+            Field::GpuFilterBudgetMib,
+            self.model.draft.gpu_filter_budget_mib.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
+            Field::GpuFilterMaxDepth,
+            self.model.draft.gpu_filter_max_depth.to_string(),
+            unchanged,
+            cx,
+        );
         self.font_value = self.model.draft.ui_font.clone();
         self.set_value(Field::Font, self.model.draft.ui_font.clone(), unchanged, cx);
         self.set_value(
@@ -1656,6 +1678,8 @@ impl Settings {
         config.artwork_file_limit_mib = self.number(Field::ArtworkFileLimitMib, cx)?;
         config.artwork_decode_budget_mib = self.number(Field::ArtworkDecodeBudgetMib, cx)?;
         config.gpu_material_budget_mib = self.number(Field::GpuMaterialBudgetMib, cx)?;
+        config.gpu_filter_budget_mib = self.number(Field::GpuFilterBudgetMib, cx)?;
+        config.gpu_filter_max_depth = self.number(Field::GpuFilterMaxDepth, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         if config.ui_font.is_empty() {
             config.ui_font = "monospace".to_owned();
@@ -2060,6 +2084,8 @@ impl Settings {
                 (SettingsPage::Visualizations, Some(VisualPage::Oscilloscope))
             }
             Field::GpuMaterialBudgetMib
+            | Field::GpuFilterBudgetMib
+            | Field::GpuFilterMaxDepth
             | Field::AnalysisRateHz
             | Field::VisualizationAnimationFps
             | Field::VisualizationBackground

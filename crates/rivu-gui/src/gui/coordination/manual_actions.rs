@@ -185,7 +185,9 @@ impl WindowView {
             ManualAction::Close(window) => {
                 self.content_resolution.cancel();
                 cx.defer(move |cx| {
-                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                    let _ = window.update(cx, |_, window, _| {
+                        window.remove_window();
+                    });
                 });
             }
             ManualAction::Quit => {

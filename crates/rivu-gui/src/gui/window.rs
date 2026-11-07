@@ -94,6 +94,7 @@ pub(crate) struct WindowView {
     pub(super) artwork_images: artwork::ArtworkImageRegistry,
     pub(super) default_artwork: Entity<artwork::DefaultArtwork>,
     pub(super) artwork_runtime: Entity<artwork_panel::ArtworkRuntime>,
+    pub(super) atmosphere: Entity<appearance::ambient::Atmosphere>,
     pub(super) artwork_panels: HashMap<u64, Entity<artwork_panel::ArtworkPanel>>,
     pub(super) album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
     pub(super) panel_views: HashMap<u64, Entity<shell::panels::PanelView>>,
@@ -678,6 +679,13 @@ impl WindowView {
         let circular_default_artwork = default_artwork.read(cx).circular();
         let artwork_images =
             artwork::ArtworkImageRegistry::new(state.system.config.artwork_decode_budget_mib);
+        let atmosphere = cx.new(|_| {
+            appearance::ambient::Atmosphere::new(
+                Arc::clone(&artwork_manager),
+                artwork_images.clone(),
+            )
+        });
+        subscriptions.push(cx.observe(&atmosphere, |_, _, cx| cx.notify()));
         let feature_context = feature::FeatureContext {
             snapshots: Rc::clone(&snapshots),
             i18n: Arc::clone(&i18n),
@@ -689,6 +697,7 @@ impl WindowView {
             localized_text,
             settings,
             handle,
+            atmosphere,
             snapshots,
             state,
             workspace,
@@ -777,6 +786,8 @@ impl WindowView {
         self.artwork_runtime.update(cx, |artwork, cx| {
             artwork.release_all_images(window, cx);
         });
+        self.atmosphere
+            .update(cx, |atmosphere, cx| atmosphere.release(window, cx));
         for albums in self.album_browsers.values() {
             albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
         }

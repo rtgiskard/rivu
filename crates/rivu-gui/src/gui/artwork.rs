@@ -17,6 +17,7 @@ use gpui::{
     div, img, prelude::*, rgb,
 };
 
+mod ambient;
 mod decode;
 
 impl gpui::Global for decode::DecodeWorkspace {}
@@ -67,15 +68,13 @@ impl ArtworkImageRegistry {
                     .copied()
                     .max()
                     .unwrap_or_else(|| decode::requested_tier(0));
-                let pixels = image.take_pixels();
+                let generation = image.generation.wrapping_add(1);
+                let pixels = image.take_guarded_pixels(generation);
                 if image.views.is_empty() {
-                    pixels.collect::<Vec<_>>()
+                    pixels.map(|retired| retired.image).collect::<Vec<_>>()
                 } else {
-                    image.generation = image.generation.wrapping_add(1);
-                    let generation = image.generation;
-                    image
-                        .replaced
-                        .extend(pixels.map(|image| ReplacedArtworkImage { image, generation }));
+                    image.generation = generation;
+                    image.replaced.extend(pixels);
                     image.invalidate_consumers(cx);
                     Vec::new()
                 }
@@ -108,7 +107,7 @@ impl ArtworkImageRegistry {
         owner
     }
 
-    fn retire(&self, image: ArtworkViewImage, cx: &App) {
+    fn retire(&self, image: ArtworkViewImage, cx: &mut App) {
         // Measurement handles can already be held by a scene before Img starts
         // its first decode; those owners must also become terminal at the edge.
         if !image.consumers.is_empty() || image.owner.image.read(cx).item.is_some() {
@@ -116,6 +115,12 @@ impl ArtworkImageRegistry {
                 .borrow_mut()
                 .retired
                 .push(RetiredArtworkImage::Artwork(image));
+        } else if Rc::strong_count(&image.owner) == 1 {
+            // A previously built Img may still hold the entity, not its lease.
+            image.owner.image.update(cx, |image, _| {
+                image.released = true;
+                image.artwork = None;
+            });
         }
     }
 
@@ -198,11 +203,15 @@ impl RetiredArtworkImage {
         match self {
             Self::Artwork(image) => image.release(window, cx),
             Self::Demand(image, consumers) => image.update(cx, |image, cx| {
+                let mut demand_changed = false;
                 for consumer in consumers {
-                    image.demands.remove(&consumer);
+                    demand_changed |= image.demands.remove(&consumer).is_some();
                     image.views.remove(&consumer);
                 }
-                image.reconcile_demand(window, cx);
+                image.flush_replaced();
+                if demand_changed {
+                    image.reconcile_demand(window, cx);
+                }
             }),
             Self::Decoration(owner) => owner.release(window, cx),
             Self::Decoded(decoded) => cx.drop_image(decoded, Some(window)),
@@ -397,11 +406,17 @@ impl ArtworkViewImage {
     fn release(self, window: &mut Window, cx: &mut App) {
         if !self.consumers.is_empty() {
             self.owner.image.update(cx, |image, cx| {
+                let mut demand_changed = false;
                 for consumer in self.consumers.into_values() {
-                    image.demands.remove(&consumer);
+                    demand_changed |= image.demands.remove(&consumer).is_some();
                     image.views.remove(&consumer);
                 }
-                image.reconcile_demand(window, cx);
+                image.flush_replaced();
+                // A scene handle that was never measured owns no demand to
+                // remove. Its retirement must not unload another live lease.
+                if demand_changed {
+                    image.reconcile_demand(window, cx);
+                }
             });
         }
         self.owner.release(window, cx);
@@ -414,6 +429,7 @@ struct ArtworkViewState {
 }
 
 /// Scene-held measurement handle, deliberately not a consumer/source lease.
+#[derive(Clone)]
 pub(super) struct ArtworkImageSizing {
     image: Entity<ArtworkImage>,
     token: u64,
@@ -424,10 +440,79 @@ impl ArtworkImageSizing {
     pub(super) fn request(&self, side: Pixels, window: &mut Window, cx: &mut App) {
         let view = window.current_view();
         self.image.update(cx, |image, cx| {
+            if image.released {
+                return;
+            }
             image.views.insert(self.token, (view, image.generation));
             image.flush_replaced();
             image.request(self.token, side, self.max_side, window, cx);
         });
+    }
+
+    fn request_cover(&self, window: &mut Window, cx: &mut App) {
+        let viewport = window.viewport_size();
+        let side = self.image.read(cx).cover_side(viewport);
+        self.request(side, window, cx);
+    }
+}
+
+/// A frame-local source handle, not a consumer lease or a cached Img element.
+#[derive(Clone)]
+pub(super) struct ArtworkSource {
+    sizing: ArtworkImageSizing,
+    view: Weak<RefCell<ArtworkViewState>>,
+}
+
+impl ArtworkSource {
+    fn active(&self) -> bool {
+        self.view.upgrade().is_some_and(|state| {
+            state
+                .borrow()
+                .current
+                .as_ref()
+                .is_some_and(|image| image.consumers.get(&u64::MAX) == Some(&self.sizing.token))
+        })
+    }
+
+    fn request_cover(&self, window: &mut Window, cx: &mut App) -> bool {
+        let active = self.active();
+        if active {
+            self.sizing.request_cover(window, cx);
+        }
+        active
+    }
+
+    pub(super) fn ambient_image(&self) -> Img {
+        let source = self.clone();
+        img(move |window: &mut Window, cx: &mut App| {
+            if !source.active() {
+                return None;
+            }
+            source.sizing.image.update(cx, |image, cx| {
+                if image.released {
+                    return None;
+                }
+                image.views.insert(
+                    source.sizing.token,
+                    (window.current_view(), image.generation),
+                );
+                image.flush_replaced();
+                image.load_ambient(source.sizing.token, window, cx)
+            })
+        })
+    }
+
+    pub(super) fn static_image(&self) -> Img {
+        let source = self.clone();
+        img(move |window: &mut Window, cx: &mut App| {
+            if !source.request_cover(window, cx) {
+                return None;
+            }
+            source.sizing.image.update(cx, |image, cx| {
+                let path = image.artwork.as_ref()?.path();
+                image.load(&Resource::from(path), window, cx)
+            })
+        })
     }
 }
 
@@ -579,6 +664,80 @@ impl ArtworkView {
         })
     }
 
+    pub(super) fn source(&self) -> Option<ArtworkSource> {
+        // One atmosphere observer belongs to this view's lease, not to each
+        // frame-local Img. A ready derivative no longer needs source demand.
+        self.sizing(u64::MAX).map(|sizing| ArtworkSource {
+            sizing,
+            view: Rc::downgrade(&self.state),
+        })
+    }
+
+    /// Start/use the shared decode and report readiness without copying its pixels.
+    /// A transition starts only once its target is renderable, never on I/O start.
+    pub(super) fn ready_static_source(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        self.sizing(u64::MAX)?.request_cover(window, cx);
+        let state = self.state.borrow();
+        let image = state.current.as_ref()?;
+        let ready = image.owner.image.update(cx, |cache, cx| {
+            cache.load(&Resource::from(image.artwork.path()), window, cx)
+        })?;
+        Some(ready)
+    }
+
+    /// Observe pending/ready work only; an obsolete source must not start cold I/O.
+    pub(super) fn cached_static_source(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        // A predecessor may acknowledge retained pixels, but must not create
+        // demand or start I/O if it was never decoded.
+        self.state
+            .borrow()
+            .current
+            .as_ref()?
+            .owner
+            .image
+            .read(cx)
+            .item
+            .as_ref()?;
+        self.sizing(u64::MAX)?.request_cover(window, cx);
+        let state = self.state.borrow();
+        let image = state.current.as_ref()?;
+        let ready = image
+            .owner
+            .image
+            .read(cx)
+            .item
+            .as_ref()?
+            .use_image(window)?;
+        Some(ready)
+    }
+
+    pub(super) fn clear_ambient(&self, cx: &mut App) {
+        let state = self.state.borrow();
+        if let Some(image) = &state.current
+            && let Some(decoded) = image.owner.image.update(cx, |image, _| {
+                image
+                    .ambient
+                    .take()
+                    .and_then(|item| item.get())
+                    .and_then(Result::ok)
+            })
+        {
+            self.images
+                .0
+                .borrow_mut()
+                .retired
+                .push(RetiredArtworkImage::Decoded(decoded));
+        }
+    }
+
     pub(super) fn aspect_ratio(&self, cx: &App) -> Option<f32> {
         let state = self.state.borrow();
         let image = state.current.as_ref()?.owner.image.read(cx);
@@ -597,16 +756,21 @@ impl ArtworkView {
 struct ArtworkSourceInfo {
     animated: bool,
     side: u32,
+    width: u32,
+    height: u32,
 }
 
 struct ReplacedArtworkImage {
     image: Arc<RenderImage>,
     generation: u64,
+    // Derived-only observers must not pin obsolete source pixels.
+    source_pixels: bool,
 }
 
 /// One immutable content path, shared maximum demand, and one in-flight decode.
 struct ArtworkImage {
-    artwork: LoadedArtwork,
+    // None is terminal: scene-held entities cannot reload or protect old files.
+    artwork: Option<LoadedArtwork>,
     budget: decode::Budget,
     item: Option<ImageCacheItem>,
     tier: u32,
@@ -621,6 +785,7 @@ struct ArtworkImage {
     downgrade: Option<(u32, Task<()>)>,
     registry: Weak<RefCell<ArtworkImageRegistryState>>,
     released: bool,
+    ambient: Option<ImageCacheItem>,
 }
 
 impl ArtworkImage {
@@ -631,9 +796,10 @@ impl ArtworkImage {
         cx: &mut App,
     ) -> Entity<Self> {
         let image = cx.new(|_| Self {
-            artwork,
+            artwork: Some(artwork),
             budget,
             item: None,
+            ambient: None,
             tier: decode::requested_tier(0),
             target: decode::requested_tier(0),
             pending: None,
@@ -657,23 +823,66 @@ impl ArtworkImage {
     }
 
     fn take_pixels(&mut self) -> impl Iterator<Item = Arc<RenderImage>> + use<> {
+        self.take_guarded_pixels(self.generation)
+            .map(|retired| retired.image)
+    }
+
+    fn take_guarded_pixels(
+        &mut self,
+        generation: u64,
+    ) -> impl Iterator<Item = ReplacedArtworkImage> + use<> {
+        let ambient = self
+            .ambient
+            .take()
+            .and_then(|item| item.get())
+            .and_then(Result::ok)
+            .map(|image| ReplacedArtworkImage {
+                image,
+                generation,
+                source_pixels: false,
+            });
+        self.take_source_pixels()
+            .map(move |image| ReplacedArtworkImage {
+                image,
+                generation,
+                source_pixels: true,
+            })
+            .chain(ambient)
+            .chain(
+                std::mem::take(&mut self.replaced)
+                    .into_iter()
+                    .map(move |mut retired| {
+                        retired.generation = generation;
+                        retired
+                    }),
+            )
+    }
+
+    fn take_source_pixels(&mut self) -> impl Iterator<Item = Arc<RenderImage>> + use<> {
         self.downgrade = None;
         self.failed_tier = None;
         [self.item.take(), self.pending.take().map(|(_, item)| item)]
             .into_iter()
             .filter_map(|item| item.and_then(|item| item.get()).and_then(Result::ok))
-            .chain(
-                std::mem::take(&mut self.replaced)
-                    .into_iter()
-                    .map(|retired| retired.image),
-            )
     }
 
     fn clear(&mut self, window: &mut Window, cx: &mut App) {
         self.released = true;
+        self.artwork = None;
         for decoded in self.take_pixels() {
             cx.drop_image(decoded, Some(window));
         }
+    }
+
+    fn cover_side(&self, viewport: gpui::Size<Pixels>) -> Pixels {
+        let Some(source) = self.source.get() else {
+            // Bootstrap at viewport resolution, then promote once decode has
+            // supplied the exact oriented source dimensions.
+            return viewport.width.max(viewport.height);
+        };
+        let longest = source.side as f32;
+        (viewport.width * (longest / source.width as f32))
+            .max(viewport.height * (longest / source.height as f32))
     }
 
     fn request(
@@ -702,7 +911,7 @@ impl ArtworkImage {
         let Some(target) = self.demands.values().copied().max() else {
             // The scene that used these pixels has already crossed a frame edge.
             self.target = decode::requested_tier(0);
-            for decoded in self.take_pixels() {
+            for decoded in self.take_source_pixels() {
                 cx.drop_image(decoded, Some(window));
             }
             return;
@@ -733,7 +942,7 @@ impl ArtworkImage {
     }
 
     fn decode_item(&self, tier: u32, cx: &mut App) -> ImageCacheItem {
-        let artwork = self.artwork.clone();
+        let artwork = self.artwork.as_ref().expect("live artwork source").clone();
         let budget = self.budget;
         let source = Arc::clone(&self.source);
         if !cx.has_global::<decode::DecodeWorkspace>() {
@@ -753,6 +962,8 @@ impl ArtworkImage {
                     source.get_or_init(|| ArtworkSourceInfo {
                         animated: decoded.animated,
                         side: decoded.source_side,
+                        width: decoded.source_dimensions.0,
+                        height: decoded.source_dimensions.1,
                     });
                     decoded.image
                 })
@@ -785,9 +996,22 @@ impl ArtworkImage {
             .map(|(_, generation)| *generation)
             .min()
             .unwrap_or(self.generation);
+        let source_acknowledged = self
+            .views
+            .iter()
+            .filter(|(consumer, _)| self.demands.contains_key(*consumer))
+            .map(|(_, (_, generation))| *generation)
+            .min()
+            .unwrap_or(self.generation);
         let mut index = 0;
         while index < self.replaced.len() {
-            if self.replaced[index].generation <= acknowledged {
+            let retired = &self.replaced[index];
+            let acknowledged = if retired.source_pixels {
+                source_acknowledged
+            } else {
+                acknowledged
+            };
+            if retired.generation <= acknowledged {
                 let retired = self.replaced.swap_remove(index);
                 self.retire_pixels(retired.image);
             } else {
@@ -804,6 +1028,41 @@ impl ArtworkImage {
                 .push(RetiredArtworkImage::Decoded(decoded));
         }
     }
+
+    fn load_ambient(
+        &mut self,
+        consumer: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        if self.ambient.is_none() {
+            self.request(consumer, gpui::px(64.), None, window, cx);
+            let source =
+                match self.load(&Resource::from(self.artwork.as_ref()?.path()), window, cx)? {
+                    Ok(source) => source,
+                    Err(error) => return Some(Err(error)),
+                };
+            self.ambient = Some(ImageCacheItem::from_future(
+                async move { Ok(ambient::filtered(&source)) },
+                cx,
+            ));
+        }
+        let ready = self.ambient.as_ref()?.use_image(window);
+        if ready.is_some() && self.demands.remove(&consumer).is_some() {
+            self.flush_replaced();
+            if self.demands.is_empty() {
+                self.target = decode::requested_tier(0);
+                // The derivative owns its pixels. Source-only pixels may still
+                // belong to the old scene, so retire them at the normal fence.
+                for decoded in self.take_source_pixels() {
+                    self.retire_pixels(decoded);
+                }
+            } else {
+                self.reconcile_demand(window, cx);
+            }
+        }
+        ready
+    }
 }
 
 impl ImageCache for ArtworkImage {
@@ -813,7 +1072,8 @@ impl ImageCache for ArtworkImage {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        debug_assert_eq!(resource, &Resource::from(self.artwork.path()));
+        let artwork = self.artwork.as_ref()?;
+        debug_assert_eq!(resource, &Resource::from(artwork.path()));
         if self.released {
             return None;
         }
@@ -845,6 +1105,7 @@ impl ImageCache for ArtworkImage {
                     self.replaced.push(ReplacedArtworkImage {
                         image: decoded,
                         generation: self.generation,
+                        source_pixels: true,
                     });
                 }
                 // A cached sibling may never have requested this pending load.
@@ -1209,12 +1470,284 @@ mod tests {
     // Each test selects distinct pixels so global same-source decode sharing
     // cannot make another concurrently running test own its release probe.
     fn static_cover(side: u32, red: u8) -> Vec<u8> {
-        let image = image::RgbaImage::from_pixel(side, side / 2, image::Rgba([red, 90, 110, 128]));
+        rectangular_cover(side, side / 2, red)
+    }
+
+    fn rectangular_cover(width: u32, height: u32, red: u8) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([red, 90, 110, 128]));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image)
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    struct EmptyMaterialScene;
+
+    impl Render for EmptyMaterialScene {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    struct StaticMaterialScene {
+        artwork: ArtworkView,
+        direct: bool,
+    }
+
+    impl Render for StaticMaterialScene {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let image = if self.direct {
+                self.artwork
+                    .ready_static_source(window, cx)
+                    .and_then(Result::ok)
+                    .map(img)
+            } else {
+                self.artwork.source().map(|source| source.static_image())
+            };
+            div()
+                .size_full()
+                .children(image.map(|image| image.size_full().object_fit(gpui::ObjectFit::Cover)))
+        }
+    }
+
+    fn draw_static_material(
+        window: &mut gpui::VisualTestContext,
+        artwork: &ArtworkView,
+        direct: bool,
+    ) {
+        let viewport = window.update(|window, _| window.viewport_size());
+        window.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            viewport,
+            |_, cx| {
+                cx.new(|_| StaticMaterialScene {
+                    artwork: artwork.clone(),
+                    direct,
+                })
+                .into_any_element()
+            },
+        );
+    }
+
+    fn exercise_material_cover(
+        cx: &mut gpui::TestAppContext,
+        dimensions: (u32, u32),
+        viewport: (f32, f32),
+        expected_tier: u32,
+        direct: bool,
+        red: u8,
+    ) {
+        let (_directory, loaded) =
+            loaded_cover(&rectangular_cover(dimensions.0, dimensions.1, red));
+        let images = ArtworkImageRegistry::default();
+        let material = ArtworkView::new(images.clone());
+        let sibling = ArtworkView::new(images.clone());
+        let handle = cx.open_window(
+            gpui::size(gpui::px(viewport.0), gpui::px(viewport.1)),
+            |_, _| EmptyMaterialScene,
+        );
+        cx.simulate_window_scale_factor_change(handle.into(), 1.);
+        let window = &mut gpui::VisualTestContext::from_window(handle.into(), cx);
+        let source = window.update(|_, cx| {
+            sibling.replace(Some(loaded.clone()), cx);
+            material.replace(Some(loaded), cx);
+            material.source().unwrap()
+        });
+        let cache = source.sizing.image.clone();
+        request_cover_size(window, &sibling, 1, 200.);
+        window.update(|window, cx| {
+            assert_eq!(window.scale_factor(), 1.);
+            assert!(cache.read(cx).source.get().is_none());
+            assert!(cache.read(cx).item.is_none());
+            assert_eq!(sibling.sizing(1).unwrap().image, cache);
+        });
+
+        // Both material routes bootstrap without knowing the source aspect.
+        let initial_tier = decode::requested_tier(viewport.0.max(viewport.1).ceil() as u32);
+        draw_static_material(window, &material, direct);
+        window.update(|_, cx| {
+            let image = cache.read(cx);
+            assert_eq!(image.target, initial_tier);
+            assert_eq!(image.tier, initial_tier);
+            assert_eq!(image.demands.len(), 2);
+            assert!(image.pending.is_none());
+        });
+        window.run_until_parked();
+        window.update(|_, cx| {
+            let image = cache.read(cx);
+            let source = image.source.get().unwrap();
+            assert_eq!((source.width, source.height), dimensions);
+            assert!(image.item.as_ref().unwrap().get().unwrap().is_ok());
+        });
+
+        // The first ready frame re-evaluates Cover, using exact source metadata
+        // rather than the rounded dimensions of the bootstrap thumbnail.
+        draw_static_material(window, &material, direct);
+        window.update(|_, cx| {
+            let image = cache.read(cx);
+            assert_eq!(image.target, expected_tier);
+            if expected_tier != initial_tier {
+                assert_eq!(
+                    image.pending.as_ref().map(|(tier, _)| *tier),
+                    Some(expected_tier)
+                );
+            }
+        });
+        window.run_until_parked();
+        draw_static_material(window, &material, direct);
+        let pixels = window.update(|_, cx| {
+            let image = cache.read(cx);
+            assert_eq!(image.tier, expected_tier);
+            assert!(image.pending.is_none());
+            assert!(image.downgrade.is_none());
+            let pixels = image.item.as_ref().unwrap().get().unwrap().unwrap();
+            let expected_size = if expected_tier == u32::MAX {
+                dimensions
+            } else {
+                (expected_tier, expected_tier)
+            };
+            assert_eq!(
+                pixels.size(0),
+                gpui::size(
+                    gpui::DevicePixels(expected_size.0 as i32),
+                    gpui::DevicePixels(expected_size.1 as i32),
+                )
+            );
+            pixels
+        });
+        for _ in 0..3 {
+            draw_static_material(window, &material, direct);
+            window.run_until_parked();
+            window.update(|_, cx| {
+                let image = cache.read(cx);
+                assert_eq!(image.target, expected_tier);
+                assert_eq!(image.tier, expected_tier);
+                assert_eq!(image.generation, u64::from(initial_tier != expected_tier));
+                assert!(image.pending.is_none());
+                assert!(image.downgrade.is_none());
+                assert!(Arc::ptr_eq(
+                    &pixels,
+                    &image.item.as_ref().unwrap().get().unwrap().unwrap(),
+                ));
+            });
+        }
+        drop(pixels);
+
+        // Retiring this route cannot rejoin a still-live sibling's shared lease.
+        window.update(|window, cx| {
+            material.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(!cache.read(cx).released);
+            assert_eq!(cache.read(cx).demands.len(), 1);
+            assert!(material.ready_static_source(window, cx).is_none());
+        });
+        draw_source(window, source.static_image());
+        window.update(|window, cx| {
+            assert_eq!(cache.read(cx).demands.len(), 1);
+            assert!(cache.read(cx).pending.is_none());
+            sibling.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+            assert!(cache.read(cx).released);
+            assert!(cache.read(cx).item.is_none());
+        });
+        draw_source(window, source.static_image());
+        window.run_until_parked();
+        window.update(|_, cx| {
+            assert!(cache.read(cx).item.is_none());
+            assert!(cache.read(cx).pending.is_none());
+            assert!(cache.read(cx).demands.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn material_cover_promotes_portrait_landscape_and_exact_aspect_boundary(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for direct in [false, true] {
+            for (index, (dimensions, viewport)) in [
+                ((1000, 4000), (800., 600.)),
+                ((4000, 1000), (800., 600.)),
+                // At 256px, 4096x1023 rounds to 256x64. That rounded ratio
+                // would incorrectly keep 1024px instead of the original tier.
+                ((4096, 1023), (256., 256.)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                exercise_material_cover(
+                    cx,
+                    dimensions,
+                    viewport,
+                    u32::MAX,
+                    direct,
+                    130 + index as u8 + 3 * u8::from(direct),
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn material_cover_keeps_square_and_large_viewports_at_their_existing_tier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for direct in [false, true] {
+            exercise_material_cover(
+                cx,
+                (1600, 1600),
+                (800., 600.),
+                1024,
+                direct,
+                136 + u8::from(direct),
+            );
+            exercise_material_cover(
+                cx,
+                (1000, 4000),
+                (1600., 1200.),
+                u32::MAX,
+                direct,
+                138 + u8::from(direct),
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn retired_unknown_material_cover_sources_cannot_start_shared_or_released_decodes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for shared in [false, true] {
+            let (_directory, loaded) =
+                loaded_cover(&rectangular_cover(1000, 4000, 140 + u8::from(shared)));
+            let images = ArtworkImageRegistry::default();
+            let material = ArtworkView::new(images.clone());
+            let sibling = ArtworkView::new(images.clone());
+            let window = cx.add_empty_window();
+            let source = window.update(|window, cx| {
+                if shared {
+                    sibling.replace(Some(loaded.clone()), cx);
+                }
+                material.replace(Some(loaded), cx);
+                let source = material.source().unwrap();
+                material.replace(None, cx);
+                images.release_retired(window);
+                window.simulate_next_frame(cx);
+                assert!(material.ready_static_source(window, cx).is_none());
+                source
+            });
+            draw_source(window, source.static_image());
+            window.run_until_parked();
+            window.update(|window, cx| {
+                let image = source.sizing.image.read(cx);
+                assert_eq!(image.released, !shared);
+                assert!(image.source.get().is_none());
+                assert!(image.item.is_none());
+                assert!(image.pending.is_none());
+                assert!(image.demands.is_empty());
+                sibling.release_all_images(window, cx);
+                images.release_all_retired(window, cx);
+            });
+        }
     }
 
     #[gpui::test]
@@ -1274,6 +1807,385 @@ mod tests {
                     cx,
                 );
             });
+        });
+    }
+
+    #[gpui::test]
+    fn material_source_keeps_viewport_demand_after_the_artwork_panel_retires(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct MaterialScene(ArtworkView);
+
+        impl Render for MaterialScene {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().children(
+                    self.0
+                        .ready_static_source(window, cx)
+                        .and_then(Result::ok)
+                        .map(img),
+                )
+            }
+        }
+
+        fn draw_material(window: &mut gpui::VisualTestContext, material: &ArtworkView) {
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(640.), gpui::px(480.)),
+                |_, cx| {
+                    cx.new(|_| MaterialScene(material.clone()))
+                        .into_any_element()
+                },
+            );
+        }
+
+        let (_directory, loaded) = loaded_cover(&static_cover(2048, 83));
+        let images = ArtworkImageRegistry::default();
+        let material = ArtworkView::new(images.clone());
+        let panel = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let cache = window.update(|_, cx| {
+            material.replace(Some(loaded.clone()), cx);
+            panel.replace(Some(loaded.clone()), cx);
+            material
+                .state
+                .borrow()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .image
+                .clone()
+        });
+        draw_material(window, &material);
+        window.update(|window, cx| {
+            let viewport = window.viewport_size();
+            let expected = decode::requested_tier(
+                (f32::from(viewport.width.max(viewport.height)) * window.scale_factor()).ceil()
+                    as u32,
+            );
+            assert_eq!(cache.read(cx).target, expected);
+            assert_eq!(cache.read(cx).demands.len(), 1);
+        });
+        window.run_until_parked();
+        draw_material(window, &material);
+        window.update(|_, cx| {
+            assert!(cache.read(cx).item.as_ref().unwrap().get().unwrap().is_ok());
+        });
+        request_cover_size(window, &panel, 1, 800.);
+        window.update(|window, cx| {
+            assert_eq!(cache.read(cx).demands.len(), 2);
+            let retired_source = material.source().unwrap();
+            material.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert_eq!(cache.read(cx).demands.len(), 1);
+            assert!(!retired_source.request_cover(window, cx));
+            assert_eq!(cache.read(cx).demands.len(), 1);
+            material.replace(Some(loaded.clone()), cx);
+        });
+        draw_material(window, &material);
+        window.update(|window, cx| {
+            assert_eq!(cache.read(cx).demands.len(), 2);
+            panel.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert_eq!(cache.read(cx).demands.len(), 1);
+            assert!(cache.read(cx).item.is_some());
+            assert!(!cache.read(cx).released);
+            material.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(cache.read(cx).released);
+            assert!(cache.read(cx).artwork.is_none());
+            assert!(cache.read(cx).item.is_none());
+        });
+    }
+
+    fn draw_ambient(window: &mut gpui::VisualTestContext, material: &ArtworkView) {
+        draw_source(window, material.source().unwrap().ambient_image());
+    }
+
+    fn draw_source(window: &mut gpui::VisualTestContext, image: Img) {
+        window.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(64.), gpui::px(64.)),
+            |_, cx| cx.new(|_| DecorationScene(Some(image))).into_any_element(),
+        );
+    }
+
+    #[gpui::test]
+    fn ambient_ready_retires_source_at_frame_edge_and_reuses_derivative(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for immediate_release in [false, true] {
+            let (_directory, loaded) =
+                loaded_cover(&static_cover(2048, 229 + u8::from(immediate_release)));
+            let images = ArtworkImageRegistry::default();
+            let material = ArtworkView::new(images.clone());
+            let window = cx.add_empty_window();
+            let cache = window.update(|_, cx| {
+                material.replace(Some(loaded), cx);
+                material.source().unwrap().sizing.image
+            });
+            draw_ambient(window, &material);
+            window.run_until_parked();
+            let source = window.update(|_, cx| {
+                let image = cache.read(cx);
+                assert_eq!(image.demands.len(), 1);
+                Arc::downgrade(&image.item.as_ref().unwrap().get().unwrap().unwrap())
+            });
+            draw_ambient(window, &material);
+            window.run_until_parked();
+            draw_ambient(window, &material);
+            let ambient = window.update(|window, cx| {
+                let image = cache.read(cx);
+                assert!(image.demands.is_empty());
+                assert_eq!(
+                    image.views.len(),
+                    1,
+                    "derived consumers still observe invalidation"
+                );
+                assert!(image.item.is_none());
+                assert!(image.pending.is_none());
+                assert!(image.downgrade.is_none());
+                assert!(
+                    source.upgrade().is_some(),
+                    "old scene has not crossed its fence"
+                );
+                let ambient = image.ambient.as_ref().unwrap().get().unwrap().unwrap();
+                assert_eq!(
+                    ambient.size(0),
+                    gpui::size(gpui::DevicePixels(64), gpui::DevicePixels(64))
+                );
+                images.release_retired(window);
+                window.simulate_next_frame(cx);
+                assert!(source.upgrade().is_none());
+                ambient
+            });
+            for _ in 0..3 {
+                draw_ambient(window, &material);
+                window.run_until_parked();
+                window.update(|_, cx| {
+                    let image = cache.read(cx);
+                    assert!(image.demands.is_empty());
+                    assert!(image.item.is_none());
+                    assert!(Arc::ptr_eq(
+                        &ambient,
+                        &image.ambient.as_ref().unwrap().get().unwrap().unwrap()
+                    ));
+                });
+            }
+            let ambient_pixels = Arc::downgrade(&ambient);
+            drop(ambient);
+            let old_scene = material.source().unwrap().ambient_image();
+            window.update(|window, cx| {
+                if immediate_release {
+                    material.release_all_images(window, cx);
+                    images.release_all_retired(window, cx);
+                } else {
+                    material.replace(None, cx);
+                    images.release_retired(window);
+                    window.simulate_next_frame(cx);
+                }
+                assert!(cache.read(cx).released);
+                assert!(cache.read(cx).views.is_empty());
+                assert!(cache.read(cx).ambient.is_none());
+                assert!(ambient_pixels.upgrade().is_none());
+            });
+            draw_source(window, old_scene);
+            window.run_until_parked();
+            window.update(|_, cx| {
+                assert!(cache.read(cx).item.is_none());
+                assert!(cache.read(cx).ambient.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn ambient_preserves_other_source_consumers_and_source_requests_can_reload(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_directory, loaded) = loaded_cover(&static_cover(2048, 231));
+        let images = ArtworkImageRegistry::default();
+        let material = ArtworkView::new(images.clone());
+        let panel = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let cache = window.update(|_, cx| {
+            material.replace(Some(loaded.clone()), cx);
+            panel.replace(Some(loaded.clone()), cx);
+            material.source().unwrap().sizing.image
+        });
+        request_cover_size(window, &panel, 1, 800.);
+        draw_cover(window, &panel);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        let replaced_source = window.update(|_, cx| {
+            Arc::downgrade(
+                &cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .unwrap(),
+            )
+        });
+        // A cached derivative does not need to render/ACK a source-only upgrade.
+        request_cover_size(window, &panel, 1, 1100.);
+        draw_cover(window, &panel);
+        window.run_until_parked();
+        draw_cover(window, &panel);
+        let (source, ambient) = window.update(|window, cx| {
+            let image = cache.read(cx);
+            assert_eq!(
+                image.demands.len(),
+                1,
+                "only the panel retains source demand"
+            );
+            assert_eq!(image.target, decode::requested_tier(1100));
+            assert_eq!(image.tier, image.target);
+            assert!(image.replaced.is_empty());
+            assert!(image.downgrade.is_none());
+            let source = Arc::downgrade(&image.item.as_ref().unwrap().get().unwrap().unwrap());
+            let ambient = image.ambient.as_ref().unwrap().get().unwrap().unwrap();
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(
+                replaced_source.upgrade().is_none(),
+                "ambient observers must not pin retired source generations"
+            );
+            assert!(
+                source.upgrade().is_some(),
+                "the panel still needs these pixels"
+            );
+            panel.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(cache.read(cx).item.is_none());
+            assert!(source.upgrade().is_none());
+            assert!(cache.read(cx).ambient.is_some());
+            (source, ambient)
+        });
+        // Switching this live material back to a source consumer reloads at its
+        // actual viewport demand, not at the former ambient bootstrap size.
+        draw_source(window, material.source().unwrap().static_image());
+        window.run_until_parked();
+        draw_source(window, material.source().unwrap().static_image());
+        window.update(|window, cx| {
+            let image = cache.read(cx);
+            let viewport = window.viewport_size();
+            assert_eq!(
+                image.target,
+                decode::requested_tier(
+                    (f32::from(viewport.width.max(viewport.height * 2.)) * window.scale_factor())
+                        .ceil() as u32
+                )
+            );
+            assert_eq!(image.tier, image.target);
+            assert!(image.item.as_ref().unwrap().get().unwrap().is_ok());
+            assert!(source.upgrade().is_none());
+            assert!(Arc::ptr_eq(
+                &ambient,
+                &image.ambient.as_ref().unwrap().get().unwrap().unwrap()
+            ));
+            panel.replace(Some(loaded), cx);
+        });
+        request_cover_size(window, &panel, 1, 800.);
+        let stale = material.source().unwrap().ambient_image();
+        window.update(|window, cx| {
+            material.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(!cache.read(cx).released, "another consumer owns the source");
+            assert_eq!(cache.read(cx).demands.len(), 1);
+        });
+        draw_source(window, stale);
+        window.update(|window, cx| {
+            assert_eq!(
+                cache.read(cx).demands.len(),
+                1,
+                "stale handles cannot rejoin a live source"
+            );
+            panel.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn ambient_only_budget_changes_invalidate_derivative_without_losing_observer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_directory, loaded) = loaded_cover(&static_cover(2048, 232));
+        let images = ArtworkImageRegistry::default();
+        let material = ArtworkView::new(images.clone());
+        let sibling = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let cache = window.update(|_, cx| {
+            sibling.replace(Some(loaded.clone()), cx);
+            material.replace(Some(loaded), cx);
+            material.source().unwrap().sizing.image
+        });
+        draw_ambient(window, &material);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        draw_ambient(window, &sibling);
+        let old_ambient = window.update(|window, cx| {
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            let old = Arc::downgrade(
+                &cache
+                    .read(cx)
+                    .ambient
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(cache.read(cx).demands.is_empty());
+            assert!(images.set_decode_budget_mib(16, cx));
+            assert!(cache.read(cx).ambient.is_none());
+            assert!(cache.read(cx).item.is_none());
+            assert_eq!(cache.read(cx).views.len(), 2);
+            assert!(
+                old.upgrade().is_some(),
+                "budget invalidation retains the old scene until ACK"
+            );
+            old
+        });
+        draw_ambient(window, &material);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        window.run_until_parked();
+        draw_ambient(window, &material);
+        window.update(|window, cx| {
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(
+                old_ambient.upgrade().is_some(),
+                "the cached sibling has not ACKed the new generation"
+            );
+            assert_eq!(cache.read(cx).replaced.len(), 1);
+            sibling.replace(None, cx);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            // Retiring an ambient-only observer removes no source demand, but
+            // still acknowledges guarded replacements at the same fence.
+            images.release_all_retired(window, cx);
+            assert!(old_ambient.upgrade().is_none());
+            let image = cache.read(cx);
+            assert!(image.ambient.as_ref().unwrap().get().unwrap().is_ok());
+            assert!(image.demands.is_empty());
+            assert!(image.item.is_none());
+            assert!(image.pending.is_none());
+            assert!(image.replaced.is_empty());
+            material.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
         });
     }
 
@@ -1958,6 +2870,8 @@ mod tests {
                     .image
                     .clone()
             });
+            let old_scene = window.update(|_, cx| first.image(cx).unwrap());
+            let old_ambient = first.source().unwrap().ambient_image();
             window.draw(
                 gpui::point(gpui::px(0.), gpui::px(0.)),
                 gpui::size(gpui::px(64.), gpui::px(64.)),
@@ -2016,7 +2930,32 @@ mod tests {
             if let Some(pixels) = &pixels {
                 assert!(pixels.upgrade().is_none());
             }
-            window.update(|_, cx| assert!(cache.read(cx).item.is_none()));
+            for old_scene in [old_scene, old_ambient] {
+                window.draw(
+                    gpui::point(gpui::px(0.), gpui::px(0.)),
+                    gpui::size(gpui::px(64.), gpui::px(64.)),
+                    |_, cx| {
+                        cx.new(|_| DecorationScene(Some(old_scene)))
+                            .into_any_element()
+                    },
+                );
+                window.run_until_parked();
+                window.update(|_, cx| {
+                    let image = cache.read(cx);
+                    assert!(
+                        image.artwork.is_none(),
+                        "released scenes must not protect old files"
+                    );
+                    assert!(
+                        image.item.is_none(),
+                        "released scenes must not restart cover decoding"
+                    );
+                    assert!(
+                        image.ambient.is_none(),
+                        "released scenes must not restart filtering"
+                    );
+                });
+            }
         }
     }
 
@@ -2244,6 +3183,173 @@ mod tests {
                 view.release_all_images(window, cx);
                 images.release_all_retired(window, cx);
             });
+        }
+    }
+
+    #[gpui::test]
+    fn unrequested_artwork_scenes_cannot_load_after_their_lease_is_retired(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("unrequested.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager
+            .load(crate::artwork_source(&crate::test_support::artwork_track(
+                path,
+            )))
+            .unwrap();
+        let images = ArtworkImageRegistry::default();
+        let view = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let (cache, old_cover, old_ambient) = window.update(|_, cx| {
+            view.replace(Some(loaded), cx);
+            let cache = view
+                .state
+                .borrow()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .image
+                .clone();
+            (
+                cache,
+                view.image(cx).unwrap(),
+                view.source().unwrap().ambient_image(),
+            )
+        });
+        window.update(|window, cx| {
+            assert!(view.cached_static_source(window, cx).is_none());
+            assert!(cache.read(cx).item.is_none());
+            assert!(view.replace(None, cx));
+            assert_eq!(images.0.borrow().retired.len(), 1);
+            images.release_retired(window);
+            window.simulate_next_frame(cx);
+            assert!(cache.read(cx).artwork.is_none());
+        });
+        for old_scene in [old_cover, old_ambient] {
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(64.), gpui::px(64.)),
+                |_, cx| {
+                    cx.new(|_| DecorationScene(Some(old_scene)))
+                        .into_any_element()
+                },
+            );
+            window.run_until_parked();
+            window.update(|_, cx| {
+                assert!(cache.read(cx).item.is_none());
+                assert!(cache.read(cx).ambient.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn artwork_flush_cancels_source_and_ambient_before_or_after_worker_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("pending-release.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager
+            .load(crate::artwork_source(&crate::test_support::artwork_track(
+                path,
+            )))
+            .unwrap();
+        for ambient in [false, true] {
+            for worker_finished in [false, true] {
+                let images = ArtworkImageRegistry::default();
+                let view = ArtworkView::new(images.clone());
+                let window = cx.add_empty_window();
+                let cache = window.update(|_, cx| {
+                    view.replace(Some(loaded.clone()), cx);
+                    view.state
+                        .borrow()
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .owner
+                        .image
+                        .clone()
+                });
+                let (sender, receiver) = futures::channel::oneshot::channel();
+                let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                cache.update(window, |image, cx| {
+                    let finished = finished.clone();
+                    let pending = ImageCacheItem::from_future(
+                        async move {
+                            let result = receiver.await.expect("controlled decode sender is held");
+                            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                            result
+                        },
+                        cx,
+                    );
+                    if ambient {
+                        image.item = Some(ImageCacheItem::from_future(
+                            async {
+                                Ok(Arc::new(RenderImage::new([image::Frame::new(
+                                    image::RgbaImage::new(1, 1),
+                                )])))
+                            },
+                            cx,
+                        ));
+                        image.ambient = Some(pending);
+                    } else {
+                        image.item = Some(pending);
+                    }
+                });
+                window.run_until_parked();
+                let decoded = Arc::new(RenderImage::new([image::Frame::new(
+                    image::RgbaImage::new(1, 1),
+                )]));
+                let stale_pixels = Arc::downgrade(&decoded);
+                let mut sender = Some(sender);
+                if worker_finished {
+                    sender.take().unwrap().send(Ok(decoded)).unwrap();
+                    while !finished.load(std::sync::atomic::Ordering::SeqCst) {
+                        assert!(window.background_executor.tick());
+                    }
+                } else {
+                    drop(decoded);
+                }
+                window.update(|window, cx| {
+                    view.replace(None, cx);
+                    images.release_retired(window);
+                    images.release_all_retired(window, cx);
+                    assert!(cache.read(cx).artwork.is_none());
+                    view.replace(Some(loaded.clone()), cx);
+                    assert_ne!(
+                        cache,
+                        view.state.borrow().current.as_ref().unwrap().owner.image
+                    );
+                });
+                window.run_until_parked();
+                if let Some(sender) = sender {
+                    assert!(
+                        sender
+                            .send(Ok(Arc::new(RenderImage::new([image::Frame::new(
+                                image::RgbaImage::new(1, 1)
+                            ),]))))
+                            .is_err()
+                    );
+                }
+                assert!(stale_pixels.upgrade().is_none());
+                draw_cover(window, &view);
+                window.run_until_parked();
+                window.update(|window, cx| {
+                    // An old pending frame callback cannot clear the reopened source.
+                    window.simulate_next_frame(cx);
+                    assert!(view.aspect_ratio(cx).is_some());
+                    assert!(cache.read(cx).item.is_none());
+                    assert!(cache.read(cx).ambient.is_none());
+                    view.release_all_images(window, cx);
+                    images.release_all_retired(window, cx);
+                });
+            }
         }
     }
 

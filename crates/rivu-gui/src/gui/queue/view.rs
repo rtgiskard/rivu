@@ -365,6 +365,12 @@ impl Queue {
                                         playing,
                                         &this.context.i18n,
                                     )
+                                    .bg(crate::gui::appearance::material::row_background(
+                                        theme,
+                                        this.model.contains(&id),
+                                        false,
+                                        cx,
+                                    ))
                                     .when(entry.track.missing, |row| {
                                         row.child(caption(theme, this.tr("gl-missing")))
                                     })
@@ -623,7 +629,8 @@ impl Queue {
                 .h_full()
                 .min_h_0()
                 .w_full()
-                .scrollbar(("queue-scrollbar", panel_id)),
+                .scrollbar(("queue-scrollbar", panel_id))
+                .map(|view| crate::gui::appearance::texture_styles::list_fade(view, cx)),
             ))
             .into_any_element()
     }

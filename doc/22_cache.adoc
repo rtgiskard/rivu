@@ -564,6 +564,10 @@ latest demand. Hiding the Artwork panel clears queued demand, not an already
 submitted shared load; it cannot start hidden acquisition. Other consumers retain
 independent demand. MPRIS continues transport and metadata notifications during
 loading, but disabling or replacing the service waits for physical completion.
+The material atmosphere follows the same physical-slot rule. Hiding or disabling
+it releases display demand, not an in-flight lookup. Matching completion checks
+the latest enabled track against the cache's resolved result, including cached
+misses, before admitting another lookup.
 
 In-flight probes and published results keep their logical versions resident, not
 idle CUE aliases. Different fingerprints may coexist while old covers are in use.
@@ -667,6 +671,13 @@ large preview can raise the shared image above the album-card cap. Upgrades reta
 the old image until ready; smaller demand is debounced 300 ms. Old textures retire
 only after consumers acknowledge scene replacement. Within-tier resizing does
 not decode again.
+The 64-by-64 material derivative requests source pixels only until its result is
+ready, then retains its own cache without keeping a low-tier source alive. Other
+cover consumers retain their independent source demands. When the last source
+demand retires, source pixels release at the scene boundary without generating a
+lower tier for the derivative. Switching back to a source-image material requests
+the required tier again. Derivative observers remain registered for budget
+invalidation but do not hold obsolete source generations.
 
 One application-owned decode seat, shared by every window, serializes real-cover
 reads, pixel decoding, thumbnail filtering, encoding, and publication on GPUI's
@@ -689,6 +700,10 @@ or unloads its image. Hiding Details or Artwork also clears queued lookup demand
 late completion cannot restore a hidden owner or start hidden acquisition.
 Window hide, close, or reload flushes current and retired owners without another
 frame. Other windows keep independent lifetimes.
+Source release is terminal even for a scene-held image that was never painted:
+an obsolete scene cannot restart its decode or keep its encoded-file protection
+alive. Updating a path without changing track ID/fingerprint updates queued and
+current lookup inputs, but does not reset artwork rotation or invent a transition.
 
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer
@@ -824,7 +839,10 @@ costs. Font discovery is not a measurement of retained memory.
 Settings owns its draft, inputs, navigation, and save feedback in a separate
 GPUI entity. Playback and analysis updates do not invalidate that entity's
 cached element tree. Settings interactions and relevant runtime changes do;
-GPUI also invalidates reuse when bounds or inherited text style change.
+GPUI also invalidates reuse when bounds, content mask, inherited text style,
+effective rem size, or paint-only group context changes. Active accessibility
+rebuilds cached subtrees so nodes and actions remain registered, without changing
+the caller-provided layout style.
 This cache retains no settings bitmap and does not freeze background
 visualizations or eliminate window composition.
 
@@ -864,6 +882,8 @@ draws, not timers, and do not promise reclamation while drawing is inactive.
 
 Atlas admission rejects invalid or over-device-limit dimensions before allocation.
 Failed first-tile reservation leaves no empty page or consumed page slot.
+Device recovery clears old atlas tiles and adopts the replacement device's
+texture-dimension limit before new requests.
 
 Closing the last window exits the desktop process. GPUI display connections,
 GPU contexts, font caches, worker buffers and allocator state retire with that

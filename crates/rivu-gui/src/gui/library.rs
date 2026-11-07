@@ -661,7 +661,6 @@ impl Library {
         }
     }
 }
-
 #[cfg(test)]
 mod library_root_tests {
     use super::{FeatureContext, Library};

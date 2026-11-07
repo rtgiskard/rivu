@@ -1218,6 +1218,12 @@ impl Playlists {
                             this.browser.playlists().selected() == Some(id),
                             row_height,
                         )
+                        .bg(crate::gui::appearance::material::row_background(
+                            theme,
+                            this.browser.playlists().selected() == Some(id),
+                            false,
+                            cx,
+                        ))
                         .when(
                             (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
@@ -1496,6 +1502,12 @@ impl Playlists {
                                     .is_some_and(|track| track.id == track_id),
                                 &this.i18n,
                             )
+                            .bg(crate::gui::appearance::material::row_background(
+                                theme,
+                                this.browser.playlists().track_selection.contains(id),
+                                false,
+                                cx,
+                            ))
                             .when(e.missing, |row| {
                                 row.child(caption(theme, this.tr("gl-missing")))
                             })
