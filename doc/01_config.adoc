@@ -660,9 +660,10 @@ belong only to `audio_visualizer` panels. Animation FPS remains global.
 
 == Visualizations
 
-Live analysis requires playback, enabled visualizations, and a visible live-analysis
-style. Waveform instead folds admitted PCM progressively in the GUI session or
-loads an explicitly requested track preview.
+Live analysis requires playback, enabled visualizations, and either a visible
+live-analysis style or a configured Spectrogram history view. Waveform instead
+folds admitted PCM progressively while configured in the GUI layout, even hidden,
+or loads an explicitly requested track preview.
 
 [cols="2,1,3",options="header"]
 |===
@@ -685,17 +686,18 @@ Spectrum use the latest result rather than replaying skipped publications.
 
 Pause freezes the last displayed frame without running analysis or audio-driven
 animation. Stop retires analysis results; the optional radial idle fade may keep
-the last drawing briefly. Seek, source replacement, incompatible analysis settings,
-and disabling visualizations clear stale results even while hidden or paused.
+the last drawing briefly. Seek and source replacement retire instantaneous views,
+but preserve compatible Spectrogram history. Incompatible analysis settings and
+disabling visualizations clear frequency history even while hidden or paused.
 
-Inactive tabs and reliably reported hidden windows suspend their demand, retaining
-the last drawing until fresh audio is ready without replaying hidden time.
-Switching one panel does not interrupt other visible views; losing focus alone
-does not suspend analysis. If the platform does not report visibility reliably,
-compositor throttling can slow animation while the independent analysis timer
-continues. Closing the window releases its presentation; reopening does not
-restore old live-analysis frames. Waveform keeps its bounded session summary when
-hidden or globally disabled; disabled display/interaction caches are released.
+Inactive tabs and reliably reported hidden windows stop drawing and animation.
+Configured Waveform and Spectrogram panels continue bounded history collection;
+returning shows the latest recorded history without replaying hidden time or
+waiting for a new history window to fill. Other styles suspend their demand.
+Removing the corresponding panels or disabling visualizations stops collection;
+losing focus alone does not. Closing the window releases its presentation and
+collection demand. Waveform keeps its bounded session summary when hidden or
+globally disabled; disabled display/interaction caches are released.
 Scheduling and continuity details are in
 link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
 
@@ -900,9 +902,10 @@ continuous or stepped boundary. `line` always connects valid body points
 continuously and skips empty slots rather than drawing them at the floor.
 Peak indicators remain discrete in every style.
 
-Spectrogram shows recent frequency history at a fixed audio-time scale. New audio
-enters at the right; startup and unavailable history remain blank rather than
-stretching the available audio across the panel.
+Spectrogram shows recent frequency history at a fixed audio-time scale. It records
+the audio stream across seeks and track changes rather than tracking one song's
+position. New audio enters at the right; startup and unavailable history remain
+blank rather than stretching the available audio across the panel.
 Its `visualizations.spectrogram.*` settings include:
 
 * `interpolate`: default `true`; controls interpolation between source rows.

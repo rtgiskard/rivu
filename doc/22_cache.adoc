@@ -366,7 +366,8 @@ link:25_gpu_rendering.adoc#spectrogram-column-fields[GPU column fields].
 Panels share one immutable layer assembly for the effective history, display time
 and sampling state. Each panel retains its accepted presentation independently;
 scrolling can replace layer placement without rebuilding unchanged numerical tiles.
-Suspension releases working assembly ownership, not another panel's retained output.
+Hidden history updates invalidate working assembly ownership without rebuilding
+it; another panel's retained output remains independently owned.
 
 Shared Spectrogram history follows the largest drawable physical width, capped
 by history seconds × analysis FPS, with at least two columns. Its logarithmic
@@ -375,6 +376,9 @@ budget against full history capacity. Presentation targets one row per physical
 pixel within that grid. Peak-preserving reduction avoids retaining raw FFT bins
 per historical column; equivalent sampled rows share storage, but reprojection
 cannot merge historically distinct peaks.
+Hidden panels reuse their last measured dimensions; a configured history view
+that has never been drawn starts with history seconds × analysis FPS columns.
+This records the hidden interval without allocating a GPU presentation.
 
 Sample storage is four bytes per distinct row per column plus a shared two-byte
 index per logical row, excluding container overhead and allocator capacity. GPU
@@ -388,21 +392,21 @@ columns without a drawable plot. Enlargement resumes normal retention from those
 coarsened intervals. This does not change analysis demand; see
 link:24_layout.adoc[GUI layout] for drawable geometry.
 
-When no Spectrogram panel is visible, including when the window is hidden,
-CPU history, pooling/scroll state, and derived working storage are released.
-Each current layout panel may retain only the immutable tiles and normalized
-placements in its last actual drawing, not the full historical column store.
-Other analysis views can continue updating without accumulating hidden history.
-Restoration shows that frozen drawing until fresh analysis produces a replacement;
-it does not replay frames received while hidden.
+Configured Spectrogram panels retain bounded CPU history, pooling state and their
+last sampling dimensions while hidden. Audio publications continue appending to
+that history without assembling new GPU drawings. Restoration draws the latest
+history instead of replaying hidden publications or restarting an empty window.
+Removing the last configured Spectrogram panel, disabling visualizations or
+destroying the window releases history and derived working storage.
 
 [[resource-boundaries]]
 === Resource boundaries
 
-Hiding releases GUI working state, Spectrogram history and stereo/generative
-simulation resources while retaining bounded final drawings as described below.
-GUI-worker analyzer capacity has a separate lifetime. Base waveform previews
-retain their independent bounded lifetime; see <<waveform,Waveform caching>>.
+Hiding releases instantaneous-view working state and stereo/generative simulation
+resources while retaining bounded final drawings as described below. Configured
+Spectrogram history and progressive Waveform collection continue independently of
+visibility. GUI-worker analyzer capacity and base waveform previews have separate
+lifetimes; see <<waveform,Waveform caching>>.
 Waveform numerical payloads grow with effective display-column count and panel
 count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
 columns per panel, plus the shared paired-color palette and publication metadata.
@@ -417,9 +421,9 @@ Renderer admission is separate from CPU retention; its startup budget also limit
 Spectrogram sampling. Accounting, limits and pressure behavior belong to
 link:25_gpu_rendering.adoc#admission-and-retirement[GPU admission and retirement].
 
-Removed panel entries are pruned. Window suspension retains only final drawing
-data: radial styles keep at most 32 levels and rotation; stereo styles keep their
-immutable fixed-size field; fractals keep bounded segments, not simulation; and
+Removed panel entries are pruned. For instantaneous styles, window suspension
+retains only final drawing data: radial styles keep at most 32 levels and rotation;
+stereo styles keep their immutable fixed-size field; fractals keep bounded segments, not simulation; and
 Oscilloscope keeps at most 2048 normalized stereo sweep points (16 KiB), never
 its PCM owner. Pause and inactive fractal tabs instead retain the bounded scene
 without running it. Layout removal, semantic invalidation and window destruction
@@ -481,9 +485,10 @@ five-slot PCM pool retains at most 160 KiB of stereo sample storage per analyzer
 Spectrogram full-bin analysis uses three reusable immutable slots, each holding
 `analysis_fft_size / 2` calibrated dB values. Their sample storage totals 48 KiB
 for FFT 8192 and at most 192 KiB for FFT 32768. Staging shares these arrays, not
-copies; exhaustion omits only this optional payload. Dropping the last visible
+copies; exhaustion omits only this optional payload. Removing the last configured
 Spectrogram demand releases the analyzer pool and staging handle even while
-paused. Existing external snapshots remain valid until their owners release them.
+paused; hiding alone does not. Existing external snapshots remain valid until
+their owners release them.
 This storage is separate from bounded logarithmic CPU history and GPU tiles;
 the figures are payload capacities, not total process-memory limits.
 

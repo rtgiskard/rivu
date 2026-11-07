@@ -125,6 +125,7 @@ pub(in crate::gui) struct VisualizerRuntime {
     sequence: u64,
     staging: AnalysisFrame,
     needs_refresh: bool,
+    presentation_pending: bool,
     visible: bool,
     shutting_down: bool,
     status: PlaybackStatus,
@@ -172,6 +173,7 @@ impl VisualizerRuntime {
             sequence: 0,
             staging: AnalysisFrame::default(),
             needs_refresh: false,
+            presentation_pending: false,
             visible: false,
             shutting_down: false,
             status: PlaybackStatus::Stopped,
@@ -242,6 +244,7 @@ impl VisualizerRuntime {
             || shutting_down
             || stopping
             || (status == PlaybackStatus::Stopped && stop_receipt_changed);
+        let had_visible_analysis = self.panels.values().any(|kind| kind.analysis());
         let membership_changed = self.panel_revision != panels.revision
             || AudioVisualizerOptions::from(self.config.as_ref())
                 != AudioVisualizerOptions::from(config.as_ref());
@@ -279,6 +282,7 @@ impl VisualizerRuntime {
         self.position = position;
         self.duration = duration;
         if status_changed && status == PlaybackStatus::Paused {
+            self.presentation_pending = false;
             self.style_coordinator.suspend();
             self.animation_clock.suspend();
         }
@@ -287,8 +291,13 @@ impl VisualizerRuntime {
             self.staging = AnalysisFrame::default();
             self.sequence = self.handle.analysis.read().sequence;
             self.needs_refresh = false;
+            self.presentation_pending = false;
             self.animation_clock = AnimationClock::default();
-            self.frequency_views.clear_presentation();
+            if visualization_changed || shutting_down {
+                self.frequency_views.clear_presentation();
+            } else {
+                self.frequency_views.invalidate_signal();
+            }
             if fade_on_stop {
                 self.style_coordinator
                     .stop(Instant::now(), self.config.radial_fade_when_idle);
@@ -305,7 +314,9 @@ impl VisualizerRuntime {
             self.awaiting_replacement = status != PlaybackStatus::Stopped;
         }
         let enabled = self.active();
-        let demand_changed = panels_changed || visibility_changed || visualization_changed;
+        let collecting = self.config.visualization_enabled && !self.shutting_down;
+        let demand_changed =
+            panels_changed || layout_panels_changed || visibility_changed || visualization_changed;
         let mut frequency_restored = false;
         if layout_panels_changed {
             let mut retained_spectrum = Vec::new();
@@ -331,9 +342,9 @@ impl VisualizerRuntime {
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
             let spectrogram_ids = self
-                .panels
+                .layout_panels
                 .iter()
-                .filter(|(_, kind)| enabled && matches!(kind, PanelKind::Spectrogram(_)))
+                .filter(|(_, kind)| collecting && matches!(kind, PanelKind::Spectrogram(_)))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
             let frequency_enabled = !spectrum_ids.is_empty() || !spectrogram_ids.is_empty();
@@ -344,6 +355,14 @@ impl VisualizerRuntime {
             self.frequency_views.retain_spectrum_panels(&spectrum_ids);
             self.frequency_views
                 .retain_spectrogram_panels(&spectrogram_ids);
+            self.frequency_views.set_presentation_visible(enabled);
+            frequency_restored |= self.frequency_views.set_spectrogram_visible(
+                enabled
+                    && self
+                        .panels
+                        .values()
+                        .any(|kind| matches!(kind, PanelKind::Spectrogram(_))),
+            );
             frequency_restored |= self
                 .frequency_views
                 .set_spectrum_visible(!spectrum_ids.is_empty());
@@ -370,13 +389,21 @@ impl VisualizerRuntime {
                 }
             }
             let demand = DisplayDemand {
-                enabled: enabled && self.panels.values().any(|kind| kind.analysis()),
+                enabled: frequency_enabled
+                    || enabled && self.panels.values().any(|kind| kind.analysis()),
                 spectrum,
                 visualizer,
             };
             retain_analysis_staging(&mut self.staging, demand);
             self.handle.set_display_demand(demand);
             self.handle.set_waveform_demand(
+                collecting
+                    && self
+                        .layout_panels
+                        .values()
+                        .any(|kind| matches!(kind, PanelKind::Waveform(_))),
+            );
+            self.handle.set_waveform_presentation_visible(
                 enabled
                     && self
                         .panels
@@ -387,6 +414,9 @@ impl VisualizerRuntime {
                 self.cancel_clock(cx);
             }
             self.demand = demand;
+        }
+        if visibility_changed || visualization_changed {
+            self.needs_refresh |= enabled && self.demand.enabled;
         }
         if config_changed || demand_changed {
             let audio_changed = self.style_coordinator.sync(
@@ -409,6 +439,7 @@ impl VisualizerRuntime {
             || visibility_changed
             || visualization_changed
             || fps_changed
+            || had_visible_analysis != self.panels.values().any(|kind| kind.analysis())
         {
             self.cancel_clock(cx);
         }
@@ -435,6 +466,9 @@ impl VisualizerRuntime {
         } else if position_changed {
             self.notify_panels(false, cx);
         }
+        if self.active() && self.needs_refresh {
+            self.analysis_available(cx);
+        }
     }
 
     fn active(&self) -> bool {
@@ -442,7 +476,10 @@ impl VisualizerRuntime {
     }
 
     fn animating(&self) -> bool {
-        self.active() && self.demand.enabled && self.status == PlaybackStatus::Playing
+        self.active()
+            && self.panels.values().any(|kind| kind.analysis())
+            && self.demand.enabled
+            && self.status == PlaybackStatus::Playing
     }
 
     fn cancel_clock(&mut self, cx: &mut gpui::App) {
@@ -458,6 +495,7 @@ impl VisualizerRuntime {
     pub(in crate::gui) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active()
             || !self.demand.enabled
+            || !self.panels.values().any(|kind| kind.analysis())
             || (!self.frame_requested
                 && !self.animating()
                 && !self.style_coordinator.idle_fading(Instant::now()))
@@ -493,8 +531,8 @@ impl VisualizerRuntime {
             return;
         }
         self.frame_requested = false;
+        self.present_analysis(now, cx);
         if self.animating() {
-            self.consume_analysis(now, cx);
             if !self.awaiting_replacement {
                 let time = self.animation_clock.advance(now);
                 let visuals_changed = self.frequency_enabled && self.frequency_views.animate(time);
@@ -509,7 +547,15 @@ impl VisualizerRuntime {
         self.request_frame(window, cx);
     }
 
-    fn consume_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
+    /// Consume publications on the frontend wake path, independently of paints.
+    /// Hidden configured spectrograms collect CPU history without scheduling frames.
+    pub(in crate::gui) fn analysis_available(&mut self, _cx: &mut Context<Self>) {
+        if self.demand.enabled && self.config.visualization_enabled && !self.shutting_down {
+            self.consume_analysis();
+        }
+    }
+
+    fn consume_analysis(&mut self) {
         // Suspended playback never consumes audio, including the retired Stop
         // fade. Semantic invalidations are handled by sync.
         if self.status != PlaybackStatus::Playing {
@@ -519,7 +565,9 @@ impl VisualizerRuntime {
         let sequence = &mut self.sequence;
         let needs_refresh = self.needs_refresh;
         let awaiting_replacement = self.awaiting_replacement;
-        let source = self.animation_clock.source;
+        let source = staging
+            .settings
+            .map(|_| (staging.generation, staging.sample_rate));
         // Acceptance and the local copy share the transport's synchronous lock
         // boundary. No transport lock survives into renderer/GPU work below.
         if !self.handle.consume_current_analysis(|frame| {
@@ -535,6 +583,18 @@ impl VisualizerRuntime {
             return;
         }
         self.needs_refresh = false;
+        self.awaiting_replacement = false;
+        self.presentation_pending = true;
+        if self.frequency_enabled {
+            self.frequency_views.collect(&self.staging);
+        }
+    }
+
+    fn present_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.status != PlaybackStatus::Playing || !self.presentation_pending || !self.active() {
+            return;
+        }
+        self.presentation_pending = false;
         self.awaiting_replacement = false;
         self.animation_clock.accept(&self.staging, now);
         let time = self.animation_clock.advance(now);
@@ -573,6 +633,9 @@ impl VisualizerRuntime {
     }
 
     fn notify_panels(&self, analysis: bool, cx: &mut Context<Self>) {
+        if !self.visible || self.shutting_down {
+            return;
+        }
         for (id, view) in &self.views {
             if self
                 .panels
@@ -639,7 +702,7 @@ impl VisualizerRuntime {
 
     /// Called by the shell's first paint, after every panel's prepaint.
     pub(in crate::gui) fn finish_paint(&self, cx: &mut Context<Self>) {
-        if self.frequency_views.finish_prepaint() {
+        if self.active() && self.frequency_views.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
             // Repaint siblings to reflect the shared history extent.
             for (id, view) in &self.views {
@@ -657,8 +720,10 @@ impl VisualizerRuntime {
         self.demand = DisplayDemand::default();
         self.handle.set_display_demand(self.demand);
         self.handle.set_waveform_demand(false);
+        self.handle.set_waveform_presentation_visible(false);
         self.staging = AnalysisFrame::default();
         self.needs_refresh = false;
+        self.presentation_pending = false;
         self.awaiting_replacement = false;
         self.frequency_views.clear_presentation();
         self.style_coordinator.clear();
@@ -678,6 +743,7 @@ impl Drop for VisualizerRuntime {
     fn drop(&mut self) {
         self.handle.set_display_demand(DisplayDemand::default());
         self.handle.set_waveform_demand(false);
+        self.handle.set_waveform_presentation_visible(false);
     }
 }
 
@@ -1189,6 +1255,107 @@ mod tests {
     }
 
     #[gpui::test]
+    fn pause_discards_unpresented_input_before_a_queued_display_callback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save_fixture(&config_path)
+        .unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        let owner = cx.new(|cx| {
+            VisualizerRuntime::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                cx,
+            )
+        });
+        let mut layout = layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        };
+        let panel = layout.add("audio_visualizer", None);
+        layout.set_audio_visualizer_options(
+            panel,
+            AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Spectrum,
+                reference_lines: false,
+                labels: false,
+                oscilloscope_overlay_channels: false,
+            },
+        );
+        let panels = demand(&layout);
+        let state = |status| VisualizerInputs {
+            config: Arc::clone(&config),
+            panels: &panels,
+            status,
+            source_generation: 0,
+            seek_revision: 0,
+            stopped_source_generation: None,
+            visible: true,
+            shutting_down: false,
+            current_track_id: None,
+            waveform_track: None,
+            position: 0.0,
+            duration: None,
+        };
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.sync(state(PlaybackStatus::Playing), cx);
+                let start = Instant::now();
+                owner.staging = AnalysisFrame {
+                    sequence: 1,
+                    generation: 1,
+                    sample_rate: 48_000,
+                    sample_time: Duration::from_secs(1),
+                    settings: Some(config.as_ref().into()),
+                    spectrum_requested: true,
+                    frequencies_hz: vec![100.0, 1000.0],
+                    spectrum_db: vec![-12.0, -24.0],
+                    ..Default::default()
+                };
+                owner.presentation_pending = true;
+                owner.present_analysis(start, cx);
+                assert_eq!(owner.animation_clock.latest, Some(Duration::from_secs(1)));
+                // B arrived after the displayed A, but before the next capped draw.
+                owner.staging.sequence = 2;
+                owner.staging.sample_time = Duration::from_secs(2);
+                owner.staging.spectrum_db.fill(-3.0);
+                owner.frequency_views.collect(&owner.staging);
+                owner.presentation_pending = true;
+                owner.sync(state(PlaybackStatus::Paused), cx);
+                assert!(!owner.presentation_pending);
+                owner.animation_frame(
+                    owner.frame_generation,
+                    start + Duration::from_secs(2),
+                    window,
+                    cx,
+                );
+                assert_eq!(owner.animation_clock.latest, Some(Duration::from_secs(1)));
+                assert_eq!(owner.animation_clock.time, Duration::from_secs(1));
+                // Playback admission also guards the commit operation itself.
+                owner.presentation_pending = true;
+                owner.present_analysis(start + Duration::from_secs(3), cx);
+                assert_eq!(owner.animation_clock.latest, Some(Duration::from_secs(1)));
+                assert_eq!(owner.animation_clock.time, Duration::from_secs(1));
+            });
+        });
+    }
+
+    #[gpui::test]
     fn pause_preserves_displayed_publication_instead_of_consuming_worker_reset(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1255,7 +1422,7 @@ mod tests {
                 cx,
             );
             owner.needs_refresh = true;
-            owner.consume_analysis(Instant::now(), cx);
+            owner.consume_analysis();
             assert_eq!(owner.sequence, 7);
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.staging.visualizer.pcm[0], [0.25, -0.5]);
@@ -1267,7 +1434,7 @@ mod tests {
             // Keep the accepted picture and do not restart animation from it.
             owner.status = PlaybackStatus::Playing;
             owner.awaiting_replacement = true;
-            owner.consume_analysis(Instant::now(), cx);
+            owner.consume_analysis();
             assert!(owner.awaiting_replacement);
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.sequence, 7);
@@ -1276,7 +1443,7 @@ mod tests {
             // sync owns retirement and discards staged input at the boundary.
             owner.awaiting_replacement = false;
             owner.status = PlaybackStatus::Stopped;
-            owner.consume_analysis(Instant::now(), cx);
+            owner.consume_analysis();
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.sequence, 7);
         });
@@ -1580,7 +1747,11 @@ mod tests {
                     },
                     cx,
                 );
-                assert_eq!(owner.demand, DisplayDemand::default());
+                assert!(owner.demand.enabled);
+                assert!(owner.demand.visualizer.spectrogram);
+                assert!(!owner.animating());
+                owner.request_frame(window, cx);
+                assert!(!owner.frame_pending);
                 assert!(
                     !owner.frame_pending,
                     "cancellation removes only this client's slot"
@@ -1774,7 +1945,15 @@ mod tests {
                     owner.panels.get(&waveform_id),
                     Some(PanelKind::Waveform(_))
                 ));
-                assert!(!owner.demand.enabled);
+                assert!(
+                    owner.demand.enabled,
+                    "inactive configured spectrogram keeps collecting"
+                );
+                owner.request_frame(window, cx);
+                assert!(
+                    !owner.frame_pending,
+                    "waveform tab does not animate hidden spectrogram"
+                );
                 owner.sync(
                     VisualizerInputs {
                         stopped_source_generation: None,
@@ -1820,7 +1999,11 @@ mod tests {
                 assert!(!owner.layout_panels.contains_key(&panel_id));
                 assert_eq!(owner.layout_panels.len(), 1);
                 assert_eq!(owner.panels.len(), 1);
-                assert_eq!(owner.frame_generation, generation);
+                assert_ne!(owner.frame_generation, generation);
+                assert!(
+                    !owner.demand.enabled,
+                    "removing the last configured spectrogram stops analysis"
+                );
                 owner.release_display_resources(cx);
                 assert_eq!(owner.demand, DisplayDemand::default());
             });
@@ -1928,7 +2111,7 @@ mod tests {
             assert!(owner.staging.settings.is_none());
             assert!(owner.staging.spectrum_db.is_empty());
             assert!(!owner.animating());
-            owner.consume_analysis(Instant::now(), cx);
+            owner.consume_analysis();
             assert!(owner.style_coordinator.idle_fading(Instant::now()));
             assert!(owner.staging.settings.is_none());
             // Duplicate Stop carries the original receipt and never restarts its clock.

@@ -273,6 +273,51 @@ This changes PCM lifetime, not the budget, graph result or model execution polic
 Evidence and resolution:
 link:90_open_issues.adoc#model-boundary-retirement[model-boundary retirement].
 
+[[DEC-013]]
+=== DEC-013: History collection outlives presentation visibility
+
+Status: implemented and independently reviewed, 2026-11-07.
+
+Configured Waveform and Spectrogram views continue bounded audio collection while
+their panels or window are hidden. Visibility controls drawing, animation and
+derived GPU publication, not whether played audio enters their history. Reveal
+uses the latest collected history rather than replaying a hidden backlog or
+waiting for an empty window to fill. Removing the corresponding layout views,
+disabling visualizations or destroying the window still relinquishes collection.
+
+Spectrogram is a rolling audio-stream record: seek and track replacement start
+new analysis intervals without discarding compatible historical columns. Waveform
+remains a per-source, media-position summary rather than a cross-track stream.
+Incompatible analysis settings may invalidate frequency history; actual capture
+loss is not evidence of measured silence. The accepted cost is continued bounded
+PCM/analysis work while history views are configured, not a claim of negligible
+CPU or power use. See link:23_visuals.adoc[Visualization Rendering Design].
+
+Collection and presentation have separate acceptance points: audio notifications
+append CPU history, while capped callbacks commit live presentation. Pause retires
+unpresented live input; revealing a paused/stopped Spectrogram uses its collected
+domain and matching labels without accepting another live frame. Deterministic
+lifecycle checks and an isolated nested-Wayland run cover hidden-tab collection,
+initial Waveform reveal, seek/track retention and stopped higher-rate reveal.
+This is not a claim of compositor-specific occlusion notification coverage.
+
+An optimized GUI-only build on a Ryzen 7 8745HS measured 48 kHz mono PCM,
+FFT 8192, analysis 28 Hz, a 20-second history and a 60 FPS presentation cap in a
+1280×800 nested Wayland window. Each state used three five-second process-CPU
+samples after warm-up; 100% means one logical CPU, excluding compositor/GPU work.
+The no-history baseline used only Queue, not merely inactive history tabs.
+
+[cols="2,1,1",options="header"]
+|===
+|State |GUI CPU range |Core CPU range
+|Both histories configured, Queue visible |1.4–1.8% |1.0%
+|Queue only, no history views configured |0.2–0.4% |0.4–0.8%
+|===
+
+These observations establish a modest nonzero cost for this workload, not a
+worst-case FFT/rate bound or a power measurement. Source-only optimization
+recommendations from the subsequent read-only scan remain unimplemented.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

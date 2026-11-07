@@ -3,7 +3,7 @@
 //! bins into bounded logarithmic history rows. Time buckets follow physical plot
 //! width without changing the configured audio-time span. Missing history stays
 //! blank. Only accepted audio changes history; display ticks move retained tiles.
-//! Hidden panels release working data and keep only bounded final publications.
+//! Configured spectrograms retain bounded CPU history even while not presented.
 
 mod sampling;
 mod spectrogram;
@@ -58,6 +58,8 @@ enum FrequencyKind {
 
 struct FrequencyState {
     enabled: bool,
+    presentation_visible: bool,
+    spectrum_palette_dirty: bool,
     last_analysis_sequence: Option<u64>,
     frequencies: Vec<f32>,
     sample_rate: u32,
@@ -72,6 +74,8 @@ struct FrequencyState {
     analysis_rate_hz: u32,
     stream_generation: u64,
     source_generation: Option<u64>,
+    source_sample_time: Option<Duration>,
+    sample_time_offset: Duration,
     latest_sample_time: Option<Duration>,
     error: Option<String>,
     last_paint_error: Option<String>,
@@ -98,6 +102,8 @@ impl FrequencyViews {
         Self {
             data: Rc::new(RefCell::new(FrequencyState {
                 enabled: true,
+                presentation_visible: true,
+                spectrum_palette_dirty: false,
                 last_analysis_sequence: None,
                 frequencies: Vec::new(),
                 sample_rate: 0,
@@ -112,6 +118,8 @@ impl FrequencyViews {
                 analysis_rate_hz: config.analysis_rate_hz,
                 stream_generation: 0,
                 source_generation: None,
+                source_sample_time: None,
+                sample_time_offset: Duration::ZERO,
                 latest_sample_time: None,
                 error: None,
                 last_paint_error: None,
@@ -165,6 +173,33 @@ impl FrequencyViews {
         data.spectrum.top_db = 0.0;
         data.refresh_db_labels();
     }
+
+    /// Invalidate live signal output without revoking the continuous audio history.
+    pub fn invalidate_signal(&mut self) {
+        let mut data = self.data.borrow_mut();
+        data.latest_levels.clear();
+        data.spectrum.peaks.clear();
+        data.spectrum.peak_deadlines.clear();
+        data.spectrum.bar_levels.clear();
+        data.spectrum.bar_deadlines.clear();
+        data.spectrum.smoothed_levels.clear();
+        data.spectrum.mappings.clear();
+        data.spectrum.presentations.clear();
+        data.spectrum.envelope_initialized = false;
+        data.spectrum.last_update = None;
+        data.spectrum.top_db = 0.0;
+        data.refresh_db_labels();
+    }
+
+    /// Presentation suspension keeps sampling dimensions and bounded CPU history.
+    pub fn set_presentation_visible(&mut self, visible: bool) {
+        let mut data = self.data.borrow_mut();
+        if visible && !data.presentation_visible && data.spectrogram.latest_sample_time.is_some() {
+            data.display_time = data.spectrogram.latest_sample_time;
+            data.refresh_frequency_labels();
+        }
+        data.presentation_visible = visible;
+    }
     pub fn configure(&mut self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
         data.material_budget_bytes
@@ -173,7 +208,7 @@ impl FrequencyViews {
         let spectrogram_db_range = config.spectrogram_db_range();
         let palette_changed = data.palette_lut.palette != config.visualization_palette;
         let history_missing =
-            data.enabled && data.spectrogram.visible && data.spectrogram.history_columns == 0;
+            data.enabled && data.spectrogram.collecting && data.spectrogram.history_columns == 0;
         let background_changed =
             data.visualization_background != config.visualization_background.rgb();
         let spectrum_appearance_changed = palette_changed || background_changed;
@@ -236,12 +271,14 @@ impl FrequencyViews {
         data.spectrogram.db_range = spectrogram_db_range;
         data.spectrogram.history_seconds = config.spectrogram_history_seconds;
         data.analysis_rate_hz = config.analysis_rate_hz;
-        if data.enabled && data.spectrogram.visible && history_changed {
+        if data.enabled && data.spectrogram.collecting && history_changed {
             // Use the measured panel width before any lossy frequency-row
             // resampling, not a temporary history_seconds * Hz capacity.
             data.finish_prepaint();
         }
         if analysis_changed {
+            // Explicit FFT/window/signal selection changes invalidate the meaning
+            // of retained history; ordinary source/rate/seek changes do not.
             data.clear_history();
             data.latest_levels.clear();
             data.spectrum.peaks.clear();
@@ -256,16 +293,33 @@ impl FrequencyViews {
         } else if heat_changed {
             data.invalidate_spectrogram();
         }
-        if palette_changed
+        if palette_changed {
+            data.spectrum_palette_dirty = !data.presentation_visible || !data.spectrum.visible;
+        }
+        if palette_changed && !data.presentation_visible {
+            data.spectrogram.presentations.clear();
+            data.invalidate_spectrogram();
+        } else if palette_changed
             && !background_changed
             && !spectrum_changed
             && !analysis_changed
+            && data.spectrum.visible
             && let Err(error) = data.recolor_spectrum()
         {
             data.error = Some(error);
             data.spectrum.presentations.clear();
         }
-        if palette_changed && !analysis_changed && !heat_changed && !history_span_changed {
+        if palette_changed && !data.spectrogram.presentation_visible {
+            data.spectrogram.presentations.clear();
+            data.invalidate_spectrogram();
+        }
+        if palette_changed
+            && data.presentation_visible
+            && data.spectrogram.presentation_visible
+            && !analysis_changed
+            && !heat_changed
+            && !history_span_changed
+        {
             // Reuse retained scalar fields, including suspended presentations.
             // Palette selection never invalidates analysis or resamples history.
             if let Err(error) = data.recolor_spectrogram() {
@@ -284,9 +338,54 @@ impl FrequencyViews {
         true
     }
 
-    pub fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
+    /// Accept bounded CPU history without changing live envelopes, display time,
+    /// or labels, creating GPU publications, or issuing presentation invalidations.
+    pub fn collect(&mut self, frame: &AnalysisFrame) {
         let mut data = self.data.borrow_mut();
-        if !data.enabled || (!data.spectrum.visible && !data.spectrogram.visible) {
+        if !data.enabled
+            || !frame.spectrum_requested
+            || frame.spectrum_db.is_empty()
+            || frame.spectrum_db.len() != frame.frequencies_hz.len()
+            || !frame.settings.is_some_and(|settings| {
+                settings.signal_compatible_with(rivu_analysis::AnalysisSettings {
+                    fps: data.analysis_rate_hz,
+                    fft_size: data.analysis_fft_size,
+                    window: data.analysis_window,
+                    signal: data.visualization_signal,
+                })
+            })
+        {
+            return;
+        }
+        let identity = (frame.sequence, frame.generation, frame.sample_time);
+        if data.spectrogram.last_analysis == Some(identity) {
+            return;
+        }
+        if data
+            .source_sample_time
+            .is_some_and(|last| frame.sample_time < last)
+        {
+            let previous = data.source_sample_time.unwrap();
+            data.sample_time_offset += previous;
+        }
+        data.source_sample_time = Some(frame.sample_time);
+        let time = frame.sample_time.saturating_add(data.sample_time_offset);
+        data.spectrogram.last_analysis = Some(identity);
+        data.spectrogram.sample_rate = frame.sample_rate;
+        data.spectrogram.source_generation = Some(frame.generation);
+        if data.spectrogram.collecting
+            && frame.visualizer.demand.spectrogram
+            && !frame.visualizer.spectrogram.is_empty()
+        {
+            data.push_fft_history(time, &frame.visualizer.spectrogram);
+        }
+        data.spectrogram.latest_sample_time = Some(time);
+    }
+
+    pub fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
+        self.collect(frame);
+        let mut data = self.data.borrow_mut();
+        if !data.enabled || (!data.spectrum.visible && !data.spectrogram.collecting) {
             return;
         }
         if !frame.settings.is_some_and(|settings| {
@@ -307,7 +406,6 @@ impl FrequencyViews {
             data.spectrum.presentations.clear();
             // Continuity loss revokes live Spectrum output, not compatible
             // historical Spectrogram buckets or their last publication.
-            data.display_time = None;
             data.spectrum.envelope_initialized = false;
             data.last_analysis_sequence = None;
             data.spectrum.last_update = None;
@@ -329,16 +427,11 @@ impl FrequencyViews {
         let sample_rate_changed = data.sample_rate != frame.sample_rate;
         data.sample_rate = frame.sample_rate;
         if sample_rate_changed || data.frequencies != frame.frequencies_hz {
-            data.invalidate_spectrogram();
             data.stream_generation = data.stream_generation.wrapping_add(1);
             data.latest_levels.clear();
             data.spectrum.envelope_initialized = false;
             data.frequencies.clone_from(&frame.frequencies_hz);
             data.spectrum.top_db = 0.0;
-            let generation = data.stream_generation;
-            for column in &mut data.spectrogram.columns {
-                column.generation = generation;
-            }
             data.spectrum.last_update = None;
             data.refresh_db_labels();
             data.refresh_frequency_labels();
@@ -346,31 +439,20 @@ impl FrequencyViews {
         if frame.spectrum_db.is_empty() {
             return;
         }
-        let now = presentation_time;
-        if data
-            .latest_sample_time
-            .is_some_and(|last| frame.sample_time < last)
-        {
-            data.clear_history();
-            data.spectrum.last_update = None;
-            data.spectrum.envelope_initialized = false;
-        }
+        let sample_time = frame.sample_time.saturating_add(data.sample_time_offset);
+        let now = presentation_time.saturating_add(data.sample_time_offset);
         // Finish the old target's interval before accepting its replacement.
         // Input arriving on every display tick must not suppress release.
-        data.advance_spectrum(now);
+        if data.presentation_visible {
+            data.advance_spectrum(now);
+        }
         let new_input = data.last_analysis_sequence != Some(frame.sequence);
         data.latest_levels.clone_from(&frame.spectrum_db);
-        if data.spectrogram.visible
-            && new_input
-            && frame.visualizer.demand.spectrogram
-            && !frame.visualizer.spectrogram.is_empty()
-        {
-            data.push_fft_history(frame.sample_time, &frame.visualizer.spectrogram);
-        }
         data.last_analysis_sequence = Some(frame.sequence);
-        data.latest_sample_time = Some(frame.sample_time);
-        data.display_time = Some(presentation_time);
-        if !data.spectrum.visible {
+        data.latest_sample_time = Some(sample_time);
+        data.display_time = Some(now);
+        data.refresh_frequency_labels();
+        if !data.presentation_visible || !data.spectrum.visible {
             return;
         }
         if !new_input && data.spectrum.envelope_initialized {
@@ -436,7 +518,8 @@ impl FrequencyViews {
     pub fn animate(&mut self, presentation_time: Duration) -> bool {
         let mut data = self.data.borrow_mut();
         if !data.enabled
-            || (!data.spectrum.visible && !data.spectrogram.visible)
+            || !data.presentation_visible
+            || (!data.spectrum.visible && !data.spectrogram.presentation_visible)
             || data.error.is_some()
         {
             return false;
@@ -444,7 +527,9 @@ impl FrequencyViews {
         let Some(latest) = data.latest_sample_time else {
             return false;
         };
-        let now = presentation_time.min(latest);
+        let now = presentation_time
+            .saturating_add(data.sample_time_offset)
+            .min(latest);
         let Some(previous) = data.display_time else {
             return false;
         };
@@ -452,7 +537,9 @@ impl FrequencyViews {
             return false;
         }
         data.display_time = Some(now);
-        let mut changed = data.spectrogram.visible && data.spectrogram.len > 0;
+        let mut changed = data.spectrogram.presentation_visible
+            && data.spectrogram.collecting
+            && data.spectrogram.len > 0;
         if !data.spectrum.visible || !data.spectrum.envelope_initialized {
             return changed;
         }
@@ -492,15 +579,27 @@ impl FrequencyViews {
     }
     pub fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
-        // Cached panel views may reuse prepaint. Keep their last measurement
-        // until the panel is hidden/removed or prepaints with changed bounds.
+        // Retain configured panels, including inactive tabs. Their last measured
+        // dimensions continue to bound collection until removed from the layout.
         data.spectrogram
             .panel_sizes
             .retain(|panel_id, _| panel_ids.contains(panel_id));
-        data.spectrogram.visible = !panel_ids.is_empty();
+        data.spectrogram.collecting = !panel_ids.is_empty();
         if panel_ids.is_empty() {
             data.release_history();
         }
+    }
+
+    /// Visible panels may publish/animate; configured hidden panels only collect.
+    pub fn set_spectrogram_visible(&mut self, visible: bool) -> bool {
+        let mut data = self.data.borrow_mut();
+        let restored = visible && !data.spectrogram.presentation_visible;
+        data.spectrogram.presentation_visible = visible;
+        if restored && data.spectrogram.latest_sample_time.is_some() {
+            data.display_time = data.spectrogram.latest_sample_time;
+            data.refresh_frequency_labels();
+        }
+        restored
     }
 
     pub fn set_spectrum_visible(&self, visible: bool) -> bool {
@@ -512,6 +611,13 @@ impl FrequencyViews {
             data.spectrum.last_update = None;
             if !visible {
                 data.release_spectrum();
+            }
+        }
+        if visible && data.presentation_visible && data.spectrum_palette_dirty {
+            data.spectrum_palette_dirty = false;
+            if let Err(error) = data.recolor_spectrum() {
+                data.error = Some(error);
+                data.spectrum.presentations.clear();
             }
         }
         restored
@@ -668,6 +774,9 @@ impl FrequencyState {
         available: gpui::Size<Pixels>,
         show_labels: bool,
     ) -> bool {
+        if !self.enabled || !self.presentation_visible {
+            return false;
+        }
         let has_room = visual_canvas_has_room(available);
         if mode == FrequencyKind::Spectrogram {
             if has_room {
@@ -870,6 +979,236 @@ impl FrequencyViews {
 mod tests {
     use super::*;
     use rivu_format::config::Config;
+
+    #[test]
+    fn stopped_reveal_labels_follow_the_domain_collected_while_hidden() {
+        for hide_window in [false, true] {
+            let mut visuals = configured_visuals();
+            let first = frame(1.0, -30.0);
+            visuals.update(&first, first.sample_time);
+            publish_analysis_views(&visuals, 1);
+            assert_eq!(
+                visuals.data.borrow().spectrogram.frequency_labels[1].as_ref(),
+                "24 kHz"
+            );
+            visuals.set_spectrogram_visible(false);
+            if hide_window {
+                visuals.set_presentation_visible(false);
+            }
+            let mut hidden = frame(1.1, -20.0);
+            hidden.sample_rate = 96_000;
+            hidden.generation += 1;
+            visuals.collect(&hidden);
+            assert_eq!(
+                visuals.data.borrow().spectrogram.frequency_labels[1].as_ref(),
+                "24 kHz",
+                "collection does not commit visible labels"
+            );
+            // Stop retires live signal output, without accepting another display frame.
+            visuals.invalidate_signal();
+            visuals.set_presentation_visible(true);
+            visuals.set_spectrogram_visible(true);
+            let mut data = visuals.data.borrow_mut();
+            assert_eq!(data.spectrogram.frequency_labels[1].as_ref(), "48 kHz");
+            data.prepare_spectrogram_presentation(1).unwrap();
+            assert_eq!(
+                data.spectrogram.presentations[&1].labels[1].as_ref(),
+                "48 kHz"
+            );
+            assert_eq!(data.display_time, Some(hidden.sample_time));
+        }
+    }
+
+    #[test]
+    fn analysis_collection_does_not_commit_the_display_between_capped_frames() {
+        let mut visuals = configured_visuals();
+        let initial = frame(1.0, -60.0);
+        visuals.update(&initial, initial.sample_time);
+        publish_analysis_views(&visuals, 1);
+        let (retained, deadlines, db_labels) = {
+            let data = visuals.data.borrow();
+            (
+                Arc::clone(&data.spectrogram.presentations[&1]),
+                data.spectrum.peak_deadlines.clone(),
+                data.spectrum.db_labels.clone(),
+            )
+        };
+        // Sixty producer wakes between two one-Hz presentation callbacks.
+        for tick in 1..=60 {
+            let time = 1.0 + tick as f64 / 60.0;
+            visuals.collect(&frame(time, -3.0));
+        }
+        let history_len = {
+            let data = visuals.data.borrow();
+            assert_eq!(data.display_time, Some(initial.sample_time));
+            assert_eq!(data.latest_sample_time, Some(initial.sample_time));
+            assert_eq!(data.latest_levels, initial.spectrum_db);
+            assert_eq!(data.spectrum.peaks, initial.spectrum_db);
+            assert_eq!(data.spectrum.peak_deadlines, deadlines);
+            assert_eq!(data.spectrum.db_labels, db_labels);
+            assert_eq!(data.last_analysis_sequence, Some(initial.sequence));
+            assert_eq!(
+                data.spectrogram.latest_sample_time,
+                Some(Duration::from_secs(2))
+            );
+            assert!(data.spectrogram.len > 1);
+            assert!(Arc::ptr_eq(&data.spectrogram.presentations[&1], &retained));
+            data.spectrogram.len
+        };
+        let latest = frame(2.0, -3.0);
+        visuals.update(&latest, latest.sample_time);
+        publish_analysis_views(&visuals, 1);
+        let data = visuals.data.borrow();
+        assert_eq!(data.display_time, Some(latest.sample_time));
+        assert_eq!(data.latest_levels, latest.spectrum_db);
+        assert_eq!(data.spectrum.peaks, latest.spectrum_db);
+        assert_eq!(
+            data.spectrogram.len, history_len,
+            "display commit does not recollect audio"
+        );
+        assert!(!Arc::ptr_eq(&data.spectrogram.presentations[&1], &retained));
+    }
+
+    #[test]
+    fn hidden_spectrogram_collects_bounded_history_without_publishing_until_return() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
+        visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+        publish_analysis_views(&visuals, 1);
+        let (retained, dimensions, capacity) = {
+            let data = visuals.data.borrow();
+            (
+                Arc::clone(&data.spectrogram.presentations[&1]),
+                data.spectrogram.panel_sizes.clone(),
+                data.spectrogram.history_columns,
+            )
+        };
+        visuals.set_presentation_visible(false);
+        visuals.set_spectrum_visible(false);
+        visuals.set_spectrogram_visible(false);
+        for tick in 12..=1200 {
+            let time = Duration::from_millis(tick * 100);
+            let level = if tick == 1199 { -3.0 } else { -60.0 };
+            visuals.collect(&frame(time.as_secs_f64(), level));
+        }
+        assert!(!visuals.animate(Duration::from_secs(121)));
+        publish_analysis_views(&visuals, 1);
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrogram.panel_sizes, dimensions);
+            assert_eq!(data.spectrogram.history_columns, capacity);
+            assert!(data.spectrogram.len <= capacity);
+            assert_eq!(data.spectrogram.columns.len(), capacity);
+            assert!(
+                data.spectrogram
+                    .columns
+                    .iter()
+                    .all(|column| column.levels.len() <= 1024)
+            );
+            assert!(Arc::ptr_eq(&data.spectrogram.presentations[&1], &retained));
+            assert_eq!(data.display_time, Some(Duration::from_millis(1100)));
+            assert_eq!(
+                data.spectrogram.latest_sample_time,
+                Some(Duration::from_secs(120))
+            );
+        }
+        visuals.set_presentation_visible(true);
+        assert!(visuals.set_spectrogram_visible(true));
+        publish_analysis_views(&visuals, 1);
+        let data = visuals.data.borrow();
+        let returned = &data.spectrogram.presentations[&1];
+        assert!(!Arc::ptr_eq(returned, &retained));
+        assert!(
+            returned.layers.iter().any(|(_, publication)| {
+                matches!(publication.content(), gpui::GpuContent::Field { values, .. }
+                if values.iter().any(|&level| level >= -3.01))
+            }),
+            "returning publishes the transient collected while hidden"
+        );
+    }
+
+    #[test]
+    fn never_presented_configured_spectrogram_collects_at_bounded_analysis_cadence() {
+        let config = Config::default();
+        let mut visuals = FrequencyViews::new();
+        visuals.retain_spectrogram_panels(&[1]);
+        visuals.set_spectrum_visible(false);
+        visuals.set_spectrogram_visible(false);
+        visuals.set_presentation_visible(false);
+        visuals.configure_config(&config);
+        for tick in 1..=20 {
+            let time = Duration::from_millis(tick * 100);
+            visuals.collect(&frame(time.as_secs_f64(), -30.0));
+        }
+        let data = visuals.data.borrow();
+        assert_eq!(
+            data.spectrogram.history_columns,
+            history_column_count(config.spectrogram_history_seconds, config.analysis_rate_hz)
+        );
+        assert!(data.spectrogram.len > 2);
+        assert!(data.spectrogram.tiles.is_empty());
+        assert!(data.spectrogram.presentations.is_empty());
+    }
+
+    #[test]
+    fn seeks_and_track_rate_changes_append_without_media_gaps_or_losing_old_bands() {
+        let mut visuals = configured_visuals();
+        let fft = Config::default().analysis_fft_size;
+        let mut high_rate = frame(1.0, -80.0);
+        high_rate.sample_rate = 96_000;
+        let mut bins = vec![-80.0; fft as usize / 2];
+        let peak = (40_000.0 * fft as f32 / 96_000.0).round() as usize - 1;
+        bins[peak] = -3.0;
+        high_rate.visualizer.spectrogram = bins.into();
+        visuals.update(&high_rate, high_rate.sample_time);
+        visuals.invalidate_signal();
+        let mut low_rate = frame(1.1, -40.0);
+        low_rate.generation = 2;
+        low_rate.audio_epoch = 2;
+        low_rate.audio_intent = 100;
+        low_rate.sample_rate = 8_000;
+        visuals.update(&low_rate, low_rate.sample_time);
+        visuals.invalidate_signal();
+        let mut returned_rate = frame(1.2, -60.0);
+        returned_rate.sample_rate = 96_000;
+        returned_rate.generation = 3;
+        returned_rate.audio_epoch = 3;
+        returned_rate.audio_intent = 200;
+        visuals.update(&returned_rate, returned_rate.sample_time);
+        publish_analysis_views(&visuals, 1);
+        let data = visuals.data.borrow();
+        assert_eq!(data.spectrogram.len, 3);
+        assert_eq!(
+            data.spectrogram.columns[0].sample_time,
+            Some(high_rate.sample_time)
+        );
+        assert_eq!(
+            data.spectrogram.columns[1].interval_start,
+            high_rate.sample_time
+        );
+        assert_eq!(
+            data.spectrogram.columns[2].interval_start,
+            low_rate.sample_time
+        );
+        assert_eq!(data.visible_range().unwrap().3, 48_000.0);
+        assert!(
+            data.spectrogram.columns[1]
+                .levels
+                .iter()
+                .any(|level| !level.is_finite()),
+            "8 kHz source must not invent content above its Nyquist frequency"
+        );
+        assert!(
+            data.spectrogram.presentations[&1]
+                .layers
+                .iter()
+                .any(|(_, publication)| {
+                    matches!(publication.content(), gpui::GpuContent::Field { values, .. }
+                if values.iter().any(|&level| level >= -3.01))
+                }),
+            "the earlier 40 kHz peak survives a lower-rate track and returning source"
+        );
+    }
 
     #[test]
     fn native_ticks_release_and_scroll_without_reaccepting_audio() {
@@ -1635,7 +1974,10 @@ mod tests {
             level_range(&data.spectrogram.columns[1].levels),
             Some((-60.0, -60.0))
         );
-        assert_eq!(data.spectrogram.columns[1].interval_start, next.sample_time);
+        assert_eq!(
+            data.spectrogram.columns[1].interval_start,
+            Duration::from_secs_f64(1.02)
+        );
         assert_eq!(data.spectrum.peaks, vec![-60.0; 4]);
         assert_eq!(data.spectrum.bar_levels, vec![-60.0; 4]);
         assert_eq!(data.spectrum.smoothed_levels, vec![-60.0; 4]);
@@ -1662,6 +2004,8 @@ mod tests {
             let mut fresh = frame(2.1, -60.0);
             fresh.settings = Some(rivu_analysis::AnalysisSettings::from(&config));
             fresh.generation = 2;
+            fresh.visualizer.spectrogram =
+                vec![-60.0; config.analysis_fft_size as usize / 2].into();
             visuals.update(&fresh, fresh.sample_time);
             assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-60.0; 4]);
             let before = visuals.data.borrow().latest_sample_time;
@@ -1781,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn spectrogram_history_requires_visible_demand_and_restarts_without_hidden_frames() {
+    fn spectrogram_history_requires_configured_demand_and_stops_when_removed() {
         let mut visuals = FrequencyViews::new();
         let mut config = Config::default();
         visuals.configure_config(&config);
@@ -2756,7 +3100,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_views_keep_only_final_output_until_fresh_drawable_publication() {
+    fn disabled_views_keep_only_final_output_until_fresh_drawable_publication() {
         let mut visuals = configured_visuals();
         let config = Config::default();
         visuals.configure_config(&config);
@@ -3731,7 +4075,8 @@ mod tests {
         assert_eq!(expanded, expected);
         drop(data);
 
-        let remap = sampling::frequency_rows(&old_axis, 16.0, 22050.0, 1024, false);
+        // A narrower source does not narrow the retained history's domain.
+        let remap = sampling::frequency_rows(&old_axis, 16.0, 24000.0, 1024, false);
         let expected: Vec<_> = remap
             .iter()
             .map(|row| sampling::frequency_level(&logical, row, false))

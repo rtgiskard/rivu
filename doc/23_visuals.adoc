@@ -28,9 +28,9 @@ accepts source/seek identities and owns scheduling; the host routes Waveform see
 load and decoder-hint events through existing playback and finite-render owners. Rendering
 introduces no additional analysis worker, PCM pool or animation loop. Constructors
 share configuration-projection defaults; history and GPU allocation are demand-driven.
-Frequency views ingest shared analysis only while Spectrum or Spectrogram is
-active; other styles do not advance their history. Each style owns its rendering
-state.
+Frequency views ingest shared analysis while Spectrum is visible or Spectrogram
+is configured in the layout. Spectrogram history collection is independent of
+presentation visibility; each style owns its rendering state.
 Resource capacities and release points belong to
 link:22_cache.adoc#visualization-caching[Visualization caching].
 
@@ -87,8 +87,8 @@ is ingested once, including across subscription boundaries. `analysis_rate_hz`
 limits publications and demanded FFT transforms, not PCM ingestion. The worker
 coalesces fresh input until a complete window and its publication deadline are
 available, then publishes one latest local shared frame rather than a result
-backlog. No fresh input means no publication timer; hidden, paused and disabled
-gates revoke pending analysis and timed wakeups.
+backlog. No fresh input means no publication timer; paused and disabled gates
+revoke pending analysis and timed wakeups. Hidden history views retain demand.
 
 Analysis always observes the latest complete window. When that window is shorter
 than the analysis interval, a transient between observed windows can be absent
@@ -120,7 +120,7 @@ Display enablement and optional payloads form one coalesced control state,
 independent of the business-command queue. Closing a window relinquishes demand
 even when that queue is full. Playback and visualization enablement remain separate gates;
 display demand never starts playback. Capture restarts fence queued input and
-late publications, including quick hide/show transitions.
+late publications. Hiding configured history views does not restart capture.
 
 Load, audition-source replacement and Seek reserve monotonic audio intent.
 Settings admission compares the latest successfully queued output, signal and
@@ -155,12 +155,13 @@ the edited processing. Neither operation automatically scans a track or clears
 the rolling waveform. Active audition visualization uses the actual audible
 source and admitted processing graph, not an arbitrary persisted graph recipe.
 
-GUI analysis demand follows visible views. Stereo density, spatial spectrum,
-integrated band energy, PCM, and full-bin Spectrogram data are independent requests
-combined across panels; one accepted audio window and stereo FFT supply them all. Optional
-demand changes preserve the sampling window, continuity generation, and surviving
-consumers' display clocks. Only losing all demand fences capture, including a quick
-hide/show that the worker did not observe as a steady state.
+Instantaneous GUI analysis demand follows visible views; configured Spectrogram
+and Waveform views retain collection demand while hidden. Stereo density, spatial
+spectrum, integrated band energy, PCM, and full-bin Spectrogram data are independent
+requests combined across panels; one accepted audio window and stereo FFT supply
+them all. Optional demand changes preserve the sampling window, continuity
+generation, and surviving consumers' display clocks. Losing all collection and
+presentation demand fences capture.
 
 Musical peaks, integrated band energy and Spectrogram reuse unnormalized bin power
 when their demands overlap. Each retains its own reduction and calibration:
@@ -179,9 +180,9 @@ snapshot with newer metrics.
 ==== Independent analysis and display clocks
 
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
-The background analysis worker owns the `analysis_rate_hz` deadline; native window
-callbacks consume its latest publication and advance animation independently.
-`visualizations.general.animation_fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
+The background analysis worker owns the `analysis_rate_hz` deadline; accepted
+publication notifications collect history independently of native window animation
+callbacks. `visualizations.general.animation_fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
 `0` follows window frames, and `1`–`240` limits requests per second. It does not
 throttle analysis, Waveform or artwork. Artwork and audio visualization share one
 window-local native-frame gate and one cancellable deadline timer, while retaining
@@ -221,9 +222,10 @@ Stop preserves the original cause and never restarts the fade or restores a
 hidden, cleared or already released drawing. Clearing the queue, replacing the
 source or an unmatched close clears the drawing rather than guessing continuity.
 
-Source replacement, seek intent, FFT/window/signal changes and disabling visualizations
-clear incompatible retained results even while paused or hidden. These semantic
-facts are independent of producer continuity generation and seek previews.
+Source replacement and seek retire instantaneous results without clearing compatible
+Spectrogram history. FFT/window/signal changes and disabling visualizations clear
+incompatible retained results even while paused or hidden. These semantic facts
+are independent of producer continuity generation and seek previews.
 Disabling visualizations discards live-analysis views rather than freezing them;
 the retained waveform summary follows <<visualization-enablement,Visualization enablement>>.
 
@@ -261,15 +263,16 @@ enabled. Playback, commands, and shutdown remain independent of presentation.
 
 ==== Visibility and layout retention
 
-A reliable Hidden notification cancels both clocks and disables analysis.
-Reveal waits for a current drawable replacement without replaying hidden audio;
-switching one panel never suspends unaffected visible panels. Final drawings,
+A reliable Hidden notification cancels presentation clocks and suspends demand for
+instantaneous styles. Configured Spectrogram and Waveform views continue bounded
+history collection. Reveal uses the latest collected history without replaying
+hidden audio; switching one panel never suspends unaffected visible panels.
+No invisible history update assembles a new GPU drawing. Final drawings,
 inactive-tab state and GUI analysis-worker pools have distinct lifetimes defined in
 link:22_cache.adoc#resource-boundaries[Resource boundaries].
-Loss of focus alone never disables analysis. Without a reliable visibility
-notification, compositor throttling limits native animation callbacks but not
-the worker's analysis deadline; analysis remains bounded by `analysis_rate_hz` and
-retains only the latest publication until visibility is revoked.
+Loss of focus alone never disables analysis. Without reliable visibility
+notifications, compositor throttling limits native animation callbacks but not
+the worker's bounded analysis cadence.
 
 == Visualization enablement
 
@@ -519,6 +522,10 @@ Frequency-row reduction and frames sharing a time bucket use maximum pooling
 rather than averaging, retaining narrow peaks and short transients. Display
 mapping can recolor compatible retained data without re-running audio analysis.
 A gap starts a new interval instead of drawing new audio across missing time.
+Seek and track replacement append subsequent accepted audio without erasing the
+window. Source-rate changes retain a common physical-frequency domain so older
+bands remain meaningful; new sources leave unsupported frequency bands blank.
+Explicit FFT/window/signal setting changes still invalidate incompatible history.
 
 Only accepted analysis frames write or pool history. Native display ticks move
 the time cursor and tile placements without rebuilding unchanged numerical

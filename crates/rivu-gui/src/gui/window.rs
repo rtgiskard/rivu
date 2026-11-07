@@ -648,6 +648,7 @@ impl WindowView {
                             this.artwork_images.release_all_retired(window, cx);
                         }
                         this.presentation.update(cx, |presentation, cx| {
+                            presentation.analysis_available(cx);
                             presentation.request_frame(window, cx)
                         });
                     })

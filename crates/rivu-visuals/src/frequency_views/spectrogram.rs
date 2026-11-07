@@ -12,7 +12,13 @@ use gpui::{
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub(super) struct Spectrogram {
-    pub(super) visible: bool,
+    pub(super) collecting: bool,
+    pub(super) presentation_visible: bool,
+    pub(super) sample_rate: u32,
+    pub(super) generation: u64,
+    pub(super) source_generation: Option<u64>,
+    pub(super) latest_sample_time: Option<Duration>,
+    pub(super) last_analysis: Option<(u64, u64, Duration)>,
     pub(super) panel_sizes: HashMap<u64, (usize, usize)>,
     pub(super) panel_height: usize,
     pub(super) frequency_labels: [SharedString; 2],
@@ -20,6 +26,7 @@ pub(super) struct Spectrogram {
     fft_frequencies: Vec<f32>,
     source_axis: (u32, u32),
     frequencies: Vec<f32>,
+    frequency_range: Option<(f32, f32)>,
     fft_rows: Vec<FrequencyRow>,
     pub(super) history_indices: Vec<u16>,
     row_values: Vec<f32>,
@@ -45,7 +52,13 @@ pub(super) struct Spectrogram {
 impl Spectrogram {
     pub(super) fn new(config: &VisualParameters) -> Self {
         Self {
-            visible: false,
+            collecting: false,
+            presentation_visible: true,
+            sample_rate: 0,
+            generation: 0,
+            source_generation: None,
+            latest_sample_time: None,
+            last_analysis: None,
             panel_sizes: HashMap::new(),
             panel_height: 0,
             frequency_labels: ["8 Hz".into(), "11 kHz".into()],
@@ -53,6 +66,7 @@ impl Spectrogram {
             fft_frequencies: Vec::new(),
             source_axis: (0, 0),
             frequencies: Vec::new(),
+            frequency_range: None,
             fft_rows: Vec::new(),
             history_indices: Vec::new(),
             row_values: Vec::new(),
@@ -161,19 +175,25 @@ pub(super) fn sample_spectrogram_column(
 
 impl FrequencyState {
     pub(super) fn finish_prepaint(&mut self) -> bool {
-        if !self.enabled || !self.spectrogram.visible {
+        if !self.enabled || !self.spectrogram.collecting {
             return false;
         }
-        // No drawable panels still retain the minimum history while their
-        // active panels await more room. Do not reuse a retired measurement or
-        // repeatedly clear/reallocate history on unchanged small frames.
+        // Measurements survive hiding. A configured panel never measured yet
+        // starts with the analysis cadence; visible undersized plots retain the
+        // minimum history until a drawable measurement replaces it.
         let width = self
             .spectrogram
             .panel_sizes
             .values()
             .map(|size| size.0)
             .max()
-            .unwrap_or(2);
+            .unwrap_or_else(|| {
+                if self.presentation_visible && self.spectrogram.presentation_visible {
+                    2
+                } else {
+                    history_column_count(self.spectrogram.history_seconds, self.analysis_rate_hz)
+                }
+            });
         let previous = (
             self.spectrogram.history_columns,
             self.spectrogram.panel_height,
@@ -204,20 +224,31 @@ impl FrequencyState {
             self.material_budget_bytes
                 .expect("configured visualization budget"),
         ));
-        if self.sample_rate == 0 || self.analysis_fft_size == 0 {
+        if self.spectrogram.sample_rate == 0 || self.analysis_fft_size == 0 {
             return;
         }
-        let source_axis = (self.sample_rate, self.analysis_fft_size);
+        let source_axis = (self.spectrogram.sample_rate, self.analysis_fft_size);
         if self.spectrogram.frequencies.len() == rows && self.spectrogram.source_axis == source_axis
         {
             return;
         }
-        let step = self.sample_rate as f32 / self.analysis_fft_size as f32;
+        let step = self.spectrogram.sample_rate as f32 / self.analysis_fft_size as f32;
         let low = 16.0_f32.max(step);
-        let high = self.sample_rate as f32 * 0.5;
+        let high = self.spectrogram.sample_rate as f32 * 0.5;
         if low >= high {
             return;
         }
+        // Keep a common physical-frequency domain across tracks and FFT sizes.
+        // Narrower sources add blank unsupported rows instead of deleting the
+        // high/low bands collected from an earlier source.
+        let (low, high) = self
+            .spectrogram
+            .frequency_range
+            .map_or((low, high), |(old_low, old_high)| {
+                (low.min(old_low), high.max(old_high))
+            });
+        self.spectrogram.frequency_range = Some((low, high));
+        self.spectrogram.generation = self.spectrogram.generation.wrapping_add(1);
         if self.spectrogram.source_axis != source_axis {
             self.spectrogram.fft_frequencies.clear();
             self.spectrogram.source_axis = source_axis;
@@ -253,7 +284,7 @@ impl FrequencyState {
                     .levels
                     .extend_from_slice(&self.spectrogram.row_values);
                 column.revision = column.revision.wrapping_add(1);
-                column.generation = self.stream_generation;
+                column.generation = self.spectrogram.generation;
             }
         }
         self.spectrogram.frequencies = new_axis;
@@ -262,7 +293,6 @@ impl FrequencyState {
         self.spectrogram.sample_height = 0;
         self.spectrogram.heat_samples.clear();
         self.invalidate_spectrogram();
-        self.refresh_frequency_labels();
     }
 
     pub(super) fn push_fft_history(&mut self, time: Duration, levels: &[f32]) {
@@ -273,11 +303,13 @@ impl FrequencyState {
         if self.spectrogram.fft_rows.is_empty() || self.spectrogram.history_columns < 2 {
             return;
         }
+        // Source/seek identities split buckets, never the accepted-audio axis.
+        // A missing FFT snapshot or an unobserved accepted-audio interval remains
+        // blank rather than being painted as if we had collected that signal.
         let discontinuity = self.spectrogram.latest.is_some_and(|index| {
-            self.spectrogram.columns[index].generation != self.stream_generation
-                || self.spectrogram.columns[index].source_generation != self.source_generation
-                || self.spectrogram.columns[index].sample_time != self.latest_sample_time
+            self.spectrogram.columns[index].sample_time != self.spectrogram.latest_sample_time
         }) || self
+            .spectrogram
             .latest_sample_time
             .is_some_and(|previous| time.saturating_sub(previous) > HISTORY_GAP_RESET);
         let width = Duration::from_secs_f64(
@@ -287,8 +319,9 @@ impl FrequencyState {
             Duration::from_nanos(((time.as_nanos() / width.as_nanos()) * width.as_nanos()) as u64);
         let merge = self.spectrogram.latest.filter(|&index| {
             !discontinuity
-                && self.spectrogram.columns[index].generation == self.stream_generation
-                && self.spectrogram.columns[index].source_generation == self.source_generation
+                && self.spectrogram.columns[index].generation == self.spectrogram.generation
+                && self.spectrogram.columns[index].source_generation
+                    == self.spectrogram.source_generation
                 && self.spectrogram.columns[index].bucket_start == Some(bucket)
         });
         let index = merge.unwrap_or(self.spectrogram.head);
@@ -315,15 +348,16 @@ impl FrequencyState {
             self.spectrogram.columns[index].interval_start = if discontinuity {
                 time
             } else {
-                self.latest_sample_time
+                self.spectrogram
+                    .latest_sample_time
                     .map(|previous| previous.max(time.saturating_sub(Duration::from_millis(250))))
                     .unwrap_or_else(|| time.saturating_sub(Duration::from_millis(250)))
             };
             self.spectrogram.head = (index + 1) % self.spectrogram.history_columns;
             self.spectrogram.len = (self.spectrogram.len + 1).min(self.spectrogram.history_columns);
         }
-        self.spectrogram.columns[index].generation = self.stream_generation;
-        self.spectrogram.columns[index].source_generation = self.source_generation;
+        self.spectrogram.columns[index].generation = self.spectrogram.generation;
+        self.spectrogram.columns[index].source_generation = self.spectrogram.source_generation;
         let interval_changed = self.spectrogram.columns[index].sample_time != Some(time);
         self.spectrogram.columns[index].sample_time = Some(time);
         if changed {
@@ -404,6 +438,7 @@ impl FrequencyState {
         self.spectrogram.latest = latest;
         if len == 0 {
             self.latest_sample_time = None;
+            self.spectrogram.latest_sample_time = None;
         }
         if !self.spectrogram.fft_frequencies.is_empty() {
             self.prepare_history_sampling();
@@ -501,10 +536,17 @@ impl FrequencyState {
         self.spectrogram.head = 0;
         self.spectrogram.len = 0;
         self.spectrogram.latest = None;
+        self.spectrogram.latest_sample_time = None;
+        self.spectrogram.last_analysis = None;
+        self.spectrogram.sample_rate = 0;
+        self.spectrogram.source_generation = None;
         self.latest_sample_time = None;
+        self.source_sample_time = None;
+        self.sample_time_offset = Duration::ZERO;
         self.display_time = None;
         self.spectrogram.fft_frequencies.clear();
         self.spectrogram.source_axis = (0, 0);
+        self.spectrogram.frequency_range = None;
         self.spectrogram.frequencies.clear();
         self.spectrogram.fft_rows.clear();
         self.spectrogram.history_indices.clear();
@@ -532,18 +574,17 @@ impl FrequencyState {
 
     pub(super) fn visible_range(&self) -> Option<(usize, usize, f32, f32)> {
         let rows = self.spectrogram.frequencies.len();
-        (rows > 0).then(|| {
-            (
-                0,
-                rows - 1,
-                16.0_f32.max(self.sample_rate as f32 / self.analysis_fft_size as f32),
-                self.sample_rate as f32 * 0.5,
-            )
-        })
+        let (low, high) = self.spectrogram.frequency_range?;
+        (rows > 0).then_some((0, rows.saturating_sub(1), low, high))
     }
 
     pub(super) fn prepare_spectrogram_presentation(&mut self, panel_id: u64) -> Result<(), String> {
-        if !self.enabled || !self.spectrogram.visible || self.spectrogram.len == 0 {
+        if !self.enabled
+            || !self.presentation_visible
+            || !self.spectrogram.presentation_visible
+            || !self.spectrogram.collecting
+            || self.spectrogram.len == 0
+        {
             return Ok(());
         }
         let Some(latest_time) = self.display_time else {
@@ -552,18 +593,19 @@ impl FrequencyState {
         let Some((_, _, low, high)) = self.visible_range() else {
             return Ok(());
         };
+        self.refresh_frequency_labels();
         let start_time = latest_time
             .saturating_sub(Duration::from_secs(self.spectrogram.history_seconds as u64));
         let height = spectrogram_source_height(self.spectrogram.panel_height)
             .min(self.spectrogram.frequencies.len());
         if self.spectrogram.sample_height != height
-            || self.spectrogram.heat_sample_generation != self.stream_generation
+            || self.spectrogram.heat_sample_generation != self.spectrogram.generation
         {
             self.invalidate_spectrogram();
             self.spectrogram.sample_height = height;
             self.spectrogram.heat_samples =
                 frequency_rows(&self.spectrogram.frequencies, low, high, height, true);
-            self.spectrogram.heat_sample_generation = self.stream_generation;
+            self.spectrogram.heat_sample_generation = self.spectrogram.generation;
         }
         let assembly_key = SpectrogramAssemblyKey {
             history_revision: self.spectrogram.history_revision,
@@ -596,7 +638,7 @@ impl FrequencyState {
                     continue;
                 };
                 let column = &self.spectrogram.columns[index];
-                if column.generation != self.stream_generation {
+                if column.generation != self.spectrogram.generation {
                     continue;
                 }
                 key[index - first] = Some((column.revision, column.interval_start, time));

@@ -703,6 +703,57 @@ fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window
     server.join().unwrap();
 }
 
+async fn subscribe_waveform(f: &mut Fixture, track: &Track, generation: u64) -> (PcmState, u64) {
+    f.client
+        .configure_source(Some(track), generation, track.duration);
+    let mut control = ControlReader::<REQUEST_SIZE>::new();
+    let configured = control.read(&mut f.server).await.unwrap();
+    assert_eq!(configured[1], 0, "source selection alone requests no PCM");
+    f.client.set_waveform_demand(true);
+    let request = control.read(&mut f.server).await.unwrap();
+    assert_eq!(
+        request[1], 1,
+        "waveform-only enables the shared PCM producer"
+    );
+    let revision = rivu_protocol::pcm::word(&request[8..]);
+    let state = PcmState {
+        epoch: 2,
+        generation,
+        active: true,
+        sample_rate: track.sample_rate,
+        heard_frame: u64::MAX,
+        ..Default::default()
+    };
+    write_status(&mut f.server, state, revision, PcmPosition::default())
+        .await
+        .unwrap();
+    rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+        while f.client.analysis.read().audio_epoch != state.epoch {
+            f.wakes.recv().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    (state, revision)
+}
+
+async fn summary_after(f: &Fixture, revision: u64) -> WaveformFrame {
+    rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+        loop {
+            let ready = {
+                let summary = f.client.state.summary.lock();
+                (summary.frame.revision > revision).then(|| summary.frame.clone())
+            };
+            if let Some(frame) = ready {
+                return frame;
+            }
+            async_io::Timer::after(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("hidden waveform summary did not advance")
+}
+
 #[test]
 fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
     async_io::block_on(async {
@@ -710,35 +761,7 @@ fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
         let mut track = crate::test_support::artwork_track("source.wav".into());
         track.sample_rate = 48_000;
         track.duration = Some(1.0);
-        f.client.configure_source(Some(&track), 1, track.duration);
-        let mut control = ControlReader::<REQUEST_SIZE>::new();
-        let configured = control.read(&mut f.server).await.unwrap();
-        assert_eq!(configured[1], 0, "source selection alone requests no PCM");
-        f.client.set_waveform_demand(true);
-        let request = control.read(&mut f.server).await.unwrap();
-        assert_eq!(
-            request[1], 1,
-            "waveform-only enables the shared PCM producer"
-        );
-        let revision = rivu_protocol::pcm::word(&request[8..]);
-        let state = PcmState {
-            epoch: 2,
-            generation: 1,
-            active: true,
-            sample_rate: 48_000,
-            heard_frame: u64::MAX,
-            ..Default::default()
-        };
-        write_status(&mut f.server, state, revision, PcmPosition::default())
-            .await
-            .unwrap();
-        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
-            while f.client.analysis.read().audio_epoch != 2 {
-                f.wakes.recv().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
+        let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
         stereo(&f.window, header(state, 0), 0.5, 256);
         write_status(&mut f.server, state, revision, PcmPosition::default())
             .await
@@ -774,5 +797,304 @@ fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
         assert_eq!(f.client.waveform.read().peaks, retained);
         f.client.configure_source(Some(&track), 2, track.duration);
         assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
+    });
+}
+
+#[test]
+fn hidden_waveform_collects_without_snapshots_or_wakes_and_show_publishes_immediately() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        let mut track = crate::test_support::artwork_track("hidden.wav".into());
+        track.sample_rate = 48_000;
+        track.duration = Some(1.0);
+        let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
+        f.client.set_waveform_presentation_visible(false);
+        let initial = f.client.waveform.read().clone();
+        let (wake, wakes) = async_channel::unbounded();
+        let staging = Arc::clone(&f.client.analysis);
+        f.client.set_wakeup(Arc::new(move || {
+            let _ = wake.try_send(staging.read().display_token);
+        }));
+        // Finish initialization through the installed callback before counting
+        // hidden PCM wakes; merely reading staging can race its final wake.
+        f.client.set_display_demand(DisplayDemand {
+            spectrum: true,
+            ..Default::default()
+        });
+        let display_token = f.client.state.desired.lock().display_token;
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while wakes.recv().await.unwrap() != display_token {}
+        })
+        .await
+        .unwrap();
+
+        stereo(&f.window, header(state, 0), 0.5, 256);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let first = summary_after(&f, initial.revision).await;
+        assert_eq!(first.left_rms_counts.iter().sum::<u64>(), 256);
+        let sequence = f.window.sequence();
+        stereo(&f.window, header(state, 256), 0.25, 128);
+        assert_eq!(f.window.sequence(), sequence);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let hidden = summary_after(&f, first.revision).await;
+        assert_eq!(hidden.left_rms_counts.iter().sum::<u64>(), 384);
+        assert_eq!(hidden.request_epoch, initial.request_epoch);
+        assert_eq!(hidden.source_generation, initial.source_generation);
+        assert_eq!(f.client.waveform.read().revision, initial.revision);
+        assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
+        assert_eq!(f.client.state.desired.lock().revision, revision);
+        assert_eq!(f.client.state.desired.lock().display_token, display_token);
+
+        // A token-only publication is a worker barrier after both hidden
+        // ingests. Any waveform wake would precede it with the old token.
+        f.client.set_display_demand(DisplayDemand::default());
+        let token = f.client.state.desired.lock().display_token;
+        let observed = rivu_protocol::transport::timeout(Duration::from_secs(5), wakes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            observed, token,
+            "hidden PCM must not wake waveform presentation"
+        );
+
+        f.client.set_waveform_presentation_visible(true);
+        let published = f.client.waveform.read();
+        assert_eq!(published.revision, hidden.revision);
+        assert_eq!(published.peaks, hidden.peaks);
+        assert_eq!(published.left_rms_counts, hidden.left_rms_counts);
+        assert_eq!(published.request_epoch, initial.request_epoch);
+        drop(published);
+        assert_eq!(wakes.try_recv(), Ok(token));
+        f.client.set_waveform_presentation_visible(true);
+        assert!(
+            wakes.try_recv().is_err(),
+            "unchanged visibility must not wake"
+        );
+        assert_eq!(f.client.state.desired.lock().revision, revision);
+        assert_eq!(f.client.state.desired.lock().display_token, token);
+        assert!(f.client.analysis.read().settings.is_none());
+    });
+}
+
+#[test]
+fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        let mut track = crate::test_support::artwork_track("first.wav".into());
+        track.sample_rate = 48_000;
+        track.duration = Some(1.0);
+        let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
+        f.client.set_waveform_presentation_visible(false);
+        f.client.set_display_demand(DisplayDemand {
+            enabled: true,
+            spectrum: true,
+            ..Default::default()
+        });
+        stereo(&f.window, header(state, 0), 0.25, 1024);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let first = current_after(&f, 0).await;
+        assert_eq!(
+            first.rms_left, 0.25,
+            "analysis still publishes and wakes while hidden"
+        );
+        assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
+        let request_epoch = f.client.waveform.read().request_epoch;
+
+        let seek = PcmState {
+            epoch: 4,
+            intent: 1,
+            applied_intent: 1,
+            ..state
+        };
+        stereo(&f.window, header(seek, 0), 0.75, 512);
+        write_status(&mut f.server, seek, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let sought = current_after(&f, first.sequence).await;
+        assert_eq!(sought.audio_epoch, seek.epoch);
+        f.client.set_waveform_presentation_visible(true);
+        {
+            let waveform = f.client.waveform.read();
+            assert_eq!(waveform.peaks.first(), Some(&Some(0.75)));
+            assert!(
+                waveform.peaks.contains(&Some(0.25)),
+                "seek retains unvisited media positions"
+            );
+            assert!(waveform.left_rms_counts.iter().sum::<u64>() <= 1024);
+            assert_eq!(
+                waveform.request_epoch, request_epoch,
+                "visibility does not cancel full scans"
+            );
+        }
+
+        f.client.set_waveform_presentation_visible(false);
+        track.path = "second.wav".into();
+        f.client.configure_source(Some(&track), 2, track.duration);
+        assert_eq!(f.client.waveform.read().source_generation, Some(2));
+        assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
+        let request = ControlReader::<REQUEST_SIZE>::new()
+            .read(&mut f.server)
+            .await
+            .unwrap();
+        let revision = rivu_protocol::pcm::word(&request[8..]);
+        let next = PcmState {
+            epoch: 6,
+            generation: 2,
+            ..seek
+        };
+        write_status(&mut f.server, next, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().audio_epoch != next.epoch {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        stereo(
+            &f.window,
+            header(
+                PcmState {
+                    generation: 1,
+                    ..next
+                },
+                0,
+            ),
+            0.875,
+            512,
+        );
+        stereo(&f.window, header(next, 0), 0.5, 512);
+        write_status(&mut f.server, next, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let replacement = current_after(&f, sought.sequence).await;
+        assert_eq!(replacement.rms_left, 0.5);
+        f.client.set_waveform_presentation_visible(true);
+        let waveform_revision = {
+            let waveform = f.client.waveform.read();
+            assert_eq!(waveform.source_generation, Some(2));
+            assert_eq!(waveform.path.as_deref(), Some(track.path.as_path()));
+            assert_eq!(waveform.left_rms_counts.iter().sum::<u64>(), 512);
+            assert!(waveform.peaks.iter().flatten().all(|peak| *peak == 0.5));
+            waveform.revision
+        };
+
+        // Removing the configured waveform stops collection even if another
+        // analysis consumer keeps the shared PCM subscription alive.
+        f.client.set_waveform_presentation_visible(false);
+        f.client.set_waveform_demand(false);
+        stereo(&f.window, header(next, 512), 0.875, 512);
+        write_status(&mut f.server, next, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let analysis = current_after(&f, replacement.sequence).await;
+        assert_eq!(analysis.rms_left, 0.875);
+        assert_eq!(
+            f.client.state.summary.lock().frame.revision,
+            waveform_revision
+        );
+        f.client.set_waveform_presentation_visible(true);
+        assert_eq!(f.client.waveform.read().revision, waveform_revision);
+    });
+}
+
+#[test]
+fn hidden_waveform_master_disable_and_shutdown_fence_collection_and_full_scans() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        let mut track = crate::test_support::artwork_track("disabled.wav".into());
+        track.sample_rate = 48_000;
+        track.duration = Some(1.0);
+        let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
+        f.client.set_waveform_presentation_visible(false);
+        let initial = f.client.waveform.read().clone();
+        stereo(&f.window, header(state, 0), 0.5, 512);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let hidden = summary_after(&f, initial.revision).await;
+
+        f.client.configure(&Config {
+            visualization_enabled: false,
+            ..Config::default()
+        });
+        assert_eq!(
+            f.client.waveform.read().request_epoch,
+            hidden.request_epoch.wrapping_add(1)
+        );
+        let request = ControlReader::<REQUEST_SIZE>::new()
+            .read(&mut f.server)
+            .await
+            .unwrap();
+        assert_eq!(
+            request[1], 0,
+            "master disable releases the PCM subscription"
+        );
+        let revision = rivu_protocol::pcm::word(&request[8..]);
+        let token = f.client.state.desired.lock().display_token;
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().display_token != token {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        stereo(&f.window, header(state, 512), 0.875, 512);
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+
+        // A disabled demand's token publication proves an ingestion turn after
+        // the new PCM prefix, without re-enabling capture.
+        f.client.set_display_demand(DisplayDemand {
+            spectrum: true,
+            ..Default::default()
+        });
+        let token = f.client.state.desired.lock().display_token;
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            while f.client.analysis.read().display_token != token {
+                f.wakes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            f.client
+                .state
+                .summary
+                .lock()
+                .frame
+                .left_rms_counts
+                .iter()
+                .sum::<u64>(),
+            512
+        );
+        f.client.set_waveform_presentation_visible(true);
+        assert_eq!(f.client.waveform.read().revision, hidden.revision);
+        assert_eq!(
+            f.client.waveform.read().left_rms_counts.iter().sum::<u64>(),
+            512
+        );
+
+        let request_epoch = f.client.waveform.read().request_epoch;
+        f.client.stop();
+        assert!(f.client.state.summary.lock().frame.path.is_none());
+        assert!(f.client.waveform.read().path.is_none());
+        assert_ne!(f.client.waveform.read().request_epoch, request_epoch);
+        f.client.set_waveform_presentation_visible(false);
+        f.client.set_waveform_presentation_visible(true);
+        assert!(f.client.waveform.read().peaks.is_empty());
+        assert!(
+            !f.client
+                .consume_current_analysis(|_| panic!("stopped client accepted analysis"))
+        );
     });
 }

@@ -758,6 +758,11 @@ impl FrontendHandle {
     pub(crate) fn set_waveform_demand(&self, enabled: bool) {
         self.shared.visual.set_waveform_demand(enabled);
     }
+    pub(crate) fn set_waveform_presentation_visible(&self, visible: bool) {
+        self.shared
+            .visual
+            .set_waveform_presentation_visible(visible);
+    }
     pub(crate) fn consume_current_analysis(
         &self,
         consume: impl FnOnce(&AnalysisFrame) -> bool,

@@ -39,6 +39,7 @@ struct Desired {
     settings: AnalysisSettings,
     visualization_enabled: bool,
     waveform_enabled: bool,
+    waveform_presentation_visible: bool,
     source_generation: Option<u64>,
 }
 impl Default for Desired {
@@ -51,6 +52,7 @@ impl Default for Desired {
             settings: AnalysisSettings::from(&config),
             visualization_enabled: config.visualization_enabled,
             waveform_enabled: false,
+            waveform_presentation_visible: true,
             source_generation: None,
         }
     }
@@ -219,6 +221,27 @@ impl VisualClient {
         desired.waveform_enabled = enabled;
         drop(desired);
         let _ = self.notifications.try_send(());
+    }
+
+    /// Hide snapshot publication without changing PCM demand or scan acceptance.
+    pub(crate) fn set_waveform_presentation_visible(&self, visible: bool) {
+        let mut desired = self.state.desired.lock();
+        if desired.waveform_presentation_visible == visible {
+            return;
+        }
+        desired.waveform_presentation_visible = visible;
+        let publish = visible
+            && desired.waveform_enabled
+            && desired.visualization_enabled
+            && !self.state.stopped.load(Ordering::Acquire);
+        if publish {
+            let summary = self.state.summary.lock();
+            self.state.waveform.write().clone_from(&summary.frame);
+        }
+        drop(desired);
+        if publish {
+            self.state.wake();
+        }
     }
 
     pub(crate) fn configure_source(
@@ -579,10 +602,17 @@ async fn run_client(
                         }
                         waveform_key = Some(key);
                         summary.push_mapped(header.media_start, header.media_step, &folded);
-                        state.waveform.write().clone_from(&summary.frame);
+                        // Hidden views retain media-position history without
+                        // cloning display arrays or waking the GUI per block.
+                        let publish = desired.waveform_presentation_visible;
+                        if publish {
+                            state.waveform.write().clone_from(&summary.frame);
+                        }
                         drop(summary);
                         drop(desired);
-                        state.wake();
+                        if publish {
+                            state.wake();
+                        }
                     }
                 }
                 if ingested {
