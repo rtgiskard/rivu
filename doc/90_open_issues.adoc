@@ -8,6 +8,50 @@ maintained in link:91_design_decisions.adoc[Engineering conclusions and design d
 
 == Open and deferred
 
+[[pipewire-context-retention]]
+=== Native PipeWire context retirement retains libdbus allocations
+
+Status: reproduced, unresolved, 2026-11-07. No production fix authorized.
+
+On PipeWire 1.6.10 / libdbus 1.16.2, each native output creates a fresh PipeWire
+context. Stop joins its owner and destroys the connection, but allocations from
+the realtime module's libdbus calls remain.
+
+Two isolated runs of debug artifact `0408252db99373b9` used an eight-second
+48 kHz stereo PCM source, three warmup reopens and 120 additional reopens, with
+MPRIS/tray disabled. Exact jemalloc profiles each showed 472,320 retained libdbus
+bytes across 4,080 objects: 3,936 bytes and 34 objects per reopen. Disabling
+`module-rt` reduced total live-byte growth to 992. FD/thread counts returned to
+baseline in a separate glibc run.
+
+A standalone `pw_context` create/destroy loop also reproduces growth; disabling
+the RT module or keeping libdbus loaded greatly reduces it. The exact upstream
+cleanup defect remains unidentified. These controls are not adopted fixes.
+
+Reconsider context/module ownership or a dependency fix while preserving realtime
+scheduling, strict routing, recovery and physical retirement; see
+link:91_design_decisions.adoc#unapproved-candidates[candidates]. This small
+per-reopen retention does not explain GUI/full-waveform RSS growth; observed
+task-buffer release and allocator retention are recorded in
+<<waveform-rss-retention,the waveform RSS investigation>>.
+
+[[waveform-rss-retention]]
+=== Full-waveform buffer release and residual RSS retention
+
+Status: investigated, residual attribution unresolved, 2026-11-07. No trimming
+policy adopted.
+
+The 2026-11-07 nested-Wayland check (debug `98a9d345c85c3292`, glibc 2.44,
+240-second stereo WAVs at 48/44.1 kHz, tray/MPRIS disabled) confirmed that full-read
+completion/cancellation releases task buffers without immediate RSS reclamation.
+After twelve further completions and eight switch-driven cancellations, about
+88 KiB of residual arena growth remained unattributed. Stop left about 10.7 MiB
+of free arena space; the Core-owned PCM window remained resident. This does not
+establish zero leakage or explain another instance's 28--50 MB observation.
+The separate <<pipewire-context-retention,native retention>> remains unresolved.
+PCM transport and summary ownership are retained in
+link:91_design_decisions.adoc#DEC-006[DEC-006].
+
 === Portal file chooser cache warning
 
 Status: deferred, 2026-10-12. Keep the published `ashpd` 0.13.13 dependency;

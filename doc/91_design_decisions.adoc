@@ -26,10 +26,8 @@ Status: implemented, 2026-11-06.
 
 An unrequested spectrum is not evidence of invalid audio. Publications carry
 request state; consumers check signal identity and settings independently rather
-than inferring semantic validity from an empty optional payload. A nested-Wayland
-Bars -> playing Oscilloscope -> pause -> Bars check retained drawing without a
-source-generation or seek-revision change; it did not establish physical GPU
-retirement. See link:23_visuals.adoc#ingestion-and-publication[analysis publication].
+than inferring semantic validity from an empty optional payload.
+See link:23_visuals.adoc#ingestion-and-publication[analysis publication].
 
 [[DEC-002]]
 === DEC-002: Dependency recovery must not become a new scan
@@ -39,11 +37,7 @@ Status: implemented, 2026-11-06.
 Filtered counts depend on unfiltered root totals. Keep failed dependencies
 retryable under filters; explicit recovery retries counts, while filter changes
 must not automatically retry persistent failures or bypass physical-worker
-ownership. A fault-injected missing table originally routed recovery into scan
-task 1. After correction, isolated nested-Wayland input recovered `0/0` counts
-without changing the system revision or allocating a scan task. This is dependency
-recovery evidence, not an ordinary schema fault or host-desktop acceptance.
-See link:02_library.adoc[Library recovery].
+ownership. See link:02_library.adoc[Library recovery].
 
 [[DEC-003]]
 === DEC-003: Admit denoise state at the allocation boundary
@@ -55,8 +49,7 @@ including spectral Off, instead of applying a blanket multiplier or charging
 storage twice. At 48 kHz stereo with spectral Off and hum enabled, the original
 estimate was 6,144 bytes versus 12,088 net live allocated bytes; bypass retained
 4,424 bytes despite the same estimate. Three repetitions matched and drop returned
-the allocation delta to zero. Allocation regressions and standalone processing
-smoke passed after correction. These counts establish missing state accounting,
+the allocation delta to zero. These counts establish missing state accounting,
 not a process RSS bound or a demonstrated whole-graph 64 MiB overrun.
 See link:27_audio_processing.adoc[Audio processing budgets].
 
@@ -67,6 +60,13 @@ bypassed effects still undergo format validation. The resolved
 link:90_open_issues.adoc#denoise-hum-work-admission[arithmetic admission investigation]
 records the counterexample and verification boundaries.
 
+The per-runner realtime estimate is separate from the Offline engine: Offline
+caps each edge's delay at 64 MiB but
+does not aggregate DSP/delay allocations across the graph. Concurrent playback
+and finite render workers also own separate runners. Neither limit nor the
+512 MiB retained-PCM budget is a service-wide DSP or RSS bound. Aggregate Offline
+state admission remains an unapproved candidate, not an implemented guarantee.
+
 [[DEC-004]]
 === DEC-004: Bound ready cancellation work without releasing query ownership
 
@@ -74,10 +74,8 @@ Status: implemented, 2026-11-06.
 
 A bounded channel does not bound a polling round when cancellation controls remain
 ready. Use cumulative cooperative work limits while preserving cancellation
-identity and the physical reply slot. Executor regressions cover sustained-ready
-fairness; an actual IPC connection completed a retained query with 128 unmatched
-cancellation controls and kept its next State response aligned. Flood latency
-was not measured; ordinary one-cancel clients were not shown to stall.
+identity and the physical reply slot. Sustained-ready cancellation must yield
+without losing query ownership or misaligning the next response.
 See link:21_ipc.adoc[IPC lifecycle and limits].
 
 [[DEC-005]]
@@ -113,12 +111,12 @@ Status: retained after review, 2026-11-06.
 
 A 4096-frame latest snapshot cannot reconstruct a 32768-frame FFT or every sample
 needed by continuous Density accumulation. Retain worker analysis instead of
-substituting the latest snapshot. The PCM cutover (implemented,
-2026-11-07) retains one continuous GUI reader/fold for live analysis and bounded
-session waveform summaries. Explicit whole-source reads use a separate bounded,
-lossless finite stream with backpressure and physical worker ownership; they do
-not reconstruct missing realtime history. Independently retained optional payloads
-must not acquire a shared lifetime solely to reduce type count. See
+substituting the latest snapshot. One continuous GUI reader/fold owns live
+analysis and bounded session waveform summaries. Explicit whole-source reads use
+a separate bounded, lossless finite stream with backpressure and physical worker
+ownership; they do not reconstruct missing realtime history. Independently
+retained optional payloads must not acquire a shared lifetime solely to reduce
+type count. See
 link:23_visuals.adoc#waveform[Waveform ownership] and
 link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
 
@@ -131,14 +129,9 @@ Transporting PCM instead of summaries is a real cost: a 60-second, 48 kHz stereo
 Packet, buffer and cancellation bounds belong to the finite PCM contract above;
 decoder/graph memory and shared-window residency remain separate costs.
 
-Historical Core checks preserved complete Before/After streams, selected ranges
-and media positions across concurrent seek, and flushed valid partial PCM before
-source-error termination. Behavior checks covered replay replacement, late
-full/live overlap and backpressured cancellation. Nested-Wayland input confirmed
-midtrack blank coverage, explicit full loading, seeking and session-local summary
-lifetime. These establish continuity and ownership, not CPU, RSS, latency gains or
-host-desktop integration; they are not new verification of subsequent revisions.
-
+Task-buffer release does not imply immediate allocator or RSS reclamation; no
+trimming policy was adopted. Evidence and unresolved attribution belong in
+link:90_open_issues.adoc#waveform-rss-retention[the waveform RSS investigation].
 
 [[DEC-007]]
 === DEC-007: PCM retention needs conservative prefetch headroom
@@ -154,8 +147,8 @@ In a standalone quarter-second stereo publication, the original 32-slot window
 retained all frames at 48 kHz but only 32,640 of 48,000 at 192 kHz and 32,512 of
 96,000 at 384 kHz. After correction it retained every frame at all three rates,
 including fragmented writes. This establishes retention coverage, not measured
-audible dropout, device A/V synchronization or latency. Other corrections from
-the same review belong in link:90_open_issues.adoc#pcm-continuity-and-frontend-readiness-from-branch-review[the resolution record].
+audible dropout, device A/V synchronization or latency. Failure details belong in
+link:90_open_issues.adoc#pcm-continuity-and-frontend-readiness-from-branch-review[the resolution record].
 See link:21_ipc.adoc[PCM transport] and link:22_cache.adoc[resource lifecycles].
 
 [[DEC-008]]
@@ -200,12 +193,6 @@ retained the whole charge until its final owner dropped:
 |30 |11,520,000 |11,550,802
 |120 |46,080,000 |46,170,194
 |===
-
-After optimization, native export regressions with a zero-byte PCM budget matched
-retained execution across short EOF, delayed/branched filters, STFT and Profile.
-An isolated 30-second, 48 kHz stereo CLI export matched all 1,440,000 source frames
-and produced the same WAV bytes as the cached route. Repeated destinations were
-rejected; a file-size-limit failure left no export file after shutdown.
 
 Exact decoded EOF owns preroll/tail cropping; estimated duration is insufficient.
 Core, not worker completion, owns cancellation/source/destination revalidation and
@@ -260,11 +247,6 @@ link:90_open_issues.adoc#socket-eof-fixture-gaps[EOF fixtures],
 link:90_open_issues.adoc#socket-directory-pin-gaps[directory identity fixtures],
 link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity] and
 link:90_open_issues.adoc#neural-unwind-trigger-coverage[unwind trigger coverage].
-Historical lint and behavior validation covered default/all/disabled workspace
-features and GUI-only/TUI-only root runs; both neural retirement cases passed in
-all five root combinations. Replacing the panic injector with an ordinary early
-exit failed the trigger assertion, while the intended panic case passed. These
-checks do not by themselves prove exclusive ownership or constitute new runs.
 
 [[DEC-011]]
 === DEC-011: Retire playback without discarding current settings failures
@@ -291,46 +273,10 @@ This changes PCM lifetime, not the budget, graph result or model execution polic
 Evidence and resolution:
 link:90_open_issues.adoc#model-boundary-retirement[model-boundary retirement].
 
-[[DEC-013]]
-=== DEC-013: Keep scan error copying with the retained task result
-
-Status: implemented, 2026-11-07.
-
-Failed media-task results expose Copy beside Dismiss in their existing heading.
-Copy writes the full projected message to the clipboard without mutating or
-dismissing the task. Library scan failures remain local to Library; copying does
-not require publishing them as window-global errors. Reuse the existing icon
-button and clipboard API without adding a notification or selection mechanism.
-User behavior is documented in link:02_library.adoc[Roots and scanning].
-
-An isolated nested-Wayland run produced a real missing-root scan failure. A
-virtual-pointer click on Copy followed by a clipboard read preserved the exact
-full error beyond the visible truncation, while the failed result stayed open.
-`make lint`, the Core scan-error ownership regression, and existing GUI Library
-tests passed. This verifies the nested-compositor path, not host-desktop input.
-
-[[DEC-014]]
-=== DEC-014: Reserve footer geometry independently of notifications
-
-Status: implemented, 2026-11-07.
-
-The footer reserves the shared icon-button height at the current typography and
-interface scale. Notification backgrounds and compact copy/dismiss controls fill
-that height with horizontal padding only. Messages remain inline and truncate;
-they do not resize the workspace or require a separate toast lifecycle.
-The existing shared height calculation is reused rather than duplicating font
-metrics or changing global button geometry. The layout contract is documented in
-link:24_layout.adoc[Panel chrome and overlays].
-
-An isolated nested-Wayland run verified unchanged workspace pixels across
-notification appearance and dismissal at normal and narrow window sizes and at
-18-point text with 1.5 interface scale. Virtual-pointer clicks copied the complete
-truncated error, dismissed it and opened the footer menu at enlarged typography.
-This covers the nested-compositor path, not host-desktop integration.
-
+[[unapproved-candidates]]
 == Unapproved candidates
 
-Status: not adopted or authorized, 2026-11-06. These are investigation candidates,
+Status: not adopted or authorized; updated 2026-11-07. These are investigation candidates,
 not defects or implementation commitments; each needs evidence before selection.
 Native streaming export has been adopted separately under <<DEC-009>>.
 
@@ -339,10 +285,13 @@ Native streaming export has been adopted separately under <<DEC-009>>.
 |Candidate |Value to establish and cost to preserve
 |Pixels before thumbnail persistence |Cold-display latency versus retained bytes and shutdown ownership; see <<DEC-008>>
 |Dedicated collection write owner |Core tail latency; preserve write leases, revision authority and physical completion
-|Disk-staged scans |Bound library retention; preserve CUE/relocation facts and atomic reconcile
+|Disk-staged scans |Ordinary scans retain discovered paths and prepared records until saving; the import-only retained-data budget does not cap them. Bound peak retention while preserving CUE/relocation facts and atomic reconcile
 |Spatial-only snapshot pool |Reduce payload copying; account for slot exhaustion and independently retained payloads
 |Spectrogram capacity compaction |Reduce capacity high-water retention; account for copying and old/new overlap without reducing sampling precision
 |Callback scratch removal or finer scheduling |Measure copy/control costs; preserve wrap/frame atomicity, branches and refill headroom
 |ONNX Session reuse |Repeated short-job startup versus resident arenas; preserve model/config identity, retirement and task-local recurrent state
+|Aggregate Offline DSP admission |Bound combined processors and edge delays outside the PCM budget; preserve valid Offline execution rather than importing realtime arithmetic limits
+|D-Bus method admission |Bound detached inbound dispatch tasks before Core queue admission; preserve method replies and independent property/signal progress under slow Core operations
+|Native PipeWire context/module lifetime |Address link:90_open_issues.adoc#pipewire-context-retention[reproduced native retention] while preserving realtime scheduling, strict routing, recovery and physical retirement; diagnostic module disablement/preloading is not a fix
 |Aggregate artwork/metadata admission; a11y geometry caching |Establish workload pressure; preserve animation/metadata and font/scale/IME invalidation
 |===
