@@ -24,7 +24,7 @@ impl WindowView {
         };
         let theme = rivu_ui::theme::palette(cx);
         let copied_message = message.clone();
-        let mut buttons = row().flex_shrink_0().gap_0().ml_4().child(
+        let mut buttons = row().h_full().flex_shrink_0().gap_0().ml_4().child(
             IconButton::new(
                 if is_error {
                     "copy-error"
@@ -36,13 +36,17 @@ impl WindowView {
             )
             .build_with(
                 IconButtonStyle::Quiet,
-                IconButtonDensity::Regular,
+                IconButtonDensity::Compact,
                 cx,
                 move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copied_message.to_string()));
                 },
                 |control| {
-                    control.group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+                    control
+                        .h_full()
+                        .min_h_0()
+                        .py_0()
+                        .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
                 },
             ),
         );
@@ -50,7 +54,7 @@ impl WindowView {
             buttons = buttons.child(
                 IconButton::new("dismiss-error", "", self.tr("shell-dismiss-message")).build_with(
                     IconButtonStyle::Quiet,
-                    IconButtonDensity::Regular,
+                    IconButtonDensity::Compact,
                     cx,
                     |this, _, cx| {
                         this.error = None;
@@ -58,6 +62,9 @@ impl WindowView {
                     },
                     |control| {
                         control
+                            .h_full()
+                            .min_h_0()
+                            .py_0()
                             .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
                     },
                 ),
@@ -67,7 +74,8 @@ impl WindowView {
             row()
                 .flex_initial()
                 .min_w_0()
-                .p_1()
+                .h_full()
+                .px_1()
                 .gap_0()
                 .text_xs()
                 .text_color(rgb(theme.text))

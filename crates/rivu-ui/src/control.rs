@@ -145,8 +145,8 @@ pub fn sortable_header<T: 'static>(
     control
 }
 
-// Uniform tree rows must reserve the default button's natural line, padding and border.
-pub(crate) fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+/// Natural icon-button height, including scaled glyph, padding and border.
+pub fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
     let rem = window.rem_size();
     (rem * 2.).max((rem * crate::theme::font_size_scale(cx)).round() + rem + gpui::px(2.))
 }

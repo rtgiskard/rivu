@@ -402,6 +402,25 @@ full error beyond the visible truncation, while the failed result stayed open.
 `make lint`, the Core scan-error ownership regression, and existing GUI Library
 tests passed. This verifies the nested-compositor path, not host-desktop input.
 
+[[DEC-014]]
+=== DEC-014: Reserve footer geometry independently of notifications
+
+Status: implemented, 2026-11-07.
+
+The footer reserves the shared icon-button height at the current typography and
+interface scale. Notification backgrounds and compact copy/dismiss controls fill
+that height with horizontal padding only. Messages remain inline and truncate;
+they do not resize the workspace or require a separate toast lifecycle.
+The existing shared height calculation is reused rather than duplicating font
+metrics or changing global button geometry. The layout contract is documented in
+link:24_layout.adoc[Panel chrome and overlays].
+
+An isolated nested-Wayland run verified unchanged workspace pixels across
+notification appearance and dismissal at normal and narrow window sizes and at
+18-point text with 1.5 interface scale. Virtual-pointer clicks copied the complete
+truncated error, dismissed it and opened the footer menu at enlarged typography.
+This covers the nested-compositor path, not host-desktop integration.
+
 == Unapproved candidates
 
 Status: not adopted or authorized, 2026-11-06. These are investigation candidates,

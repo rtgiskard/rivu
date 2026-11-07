@@ -210,7 +210,12 @@ impl Render for WindowView {
                 .size_full(),
             );
 
-        let mut footer = row().gap_0().relative().flex_shrink_0().text_xs();
+        let mut footer = row()
+            .gap_0()
+            .relative()
+            .h(rivu_ui::icon_button_height(window, cx))
+            .flex_shrink_0()
+            .text_xs();
         if let Some(notification) = self.footer_notification(cx) {
             footer = footer.child(notification);
         }

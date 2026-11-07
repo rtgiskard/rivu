@@ -267,9 +267,13 @@ panel roots and captions do not repeat it. Cards, rows and forms retain internal
 spacing. The full-window root remains unpadded so modal backdrops and docking
 overlays use window coordinates.
 
-Tab and footer heights follow text and scaled padding, not fixed heights.
-Unlocking adds tab-close controls without changing tab height. Footer messages
-shrink and truncate before the fixed action group. Menus anchor to actual footer
+Tab heights follow text and scaled padding. Unlocking adds tab-close controls
+without changing tab height. The footer reserves the shared icon-button height,
+following typography and interface scale independently of notification presence.
+Messages and their copy/dismiss controls fill that height without extra vertical
+padding; error backgrounds fill the notification area. Showing, replacing or
+dismissing a message does not resize the workspace. Footer messages shrink and
+truncate before the fixed action group. Menus anchor to actual footer
 bounds, size to contents and scroll when taller than the viewport; each catalog
 row wraps within its own group and overlong individual labels truncate. Shared
 menus, tooltips and drag previews retain viewport clearance rather than expanding
