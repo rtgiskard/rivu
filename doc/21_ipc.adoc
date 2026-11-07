@@ -113,8 +113,12 @@ link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifec
 [[realtime-pcm-transport]]
 ==== Realtime PCM transport
 
-The PCM v5 side channel binds to the command session's Core instance and verifies
-the local peer. Its control socket carries 16-byte requests and 72-byte status
+The PCM side channel binds to the command session's Core instance and verifies
+the local peer. Its shared-memory format version is defined by `VERSION` in
+link:../crates/rivu-shm/src/lib.rs[the shared-memory contract]; the control
+handshake marker is `MAGIC` in
+link:../crates/rivu-protocol/src/pcm.rs[the PCM control contract].
+Its control socket carries 16-byte requests and 72-byte status
 records, including the observed audible output-frame cursor and a logical-block
 sequence plus consumed frame offset, not a predicted presentation deadline.
 The handshake supplies a Core-owned sealed memfd path;
@@ -155,8 +159,10 @@ Metadata and post-read revision/configuration fences reject overwritten observat
 the window is not a lossless snapshot. Slow consumers resume from retained data
 rather than extending storage or reconstructing overwritten history.
 
-Waveform envelopes use their own v3 socket protocol with at most eight clients,
-1 MiB frames, a one-second Hello deadline and five-second control I/O deadlines.
+Waveform envelopes use their own socket protocol, whose version is defined by
+`VERSION` in link:../crates/rivu-protocol/src/waveform.rs[the waveform contract],
+with at most eight clients, 1 MiB frames, a one-second Hello deadline and
+five-second control I/O deadlines.
 Progressive results retain at most 1024 bins. Full requests carry only expected
 source identity (track ID, path, CUE segment, fingerprint and decoder hint) plus
 the optional playback source generation. Core resolves the authoritative Track
@@ -252,12 +258,11 @@ body
 The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
-Bodies use Postcard serialization without COBS framing. The command protocol is
-version 17, defined by `PROTOCOL_VERSION` in
+Bodies use Postcard serialization without COBS framing. The command protocol
+version is defined by `PROTOCOL_VERSION` in
 link:../crates/rivu-protocol/src/wire.rs[the wire contract]. Both peers must use
-matching protocol versions and positional wire schemas. Version 17 adds causal
-stopped-source identity and separates requested from resolved graph mode; restart
-Core and use matching clients after upgrading.
+matching protocol versions and positional wire schemas; restart Core and use
+matching clients after a protocol upgrade.
 The four-byte frame
 length remains little-endian; body integers follow Postcard's encoding.
 Version mismatches are rejected before decoding the body. There is no schema

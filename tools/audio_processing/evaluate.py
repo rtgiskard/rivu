@@ -13,9 +13,10 @@ model job at a time. Use the corresponding prepared interpreter, for example:
 
 Omit --case to evaluate every canonical synthetic case. Paired corpora require
 clean/ and noisy/ matching FLOAT WAV files plus manifest.json. Music requires
-track-*/{mixture,vocals,accompaniment}.wav plus schema-2 manifest.json with explicit
-source/SHA256/diagnostic_only records. Mark the documented Al James reference
-erratum via prepare_music.py --diagnostic-source; no track ordinal implies an
+track-*/{mixture,vocals,accompaniment}.wav plus manifest.json with explicit
+source/SHA256/diagnostic_only records; music_manifest.py defines the contract.
+Mark the documented Al James reference erratum via prepare_music.py
+--diagnostic-source; no track ordinal implies an
 erratum. All AAC MUSDB excerpts are bandlimited, not fullband quality evidence.
 """
 import argparse

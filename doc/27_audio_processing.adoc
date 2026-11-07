@@ -405,11 +405,12 @@ the child, including after early stdout EOF.
 Application streams collect no export-only PCM hashes, timing/energy statistics
 or detailed report; completion still requires validated input-end and EOF.
 
-Benchmark/corpus tools use the explicit `export.py --request` adapter, separate
-from application execution. Its version-1 file job requires absolute `input_path`
-and `output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must
-be new with an existing parent. It writes stem WAVs and `result.json`, with an
-8 GiB total audio-output limit and 256 MiB additional free-space reserve.
+Benchmark/corpus tools use the explicit
+link:../tools/audio_processing/export.py[`export.py --request` adapter], separate
+from application execution. File jobs require absolute `input_path` and
+`output_dir`: input must be IEEE float32 WAV/WAVEX/RF64 and destination must be
+new with an existing parent. The adapter writes stem WAVs and `result.json`,
+with an 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
 Detailed hashes and timing/energy evidence are collected only for this explicit
 export. The actual UTF-8 `result.json`, including its final newline, is limited
 to 8 MiB. Completion follows closed and checked audio files and a successfully
@@ -922,8 +923,9 @@ Summaries exclude undefined values, preserve infinity ordering, and report
 defined/undefined and signed infinity counts. A median between opposite infinities
 is undefined. These numerical cases do not establish quality.
 
-Music corpus manifest schema 2 records each prepared directory relative to the
-corpus root and explicitly binds `diagnostic_only` to source identity and SHA256.
+The link:../tools/audio_quality/music_manifest.py[music corpus manifest contract]
+records each prepared directory relative to the corpus root and explicitly binds
+`diagnostic_only` to source identity and SHA256.
 Directory numbering is not a diagnostic rule. During preparation, mark any known
 reference erratum with repeatable `--diagnostic-source` paths; the marker follows
 identical source bytes even when renamed or reordered. Run the following from the
