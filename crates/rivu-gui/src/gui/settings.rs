@@ -2612,9 +2612,8 @@ impl Render for Settings {
                     Dialog::card(colors)
                         .max_w(rems(860. / 16.))
                         .w(relative(0.9))
-                        .h((window.viewport_size().height - px(32.))
-                            .max(px(0.))
-                            .min(window.rem_size() * (640. / 16.)))
+                        .h(rems(40.))
+                        .max_h((window.viewport_size().height - px(32.)).max(px(0.)))
                         .gap_0()
                         .overflow_hidden()
                         .child(

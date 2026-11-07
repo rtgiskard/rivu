@@ -461,7 +461,7 @@ impl Render for WindowView {
                         popup
                             .absolute()
                             .bottom(size.height + outer_inset)
-                            .right(window.rem_size() - outer_inset)
+                            .right(rems(0.75))
                             .max_w(
                                 (window.viewport_size().width - window.rem_size() - inset)
                                     .max(px(0.)),
