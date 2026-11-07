@@ -691,6 +691,10 @@ mod tests {
             volume: 0.,
             ffmpeg_enabled: false,
             mpris_enabled: false,
+            material: rivu_format::config::MaterialPreferences {
+                enabled: true,
+                ..Default::default()
+            },
             ..Config::default()
         }
         .save_fixture(&config_path)
@@ -734,7 +738,7 @@ mod tests {
                 (Material::CgWater, false),
                 (Material::Mirror, true),
             ] {
-                app.material_intent(MaterialIntent::Select(material), cx);
+                app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 assert_eq!(app.state.revisions, revisions);
                 assert_eq!(app.atmosphere.read(cx).enabled, enabled);
                 assert_eq!(app.atmosphere.read(cx).source().is_some(), enabled);
@@ -752,18 +756,18 @@ mod tests {
                 .panels
                 .reconcile(app.workspace.layouts.current());
             for material in [Material::Atmosphere, Material::Stage] {
-                app.material_intent(MaterialIntent::Select(material), cx);
+                app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 assert!(!app.panel_demand("transport"));
                 assert!(app.panel_demand(crate::gui::shell::panels::PanelKind::Artwork.key()));
                 assert!(app.atmosphere.read(cx).enabled);
                 assert!(app.atmosphere.read(cx).source().is_some());
             }
-            app.material_intent(MaterialIntent::Select(Material::Dissolve), cx);
-            app.material_intent(
-                MaterialIntent::Adjust {
+            app.material_intent_fenced(MaterialIntent::Select(Material::Dissolve), cx);
+            app.material_intent_fenced(
+                MaterialIntent::Set {
                     material: Material::Dissolve,
                     parameter: Parameter::Alpha,
-                    increase: false,
+                    value: 0.5,
                 },
                 cx,
             );
@@ -772,7 +776,7 @@ mod tests {
             app.reconcile_feature_demand(cx);
             assert!(app.atmosphere.read(cx).previous.source().is_some());
             for enabled in [false, true, false, true] {
-                app.material_intent(MaterialIntent::SetEnabled(enabled), cx);
+                app.material_intent_fenced(MaterialIntent::SetEnabled(enabled), cx);
                 let session = MaterialSession::current(cx);
                 assert_eq!(session.enabled, enabled);
                 assert_eq!(session.material, Material::Dissolve);
@@ -793,7 +797,7 @@ mod tests {
                 assert!(atmosphere.previous.source().is_none());
                 assert!(atmosphere.transition_started.is_none());
             }
-            // Knobs must preserve the paused predecessor unless transition policy
+            // Numeric edits preserve the paused predecessor unless transition policy
             // actually crosses zero; changing a duration must not restart its clock.
             Rc::make_mut(&mut app.state).current_track = Some(Arc::new(tracks[0].clone()));
             app.reconcile_feature_demand(cx);
@@ -801,12 +805,12 @@ mod tests {
             app.atmosphere.update(cx, |atmosphere, _| {
                 atmosphere.transition_started = Some(started);
             });
-            for parameter in [Parameter::Alpha, Parameter::Transition] {
-                app.material_intent(
-                    MaterialIntent::Adjust {
+            for (parameter, value) in [(Parameter::Alpha, 0.6), (Parameter::Transition, 1.2)] {
+                app.material_intent_fenced(
+                    MaterialIntent::Set {
                         material: Material::Dissolve,
                         parameter,
-                        increase: true,
+                        value,
                     },
                     cx,
                 );
@@ -814,12 +818,12 @@ mod tests {
                 assert!(atmosphere.previous.source().is_some());
                 assert_eq!(atmosphere.transition_started, Some(started));
             }
-            for _ in 0..30 {
-                app.material_intent(
-                    MaterialIntent::Adjust {
+            for value in [0.75, 0.4, 0., 0.] {
+                app.material_intent_fenced(
+                    MaterialIntent::Set {
                         material: Material::Dissolve,
                         parameter: Parameter::Transition,
-                        increase: false,
+                        value,
                     },
                     cx,
                 );
@@ -830,45 +834,60 @@ mod tests {
                 assert_eq!(atmosphere.transition_started, enabled.then_some(started));
             }
             assert_eq!(MaterialSession::current(cx).settings.transition_seconds, 0.);
-            for increase in [true, false] {
-                app.material_intent(
-                    MaterialIntent::Adjust {
+            for value in [0.1, 0.] {
+                app.material_intent_fenced(
+                    MaterialIntent::Set {
                         material: Material::Dissolve,
                         parameter: Parameter::Transition,
-                        increase,
+                        value,
                     },
                     cx,
                 );
-                assert_eq!(app.atmosphere.read(cx).transition_enabled, increase);
+                assert_eq!(app.atmosphere.read(cx).transition_enabled, value > 0.);
                 assert!(app.atmosphere.read(cx).previous.source().is_none());
             }
             // Reset must restore predecessor policy before the next track sync,
             // without relying on render or a playback revision to reconcile it.
-            app.material_intent(MaterialIntent::Reset(Material::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::Reset(Material::Dissolve), cx);
             assert!(app.atmosphere.read(cx).transition_enabled);
             Rc::make_mut(&mut app.state).current_track = Some(Arc::new(tracks[1].clone()));
             app.reconcile_feature_demand(cx);
             assert!(app.atmosphere.read(cx).previous.source().is_some());
             assert_eq!(app.state.revisions, revisions);
-            app.material_intent(MaterialIntent::SetEnabled(false), cx);
-            app.material_intent(MaterialIntent::Select(Material::Mirror), cx);
-            assert!(!MaterialSession::current(cx).enabled);
-            assert_eq!(MaterialSession::current(cx).material, Material::Mirror);
+            app.material_intent_fenced(MaterialIntent::SetEnabled(false), cx);
+            let disabled = MaterialSession::current(cx);
+            for intent in [
+                MaterialIntent::Select(Material::Mirror),
+                MaterialIntent::Reset(Material::Dissolve),
+                MaterialIntent::Set {
+                    material: Material::Dissolve,
+                    parameter: Parameter::Alpha,
+                    value: 0.2,
+                },
+            ] {
+                app.material_intent_fenced(intent, cx);
+                let session = MaterialSession::current(cx);
+                assert!(!session.enabled);
+                assert_eq!(session.material, disabled.material);
+                assert_eq!(session.settings, disabled.settings);
+            }
             assert!(app.atmosphere.read(cx).source().is_none());
-            app.material_intent(MaterialIntent::SetEnabled(true), cx);
+            app.material_intent_fenced(MaterialIntent::SetEnabled(true), cx);
+            app.material_intent_fenced(MaterialIntent::Select(Material::Mirror), cx);
+            assert_eq!(MaterialSession::current(cx).material, Material::Mirror);
             assert!(app.atmosphere.read(cx).source().is_some());
             app.workspace.layouts.current_mut().root = None;
             for material in Material::ALL
                 .into_iter()
                 .filter(|material| material.is_texture())
             {
-                app.material_intent(MaterialIntent::Select(material), cx);
+                app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 let baseline = MaterialSession::current(cx).settings;
-                app.material_intent(
-                    MaterialIntent::Adjust {
+                app.material_intent_fenced(
+                    MaterialIntent::Set {
                         material,
                         parameter: Parameter::Alpha,
-                        increase: false,
+                        value: 0.2,
                     },
                     cx,
                 );
@@ -878,32 +897,32 @@ mod tests {
                 app.close_material_controls(cx);
                 app.toggle_material_controls(cx);
                 assert_eq!(MaterialSession::current(cx).settings, edited);
-                app.material_intent(MaterialIntent::Reset(material), cx);
+                app.material_intent_fenced(MaterialIntent::Reset(material), cx);
                 assert_eq!(MaterialSession::current(cx).settings, baseline);
-                app.material_intent(
-                    MaterialIntent::Adjust {
+                app.material_intent_fenced(
+                    MaterialIntent::Set {
                         material,
                         parameter: Parameter::Alpha,
-                        increase: false,
+                        value: 0.2,
                     },
                     cx,
                 );
-                app.material_intent(MaterialIntent::Select(material), cx);
+                app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 assert_eq!(MaterialSession::current(cx).settings, edited);
-                app.material_intent(MaterialIntent::Reset(material), cx);
+                app.material_intent_fenced(MaterialIntent::Reset(material), cx);
                 assert_eq!(MaterialSession::current(cx).settings, baseline);
             }
-            app.material_intent(MaterialIntent::Select(Material::StillWater), cx);
+            app.material_intent_fenced(MaterialIntent::Select(Material::StillWater), cx);
             let fresh = MaterialSession::current(cx).settings;
-            app.material_intent(
-                MaterialIntent::Adjust {
+            app.material_intent_fenced(
+                MaterialIntent::Set {
                     material: Material::Dissolve,
                     parameter: Parameter::Alpha,
-                    increase: true,
+                    value: 0.6,
                 },
                 cx,
             );
-            app.material_intent(MaterialIntent::Reset(Material::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::Reset(Material::Dissolve), cx);
             assert_eq!(MaterialSession::current(cx).settings, fresh);
             assert_eq!(Material::current(cx), Material::StillWater);
         });

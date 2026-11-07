@@ -47,6 +47,7 @@ pub enum ConfigMutation {
     AddLibraryRoot(PathBuf),
     RemoveLibraryRoot(PathBuf),
     Settings(Box<ConfigPatch>),
+    Material(MaterialChange),
 }
 
 mod library_column {

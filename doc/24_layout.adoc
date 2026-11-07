@@ -394,16 +394,23 @@ state. No per-layout scroll snapshots are kept.
 Albums routes PageUp/PageDown only to its displayed grid or track-list viewport;
 switching regions preserves the grid's retained position.
 
-== Session material exploration
+[[material-appearance]]
+== Material appearance
 
-The application owns material sessions, artwork demand and controls. Source-image
+The application owns material preferences, artwork demand and controls. Source-image
 effects, ordered scene filters and procedural water execution are maintained in
 https://github.com/rtgiskard/gpui-wgpu[gpui-wgpu]; both patched crates use the same
 revision pinned in the workspace manifest. Rivu does not carry a renderer copy.
 
-The footer application menu opens *Material…*, a unified selector and adjustment
-panel. Original is a standalone choice; the twenty-six studies are grouped as
-follows, without changing their rendering compositions:
+The footer application menu provides Settings, Layouts and Textures entries plus
+a checked Visualizations switch for immediate enablement. Textures opens
+the same live selector and adjustment panel from the application menu or Settings
+→ Interface, beside Theme. Language occupies the first Interface row. Closing
+Textures returns to its entry point: the workspace for the application menu, or
+the existing Settings draft without applying, discarding or resetting it. Neither
+entry toggles effects directly.
+The twenty-six studies are grouped as follows, without changing their rendering
+compositions:
 
 * Texture:
 ** Satin glass: restrained gradients and fine panel edges
@@ -441,23 +448,24 @@ strength, color levels, water displacement, wave strength, water highlight, cove
 blur, backdrop blur, list edge fade, cover transition and motion speed. These are
 adjustments to a predefined composition, not arbitrary effect stacking.
 
-Original is the startup selection, with material effects enabled. Enable material
-effects is independent of that selection: turning it off renders Original without
-changing the selected material or its edited parameters. Choosing a preset while
-effects are off does not enable effects. Turning effects back on restores the
-selected composition. Selecting Original instead changes the selected identity
-to Original.
+Without saved preferences, effects are disabled with Satin glass selected, ready
+to enable. The header's texture-effects switch is independent of that selection:
+turning it off renders the unmodified interface without changing the selected
+material or its edited parameters. While effects are off, preset selection,
+adjustments, Experimental expansion and Reset are read-only; the effects switch
+and outside dismissal remain available. Turning effects back on restores the selected composition.
+Legacy Original selections likewise remain disabled with Satin glass ready to
+enable; Original is not a selectable preset.
 
-The enable state, selection and per-preset parameters belong to the desktop
-process: switching away and back restores each preset's edits. Closing the last
-window exits that process, so reopening starts with Original and default parameters
-even while Core remains running. Reset selected preset restores only the current
-preset's defaults. Switching materials
-changes neither semantic theme colors, playback,
-queue state, configuration files nor saved-layout syntax. Menus and dialogs retain
-their opaque elevated surfaces and existing input barriers.
+The enable state, selection and per-preset parameters are saved through Core's
+configuration authority. Switching away and back restores each preset's edits;
+closing the card or restarting the desktop does not reset saved preferences.
+Reset selected preset restores only that preset's defaults. Material edits take
+effect immediately and save automatically, independently of the Settings draft.
+They do not change semantic theme colors, playback, queue state or saved-layout
+syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
 
-One material session owns the selected identity and each preset's edited parameters.
+The GUI projects the saved preferences into its material state.
 A static material specification supplies preset defaults, control capabilities and
 the composition recipe; the selector and controls consume the same catalog. Selection,
 reset and parameter edits commit through window coordination. The window-local
@@ -468,8 +476,8 @@ the same entry. Identity or enablement changes and edits to list-edge fade
 invalidate cached appearance consumers. Other parameter edits notify only the
 root composition and controls. Crossing zero transition duration updates predecessor
 ownership immediately, including while paused. These transitions do not depend on
-a Core revision or render-time control reconciliation. The shell owns control-card
-attachment and focus, not the session's parameter lifetime.
+a Core playback revision. The shell owns control-card attachment and focus,
+not the preference lifetime.
 
 Before constructing the layout, the window samples one material frame from the
 existing atmosphere owner. Root and panel decorations consume the same accepted
@@ -533,29 +541,40 @@ this image transformation path and uses the water/light composition without the
 photographic reflection. These studies do not implement physical fluid simulation,
 live desktop transparency, or refraction of arbitrary interface content.
 
-The Material… entry opens an undimmed live-preview adjustment card, including
-while effects are disabled. Turning effects off leaves the card open and shows
-that preview is disabled; selecting a preset or editing its parameters does not
-implicitly enable effects. Original, Texture and Water are directly available;
-Experimental can be expanded to reach the remaining studies. Each selection
-restores its own session parameters. Edits retain the preset identity; returning
+The Textures entry opens an undimmed live-preview adjustment card, including
+while effects are disabled. Turning effects off leaves the card open, cancels
+uncommitted parameter editing and disables preset, adjustment and reset controls.
+A compact grouped selector provides Texture and Water;
+Show experimental presets includes the remaining studies. Reset selected preset
+follows that switch and restores only the selected preset. Each selection
+restores its own saved parameters. Edits retain the preset identity; returning
 all values to their baseline clears the modified state. Fixed-appearance presets
-show an explanation instead of parameter controls. Supported controls are grouped
-by surface, cover, optics, motion and lists.
-The heading, selector and parameter rows share a scrolling body so every preset
-remains reachable in small viewports. Reset/Close remain outside that body.
-The controls use the application's active language. Closing the card retains
-the selection and each preset's adjustments for this session. Parameters do not
-write theme, playback, layout or configuration data. Transition duration and
-motion speed can both be reduced to exactly zero: zero duration disables the
+show an explanation instead of parameter controls. Supported controls cover
+surface, cover, optics, motion and list appearance.
+The compact card opens directly above the application footer and grows only to
+fit its content, within the available viewport. Property rows follow Track Details:
+aligned labels and plain-text values, with an edit icon revealed by hover or keyboard
+focus. Compact rows have no added vertical gap and retain their height while
+editing. The icon opens a single-line editor; Enter commits and Escape cancels.
+Units accompany values rather than repeating in labels, and remain visible while
+editing. Invalid numbers stay in the editor with an error indicator and tooltip
+instead of being saved or silently clamped. The parameter body scrolls independently.
+The title bar owns the single enablement switch, with state conveyed by its glyph.
+The experimental-visibility switch and Reset follow it as symbol icon buttons
+with localized tooltips. Clicking outside the card dismisses it; there is no
+separate Close button.
+Compatibility with extremely small windows is outside the material card's accepted scope.
+Parameters save as interface preferences, not theme, playback or layout data.
+Transition duration and motion speed can both be reduced to exactly zero: zero duration disables the
 dissolve, and zero speed leaves coherent static artwork without retaining a
 transition predecessor. This is a fixed parameter surface, not a user shader
 compiler or node editor.
 The card is a mutually exclusive shell surface, sharing the shell's ordered
-composition and keyboard routing. Tab stays within its focus scope and Escape
-closes it without a preliminary click. A covering metadata confirmation owns
-focus until dismissed. Closing the last window drops both the card and the material
-session; reopening does not revive a stale modal focus owner.
+composition and keyboard routing. Tab stays within its focus scope. Escape
+cancels an active numeric edit first; otherwise it closes the card. A covering
+metadata confirmation owns focus until dismissed. Closing the last window drops
+the card and transient editors, not saved preferences; reopening does not revive
+a stale modal focus owner.
 
 The source-image studies from Gradient translucency through Celtic storybook share
 decoded artwork rather than generating per-frame bitmaps. Image masks,

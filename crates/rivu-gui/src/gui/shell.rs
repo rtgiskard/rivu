@@ -50,6 +50,7 @@ pub(super) enum Surface {
 
 pub(super) struct WindowShell {
     surface: Option<Surface>,
+    texture_return_to: Option<Surface>,
     layout_focus: FocusHandle,
     scope: rivu_ui::FocusScope,
     keyboard_surface: Option<KeyboardSurface>,
@@ -58,12 +59,20 @@ pub(super) struct WindowShell {
     help: Option<rivu_presentation::keyboard::Context>,
     help_scroll: std::rc::Rc<ScrollHandle>,
     experimental_materials_expanded: bool,
+    pub(in crate::gui) material_choices:
+        rivu_ui::ChoiceState<crate::gui::appearance::material::Material>,
+    pub(in crate::gui) material_choice_anchor: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    pub(in crate::gui) footer_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    pub(in crate::gui) material_edit:
+        Option<crate::gui::appearance::texture_controls::MaterialEdit>,
+    pub(in crate::gui) material_edit_serial: u64,
 }
 
 impl WindowShell {
     pub(super) fn new(cx: &mut App) -> Self {
         Self {
             surface: None,
+            texture_return_to: None,
             layout_focus: cx.focus_handle(),
             scope: rivu_ui::FocusScope::new(cx),
             keyboard_surface: None,
@@ -72,6 +81,11 @@ impl WindowShell {
             help: None,
             help_scroll: std::rc::Rc::new(ScrollHandle::new()),
             experimental_materials_expanded: false,
+            material_choices: rivu_ui::ChoiceState::default(),
+            material_choice_anchor: std::rc::Rc::new(std::cell::Cell::new(None)),
+            footer_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
+            material_edit: None,
+            material_edit_serial: 0,
         }
     }
 
@@ -81,14 +95,26 @@ impl WindowShell {
 
     pub(super) fn open(&mut self, surface: Surface) {
         if self.surface != Some(surface) {
+            self.texture_return_to = None;
+            self.material_choices.close();
+            self.material_edit = None;
             self.surface = Some(surface);
             self.focus_epoch = self.focus_epoch.wrapping_add(1);
         }
     }
 
+    pub(super) fn open_settings_textures(&mut self) {
+        if self.is_open(Surface::Settings) {
+            self.open(Surface::TextureControls);
+            self.texture_return_to = Some(Surface::Settings);
+        }
+    }
+
     pub(super) fn dismiss(&mut self, surface: Surface) {
         if self.is_open(surface) {
-            self.surface = None;
+            self.material_choices.close();
+            self.material_edit = None;
+            self.surface = self.texture_return_to.take();
             self.focus_epoch = self.focus_epoch.wrapping_add(1);
         }
     }
@@ -199,7 +225,33 @@ impl WindowView {
     }
 
     pub(in crate::gui) fn toggle_experimental_materials(&mut self, cx: &mut Context<Self>) {
+        if !crate::gui::appearance::material::MaterialSession::current(cx).enabled {
+            return;
+        }
         self.shell.experimental_materials_expanded = !self.shell.experimental_materials_expanded;
+        self.shell.material_choices.close();
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn choose_material_preset(
+        &mut self,
+        index: usize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .shell
+            .material_choices
+            .item(index)
+            .map(|item| item.value);
+        self.shell.material_choices.close();
+        self.shell.material_edit = None;
+        if let Some(material) = selected {
+            self.material_intent(
+                crate::gui::appearance::material::MaterialIntent::Select(material),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -302,7 +354,13 @@ impl WindowView {
 
     fn synchronize_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let surface = self.current_keyboard_surface(cx);
-        let focus_ticket = self.shell.synchronize(surface, window, cx);
+        let returning_to_settings = surface == Some(KeyboardSurface::Settings)
+            && self.shell.keyboard_surface
+                == Some(KeyboardSurface::Dialog(DialogSurface::TextureControls));
+        let focus_ticket = self
+            .shell
+            .synchronize(surface, window, cx)
+            .or_else(|| returning_to_settings.then_some(self.shell.focus_epoch));
         let frame_epoch = self.shell.focus_epoch;
         let owner = cx.weak_entity();
         window.set_native_focus_guard(move |focus, window, cx| {
@@ -347,7 +405,11 @@ impl WindowView {
                         this.shell.restore = None;
                         return;
                     }
-                    this.shell.focus_surface(epoch, window, cx);
+                    if surface == Some(KeyboardSurface::Settings) {
+                        this.settings.read(cx).focus_handle(cx).focus(window, cx);
+                    } else {
+                        this.shell.focus_surface(epoch, window, cx);
+                    }
                     if matches!(
                         surface,
                         Some(KeyboardSurface::Menu(MenuSurface::Content(_)))
@@ -471,6 +533,30 @@ mod tests {
             assert!(!shell.is_open(Surface::TextureControls));
             assert!(shell.is_open(surface));
         }
+    }
+
+    #[gpui::test]
+    fn settings_texture_return_origin_is_consumed_or_abandoned(cx: &mut gpui::TestAppContext) {
+        let mut shell = cx.update(WindowShell::new);
+        shell.open(Surface::Settings);
+        shell.open_settings_textures();
+        assert!(shell.is_open(Surface::TextureControls));
+        shell.dismiss(Surface::TextureControls);
+        assert!(shell.is_open(Surface::Settings));
+
+        // A later application-menu visit must not inherit the Settings origin.
+        shell.open(Surface::AppMenu);
+        shell.toggle(Surface::TextureControls);
+        shell.dismiss(Surface::TextureControls);
+        assert!(shell.surface.is_none());
+
+        // Replacing the card abandons its return route.
+        shell.open(Surface::Settings);
+        shell.open_settings_textures();
+        shell.open(Surface::About);
+        shell.open(Surface::TextureControls);
+        shell.dismiss(Surface::TextureControls);
+        assert!(shell.surface.is_none());
     }
 
     struct FocusRestoreSurface {

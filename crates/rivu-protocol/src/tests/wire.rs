@@ -1700,6 +1700,14 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     config.denoise.spectral_gain_floor_db = -31.5;
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
+    config.material.enabled = false;
+    config.material.selected = rivu_format::config::MaterialPreset::StillWater;
+    config.material.presets.insert(
+        rivu_format::config::MaterialPreset::StillWater,
+        rivu_format::config::MaterialParameters::preset(
+            rivu_format::config::MaterialPreset::StillWater,
+        ),
+    );
     let wire = WireConfig::from(&config);
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
@@ -2015,6 +2023,8 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     draft.spectrum_db_range = None;
     draft.spectrum_bar_layout = SpectrumBarLayout::Fixed { count: 48 };
     draft.scan_max_depth = 7;
+    draft.material.enabled = false;
+    draft.material.selected = rivu_format::config::MaterialPreset::Dissolve;
     let patch = ConfigPatch::between(&baseline, &draft);
     let mut encoded = Vec::new();
     encode_request_frame_into(
@@ -2043,6 +2053,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     assert_eq!(owner.scan_max_depth, 7);
     assert_eq!(owner.volume, 0.2);
     assert!(owner.shuffle);
+    assert_eq!(owner.material, draft.material);
 }
 
 #[test]
@@ -2088,6 +2099,18 @@ fn quick_config_mutations_round_trip_without_full_config_payloads() {
         ConfigMutation::ToggleWaveformSeek,
         ConfigMutation::AddLibraryRoot("/music/夜".into()),
         ConfigMutation::RemoveLibraryRoot("/music/old".into()),
+        ConfigMutation::Material(rivu_format::config::MaterialChange::Select(
+            rivu_format::config::MaterialPreset::StillWater,
+        )),
+        ConfigMutation::Material(rivu_format::config::MaterialChange::SetEnabled(false)),
+        ConfigMutation::Material(rivu_format::config::MaterialChange::Reset(
+            rivu_format::config::MaterialPreset::Dissolve,
+        )),
+        ConfigMutation::Material(rivu_format::config::MaterialChange::SetParameter {
+            preset: rivu_format::config::MaterialPreset::StillWater,
+            parameter: rivu_format::config::material::MaterialParameter::Wave,
+            value: 8.,
+        }),
     ];
     for column in [
         LibraryColumn::Artist,

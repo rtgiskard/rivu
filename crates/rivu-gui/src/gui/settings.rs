@@ -652,6 +652,7 @@ enum Measured {
 pub(super) enum SettingsEvent {
     Closed,
     ReviewDuplicates,
+    OpenTextures,
     ApplyArtwork {
         panel_id: u64,
         options: ArtworkOptions,

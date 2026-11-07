@@ -319,8 +319,11 @@ clearing an optional numeric override restores inheritance on Apply. Untouched
 numbers retain their TOML precision even if Settings displays fewer decimal places.
 
 Media read buffering affects future opens, including finite PCM reads, without
-reopening the current track. The application-menu Visualizations toggle applies
-immediately; see <<visualization-enablement,Visualization enablement>>.
+reopening the current track. The application-menu Visualizations entry toggles
+enablement immediately, outside the Settings draft, but does not write the
+configuration file immediately. Apply or a normal Core shutdown saves the value.
+Detailed controls remain under Settings → Visualizations; see
+<<visualization-enablement,Visualization enablement>>.
 Draft merging, validation, Discard and save failures follow
 <<apply-and-validation,Apply and validation>>.
 
@@ -370,6 +373,42 @@ presets adapt https://github.com/folke/tokyonight.nvim[Tokyo Night]. Unknown nam
 are configuration errors; other applications' theme files are not imported.
 Themes do not change visualization backgrounds, signal palettes, canvas labels,
 cursor colors, or artwork.
+
+The application-menu *Textures* entry and Settings → Interface → *Textures* open
+the same live material card. Changes preview and save immediately, outside the
+Settings draft. Closing the card returns to the workspace or the existing
+Settings draft, according to its entry point, without applying or discarding
+that draft. Closing it or restarting the desktop retains the selected preset,
+enable state and each preset's adjustments. Settings Discard does not undo those
+independently saved changes. Save failures are reported rather than silently
+treated as saved.
+
+[source,toml]
+----
+[interface.material]
+enabled = true
+selected = "still_water"
+----
+
+Omitting this table leaves effects disabled with `satin` selected, ready to enable.
+The effects switch preserves the selected preset and its adjustments. While
+effects are off, preset selection, adjustments, Experimental expansion and Reset
+are read-only; enable effects before editing. Legacy `original` selections remain
+effect-free and prepare Satin glass for the next enable action. Preset identities are stable
+snake_case names, independent of translated labels; `still_water` is displayed as
+Rain ripples. Edited parameters are stored under
+`[interface.material.presets.<preset>]`; Reset restores only the selected preset.
+These preferences are independent of theme colors and GPU resource limits.
+Each saved preset table contains the complete parameter set; use the card to
+create one before editing it by hand. All values must be finite and nonnegative.
+Opacity, feather, highlight, grain and edge fade are at most `1`; wave is at most
+`16`, cover blur `24`, backdrop blur `32`, and transition seconds and speed `3`.
+Color steps is `0` (off) or an integer from `2` to `16`.
+See link:24_layout.adoc#material-appearance[Material appearance] for presets,
+controls and rendering boundaries.
+The material preference transport changes the IPC contract; after upgrading,
+restart Core and use matching GUI/TUI clients. Existing configuration files
+without material preferences remain valid.
 
 Scene filters have separate per-window limits under Settings → Visualizations →
 General → Appearance, after the shared GPU buffer budget:

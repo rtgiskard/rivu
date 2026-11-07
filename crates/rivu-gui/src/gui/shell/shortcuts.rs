@@ -152,6 +152,8 @@ impl WindowView {
                     DialogSurface::LayoutManager | DialogSurface::LayoutAction
                 ) && (dialog != DialogSurface::PlaylistEditor
                     || !self.input_focused(window, cx))
+                    && (dialog != DialogSurface::TextureControls
+                        || !self.material_input_focused(window, cx))
                 {
                     cx.stop_propagation();
                 }

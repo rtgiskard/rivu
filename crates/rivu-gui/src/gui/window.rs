@@ -450,6 +450,9 @@ impl WindowView {
             .set_gpu_material_budget(state.system.config.gpu_material_budget_bytes())
             .expect("validated GPU material budget");
         appearance::theme::set_theme(state.system.config.ui_theme, cx);
+        cx.set_global(appearance::material::MaterialSession::from_preferences(
+            &state.system.config.material,
+        ));
         let localized_text = Rc::new(
             i18n.fixed_texts()
                 .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
@@ -495,6 +498,12 @@ impl WindowView {
                 settings::SettingsEvent::Closed => {
                     this.shell.dismiss(shell::Surface::Settings);
                     this.focus_layout(window, cx);
+                    cx.notify();
+                }
+                settings::SettingsEvent::OpenTextures => {
+                    this.cancel_interaction(window, cx);
+                    this.panel_menu = None;
+                    this.shell.open_settings_textures();
                     cx.notify();
                 }
                 settings::SettingsEvent::ReviewDuplicates => {
@@ -952,7 +961,17 @@ impl WindowView {
         if self.state.system.config.ui_theme != state.system.config.ui_theme {
             appearance::theme::set_theme(state.system.config.ui_theme, cx);
         }
+        let previous_material = (self.state.system.config.material != state.system.config.material)
+            .then(|| {
+                let previous = appearance::material::MaterialSession::current(cx);
+                cx.default_global::<appearance::material::MaterialSession>()
+                    .reconcile(&state.system.config.material);
+                previous
+            });
         self.state = state;
+        if let Some(previous) = previous_material {
+            self.material_changed(previous, cx);
+        }
         self.reconcile_features(cx);
         if appearance_changed {
             for view in self.panel_views.values() {

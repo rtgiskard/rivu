@@ -18,12 +18,14 @@ use std::{
 
 mod edit;
 mod file;
+pub mod material;
 pub mod paths;
 pub mod processing_graph;
 
 #[cfg(test)]
 mod tests;
 
+pub use material::{MaterialChange, MaterialParameters, MaterialPreferences, MaterialPreset};
 pub use processing_graph::ProcessingGraph;
 pub use rivu_dsp::{denoise::DenoiseConfig, equalizer::config::EqualizerConfig};
 
@@ -425,6 +427,7 @@ macro_rules! config_fields {
         pub ui_language: String,
         /// Shared GUI and TUI color preset, independent of visualization colors.
         pub ui_theme: Theme,
+        pub material: $crate::config::MaterialPreferences,
         /// UI font family; defaults to monospace, including empty saved values.
         pub ui_font: String,
         /// Base UI font size in points, independent of interface scaling.
@@ -545,6 +548,7 @@ impl Default for Config {
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
+            material: MaterialPreferences::default(),
             ui_font: DEFAULT_UI_FONT.to_owned(),
             ui_font_size_pt: 12,
             ui_scale: 1.0,
@@ -638,6 +642,7 @@ impl Config {
         self.equalizer.validate()?;
         self.denoise.validate()?;
         self.neural.validate()?;
+        self.material.validate()?;
         self.processing_graph.validate()?;
         ensure!(
             self.equalizer_presets.len() <= 64,

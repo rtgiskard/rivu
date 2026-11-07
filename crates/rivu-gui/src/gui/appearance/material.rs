@@ -1,6 +1,9 @@
-//! Session-only material exploration; semantic theme colors and control state stay independent.
+//! Persisted material preferences with immediate preview; semantic theme colors stay independent.
 use crate::gui::shell::panels::PanelKind;
 use gpui::{prelude::*, *};
+use rivu_format::config::{
+    MaterialChange, MaterialParameters, MaterialPreferences, MaterialPreset,
+};
 use rivu_format::palette::Palette;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +36,90 @@ pub(in crate::gui) enum Material {
     Rain,
     Garden,
     Crystal,
+}
+
+impl Material {
+    const fn preset(self) -> MaterialPreset {
+        match self {
+            Self::Original => MaterialPreset::Original,
+            Self::Satin => MaterialPreset::Satin,
+            Self::Atmosphere => MaterialPreset::Atmosphere,
+            Self::Glass => MaterialPreset::Glass,
+            Self::Stage => MaterialPreset::Stage,
+            Self::Mist => MaterialPreset::Mist,
+            Self::Spring => MaterialPreset::Spring,
+            Self::Glint => MaterialPreset::Glint,
+            Self::Ripple => MaterialPreset::Ripple,
+            Self::Mirror => MaterialPreset::Mirror,
+            Self::Gradient => MaterialPreset::Gradient,
+            Self::Feather => MaterialPreset::Feather,
+            Self::Sheen => MaterialPreset::Sheen,
+            Self::EdgeFade => MaterialPreset::EdgeFade,
+            Self::Aura => MaterialPreset::Aura,
+            Self::Water => MaterialPreset::Water,
+            Self::Grain => MaterialPreset::Grain,
+            Self::Dissolve => MaterialPreset::Dissolve,
+            Self::Frost => MaterialPreset::Frost,
+            Self::Storybook => MaterialPreset::Storybook,
+            Self::CgWater => MaterialPreset::CgWater,
+            Self::StillWater => MaterialPreset::StillWater,
+            Self::Stream => MaterialPreset::Stream,
+            Self::Lake => MaterialPreset::Lake,
+            Self::Rain => MaterialPreset::Rain,
+            Self::Garden => MaterialPreset::Garden,
+            Self::Crystal => MaterialPreset::Crystal,
+        }
+    }
+
+    fn from_preset(preset: MaterialPreset) -> Self {
+        match preset {
+            MaterialPreset::Original => Self::Original,
+            MaterialPreset::Satin => Self::Satin,
+            MaterialPreset::Atmosphere => Self::Atmosphere,
+            MaterialPreset::Glass => Self::Glass,
+            MaterialPreset::Stage => Self::Stage,
+            MaterialPreset::Mist => Self::Mist,
+            MaterialPreset::Spring => Self::Spring,
+            MaterialPreset::Glint => Self::Glint,
+            MaterialPreset::Ripple => Self::Ripple,
+            MaterialPreset::Mirror => Self::Mirror,
+            MaterialPreset::Gradient => Self::Gradient,
+            MaterialPreset::Feather => Self::Feather,
+            MaterialPreset::Sheen => Self::Sheen,
+            MaterialPreset::EdgeFade => Self::EdgeFade,
+            MaterialPreset::Aura => Self::Aura,
+            MaterialPreset::Water => Self::Water,
+            MaterialPreset::Grain => Self::Grain,
+            MaterialPreset::Dissolve => Self::Dissolve,
+            MaterialPreset::Frost => Self::Frost,
+            MaterialPreset::Storybook => Self::Storybook,
+            MaterialPreset::CgWater => Self::CgWater,
+            MaterialPreset::StillWater => Self::StillWater,
+            MaterialPreset::Stream => Self::Stream,
+            MaterialPreset::Lake => Self::Lake,
+            MaterialPreset::Rain => Self::Rain,
+            MaterialPreset::Garden => Self::Garden,
+            MaterialPreset::Crystal => Self::Crystal,
+        }
+    }
+}
+
+impl From<MaterialParameters> for TextureSettings {
+    fn from(value: MaterialParameters) -> Self {
+        Self {
+            panel_alpha: value.panel_alpha,
+            feather: value.feather,
+            highlight: value.highlight,
+            grain: value.grain,
+            color_steps: value.color_steps,
+            wave: value.wave,
+            cover_blur: value.cover_blur,
+            backdrop_blur: value.backdrop_blur,
+            edge_fade: value.edge_fade,
+            transition_seconds: value.transition_seconds,
+            speed: value.speed,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -301,103 +388,23 @@ pub(in crate::gui) struct TextureSettings {
 impl TextureSettings {
     /// Defaults shared with the image and panel composition in `texture_styles`.
     const fn preset(material: Material) -> Self {
-        let mut settings = Self {
-            panel_alpha: 0.58,
-            feather: 0.,
-            highlight: 0.,
-            grain: 0.,
-            color_steps: 0.,
-            wave: 0.,
-            cover_blur: 0.,
-            backdrop_blur: 0.,
-            edge_fade: 0.,
-            transition_seconds: 0.,
-            speed: 1.,
-        };
-        match material {
-            Material::Feather => {
-                settings.panel_alpha = 0.50;
-                settings.feather = 0.62;
-            }
-            Material::Sheen => {
-                settings.panel_alpha = 0.68;
-                settings.highlight = 0.64;
-            }
-            Material::EdgeFade => {
-                settings.panel_alpha = 0.72;
-                settings.edge_fade = 0.55;
-            }
-            Material::Aura => {
-                settings.panel_alpha = 0.54;
-                settings.cover_blur = 18.;
-            }
-            Material::Water => {
-                settings.panel_alpha = 0.52;
-                settings.wave = 7.;
-            }
-            Material::CgWater => {
-                settings.panel_alpha = 0.72;
-                settings.wave = 7.;
-                settings.highlight = 0.65;
-            }
-            Material::StillWater => {
-                settings.panel_alpha = 0.45;
-                settings.wave = 4.;
-                settings.highlight = 0.32;
-                settings.speed = 0.55;
-            }
-            Material::Stream => {
-                settings.panel_alpha = 0.40;
-                settings.wave = 6.;
-                settings.highlight = 0.55;
-                settings.speed = 0.8;
-            }
-            Material::Lake => {
-                settings.panel_alpha = 0.38;
-                settings.wave = 4.;
-                settings.highlight = 0.4;
-                settings.speed = 0.5;
-            }
-            Material::Rain => {
-                settings.panel_alpha = 0.42;
-                settings.wave = 5.;
-                settings.highlight = 0.45;
-                settings.speed = 0.85;
-            }
-            Material::Garden => {
-                settings.panel_alpha = 0.40;
-                settings.wave = 4.5;
-                settings.highlight = 0.40;
-                settings.speed = 0.55;
-            }
-            Material::Crystal => {
-                settings.panel_alpha = 0.32;
-                settings.wave = 4.;
-                settings.highlight = 0.50;
-                settings.speed = 0.6;
-            }
-            Material::Grain => {
-                settings.panel_alpha = 0.82;
-                settings.grain = 0.18;
-            }
-            Material::Dissolve => settings.transition_seconds = 0.85,
-            Material::Frost => {
-                settings.panel_alpha = 0.28;
-                settings.backdrop_blur = 20.;
-            }
-            Material::Storybook => {
-                settings.panel_alpha = 0.78;
-                settings.grain = 0.10;
-                settings.color_steps = 5.;
-                settings.wave = 1.2;
-                settings.speed = 0.55;
-            }
-            _ => {}
+        let parameters = MaterialParameters::preset(material.preset());
+        Self {
+            panel_alpha: parameters.panel_alpha,
+            feather: parameters.feather,
+            highlight: parameters.highlight,
+            grain: parameters.grain,
+            color_steps: parameters.color_steps,
+            wave: parameters.wave,
+            cover_blur: parameters.cover_blur,
+            backdrop_blur: parameters.backdrop_blur,
+            edge_fade: parameters.edge_fade,
+            transition_seconds: parameters.transition_seconds,
+            speed: parameters.speed,
         }
-        settings
     }
 
-    /// T through Z reuse the session's 0..16 wave range, not image displacement units.
+    /// Procedural water reuses the shared 0..16 wave range, not image displacement units.
     pub(in crate::gui) fn cg_water_params(
         self,
         material: Material,
@@ -449,6 +456,23 @@ pub(in crate::gui) enum Parameter {
 }
 
 impl Parameter {
+    fn persisted(self) -> rivu_format::config::material::MaterialParameter {
+        use rivu_format::config::material::MaterialParameter;
+        match self {
+            Self::Alpha => MaterialParameter::Alpha,
+            Self::Feather => MaterialParameter::Feather,
+            Self::Highlight => MaterialParameter::Highlight,
+            Self::Grain => MaterialParameter::Grain,
+            Self::Steps => MaterialParameter::Steps,
+            Self::Wave => MaterialParameter::Wave,
+            Self::CoverBlur => MaterialParameter::CoverBlur,
+            Self::BackdropBlur => MaterialParameter::BackdropBlur,
+            Self::EdgeFade => MaterialParameter::EdgeFade,
+            Self::Transition => MaterialParameter::Transition,
+            Self::Speed => MaterialParameter::Speed,
+        }
+    }
+
     pub(in crate::gui) const ALL: [Self; 11] = [
         Self::Alpha,
         Self::Feather,
@@ -523,35 +547,11 @@ impl Parameter {
         }
     }
 
-    pub(in crate::gui) fn next(self, value: f32, increase: bool) -> f32 {
-        let (min, max, step) = self.limits();
-        let value = if value.is_finite() {
-            value.clamp(min, max)
-        } else {
-            min
-        };
-        if matches!(self, Self::Steps) {
-            return if increase {
-                if value < 2. {
-                    2.
-                } else {
-                    (value.round() + 1.).min(max)
-                }
-            } else if value <= 2. {
-                0.
-            } else {
-                value.round() - 1.
-            };
-        }
-        let next = (value + if increase { step } else { -step }).clamp(min, max);
-        // Repeated decimal steps must reach the exact disabled/saturated value,
-        // not leave invisible residual motion or an enabled button at a limit.
-        let boundary = if increase { max } else { min };
-        if (next - boundary).abs() <= step * 0.0001 {
-            boundary
-        } else {
-            next
-        }
+    fn accepts(self, value: f32) -> bool {
+        let (min, max, _) = self.limits();
+        value.is_finite()
+            && (min..=max).contains(&value)
+            && (!matches!(self, Self::Steps) || value == 0. || (value >= 2. && value.fract() == 0.))
     }
 }
 
@@ -808,10 +808,10 @@ pub(in crate::gui) enum MaterialIntent {
     SetEnabled(bool),
     Select(Material),
     Reset(Material),
-    Adjust {
+    Set {
         material: Material,
         parameter: Parameter,
-        increase: bool,
+        value: f32,
     },
 }
 
@@ -820,19 +820,81 @@ pub(in crate::gui) struct MaterialSession {
     pub material: Material,
     pub settings: TextureSettings,
     saved: [Option<TextureSettings>; MATERIALS.len()],
+    pending: usize,
 }
 impl Default for MaterialSession {
     fn default() -> Self {
         Self {
-            enabled: true,
-            material: Material::Original,
-            settings: Material::Original.spec().defaults,
+            enabled: false,
+            material: Material::Satin,
+            settings: Material::Satin.spec().defaults,
             saved: [None; MATERIALS.len()],
+            pending: 0,
         }
     }
 }
 impl Global for MaterialSession {}
 impl MaterialSession {
+    pub(in crate::gui) fn restore(&mut self, previous: MaterialSnapshot) {
+        self.enabled = previous.enabled;
+        self.material = previous.material;
+        self.settings = previous.settings;
+    }
+
+    pub(in crate::gui) fn from_preferences(preferences: &MaterialPreferences) -> Self {
+        let mut session = Self::default();
+        session.load_preferences(preferences);
+        session
+    }
+
+    fn load_preferences(&mut self, preferences: &MaterialPreferences) {
+        let legacy_original = preferences.selected == MaterialPreset::Original;
+        self.enabled = preferences.enabled && !legacy_original;
+        self.material = if legacy_original {
+            Material::Satin
+        } else {
+            Material::from_preset(preferences.selected)
+        };
+        self.saved.fill(None);
+        for (&preset, &parameters) in &preferences.presets {
+            self.saved[Material::from_preset(preset) as usize] = Some(parameters.into());
+        }
+        self.settings = self.saved[self.material as usize].unwrap_or(self.material.spec().defaults);
+    }
+
+    pub(in crate::gui) fn reconcile(&mut self, preferences: &MaterialPreferences) {
+        // Intermediate config publications cannot replace newer immediate previews.
+        if self.pending == 0 {
+            self.load_preferences(preferences);
+        }
+    }
+
+    pub(in crate::gui) fn begin_save(&mut self) {
+        self.pending += 1;
+    }
+
+    pub(in crate::gui) fn finish_save(&mut self, preferences: &MaterialPreferences) {
+        self.pending -= 1;
+        self.reconcile(preferences);
+    }
+
+    pub(in crate::gui) fn change(&self, intent: MaterialIntent) -> MaterialChange {
+        match intent {
+            MaterialIntent::SetEnabled(enabled) => MaterialChange::SetEnabled(enabled),
+            MaterialIntent::Select(material) => MaterialChange::Select(material.preset()),
+            MaterialIntent::Reset(material) => MaterialChange::Reset(material.preset()),
+            MaterialIntent::Set {
+                material,
+                parameter,
+                value,
+            } => MaterialChange::SetParameter {
+                preset: material.preset(),
+                parameter: parameter.persisted(),
+                value,
+            },
+        }
+    }
+
     pub(in crate::gui) fn current(cx: &App) -> MaterialSnapshot {
         cx.try_global::<Self>()
             .map(Self::snapshot)
@@ -876,15 +938,15 @@ impl MaterialSession {
                 self.settings = defaults;
                 changed
             }
-            MaterialIntent::Adjust {
+            MaterialIntent::Set {
                 material,
                 parameter,
-                increase,
+                value,
             } if material == self.material
                 && material.is_texture()
-                && parameter.relevant(material) =>
+                && parameter.relevant(material)
+                && parameter.accepts(value) =>
             {
-                let value = parameter.next(parameter.value(self.settings), increase);
                 let target = match parameter {
                     Parameter::Alpha => &mut self.settings.panel_alpha,
                     Parameter::Feather => &mut self.settings.feather,
@@ -909,7 +971,7 @@ impl MaterialSession {
     }
 }
 
-/// Frame sampling copies only active values, never the per-preset session history.
+/// Frame sampling copies only active values, never the per-preset preferences.
 pub(in crate::gui) struct MaterialSnapshot {
     pub enabled: bool,
     pub material: Material,
@@ -1077,6 +1139,70 @@ mod tests {
     use super::Material;
 
     #[test]
+    fn legacy_original_session_preserves_satin_overrides_without_enabling_effects() {
+        use super::*;
+        let mut preferences = MaterialPreferences {
+            selected: MaterialPreset::Original,
+            enabled: true,
+            ..Default::default()
+        };
+        let mut satin = MaterialParameters::preset(MaterialPreset::Satin);
+        satin.panel_alpha = 0.37;
+        preferences.presets.insert(MaterialPreset::Satin, satin);
+        let mut session = MaterialSession::from_preferences(&preferences);
+        assert_eq!(session.material, Material::Satin);
+        assert!(!session.enabled);
+        assert_eq!(session.settings.panel_alpha, 0.37);
+        assert!(session.apply(MaterialIntent::SetEnabled(true)));
+        session
+            .change(MaterialIntent::SetEnabled(true))
+            .apply_to(&mut preferences);
+        session.reconcile(&preferences);
+        assert!(session.enabled);
+        assert_eq!(session.material, Material::Satin);
+        assert_eq!(session.settings.panel_alpha, 0.37);
+    }
+
+    #[test]
+    fn persisted_material_initialization_and_pending_preview_reconcile() {
+        use super::*;
+        let mut preferences = MaterialPreferences::default();
+        MaterialChange::Select(MaterialPreset::StillWater).apply_to(&mut preferences);
+        MaterialChange::SetEnabled(false).apply_to(&mut preferences);
+        MaterialChange::SetParameter {
+            preset: MaterialPreset::StillWater,
+            parameter: rivu_format::config::material::MaterialParameter::Wave,
+            value: 9.,
+        }
+        .apply_to(&mut preferences);
+        let mut session = MaterialSession::from_preferences(&preferences);
+        assert_eq!(session.material, Material::StillWater);
+        assert!(!session.enabled);
+        assert_eq!(session.settings.wave, 9.);
+        for (parameter, value) in [(Parameter::Wave, 9.5), (Parameter::Speed, 0.8)] {
+            let intent = MaterialIntent::Set {
+                material: Material::StillWater,
+                parameter,
+                value,
+            };
+            assert!(session.apply(intent));
+            session.begin_save();
+            session.change(intent).apply_to(&mut preferences);
+        }
+        let preview = session.settings;
+        session.reconcile(&MaterialPreferences::default());
+        assert_eq!(session.settings, preview);
+        session.finish_save(&MaterialPreferences::default());
+        assert_eq!(session.settings, preview);
+        session.finish_save(&preferences);
+        assert_eq!(session.settings, preview);
+        assert_eq!(
+            MaterialSession::from_preferences(&preferences).settings,
+            preview
+        );
+    }
+
+    #[test]
     fn registered_artwork_panel_receives_playback_stage_treatment() {
         use super::*;
         let theme = rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
@@ -1104,6 +1230,8 @@ mod tests {
         cx.update(|cx| {
             let theme =
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
+            cx.default_global::<super::MaterialSession>()
+                .apply(super::MaterialIntent::SetEnabled(true));
             for material in Material::ALL {
                 cx.default_global::<super::MaterialSession>()
                     .apply(super::MaterialIntent::Select(material));
@@ -1154,35 +1282,73 @@ mod tests {
     }
 
     #[test]
-    fn parameter_boundaries_disable_motion_exactly_and_skip_single_color_level() {
-        use super::Parameter;
-        for (parameter, start, steps) in [
-            (Parameter::Speed, 1., 10),
-            (Parameter::Grain, 0.18, 9),
-            (Parameter::Transition, 0.8, 8),
-        ] {
-            let mut value = start;
-            for _ in 0..steps {
-                value = parameter.next(value, false);
+    fn direct_parameter_values_validate_finite_bounds_and_disabled_values() {
+        use super::{MaterialIntent, MaterialSession, Parameter};
+        let mut session = MaterialSession::default();
+        session.apply(MaterialIntent::Select(Material::Grain));
+        for parameter in Parameter::ALL {
+            let baseline = session.settings;
+            let (min, max, _) = parameter.limits();
+            for value in [
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                min - 1.,
+                max + 1.,
+            ] {
+                assert!(!session.apply(MaterialIntent::Set {
+                    material: Material::Grain,
+                    parameter,
+                    value,
+                }));
+                assert_eq!(session.settings, baseline);
             }
-            assert_eq!(value, 0.);
-            assert_eq!(parameter.next(value, false), 0.);
-            for _ in 0..100 {
-                value = parameter.next(value, true);
+            for value in [min, max, 0.] {
+                session.apply(MaterialIntent::Set {
+                    material: Material::Grain,
+                    parameter,
+                    value,
+                });
+                assert_eq!(parameter.value(session.settings), value);
+                assert!(!session.apply(MaterialIntent::Set {
+                    material: Material::Grain,
+                    parameter,
+                    value,
+                }));
             }
-            assert_eq!(value, parameter.limits().1);
-            assert_eq!(parameter.next(value, true), value);
         }
-        assert_eq!(Parameter::Steps.next(0., true), 2.);
-        assert_eq!(Parameter::Steps.next(2., false), 0.);
-        assert_eq!(Parameter::Transition.next(0., false), 0.);
+        for value in [1., 2.5] {
+            assert!(!session.apply(MaterialIntent::Set {
+                material: Material::Grain,
+                parameter: Parameter::Steps,
+                value,
+            }));
+        }
+        assert!(session.apply(MaterialIntent::Set {
+            material: Material::Grain,
+            parameter: Parameter::Steps,
+            value: 2.,
+        }));
+        let baseline = session.settings;
+        assert!(!session.apply(MaterialIntent::Set {
+            material: Material::Dissolve,
+            parameter: Parameter::Alpha,
+            value: 0.5,
+        }));
+        assert_eq!(session.settings, baseline);
+        session.apply(MaterialIntent::Select(Material::Original));
+        assert!(!session.apply(MaterialIntent::Set {
+            material: Material::Original,
+            parameter: Parameter::Alpha,
+            value: 0.5,
+        }));
     }
 
     #[test]
     fn resets_restore_cache_and_transition_settings_and_skip_unchanged_sessions() {
         use super::{MaterialIntent, MaterialSession, Parameter};
         let mut session = MaterialSession::default();
-        assert!(!session.apply(MaterialIntent::Select(Material::Original)));
+        assert!(!session.apply(MaterialIntent::Select(Material::Satin)));
         for (material, parameter) in [
             (Material::EdgeFade, Parameter::EdgeFade),
             (Material::Dissolve, Parameter::Transition),
@@ -1190,19 +1356,19 @@ mod tests {
             assert!(session.apply(MaterialIntent::Select(material)));
             let defaults = session.settings;
             assert!(!session.apply(MaterialIntent::Reset(material)));
-            assert!(session.apply(MaterialIntent::Adjust {
+            assert!(session.apply(MaterialIntent::Set {
                 material,
                 parameter,
-                increase: false,
+                value: 0.,
             }));
             assert_ne!(session.settings, defaults);
             assert!(session.apply(MaterialIntent::Reset(material)));
             assert_eq!(session.settings, defaults);
             assert!(!session.apply(MaterialIntent::Select(material)));
-            assert!(session.apply(MaterialIntent::Adjust {
+            assert!(session.apply(MaterialIntent::Set {
                 material,
                 parameter,
-                increase: true,
+                value: parameter.limits().1,
             }));
             let edited = session.settings;
             assert!(!session.apply(MaterialIntent::Select(material)));
@@ -1230,23 +1396,23 @@ mod tests {
                 .into_iter()
                 .filter(|parameter| !parameter.relevant(material))
             {
-                assert!(!session.apply(MaterialIntent::Adjust {
+                assert!(!session.apply(MaterialIntent::Set {
                     material,
                     parameter,
-                    increase: true
+                    value: parameter.limits().1,
                 }));
                 assert_eq!(session.settings, baseline);
             }
-            session.apply(MaterialIntent::Adjust {
+            session.apply(MaterialIntent::Set {
                 material,
                 parameter: Parameter::Wave,
-                increase: true,
+                value: 12.,
             });
             assert!(session.modified());
-            session.apply(MaterialIntent::Adjust {
+            session.apply(MaterialIntent::Set {
                 material,
                 parameter: Parameter::Wave,
-                increase: false,
+                value: baseline.wave,
             });
             assert!(!session.modified());
             let mut settings = baseline;
@@ -1329,6 +1495,8 @@ mod tests {
         let window = cx.add_empty_window();
         window.update(|window, cx| {
             window.activate_window();
+            cx.default_global::<MaterialSession>()
+                .apply(MaterialIntent::SetEnabled(true));
             cx.default_global::<MaterialSession>()
                 .apply(MaterialIntent::Select(Material::Dissolve));
             atmosphere.update(cx, |owner, cx| {

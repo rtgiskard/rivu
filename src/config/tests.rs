@@ -648,6 +648,10 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         ui_font_size_pt: 18,
         ui_language: "zh-CN".to_owned(),
         ui_theme: Theme::TokyoNight,
+        material: rivu_format::config::MaterialPreferences {
+            selected: rivu_format::config::MaterialPreset::Glass,
+            ..Default::default()
+        },
         ui_scale: 1.5,
         layout_snap_enabled: false,
         layout_snap_grid_px: 12,

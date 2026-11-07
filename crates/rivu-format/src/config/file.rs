@@ -117,6 +117,7 @@ file_group!(Playback, PlaybackView {
 file_group!(Interface, InterfaceView {
     language => ui_language: String,
     theme => ui_theme: Theme,
+    material => material: MaterialPreferences,
     tray_enabled => tray_enabled: bool,
     mpris_enabled => mpris_enabled: bool,
     confirm_queue_replace => confirm_queue_replace: bool,

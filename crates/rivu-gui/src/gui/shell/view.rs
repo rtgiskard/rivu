@@ -15,7 +15,6 @@ impl Render for WindowView {
         let theme = rivu_ui::theme::palette(cx);
         let material = appearance::material::Material::current(cx);
         let material_session = appearance::material::MaterialSession::current(cx);
-        let material_enabled = material_session.enabled;
         let selected_material = material_session.material;
         self.presentation.update(cx, |presentation, cx| {
             presentation.request_frame(window, cx)
@@ -225,12 +224,29 @@ impl Render for WindowView {
             app = app.child(backdrop);
         }
 
+        let footer_bounds = self.shell.footer_bounds.clone();
+        let footer_owner = cx.weak_entity();
         let mut footer = row()
             .gap_0()
             .relative()
             .h(rivu_ui::icon_button_height(window, cx))
             .flex_shrink_0()
-            .text_xs();
+            .text_xs()
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        if footer_bounds.get() != Some(bounds) {
+                            footer_bounds.set(Some(bounds));
+                            let _ = footer_owner.update(cx, |_, cx| cx.notify());
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
         if let Some(notification) = self.footer_notification(cx) {
             footer = footer.child(notification);
         }
@@ -387,28 +403,12 @@ impl Render for WindowView {
                             )),
                         ),
                     )
-                    .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "material-controls",
                         self.tr("material-menu"),
                         cx,
                         |this, _, cx| {
                             this.toggle_material_controls(cx);
-                        },
-                    ))
-                    .child(rivu_ui::checked_menu_item(
-                        "material-enabled",
-                        self.tr("material-enabled"),
-                        material_enabled,
-                        rivu_ui::surface::MenuIndicator::Check,
-                        cx,
-                        move |this, _, cx| {
-                            this.material_intent(
-                                appearance::material::MaterialIntent::SetEnabled(!material_enabled),
-                                cx,
-                            );
-                            this.shell.dismiss(shell::Surface::AppMenu);
-                            cx.notify();
                         },
                     ))
                     .child(rivu_ui::menu_separator(theme))
@@ -676,11 +676,15 @@ impl Render for WindowView {
                     );
                 }
                 KeyboardSurface::Dialog(DialogSurface::TextureControls) => {
+                    let labels = Rc::clone(&self.localized_text);
+                    let scope = self.shell.scope().clone();
+                    let experimental_expanded = self.shell.experimental_materials_expanded;
                     app = app.child(appearance::texture_controls::render(
+                        self,
                         selected_material,
-                        self.shell.experimental_materials_expanded,
-                        Some(self.shell.scope()),
-                        |id| self.tr(id),
+                        experimental_expanded,
+                        Some(&scope),
+                        move |id| labels.get(id).expect("cached localized GUI text").clone(),
                         window,
                         cx,
                     ));

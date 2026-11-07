@@ -19,8 +19,8 @@ use rivu_format::config::VisualizationSignal;
 use rivu_presentation::theme::Theme;
 use rivu_ui::{
     ChoiceItem, FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, button,
-    caption, column, copyable_message, disabled_control, row, status_message, text_tooltip,
-    theme::palette, two_column,
+    caption, column, copyable_message, disabled_control, input_aligned_control, row,
+    status_message, text_tooltip, theme::palette, two_column,
 };
 
 impl Settings {
@@ -564,13 +564,27 @@ impl Settings {
             column()
                 .gap_2()
                 .child(two_column(
-                    FormField::new(colors, self.tr("settings-theme"), theme).into_div(),
-                    div(),
-                ))
-                .child(two_column(
                     FormField::new(colors, self.tr("settings-language"), language).into_div(),
                     div(),
                 ))
+                .child(
+                    two_column(
+                        FormField::new(colors, self.tr("settings-theme"), theme).into_div(),
+                        div().child(input_aligned_control(
+                            button(
+                                "settings-textures",
+                                self.tr("material-menu"),
+                                cx,
+                                |this, _, cx| {
+                                    this.dropdown.close();
+                                    cx.emit(SettingsEvent::OpenTextures);
+                                },
+                            ),
+                            cx,
+                        )),
+                    )
+                    .items_end(),
+                )
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
                     self.field(Field::FontSizePt, cx).min_w(rems(180. / 16.)),

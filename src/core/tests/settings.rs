@@ -2,6 +2,102 @@ use super::*;
 use crate::config::LibraryColumn;
 
 #[test]
+fn material_edits_persist_immediately_and_merge_with_owner_time_settings() {
+    use rivu_format::config::{MaterialChange, MaterialPreset, material::MaterialParameter};
+    let (_directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    let baseline = core.preferences.checkpoint();
+    let mut draft = baseline.clone();
+    draft.ui_font_size_pt = 14;
+    let settings = ConfigPatch::between(&baseline, &draft);
+    for change in [
+        MaterialChange::Select(MaterialPreset::StillWater),
+        MaterialChange::SetEnabled(false),
+        MaterialChange::SetParameter {
+            preset: MaterialPreset::StillWater,
+            parameter: MaterialParameter::Alpha,
+            value: 0.3,
+        },
+        MaterialChange::SetParameter {
+            preset: MaterialPreset::StillWater,
+            parameter: MaterialParameter::Speed,
+            value: 0.8,
+        },
+        MaterialChange::SetParameter {
+            preset: MaterialPreset::Dissolve,
+            parameter: MaterialParameter::Transition,
+            value: 1.5,
+        },
+    ] {
+        core.mutate_config(ConfigMutation::Material(change))
+            .unwrap();
+        assert_eq!(
+            Config::load(&core.state.configuration.config_path).unwrap(),
+            core.preferences.checkpoint()
+        );
+    }
+    core.mutate_config(ConfigMutation::Settings(Box::new(settings)))
+        .unwrap();
+    let restored = Config::load(&core.state.configuration.config_path).unwrap();
+    assert_eq!(restored.ui_font_size_pt, 14);
+    assert_eq!(restored.material.selected, MaterialPreset::StillWater);
+    assert!(!restored.material.enabled);
+    assert_eq!(
+        restored.material.presets[&MaterialPreset::StillWater].panel_alpha,
+        0.3
+    );
+    assert_eq!(
+        restored.material.presets[&MaterialPreset::StillWater].speed,
+        0.8
+    );
+    assert_eq!(
+        restored.material.presets[&MaterialPreset::Dissolve].transition_seconds,
+        1.5
+    );
+    core.mutate_config(ConfigMutation::Material(MaterialChange::Reset(
+        MaterialPreset::StillWater,
+    )))
+    .unwrap();
+    let restored = Config::load(&core.state.configuration.config_path).unwrap();
+    assert!(
+        !restored
+            .material
+            .presets
+            .contains_key(&MaterialPreset::StillWater)
+    );
+    assert!(
+        restored
+            .material
+            .presets
+            .contains_key(&MaterialPreset::Dissolve)
+    );
+}
+
+#[test]
+fn material_save_failure_keeps_authority_and_reports_error() {
+    use rivu_format::config::{MaterialChange, MaterialPreset};
+    let (_directory, mut core) = fixture();
+    let previous = core.preferences.settings().clone();
+    std::fs::create_dir(&core.state.configuration.config_path).unwrap();
+    assert!(
+        core.mutate_config(ConfigMutation::Material(MaterialChange::Select(
+            MaterialPreset::Glass
+        )))
+        .is_err()
+    );
+    assert_eq!(core.preferences.settings(), &previous);
+    let error = core.state.system.last_error.clone().unwrap();
+    assert!(error.contains("Saving configuration"));
+    core.mutate_config(ConfigMutation::ToggleWaveformSeek)
+        .unwrap();
+    core.publish();
+    assert_eq!(
+        core.shared.read().system.last_error.as_deref(),
+        Some(error.as_str())
+    );
+}
+
+#[test]
 fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() {
     let (_directory, mut core) = fixture();
     core.publish();

@@ -12,6 +12,7 @@ pub enum WireConfigMutation {
     AddLibraryRoot(PathBuf),
     RemoveLibraryRoot(PathBuf),
     Settings(Box<WireConfigPatch>),
+    Material(rivu_format::config::MaterialChange),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +41,7 @@ impl From<ConfigMutation> for WireConfigMutation {
             ConfigMutation::AddLibraryRoot(path) => Self::AddLibraryRoot(path),
             ConfigMutation::RemoveLibraryRoot(path) => Self::RemoveLibraryRoot(path),
             ConfigMutation::Settings(patch) => Self::Settings(Box::new((*patch).into())),
+            ConfigMutation::Material(change) => Self::Material(change),
         }
     }
 }
@@ -61,6 +63,7 @@ impl From<WireConfigMutation> for ConfigMutation {
             WireConfigMutation::AddLibraryRoot(path) => Self::AddLibraryRoot(path),
             WireConfigMutation::RemoveLibraryRoot(path) => Self::RemoveLibraryRoot(path),
             WireConfigMutation::Settings(patch) => Self::Settings(Box::new((*patch).into())),
+            WireConfigMutation::Material(change) => Self::Material(change),
         }
     }
 }
@@ -89,6 +92,7 @@ pub struct WireConfigPatch {
     ui_font_size_pt: Option<u32>,
     ui_language: Option<String>,
     ui_theme: Option<rivu_format::config::Theme>,
+    material: Option<rivu_format::config::MaterialPreferences>,
     ui_scale: Option<f32>,
     layout_snap_enabled: Option<bool>,
     layout_snap_grid_px: Option<u32>,
@@ -183,6 +187,7 @@ impl From<ConfigPatch> for WireConfigPatch {
             ui_font_size_pt: value.ui_font_size_pt,
             ui_language: value.ui_language,
             ui_theme: value.ui_theme,
+            material: value.material,
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
@@ -285,6 +290,7 @@ impl From<WireConfigPatch> for ConfigPatch {
             ui_font_size_pt: value.ui_font_size_pt,
             ui_language: value.ui_language,
             ui_theme: value.ui_theme,
+            material: value.material,
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,

@@ -594,6 +594,32 @@ impl FrontendHandle {
     pub(crate) fn update_config(&self, change: ConfigMutation) -> Result<()> {
         self.send(Command::MutateConfig { change })
     }
+    /// Admit immediate preference edits synchronously, preserving click order.
+    pub(crate) fn enqueue_config(
+        &self,
+        change: ConfigMutation,
+    ) -> Result<impl Future<Output = CommandDelivery> + use<>> {
+        anyhow::ensure!(self.is_connected(), "GUI is disconnected from Core");
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .try_send(CommandRequest {
+                command: Command::MutateConfig { change }.into(),
+                reply: Some(reply),
+            })
+            .context("GUI command queue is busy or stopped")?;
+        let shared = Arc::clone(&self.shared);
+        Ok(async move {
+            receiver.await.unwrap_or_else(|_| CommandDelivery {
+                ack: shared.ack_error(
+                    AckStatus::Unknown,
+                    "GUI command outcome unknown; do not automatically retry".into(),
+                ),
+                observation: CommandObservation::Unavailable(
+                    "GUI command worker stopped before observation".into(),
+                ),
+            })
+        })
+    }
     pub(crate) async fn apply_settings(&self, patch: ConfigPatch) -> CommandDelivery {
         self.request_ack(Command::MutateConfig {
             change: ConfigMutation::Settings(Box::new(patch)),

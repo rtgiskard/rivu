@@ -154,7 +154,8 @@ See link:21_ipc.adoc[PCM transport] and link:22_cache.adoc[resource lifecycles].
 [[DEC-008]]
 === DEC-008: Keep GUI cache ownership until cold-path measurements justify change
 
-Status: retained after review, 2026-11-06; redesign not authorized.
+Status: cache and scheduling design retained after review, 2026-11-06; their
+redesign remains unapproved. Material preference authority is covered by <<DEC-015>>.
 
 Keep disposable content-addressed thumbnails, the reusable decode seat and
 acknowledged pixel retirement. Window animation demand, per-panel rotation and
@@ -171,20 +172,16 @@ and equivalent failure/retirement evidence. Per-image budgets do not establish a
 window-wide decoded/GPU cap. See link:22_cache.adoc[Artwork retention] and
 link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation].
 
-The glass-material experiment rebased on 2026-11-06 retains these owners and the
-album-card size cap. Its atmosphere uses the same consumer-owned negative lookup
-identity as ordinary artwork: cache eviction alone must not restart an unchanged
-visible miss. Hiding, disabling or changing its source retires that negative demand;
-an in-flight physical lookup still owns its slot until completion. The desktop/Core
-split also bounds material selections and edits to the desktop process, not Core's
-lifetime. See link:90_open_issues.adoc#material-atmosphere-negative-demand[the regression]
-and link:24_layout.adoc#_session_material_exploration[material session ownership].
+Atlas-key invalidation does not retire physical tiles still needed by replayable
+scenes. The renderer owns that lifetime without changing the sprite ABI or replacing
+Rivu's source-generation acknowledgements and targeted invalidation; hidden replayable
+scenes can retain GPU resources. See link:22_cache.adoc[Cache and retention].
 
-The 2026-11-07 material corrections retain the same owners. Material scope follows
-the registered transport/artwork panel kinds. Full-cover demand uses exact oriented
-source dimensions rather than rounded thumbnail dimensions, promoting through the
-existing decode seat after the initial viewport-sized load. This does not add a
-cache or relax decode admission. Resolution records:
+Materials reuse artwork ownership, consumer-owned negative lookup identities and
+the existing decode admission; they do not add a cache or relax the album-card
+size cap. Full-cover demand promotes through the same decode seat using exact
+oriented source dimensions. Resolved boundary defects are recorded under
+link:90_open_issues.adoc#material-atmosphere-negative-demand[negative demand],
 link:90_open_issues.adoc#material-artwork-panel-routing[panel routing] and
 link:90_open_issues.adoc#material-cover-decode-sizing[Cover sizing].
 
@@ -384,6 +381,28 @@ freeze, stopped higher-rate reveal, stopped resize and Waveform source/seek chec
 Independent producer-to-consumer review found no introduced correctness defect.
 The preceding scan remained read-only; its recommendations were authorized and
 implemented at this stage.
+
+[[DEC-015]]
+=== DEC-015: Keep material preferences under Core configuration authority
+
+Status: implemented, 2026-11-07.
+
+Persist material selection, enablement and per-preset parameters through the
+existing Core configuration authority, not a second GUI-owned settings file.
+These preferences remain independent of semantic theme colors, renderer budgets
+and the Settings draft, so discarding that draft does not undo material changes.
+
+Material edits preview immediately and submit narrow configuration mutations.
+Core validates and writes them before accepting the new preferences; the GUI
+reconciles its preview with authoritative configuration and reports save failures.
+Unrelated configuration updates must not overwrite pending material edits.
+This replaces session-only preference storage without moving artwork ownership
+or changing decode admission; those boundaries remain under <<DEC-008>>.
+
+Preference defaults and migration are described in
+link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
+The shared card, editing and navigation contract belongs in
+link:24_layout.adoc#material-appearance[Material appearance].
 
 [[unapproved-candidates]]
 == Unapproved candidates

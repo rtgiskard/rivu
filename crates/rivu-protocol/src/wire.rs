@@ -13,7 +13,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 18;
+pub const PROTOCOL_VERSION: u8 = 19;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1821,6 +1821,7 @@ pub struct WireConfig {
     ui_font_size_pt: u32,
     ui_language: String,
     ui_theme: rivu_format::config::Theme,
+    material: rivu_format::config::MaterialPreferences,
     ui_scale: f32,
     layout_snap_enabled: bool,
     layout_snap_grid_px: u32,
@@ -1919,6 +1920,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             ui_font_size_pt: value.ui_font_size_pt,
             ui_language: value.ui_language.clone(),
             ui_theme: value.ui_theme,
+            material: value.material.clone(),
             ui_scale: value.ui_scale,
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
@@ -2086,6 +2088,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             equalizer_presets: value.equalizer_presets,
             equalizer_ab: value.equalizer_ab,
             processing_graph: value.processing_graph,
+            material: value.material,
         }
     }
 }

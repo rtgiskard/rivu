@@ -8,19 +8,91 @@ use crate::gui::window::*;
 use manual_actions::ManualAction;
 
 impl WindowView {
+    #[cfg(test)]
+    pub(in crate::gui) fn material_intent_fenced(
+        &mut self,
+        intent: appearance::material::MaterialIntent,
+        cx: &mut Context<Self>,
+    ) {
+        self.material_intent(intent, cx);
+        // The command worker is FIFO. This ACK follows the real material save,
+        // even though its GUI completion cannot run inside this test closure.
+        let delivery = futures::executor::block_on(self.handle.request_ack(Command::DismissError));
+        assert!(delivery.observed_result().is_ok(), "{delivery:?}");
+        let persisted = appearance::material::MaterialSession::from_preferences(
+            &self.handle.config_snapshot().material,
+        );
+        let preview = appearance::material::MaterialSession::current(cx);
+        assert_eq!(persisted.enabled, preview.enabled);
+        assert_eq!(persisted.material, preview.material);
+        assert_eq!(persisted.settings, preview.settings);
+    }
+
     pub(in crate::gui) fn material_intent(
         &mut self,
         intent: appearance::material::MaterialIntent,
         cx: &mut Context<Self>,
     ) {
         let previous = appearance::material::MaterialSession::current(cx);
+        if !previous.enabled
+            && !matches!(intent, appearance::material::MaterialIntent::SetEnabled(_))
+        {
+            return;
+        }
         if !cx
             .default_global::<appearance::material::MaterialSession>()
             .apply(intent)
         {
             return;
         }
+        let change = cx
+            .global::<appearance::material::MaterialSession>()
+            .change(intent);
+        match self
+            .handle
+            .enqueue_config(rivu_protocol::model::ConfigMutation::Material(change))
+        {
+            Ok(completion) => {
+                cx.default_global::<appearance::material::MaterialSession>()
+                    .begin_save();
+                let handle = self.handle.clone();
+                cx.spawn(async move |this, cx| {
+                    let delivery = completion.await;
+                    let result = delivery.observed_result();
+                    let preferences = handle.config_snapshot();
+                    let _ = this.update(cx, |this, cx| {
+                        let previous = appearance::material::MaterialSession::current(cx);
+                        cx.default_global::<appearance::material::MaterialSession>()
+                            .finish_save(&preferences.material);
+                        if let Err(error) = result {
+                            this.error = Some(error);
+                        }
+                        this.material_changed(previous, cx);
+                    });
+                })
+                .detach();
+            }
+            Err(error) => {
+                cx.default_global::<appearance::material::MaterialSession>()
+                    .restore(previous);
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        }
+        self.material_changed(previous, cx);
+    }
+
+    pub(in crate::gui) fn material_changed(
+        &mut self,
+        previous: appearance::material::MaterialSnapshot,
+        cx: &mut Context<Self>,
+    ) {
         let session = appearance::material::MaterialSession::current(cx);
+        if !session.enabled {
+            self.shell.material_edit = None;
+            self.shell.material_choices.close();
+        }
         let identity_changed =
             previous.enabled != session.enabled || previous.material != session.material;
         if identity_changed

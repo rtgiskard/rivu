@@ -98,6 +98,14 @@ impl Core {
             patch.apply_to(&mut config);
             return self.configure(Arc::new(config));
         }
+        if let ConfigMutation::Material(change) = change {
+            let mut config = self.preferences.checkpoint();
+            change.apply_to(&mut config.material);
+            config.validate()?;
+            self.write_config(&config)?;
+            self.preferences.accept(Arc::new(config));
+            return Ok(());
+        }
         let mut config = self.preferences.checkpoint();
         let visualization_changed = matches!(change, ConfigMutation::ToggleVisualization);
         let roots_changed = matches!(
@@ -127,6 +135,7 @@ impl Core {
                 config.library_roots.retain(|root| root != &path);
             }
             ConfigMutation::Settings(_) => unreachable!(),
+            ConfigMutation::Material(_) => unreachable!(),
         }
         config.validate()?;
         if visualization_changed {

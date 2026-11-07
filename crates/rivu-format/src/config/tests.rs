@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn material_preferences_round_trip_defaults_and_independent_presets() {
+    let original = "# Keep theme spelling\n[interface]\ntheme = 'rivu_dark'\n";
+    let baseline = from_toml(original).unwrap();
+    assert_eq!(baseline.material, MaterialPreferences::default());
+    let mut config = baseline.clone();
+    config.material.enabled = false;
+    config.material.selected = MaterialPreset::StillWater;
+    for preset in [MaterialPreset::Dissolve, MaterialPreset::StillWater] {
+        let mut parameters = MaterialParameters::preset(preset);
+        parameters.panel_alpha = 0.25;
+        config.material.presets.insert(preset, parameters);
+    }
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert!(saved.contains("# Keep theme spelling"));
+    assert!(saved.contains("still_water"));
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    let baseline = config.clone();
+    MaterialChange::Reset(MaterialPreset::Dissolve).apply_to(&mut config.material);
+    let saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert!(
+        config
+            .material
+            .presets
+            .contains_key(&MaterialPreset::StillWater)
+    );
+}
+
+#[test]
+fn legacy_original_material_stays_disabled_with_satin_ready_to_enable() {
+    assert!(!MaterialPreferences::default().enabled);
+    assert_eq!(
+        MaterialPreferences::default().selected,
+        MaterialPreset::Satin
+    );
+    for enabled in [false, true] {
+        let mut config = Config::default();
+        config.material.enabled = enabled;
+        config.material.selected = MaterialPreset::Original;
+        let mut satin = MaterialParameters::preset(MaterialPreset::Satin);
+        satin.panel_alpha = 0.37;
+        config.material.presets.insert(MaterialPreset::Satin, satin);
+        let legacy = to_toml(&config).unwrap();
+        let mut loaded = from_toml(&legacy).unwrap();
+        loaded.material.normalize();
+        assert!(!loaded.material.enabled);
+        assert_eq!(loaded.material.selected, MaterialPreset::Satin);
+        assert_eq!(loaded.material.presets, config.material.presets);
+        MaterialChange::SetEnabled(true).apply_to(&mut loaded.material);
+        assert!(loaded.material.enabled);
+        assert_eq!(loaded.material.selected, MaterialPreset::Satin);
+        let saved = update_toml(&legacy, None, &loaded).unwrap();
+        assert_eq!(from_toml(&saved).unwrap(), loaded);
+    }
+}
+
+#[test]
+fn material_preferences_reject_unknown_ids_and_invalid_parameters() {
+    assert!(from_toml("[interface.material]\nselected = 'unknown'\n").is_err());
+    assert!(from_toml("[interface.material.presets.unknown]\npanel_alpha = 0.5\n").is_err());
+    let mut config = Config::default();
+    for (parameter, value) in [
+        (material::MaterialParameter::Alpha, f32::NAN),
+        (material::MaterialParameter::Wave, f32::INFINITY),
+        (material::MaterialParameter::BackdropBlur, 33.),
+        (material::MaterialParameter::Speed, -0.1),
+        (material::MaterialParameter::Steps, 1.),
+        (material::MaterialParameter::Steps, 2.5),
+    ] {
+        config.material = MaterialPreferences::default();
+        MaterialChange::SetParameter {
+            preset: MaterialPreset::StillWater,
+            parameter,
+            value,
+        }
+        .apply_to(&mut config.material);
+        assert!(config.validate().is_err());
+        if value.is_finite() {
+            let invalid = toml::to_string_pretty(&file::FileConfigView::from(&config)).unwrap();
+            assert!(from_toml(&invalid).is_err());
+        }
+    }
+}
+
+#[test]
 fn common_palettes_roundtrip_and_patch() {
     let original = "[visualizations.general]\npalette = 'deadbeef'\n";
     let baseline = from_toml(original).unwrap();

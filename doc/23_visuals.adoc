@@ -297,8 +297,8 @@ finite-render requests. Decode loops observe cancellation between packets, but
 cannot interrupt a blocking file/container/codec call; physical admission remains
 held until worker exit. Cancellation is not a load failure. Re-enabling restores
 the retained waveform display but does not restart an interrupted full load.
-The menu toggle changes only visualization enablement through the core's serialized request
-path, preserving pending playback and device settings.
+The application-menu Visualizations entry opens its Settings page without
+changing enablement. Changes follow the Settings draft's Apply/Discard contract.
 The disabled-state icon and controls are described in
 link:01_config.adoc#visualization-enablement[Visualization enablement].
 
