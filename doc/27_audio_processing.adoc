@@ -645,53 +645,17 @@ Explicit modes reject unsupported plans instead of silently changing modes.
 Native realtime planning supports IIR/FIR EQ, non-Profile classical restoration,
 Mix and Output; Profile capture and neural inference require an offline prefix
 or fully offline execution. A native plan also has admission bounds: at most 32
-channels, 64 MiB estimated state, two seconds of latency and a conservative
-arithmetic-work budget. These are planning limits, not measured device-deadline
-guarantees. An EQ configuration supported by the DSP crate alone can therefore
-still be rejected by the realtime graph planner.
+channels, 64 MiB estimated state, two seconds of latency and 300,000,000
+arithmetic-work units/second. These are planning limits, not measured device-deadline
+guarantees. Heavier graphs can require Hybrid/Offline execution even when their
+state fits in memory; an EQ configuration supported by the DSP crate alone can
+still be rejected by the realtime graph planner. See
+<<graph-resource-admission,Graph resource admission>> for effective-work accounting,
+bypass rules and the scope of the state estimate.
 
-Admission uses a lightweight plan before preparing DSP, delay lines or PCM blocks.
-Auto/Hybrid candidates rejected for capability or budget therefore allocate no DSP
-state. A selected plan can still fail numerical construction, in which case
-automatic selection continues with the next candidate.
-
-Admission counts effective DSP work: disabled/solo-excluded IIR bands and identity
-peak/shelf sections do not consume stage estimates. Disabled EQ and fully bypassed
-restoration have no DSP latency/state, but edges and node buffers still count.
-Restoration bypass means Wet=0, or spectral Off with both hum and repair disabled.
-DSP construction, realtime/offline planning and status use the same configuration
-predicate. Validation and Profile requirements still apply; enabled flat FIR
-retains convolution latency, and active hum/repair is not bypassed by spectral Off.
-
-Active restoration work includes each enabled hum harmonic and the configured
-impulse-repair width, independently of spectral mode. Hum adds 12 units per
-harmonic/channel/frame. For repair width `W`, radius `R=W+2` and `K=W+3` median
-differences, repair adds `4*R + K*K + 24*W + 32` units per channel/frame for context,
-sorting and worst-case search/interpolation, in addition to common restoration
-work. These are conservative planning allowances, not instruction counts or
-measured CPU time. The total limit remains 300,000,000 units/second; heavier
-graphs can require Hybrid/Offline execution even when their state fits in memory.
-
-The state estimate covers DSP objects/buffers, graph PCM blocks, wide summation
-scratch and edge delay lines. It is not total retained process memory or RSS:
-graph topology/configuration containers, allocator metadata and decoder/device
-state are outside this budget. Logical node PCM blocks are charged conservatively
-even when pass-through outputs alias an upstream block.
-
-Restoration obtains its state estimate from the DSP implementation without
-constructing a processor or FFT plan. For block size `B`, channel count `C` and
-lookahead `L` in frames, its adapter reserves `(L+B)*C` output samples and
-`(2*L+B)*C` queue samples: `(3*L+2*B)*C*4` bytes, in addition to the boxed adapter
-object (which already contains the denoiser and inline repair object). Active hum
-adds one notch object and `C*2*8` state bytes per harmonic. Repair radius `R`
-adds `(2*R+2)*C*4` context/frame bytes. A delayed partial-wet blend additionally
-retains `(L+1)*C*4` dry bytes; full Wet and zero-lookahead hum retain no dry queue.
-Spectral paths add their channel/STFT and mode-specific PSD/gain arrays, plus a
-separate RustFFT power-of-two allowance of `2*N` complex scratch entries and
-`64*N` bytes for the two retained plan trees (`N` is FFT size). The FFT allowance
-is backend-specific, not a multiplier over unrelated storage; changes to RustFFT
-or supported FFT sizes require reevaluating it. Bypassed graph nodes construct no
-adapter and therefore incur none of these processor/staging charges.
+Admission checks capability and budgets before allocating DSP state. A selected
+plan can still fail numerical construction, in which case automatic selection
+continues with the next candidate.
 
 Hybrid uses a single cached output port as its boundary: every path into the
 live target must cross that exact port. A separate uncached source branch or
@@ -781,6 +745,53 @@ source changes and incompatible formats reset history; pause does not advance it
 Source identity and captured settings bind results. Playback generation and
 pending selection intent separately govern automatic audition; Stop revokes that
 intent even when no physical source is playing.
+
+[[graph-resource-admission]]
+=== Graph resource admission
+
+Admission uses a lightweight plan before preparing DSP, delay lines or PCM blocks;
+Auto/Hybrid candidates rejected for capability or budget allocate no DSP state.
+The work estimate counts effective DSP: disabled/solo-excluded IIR bands and
+identity peak/shelf sections consume no stage estimates. Disabled EQ and fully
+bypassed restoration have no DSP latency/state, but edges and node buffers still
+count. Restoration bypass means Wet=0, or spectral Off with both hum and repair
+disabled. DSP construction, realtime/offline planning and status share this
+configuration predicate. Validation and Profile requirements still apply; enabled
+flat FIR retains convolution latency, and spectral Off does not bypass active
+hum/repair.
+
+Active restoration adds work independently of spectral mode: each enabled hum
+harmonic adds 12 units per channel/frame. For impulse-repair width `W`, radius
+`R=W+2` and `K=W+3` median differences, repair adds
+`4*R + K*K + 24*W + 32` units per channel/frame for context, sorting and worst-case
+search/interpolation, in addition to common restoration work. These are
+conservative planning allowances, not instruction counts or measured CPU time.
+
+The state estimate covers DSP objects/buffers, graph PCM blocks, wide summation
+scratch and edge delay lines. Logical node PCM blocks are charged conservatively
+even when pass-through outputs alias an upstream block. This is not total retained
+process memory or RSS: graph topology/configuration containers, allocator metadata
+and decoder/device state are outside the budget.
+
+Restoration obtains its estimate from the DSP implementation without constructing
+a processor or FFT plan. For block size `B`, channel count `C` and lookahead `L`
+in frames, processor/staging charges are:
+
+* Adapter: `(L+B)*C` output samples and `(2*L+B)*C` queue samples, totaling
+  `(3*L+2*B)*C*4` bytes, plus the boxed adapter object (which already contains the
+  denoiser and inline repair object).
+* Active hum: one notch object and `C*2*8` state bytes per harmonic.
+* Repair radius `R`: `(2*R+2)*C*4` context/frame bytes.
+* Delayed partial-wet blend: `(L+1)*C*4` dry bytes; full Wet and zero-lookahead
+  hum retain no dry queue.
+* Spectral paths: channel/STFT and mode-specific PSD/gain arrays, plus a separate
+  RustFFT power-of-two allowance of `2*N` complex scratch entries and `64*N` bytes
+  for the two retained plan trees, where `N` is FFT size. This backend-specific
+  allowance is not a multiplier over unrelated storage; changes to RustFFT or
+  supported FFT sizes require reevaluating it.
+
+Bypassed graph nodes construct no adapter and incur none of these processor/staging
+charges.
 
 === Timeline and source identity
 

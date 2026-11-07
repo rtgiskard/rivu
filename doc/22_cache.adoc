@@ -325,14 +325,10 @@ changed values or palette replace the publication. Height, position, cursor
 movement, and width changes preserving effective count reuse it.
 
 The GUI session owns at most 1024 summary bins, shared by all Waveform panels;
-neither Core nor disk caches retain waveform summaries. A single background PCM
-reader folds progressive updates and finite-render chunks. Cached drawings retain
-only identity tokens and cannot pin or restore obsolete summaries. All-unknown
-data produces no publication; known silence is drawable. Pause and hidden panels
-retain the bounded summary. Source changes retire it; seek/configuration changes
-preserve old intervals until revisited. A per-bucket order fence prevents a late
-full baseline from overwriting newer realtime visits. Signal and replacement
-semantics belong to link:23_visuals.adoc#waveform[Waveform].
+neither Core nor disk caches retain waveform summaries. Cached drawings retain
+only identity tokens and cannot pin or restore obsolete summaries. Progressive
+and full-load updates, unknown intervals and summary replacement follow
+link:23_visuals.adoc#waveform[Waveform signal and lifetime rules].
 
 Finite PCM sessions use bounded chunks, reusable framing storage and backpressure,
 not whole-track PCM retention. Physical worker admission survives logical

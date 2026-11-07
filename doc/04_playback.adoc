@@ -477,19 +477,15 @@ Library, Recent, or playlist entries. It never changes a whole directory or
 playlist. Track lists prioritize titles as the terminal narrows and keep compact
 metadata, favorite, playback-state, and missing-file indicators where space permits.
 Truncation does not change stored metadata.
-Track lists distinguish artists, albums, audio-format properties, favorites,
-and playback state with semantic colors. Track-detail field values share the
-audio-format color; labels and unknown values remain secondary, as do duration
-columns and navigation counters. Field colors survive row selection and compact
-title/artist presentation.
+Track lists use semantic colors to distinguish metadata, favorites, and playback
+state.
 
 The status row shows volume, shuffle, repeat, and current-track codec, sample rate,
 bit depth, and available bitrate in `kbps` where space permits, without distinguishing
 estimated and confirmed bitrates. A separate bottom row holds notices, then scan
-status, core errors, or the startup help hint, in that priority order. Notices
-expire after six seconds; the startup help hint lasts four. Playback transitions
-update the fixed playback display rather than replacing messages.
-Properties fit the available width rather than requiring a 90-column terminal.
+status, core errors, or the startup help hint, in that priority order. Notices and
+startup help expire automatically. Playback transitions update the fixed playback
+display rather than replacing messages.
 
 Press `i` outside the query editor for read-only details of the selected track,
 directory, or playlist. Playback changes do not replace that target. Track details

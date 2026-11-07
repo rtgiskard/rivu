@@ -629,6 +629,50 @@ Current resource limits and record sizes are described above; later fixes and
 extensions do not inherit earlier timing, memory or image-comparison results
 automatically. No GUI or benchmark rerun is implied by maintaining this document.
 
+The decision index separates the reason for each experiment from its historical
+tables and methods below. Results from different rows are not a cumulative
+speedup or a common benchmark series.
+
+[cols="2,3",options="header"]
+|===
+|Evidence |Decision supported and limits
+|<<capacity-neutral-regrouping-comparison-2026-10-30,Capacity-neutral regrouping>>
+|Reject the extra planning/composite bookkeeping: sparse-layout gains came with an ordinary mixed-layout cost.
+|<<shared-local-msaa-comparison-2026-10-23,Shared local MSAA>>
+|Share local attachments to reduce retained capacity and mixed-layout engine occupancy; distant regions need more passes and CPU work. This does not measure the later reclamation policy.
+|<<initial-comparative-measurements,Rectangle-only predecessor>>
+|Replace LED tessellation with instance publication: lower CPU update, payload and render/readback costs in the prototype. Complete first-image latency is measured separately; this is not a consumer cutover.
+|<<unified-field-and-path-measurements,Unified fields and paths>>
+|Move field recoloring to numerical drawing and evaluate palette paths: CPU recoloring disappears, but field render/readback gets slower. Vendor image comparisons alone do not accept application palettes.
+|<<demand-specific-preparation-and-path-batching,Demand-local preparation and batching>>
+|Prepare only needed pipelines and batch safe disjoint paths: strong replay benefit in the stated multi-path workload, not a universal startup gain.
+|<<density-spatial-consumer-evidence,Density/Spatial consumers>>; <<spectrum-barsled-consumer-measurements,Spectrum consumers>>
+|Evaluate actual migrations: bounded live-CPU reductions, overlapping memory ranges and no isolated GPU-cost or synchronized pixel-parity claim.
+|===
+
+The following subsections are the historical reference: they retain the baseline
+identities, workloads, tables and acceptance limits behind those decisions.
+
+[[historical-vendor-measurement-method]]
+=== Shared method for the 2026-10-18 vendor comparisons
+
+The rectangle-only and unified field/path comparisons used Radeon 780M / RADV
+Vulkan, Rust 1.99.0 and optimized release builds with thin LTO. Both used five
+runs alternating baseline/candidate order, each retaining 20 frames after four
+warmups. Steady-state times are microseconds: median of run medians, with the
+minimum and maximum run median in brackets. Shared input generation is excluded
+from CPU update; static replay requires no update. Workloads and baseline
+identities remain specific to each experiment.
+
+In those comparisons and the demand-specific preparation/batching probe,
+render/readback includes CPU renderer preparation, submission, GPU completion,
+copy-back and image assembly; it is not isolated GPU execution time. First-use
+boundaries differ: the rectangle supplement includes construction and initial CPU
+preparation, whereas renderer-first-draw observations and the demand-specific
+probe exclude them. Their process/cache conditions are stated locally. These
+conventions do not apply to the shared-MSAA encode/submit or application process
+counter measurements.
+
 === Capacity-neutral regrouping comparison (2026-10-30)
 
 Capacity-neutral regrouping was rejected. On Radeon 780M it benefited specific
@@ -721,18 +765,15 @@ establish the expected sprite multiplicity. These results apply to that revision
 The measurements in this subsection describe the rectangle-only predecessor and
 its recorded source hashes, not the subsequently unified field/path renderer.
 
-Measured on 2026-10-18 using Radeon 780M / RADV Vulkan, Rust 1.99.0 and an
-optimized release build with thin LTO. The baseline was the then-current LED
-drawing kernel: append each cell to a NonZero `PathBuilder`, tessellate, then render
-the textured path. Both paths ran in the same executable with identical input and
-palette samples. This was not an end-to-end player benchmark or a consumer cutover.
+Measured on 2026-10-18 with the <<historical-vendor-measurement-method,shared vendor method>>.
+The baseline was the then-current LED drawing kernel: append each cell to a
+NonZero `PathBuilder`, tessellate, then render the textured path. Both paths ran
+in the same executable with identical input and palette samples. This was not
+an end-to-end player benchmark or a consumer cutover.
 
 The workload uses 96 columns, a 1,024-sample Tokyo Night cubic palette and
 3-pixel filled / 2-pixel empty segments. Single panels are 768 by 320 pixels;
-four panels are each 768 by 160. Resize alternates heights 320 and 240. Five
-runs alternate baseline/candidate order; each records 20 frames after four warmup
-frames. Values below are microseconds: median of run medians, with the minimum
-and maximum run median in brackets. Shared input generation is excluded.
+four panels are each 768 by 160. Resize alternates heights 320 and 240.
 
 [cols="2,2,2,2,2",options="header"]
 |===
@@ -743,10 +784,8 @@ and maximum run median in brackets. Shared input generation is excluded.
 |Resize |3,158.91 [3,142.97–3,173.37] |0.27 [0.25–0.31] |678.69 [664.00–682.63] |229.54 [229.45–235.06]
 |===
 
-Render/readback time includes CPU renderer preparation, submission, GPU completion,
-copy-back and image assembly; it is not a GPU timestamp measurement. The original
-renderer-first-draw observations exclude renderer construction and initial CPU
-preparation, so they must not be read as complete first-use latency.
+The original renderer-first-draw observations exclude renderer construction and
+initial CPU preparation, so they must not be read as complete first-use latency.
 
 A supplemental run measures the full boundary symmetrically: five fresh processes
 per path, alternating path order, with one renderer and one first image in each
@@ -788,20 +827,17 @@ frame rate for the current revision.
 
 === Unified field and path measurements
 
-Measured on 2026-10-18 using Radeon 780M / RADV Vulkan and Rust 1.99.0,
-release with thin LTO. Fields compare retained BGRA8 coloring/image drawing against
-fixed color-first numerical drawing. The source is 256 by 256 with a 256-sample
+Measured on 2026-10-18 with the <<historical-vendor-measurement-method,shared vendor method>>.
+Fields compare retained BGRA8 coloring/image drawing against fixed color-first
+numerical drawing. The source is 256 by 256 with a 256-sample
 palette and 70 dB logarithmic mapping. Outputs are 256 pixels square for native
 replay, 1,024 for static enlargement, 768 for continuous updates, and four 512-pixel
 panels sharing one publication. Resize alternates 768 and 576 pixels. Paths compare
 the same 1,024-point, 2-pixel stroke at 768 by 320 through the existing textured
 path and the new palette material; geometry generation is excluded from both.
 
-Five runs alternate baseline/candidate order, each retaining 20 frames after four
-warmups. Values are microseconds: median of run medians [minimum–maximum]. CPU
-update excludes shared signal/geometry generation; static cases generate no new
-input. Render/readback includes preparation, submission, completion and copying
-the result to CPU memory: it is not isolated GPU execution time.
+Shared signal/geometry generation is excluded from CPU update; static cases
+generate no new input.
 
 [cols="2,2,2,2,2",options="header"]
 |===
@@ -871,6 +907,7 @@ entry points and font fixtures do not become production rendering dependencies.
 
 === Density/Spatial consumer measurements
 
+[[density-spatial-consumer-evidence]]
 The actual application comparison uses two differently sized panels per style on
 an isolated 1280-by-800 Wayland surface, identical PCM input, config and library
 seed. Baseline/candidate process order was B–C–C–B–B–C.

@@ -244,16 +244,14 @@ only that track.
 Right-click a card to add the complete album to a playlist or set its favorites.
 Drag it to Queue to insert at a row boundary or append in blank space, or to a
 named playlist catalog row to append in album order; track rows can be transferred
-individually. Transfers reject changed album membership rather than copying a
-stale or partial list. External database edits while Rivu
-is running are unsupported.
+individually. Transfers, Favorite, Unfavorite, and New playlist reject changed
+album membership rather than using stale or partial results. External database
+edits while Rivu is running are unsupported.
 
-Opening an album menu does not load its complete track list. Playback and transfers
-to Queue or an existing playlist use the album identity directly. Favorite,
-Unfavorite, and New playlist resolve the complete album only after selection;
-changed membership rejects the action instead of using partial or stale results.
-Esc or Left cancels the pending resolution, including New playlist's loading page;
-a cancelled read cannot later open the playlist dialog or apply favorites.
+Press Esc or Left to cancel loading for Favorite, Unfavorite, or New playlist.
+A cancelled action cannot later change favorites or open the playlist dialog.
+See link:22_cache.adoc#demand-cancellation-and-physical-retirement[collection resolution]
+for internal loading and source-identity rules.
 
 Search matches album titles or member artists across the library. An artist match
 keeps the complete album, including other artists' tracks. The sort icon switches

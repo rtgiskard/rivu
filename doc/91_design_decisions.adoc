@@ -122,61 +122,22 @@ must not acquire a shared lifetime solely to reduce type count. See
 link:23_visuals.adoc#waveform[Waveform ownership] and
 link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
 
-Finite Before/After reads reuse the audio renderer rather than a waveform scan.
-The GUI reduces PCM off the foreground executor and coalesces bounded progress
-publications; display changes neither decode audio nor clear session statistics.
+Finite Before/After reads reuse the audio renderer. Progressive summaries share
+the GUI PCM reader, with reduction and coalesced publications off the foreground
+executor. Display changes neither decode audio nor clear session statistics.
+This reduces waveform-specific coupling, not necessarily total CPU or RSS.
+Transporting PCM instead of summaries is a real cost: a 60-second, 48 kHz stereo
+`f32` source sends 23,040,000 sample bytes, consumed and discarded incrementally.
+Packet, buffer and cancellation bounds belong to the finite PCM contract above;
+decoder/graph memory and shared-window residency remain separate costs.
 
-Progressive summaries share the GUI PCM reader instead of a dedicated
-waveform-client thread. This reduces waveform-specific coupling, but moving
-statistics does not by itself reduce total CPU or RSS. Finite reads transport PCM
-instead of summaries: a
-60-second 48 kHz stereo `f32` source sends 23,040,000 sample bytes, consumed and
-discarded incrementally. Finite transport batches contiguous render events into
-at most 4096 frames and 32 KiB of samples per packet. Four reusable PCM buffers
-retain at most 128 KiB per render, with two packets queued; this permits filling
-one while another is written and two await sending. This replaces three
-1024-frame buffers and per-render-event sends. Decoder/graph memory,
-encoded/socket buffers and shared-window residency remain separate costs.
-
-Delivery review removed migration-local allocation and computation waste. A
-1024-bin snapshot retains 114,688 array bytes; the summary also keeps 24,576
-energy bytes. A standalone allocator-counted smoke observed zero allocations
-for ingestion and warmed snapshot publication. For one 4096-frame block at
-30 seconds in that 60-second timeline, two bins are touched: finalizing RMS
-per touched bin reduces the new reducer's square-root evaluations from 12,288
-to 6 without changing energy/count/peak results. These are capacity and operation
-counts, not a timing or RSS comparison against the old architecture.
-
-An actual Core smoke delivered all 2,880,000 frames of a 60-second stereo source
-and 240,000 frames of its 10–15 second range for both signals, with continuous
-media positions and concurrent seek leaving the captured stream unchanged.
-Source/seek mapping, replay replacement, late full/live overlap and physical
-cancellation retirement are covered by the affected behavior suites.
-
-An isolated 1280×800 nested-niri GUI check started capture at 30 seconds and left
-the earlier timeline blank. The actual full-load menu filled the complete source;
-a waveform click sought from 41.37 to 20.06 seconds without discarding its display.
-Closing the window preserved Core and playback state; reopening while paused
-showed no inherited summary. Input used Wayland virtual pointer events, not direct
-business-method calls. This does not establish desktop-shell, IME or multi-output
-behavior.
-
-After rebasing onto `fc4bb47b`, `make lint` and `make test-rust` passed, including
-default/all/disabled workspace features and GUI-only/TUI-only root combinations.
-The cutover's default-feature application artifact also built successfully.
-Subsequent ownership/cost cleanup passed `make lint` and the affected audio,
-GUI and visuals suites with all features and with default features disabled.
-The standalone reducer smoke also checked midtrack blank coverage, independent
-scalar peak/RMS/count results, and replay replacement preserving untouched bins.
-
-The four-buffer batching update passed `make lint`, finite-IPC tests with default
-features enabled and disabled, and a default-feature application build. An
-isolated Core smoke read 48,017 frames at 48 kHz: stereo used 12 packets and
-18-channel PCM used 106, respecting the byte limit. Before/After and selected
-ranges preserved every sample and media position; source mutation returned the
-valid partial tail before Error, never Complete. Regressions cover media jumps,
-step changes, partial tails, cancellation and backpressured worker retirement.
-These establish batching and lifecycle behavior, not CPU, RSS or latency gains.
+Historical Core checks preserved complete Before/After streams, selected ranges
+and media positions across concurrent seek, and flushed valid partial PCM before
+source-error termination. Behavior checks covered replay replacement, late
+full/live overlap and backpressured cancellation. Nested-Wayland input confirmed
+midtrack blank coverage, explicit full loading, seeking and session-local summary
+lifetime. These establish continuity and ownership, not CPU, RSS, latency gains or
+host-desktop integration; they are not new verification of subsequent revisions.
 
 
 [[DEC-007]]
@@ -264,100 +225,46 @@ retirement requires exclusive process ownership. Keep production ownership,
 protocols and ordinary test concurrency unchanged; these cases share an ownership
 rule, not necessarily one observation primitive.
 
-The PCM reader already pins the original memfd. Compare its `(dev, ino)` with
-metadata of the owner's advertised path after Drop: a missing path or a different
-object is valid retirement; the same object exposes an owner-fd leak. Keep the
-retained PCM check too. Do not require path disappearance or reopen the replacement:
-an fd reused for a socket need not support that open. This restores coverage lost
-when the original path-unopenable assertion was removed, without extra isolation.
+Retirement observations follow the resource's identity and ownership:
 
-Isolate socket retirement checks from unrelated forking tests, keeping immediate
-rebind/EOF assertions inside the live isolated case. This includes App startup,
-normal shutdown and final-save failure: `481a602d` omitted the two shutdown cases,
-and subsequent CI exposed a reacquisition failure in the final-save-error case.
-Both now enter isolation before constructing App or its pinned directory fixture;
-reacquisition errors retain their diagnostics rather than becoming boolean failures.
-Directory pins prevent inode recycling, not listener inheritance; preserve existing
-pins without treating them as isolation. Scope any shared runner access to these
-tests, not the whole suite.
+* PCM checks compare the reader-pinned memfd's `(dev, ino)` with the owner's
+  advertised path after Drop, and still verify retained samples. A missing path
+  or different object is valid retirement; path disappearance or reopening a
+  replacement FD is not required.
+* Socket rebind/EOF checks construct fixtures inside bounded single-test
+  subprocesses when unrelated forks could inherit listeners. Directory pins
+  prevent inode recycling, not listener inheritance; neither replaces the other.
+  Keep immediate assertions and operation deadlines, without retries or global
+  test serialization.
+* Neural checks own an exclusive direct-child set with ordinary SIGCHLD semantics.
+  After terminal delivery, before applying Finished or retiring Core, non-reaping
+  `waitid(P_ALL, 0, ..., WEXITED | WNOHANG | WNOWAIT)` must report `ECHILD`.
+  Live and zombie children fail. A pidfd acquired before retirement is an
+  alternative when exclusive child-set ownership cannot be established; stale
+  numeric PIDs are not safe identities. Child absence must also be paired with
+  proof that the intended failure path actually ran.
 
-A subsequent global review found additional Drop-dependent EOF cases and unpinned
-abstract-listener fixtures. Those cases now use bounded single-test isolation and
-the existing pinned fixture without retries or relaxed operation deadlines. Keep
-their evidence in link:90_open_issues.adoc#socket-eof-fixture-gaps[EOF fixtures] and
-link:90_open_issues.adoc#socket-directory-pin-gaps[directory identity fixtures].
-Do not infer exclusive socket ownership merely from a passing feature matrix.
+Inherited lifelines provide failure cleanup, not proof of production retirement.
+Keep their peer exclusively owned through the retirement assertion so cooperative
+EOF cannot hide a missing kill. On failure, close that peer before Core joins;
+the runner guard kills and waits for its owned child. Direct inheritance avoids
+a named FIFO's blocking-open startup race. These fixtures neither supervise a
+general process tree nor change terminal-signal ownership or production reaping.
+No production PCM attach change follows from FD reuse: preserve the existing
+link:21_ipc.adoc#realtime-pcm-transport[subscription admission ordering].
 
-For the two neural regressions, the isolated case must own only its interpreter as
-a direct child and retain ordinary SIGCHLD wait semantics, without an independent
-reaper. After terminal delivery, before applying it or retiring Core, require
-`ECHILD` from `waitid(P_ALL, 0, ..., WEXITED | WNOHANG | WNOWAIT)`. Live and zombie
-children fail without transferring production wait ownership. Preserve the
-stdout-closed readiness barrier; remove stale numeric-PID checks and cleanup.
-If exclusive child-set ownership cannot be established, a pidfd acquired before
-retirement remains an alternative, not the default.
-
-Child absence must be paired with evidence that the intended failure path ran.
-Fault injection made the old neural unwind regression pass after replacing its
-worker script with an ordinary early exit. A test-owned atomic observation now
-records execution immediately before the injected progress panic and is checked
-before applying Finished or retiring Core. This hook is test-only; production
-processing and protocols are unchanged. See
-link:90_open_issues.adoc#neural-unwind-trigger-coverage[unwind trigger coverage].
-
-Replace the fixtures' busy loops with a blocking builtin read on an inherited
-lifeline endpoint. Create its guard only inside the isolated case; both endpoints
-must survive asynchronous spawn and the retirement assertion. Only the inherited
-endpoint clears CLOEXEC; its peer stays exclusively owned by the runner. Do not
-clone or shut down that peer before failure or assertion completion: cooperative
-EOF must not make a missing production kill pass. The scripts use builtins without
-spawning descendants. Declare the guard after Core so failure unwind closes it
-before Core joins; cleanup only closes owned FDs. Direct inheritance avoids a
-named FIFO's startup race: if its last writer dies before the shell opens the FIFO,
-a blocking open can wait forever.
-
-`src/test_support.rs` exposes the bounded runner through the existing `test-support`
-boundary for GUI cases; App startup and shutdown use the same helper. A guard kills
-and waits for the owned runner on timeout or unwind. The foreground process group is unchanged:
-a new group needs explicit terminal-signal forwarding, and group kill plus leader
-wait does not prove descendant reaping. Lifeline EOF lets these fixtures terminate
-when their runner dies, even before the first read; it is failure cleanup, not a
-synchronous resource-retirement assertion or a general process-tree supervisor.
-There are no retries, observer threads or global subreaping.
-
-No production PCM attach change is indicated by this review. Mapping precedes
-enabling; ingestion requires a matching nonzero subscription revision acknowledged
-on the same connection. Buffered revision-zero status cannot admit enabled PCM.
-Preserve this ordering rather than adding instance metadata or FD transfer solely
-because the advertised path can be reused.
-
-`make lint` and `make test-rust` passed after integrating the App shutdown fixes,
-global-review corrections and test cleanup. Coverage includes default/all/disabled
-workspace features and GUI-only/TUI-only root runs. Both neural retirement
-regressions passed in all five root combinations; the affected EOF assertions and
-the retained GUI gap/staging integration also passed. Repeating the ordinary
-early-exit injector now fails on missing trigger evidence with exit 101, while the
-normal progress-panic case passes. Immediate socket retirement assertions remain
-intact; neither retries nor relaxed operation deadlines were introduced.
-
-After identifying the omitted App shutdown cases, a controlled fork/exec probe
-again distinguished retained pre-exec listeners from immediate post-exec rebind,
-with the directory inode pinned. An existing debug CLI artifact exercised normal
-and failed final saves: both quit acknowledgements succeeded, the service exited
-with 0 and 1 respectively, invalid config remained untouched, and immediate IPC
-rebind plus an exclusive SQLite transaction succeeded after each exit.
-
-The cross-process PCM regression checks descriptor retirement and retained native
-samples together. A real SharedPcmWindow smoke distinguished owner leaks, close
-without reuse, and memfd/socket reuse while preserving PCM. The shared-runner smoke
-checked success, child failure, timeout and unwind after spawn, requiring no remaining
-direct children. Prior PID-namespace probes distinguished live, zombie and reaped
-children without consuming status; an actual Rust Command and /bin/sh probe covered
-lifeline exit before its first read and after startup. Fixture exit is not descendant
-reaping. Production PCM admission was checked statically. Investigation records:
+The investigation records own the counterexamples and detailed evidence:
 link:90_open_issues.adoc#pcm-owner-retirement-coverage[PCM owner-drop],
-link:90_open_issues.adoc#socket-retirement-test-isolation[socket isolation]
-and link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity].
+link:90_open_issues.adoc#socket-retirement-test-isolation[socket isolation],
+link:90_open_issues.adoc#socket-eof-fixture-gaps[EOF fixtures],
+link:90_open_issues.adoc#socket-directory-pin-gaps[directory identity fixtures],
+link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity] and
+link:90_open_issues.adoc#neural-unwind-trigger-coverage[unwind trigger coverage].
+Historical lint and behavior validation covered default/all/disabled workspace
+features and GUI-only/TUI-only root runs; both neural retirement cases passed in
+all five root combinations. Replacing the panic injector with an ordinary early
+exit failed the trigger assertion, while the intended panic case passed. These
+checks do not by themselves prove exclusive ownership or constitute new runs.
 
 [[DEC-011]]
 === DEC-011: Retire playback without discarding current settings failures

@@ -163,10 +163,7 @@ for completion. Preparation can be cancelled without saving; Saving cannot.
 Status, errors, dismissal, and shutdown follow
 link:02_library.adoc#cancellation[Library cancellation].
 
-Repeated normalized paths share preparation inspection and source scanning, while
-the playlist retains every occurrence in input order. Source deduplication uses
-budgeted temporary indices and retains one scan path per unique source; it does
-not merge playlist entries or replace descriptor-based source validation.
+Repeated paths retain every playlist occurrence in input order.
 
 === Input limits and cancellation
 

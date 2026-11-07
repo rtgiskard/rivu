@@ -3,7 +3,7 @@
 Rivu is a lightweight, local-first music player for Linux, with GUI, TUI, and CLI
 access to a shared playback instance that can also run headless.
 
-image:https://github.com/user-attachments/assets/d99d5eec-313a-49a1-9f77-c8fb92f7703b[Rivu desktop,width=100%]
+image:https://github.com/user-attachments/assets/bfa5c41c-14f5-42a6-b173-f2a89bb55d94[rivu]
 
 == Why Rivu
 
