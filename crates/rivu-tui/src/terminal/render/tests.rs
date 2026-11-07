@@ -202,7 +202,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
 fn iteration_detail_fields_keep_label_and_value_visible_at_widths_one_through_four() {
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
     for width in 1..=4 {
-        let lines = detail_field("Artist", "Visible", width, colors, colors.artist);
+        let lines = detail_field("Artist", "Visible", width, colors);
         let mut terminal = Terminal::new(TestBackend::new(width as u16, 32)).unwrap();
         terminal
             .draw(|frame| draw_cached_lines(frame, frame.area(), &lines, 0))

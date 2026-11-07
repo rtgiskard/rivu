@@ -61,13 +61,13 @@ struct TerminalColors {
 impl TerminalColors {
     fn new(theme: rivu_presentation::theme::Theme) -> Self {
         let palette = rivu_presentation::theme::palette(theme);
-        let (artist, lavender, positive, favorite, warning, error) = match theme {
+        let (artist, lavender, positive, warning, error) = match theme {
             rivu_presentation::theme::Theme::RivuDark
             | rivu_presentation::theme::Theme::TokyoNight => {
-                (0x7dcfff, 0xbb9af7, 0x9ece6a, 0xdc8ac6, 0xff9e64, 0xf7768e)
+                (0x7dcfff, 0xbb9af7, 0x9ece6a, 0xff9e64, 0xf7768e)
             }
             rivu_presentation::theme::Theme::TokyoNightDay => {
-                (0x006078, 0x7040b0, 0x35601d, 0x8c3068, 0x8f4310, 0xa62b3e)
+                (0x006078, 0x7040b0, 0x35601d, 0x8f4310, 0xa62b3e)
             }
         };
         let rgb = |color: u32| {
@@ -86,22 +86,11 @@ impl TerminalColors {
             artist: rgb(artist),
             album: rgb(lavender),
             positive: rgb(positive),
-            favorite: rgb(favorite),
-            metadata: rgb(lavender),
+            favorite: rgb(0xff5faf),
+            metadata: rgb(0x6264f0),
             selected: rgb(palette.selected),
             warning: rgb(warning),
             error: rgb(error),
-        }
-    }
-
-    fn detail_value_color(self, field: &str) -> ratatui::style::Color {
-        match field {
-            "gl-artist" => self.artist,
-            "gl-album" => self.album,
-            "gl-codec" | "gl-sample-rate" | "gl-channels" | "gl-bitrate" | "gl-bits-sample"
-            | "gl-decoder-hint" => self.metadata,
-            "gl-duration" | "gl-disc" | "gl-track" | "gl-release" => self.secondary,
-            _ => self.text,
         }
     }
 }
@@ -155,7 +144,6 @@ fn detail_field(
     value: &str,
     width: usize,
     colors: TerminalColors,
-    value_color: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
     let label_indent = width.saturating_sub(1).min(2);
     let value_indent = width.saturating_sub(1).min(4);
@@ -169,7 +157,7 @@ fn detail_field(
     let value_color = if value.is_empty() {
         colors.secondary
     } else {
-        value_color
+        colors.metadata
     };
     let value = if value.is_empty() { "—" } else { value };
     for line in wrap_details(value, width.saturating_sub(value_indent)) {
@@ -197,20 +185,8 @@ fn detail_fields(
     }) {
         if pair.len() == 2 {
             let left_width = COLUMN_WIDTH + COLUMN_GAP;
-            let left = detail_field(
-                i18n.text(pair[0].0),
-                &pair[0].1,
-                COLUMN_WIDTH,
-                colors,
-                colors.detail_value_color(pair[0].0),
-            );
-            let right = detail_field(
-                i18n.text(pair[1].0),
-                &pair[1].1,
-                COLUMN_WIDTH,
-                colors,
-                colors.detail_value_color(pair[1].0),
-            );
+            let left = detail_field(i18n.text(pair[0].0), &pair[0].1, COLUMN_WIDTH, colors);
+            let right = detail_field(i18n.text(pair[1].0), &pair[1].1, COLUMN_WIDTH, colors);
             let count = left.len().max(right.len());
             let mut left = left.into_iter();
             let mut right = right.into_iter();
@@ -229,7 +205,6 @@ fn detail_fields(
                 &pair[0].1,
                 width.min(COLUMN_WIDTH),
                 colors,
-                colors.detail_value_color(pair[0].0),
             ));
         }
         lines.push(Line::default());
@@ -400,13 +375,7 @@ fn details_lines(
             };
             group(&mut lines, "track-tags");
             for (label, value) in [("gl-artist", &track.artist), ("gl-album", &track.album)] {
-                lines.extend(detail_field(
-                    i18n.text(label),
-                    value,
-                    width,
-                    colors,
-                    colors.detail_value_color(label),
-                ));
+                lines.extend(detail_field(i18n.text(label), value, width, colors));
                 lines.push(Line::default());
             }
             detail_fields(
@@ -489,7 +458,6 @@ fn details_lines(
                 }),
                 width,
                 colors,
-                colors.text,
             ));
             lines.push(Line::default());
             lines.extend(detail_field(
@@ -497,7 +465,6 @@ fn details_lines(
                 &track.path.to_string_lossy(),
                 width,
                 colors,
-                colors.text,
             ));
             lines.push(Line::default());
             if let Some(cue) = &track.cue {
@@ -541,7 +508,6 @@ fn details_lines(
                 decoder,
                 width,
                 colors,
-                colors.metadata,
             ));
             group(&mut lines, "terminal-details-history");
             detail_fields(
@@ -1154,6 +1120,12 @@ fn draw_status(
                 metadata.push_str(" · ");
             }
             metadata.push_str(&format!("{bits} bit"));
+        }
+        if let Some(bitrate) = track.bitrate_bps {
+            if !metadata.is_empty() {
+                metadata.push_str(" · ");
+            }
+            metadata.push_str(&format!("{:.0} kbps", bitrate as f64 / 1000.0));
         }
         frame.render_widget(
             Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
