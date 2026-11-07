@@ -1571,6 +1571,62 @@ fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
 }
 
 #[test]
+fn natural_eof_uses_final_snapshot_position_instead_of_previous_progress() {
+    let (_directory, mut core) = fixture_with_duration(None);
+    pending(&mut core, 1);
+    started(&mut core, None).unwrap();
+    progress(&mut core, 1.0, 1.0);
+    let generation = core.transport.generation;
+    core.finish_playback(
+        Ok(Some(audio::AudioSnapshot {
+            generation,
+            position_seconds: 10.0,
+            listened_seconds: 1.5,
+        })),
+        true,
+        Ok(()),
+    )
+    .unwrap();
+    assert_eq!(core.state.playback.duration, Some(10.0));
+    assert_eq!(play_count(&core, 1), 0);
+    assert_eq!(core.state.playback.position, 0.0);
+    assert!(core.transport.session.is_none());
+}
+
+#[test]
+fn natural_eof_preserves_previous_position_for_stale_or_invalid_final_snapshot() {
+    for (stale, position) in [
+        (true, 10.0),
+        (false, f64::NAN),
+        (false, f64::INFINITY),
+        (false, f64::NEG_INFINITY),
+        (false, -1.0),
+    ] {
+        let (_directory, mut core) = fixture_with_duration(None);
+        pending(&mut core, 1);
+        started(&mut core, None).unwrap();
+        progress(&mut core, 1.0, 0.0);
+        let generation = core.transport.generation;
+        core.finish_playback(
+            Ok(Some(audio::AudioSnapshot {
+                generation: if stale {
+                    generation.wrapping_sub(1)
+                } else {
+                    generation
+                },
+                position_seconds: position,
+                listened_seconds: 0.0,
+            })),
+            true,
+            Ok(()),
+        )
+        .unwrap();
+        assert_eq!(core.state.playback.duration, Some(1.0));
+        assert_eq!(play_count(&core, 1), 0);
+    }
+}
+
+#[test]
 fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
     let (_directory, mut core) = fixture_with_duration(None);
     pending(&mut core, 1);

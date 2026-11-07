@@ -608,15 +608,19 @@ impl Core {
         if let Some(playback) = &mut self.transport.session {
             if let Some(snapshot) = snapshot
                 && snapshot.generation == generation
-                && snapshot.listened_seconds.is_finite()
             {
-                // Late paused confirmations still count as heard audio, but
-                // their activity timestamp cannot cross the pause boundary.
-                let heard_at = playback
-                    .paused_at
-                    .map_or_else(now, |paused_at| now().min(paused_at));
-                if playback.record_heard(snapshot.listened_seconds, heard_at) {
-                    self.state.playback.last_heard_at = playback.last_heard_at;
+                if snapshot.position_seconds.is_finite() && snapshot.position_seconds >= 0.0 {
+                    playback.position = Some(snapshot.position_seconds);
+                }
+                if snapshot.listened_seconds.is_finite() {
+                    // Late paused confirmations still count as heard audio, but
+                    // their activity timestamp cannot cross the pause boundary.
+                    let heard_at = playback
+                        .paused_at
+                        .map_or_else(now, |paused_at| now().min(paused_at));
+                    if playback.record_heard(snapshot.listened_seconds, heard_at) {
+                        self.state.playback.last_heard_at = playback.last_heard_at;
+                    }
                 }
             }
             if natural
