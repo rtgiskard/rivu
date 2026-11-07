@@ -401,14 +401,9 @@ fn merge_progressive(
     }
     if changed {
         display.duration = display.duration.or(progressive.duration);
-        display.max_peak = display
-            .peaks
-            .iter()
-            .chain(&display.left_peaks)
-            .chain(&display.right_peaks)
-            .flatten()
-            .copied()
-            .fold(1.0, f32::max);
+        // Pooling and replacement use identical bins for combined and stereo
+        // peaks, preserving combined = max(left, right) from both PCM owners.
+        display.max_peak = display.peaks.iter().flatten().copied().fold(1.0, f32::max);
         display.revision = display.revision.wrapping_add(1);
     }
 }
@@ -2736,6 +2731,63 @@ mod tests {
         assert_eq!(display.peaks, [Some(0.125), Some(1.0)]);
         assert_eq!(display.left_rms[0], Some(0.125));
         assert_eq!(display.left_rms_counts[0], 1);
+    }
+
+    #[test]
+    fn live_replacement_lowers_scanned_normalization_in_either_channel() {
+        for rate in [4, 8] {
+            let mut scan = summary::WaveformSummary::default();
+            scan.select(
+                std::path::Path::new("track.flac"),
+                None,
+                DecoderHint::Auto,
+                Some(2.0),
+                4,
+                Some(1),
+                None,
+            );
+            scan.push_mapped(0.0, 0.25, &[[3.0, 0.5]; 8]);
+            scan.finish(2.0);
+            let mut display = scan.frame;
+            let mut live = summary::WaveformSummary::default();
+            live.select(
+                std::path::Path::new("track.flac"),
+                None,
+                DecoderHint::Auto,
+                Some(2.0),
+                rate,
+                Some(1),
+                None,
+            );
+            let samples = (rate * 2) as usize;
+            let step = f64::from(rate).recip();
+            live.push_mapped(0.0, step, &vec![[4.0, 1.0]; samples]);
+            let baseline = live.frame.revision;
+            live.begin_traversal();
+            live.push_mapped(0.0, step, &[[0.25, 1.5]]);
+            merge_progressive(&mut display, &live.frame, baseline, baseline);
+            assert_eq!(display.peaks[0], Some(1.5));
+            assert_eq!(display.left_peaks[0], Some(0.25));
+            assert_eq!(display.right_peaks[0], Some(1.5));
+            assert_eq!(display.max_peak, 3.0, "unvisited scan bins remain");
+
+            let after = live.frame.revision;
+            live.push_mapped(step, step, &vec![[0.25, 1.5]; samples - 1]);
+            merge_progressive(&mut display, &live.frame, after, baseline);
+            assert_eq!(display.peaks, vec![Some(1.5); 8]);
+            assert_eq!(display.left_peaks, vec![Some(0.25); 8]);
+            assert_eq!(display.right_peaks, vec![Some(1.5); 8]);
+            assert_eq!(display.max_peak, 1.5);
+
+            let after = live.frame.revision;
+            live.begin_traversal();
+            live.push_mapped(0.0, step, &vec![[0.5, 0.125]; samples]);
+            merge_progressive(&mut display, &live.frame, after, baseline);
+            assert_eq!(display.peaks, vec![Some(0.5); 8]);
+            assert_eq!(display.left_peaks, vec![Some(0.5); 8]);
+            assert_eq!(display.right_peaks, vec![Some(0.125); 8]);
+            assert_eq!(display.max_peak, 1.0);
+        }
     }
 
     #[test]

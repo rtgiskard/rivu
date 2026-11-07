@@ -429,12 +429,12 @@ impl WaveformSummary {
         self.end_seconds = Some(end);
         self.frame.complete = false;
         self.frame.revision = revision;
+        // Each combined bin is max(left, right); clearing and coarsening use
+        // the same bins for all three arrays, so only combined peaks need a scan.
         self.frame.max_peak = self
             .frame
             .peaks
             .iter()
-            .chain(&self.frame.left_peaks)
-            .chain(&self.frame.right_peaks)
             .flatten()
             .copied()
             .fold(1.0, f32::max);
@@ -490,6 +490,24 @@ mod tests {
         summary
     }
 
+    fn assert_peak_invariant(frame: &WaveformFrame) {
+        assert_eq!(frame.peaks.len(), frame.left_peaks.len());
+        assert_eq!(frame.peaks.len(), frame.right_peaks.len());
+        for (bin, ((combined, left), right)) in frame
+            .peaks
+            .iter()
+            .zip(&frame.left_peaks)
+            .zip(&frame.right_peaks)
+            .enumerate()
+        {
+            let expected = match (*left, *right) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (left, right) => left.or(right),
+            };
+            assert_eq!(*combined, expected, "bin {bin}");
+        }
+    }
+
     #[test]
     fn eof_trims_unknown_tail_without_moving_decoded_bins() {
         let mut summary = summary(None, 100);
@@ -508,6 +526,7 @@ mod tests {
         assert_eq!((summary.frame.bin_frames, summary.frame.bin_count), width);
         assert_eq!(summary.frame.peaks[decoded], Some(0.5));
         assert_eq!(summary.frame.left_rms_counts.iter().sum::<u64>(), 100);
+        assert_peak_invariant(&summary.frame);
     }
 
     #[test]
@@ -524,6 +543,18 @@ mod tests {
         assert_eq!(summary.frame.left_rms_counts[0], 1);
         assert_eq!(summary.frame.peaks[1], old_tail);
         assert_eq!(summary.frame.max_peak, 2.0);
+        assert_peak_invariant(&summary.frame);
+
+        // Replacing the last old maximum must lower normalization, including
+        // when the new maximum switches from the left to the right channel.
+        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, &[[0.125, 1.25]]);
+        assert_eq!(summary.frame.max_peak, 1.25);
+        assert_peak_invariant(&summary.frame);
+        summary.begin_traversal();
+        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, &[[0.125, 0.5]]);
+        assert_eq!(summary.frame.max_peak, 1.0);
+        assert_eq!(summary.frame.peaks[0], Some(0.25));
+        assert_peak_invariant(&summary.frame);
     }
 
     #[test]
@@ -582,11 +613,35 @@ mod tests {
         assert_eq!(summary.frame.peaks.len(), MAX_BINS);
         assert_eq!(summary.frame.span_seconds, 240.0);
         assert_eq!(summary.frame.peaks[0], Some(2.0));
+        assert_peak_invariant(&summary.frame);
         summary.push_mapped(0.0, 0.01, &[[0.125; 2]]);
         assert_eq!(summary.frame.peaks[0], Some(0.125));
         assert_eq!(summary.frame.left_rms_counts[0], 1);
         assert_eq!(summary.frame.left_rms[0], Some(0.125));
+        assert_eq!(summary.frame.max_peak, 1.0);
+        assert_peak_invariant(&summary.frame);
         assert!(summary.frame.retained_capacity_bytes() < 256 * 1024);
+    }
+
+    #[test]
+    fn coarsening_discards_the_older_partner_peak_with_its_channel_statistics() {
+        let mut summary = summary(Some(4.0), 1);
+        summary.push_mapped(
+            0.0,
+            1.0,
+            &[[4.0, 0.25], [0.5, 2.0], [1.0, 0.5], [0.25, 1.5]],
+        );
+        summary.begin_traversal();
+        summary.push_mapped(1.0, 1.0, &[[0.25, 3.0]]);
+        assert_eq!(summary.frame.max_peak, 4.0);
+        summary.push_mapped(2.0, 1.0, &[[0.125, 0.5]; 3]);
+        assert_eq!(summary.frame.span_seconds, 8.0);
+        assert_eq!(summary.frame.peaks, [Some(3.0), Some(0.5), Some(0.5), None]);
+        assert_eq!(summary.frame.left_peaks[0], Some(0.25));
+        assert_eq!(summary.frame.right_peaks[0], Some(3.0));
+        assert_eq!(summary.frame.left_rms_counts[0], 1);
+        assert_eq!(summary.frame.max_peak, 3.0);
+        assert_peak_invariant(&summary.frame);
     }
 
     #[test]
@@ -615,5 +670,10 @@ mod tests {
         );
         assert_eq!(summary.frame.peaks, [None; 2]);
         assert_eq!(summary.frame.source_generation, Some(2));
+        assert_peak_invariant(&summary.frame);
+        summary.clear();
+        assert!(summary.frame.peaks.is_empty());
+        assert_eq!(summary.frame.max_peak, 1.0);
+        assert_peak_invariant(&summary.frame);
     }
 }

@@ -106,6 +106,10 @@ does not invalidate retained drawing; a requested but empty spectrum is
 unavailable. Consumers check signal identity and settings independently, so an
 omitted payload cannot preserve drawing across a real semantic invalidation.
 
+Spectrogram requests full FFT bins independently of the musical-band Spectrum
+payload. With no musical-spectrum consumer, it skips that extra reduction and
+its axis/level copies while retaining identical FFT analysis and history sampling.
+
 Analysis preparation and retained analyzer capacity follow
 link:22_cache.adoc#resource-boundaries[Resource boundaries]. Pause or loss of demand
 clears capture input; disabling visualizations also breaks semantic continuity.
@@ -306,6 +310,12 @@ persistence. Core and audio execution know only PCM capture/rendering, not
 waveform statistics or display geometry. One GUI background reader admits the
 shared realtime PCM once and folds it for both live analysis and Waveform; panels
 do not open independent readers or replay the same samples into the summary.
+
+Every admitted block updates the summary, but each bounded PCM drain turn
+publishes at most one latest visible Waveform snapshot, including when more input
+remains. Publication rechecks source/revision and presentation permission; hidden
+collection makes no per-block snapshots, and reveal publishes the latest summary
+synchronously.
 
 Progressive collection is the default. Only admitted PCM fills bins; undecoded,
 skipped or overwritten intervals remain blank, distinct from known silence.
@@ -530,6 +540,11 @@ Explicit FFT/window/signal setting changes still invalidate incompatible history
 Only accepted analysis frames write or pool history. Native display ticks move
 the time cursor and tile placements without rebuilding unchanged numerical
 publications; portions newer than the display cursor remain clipped.
+
+When history and sampling are unchanged, scrolling reuses validated tile metadata
+and adjusts placements without rechecking individual historical columns. Frequency
+labels reuse their formatted values while their physical domain is unchanged;
+reveal refreshes a changed hidden domain even without another live audio frame.
 
 The horizontal scale is fixed by the configured history duration. New audio
 enters at the right and scrolls left with accepted audio time; startup history

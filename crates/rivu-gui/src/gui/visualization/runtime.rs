@@ -366,8 +366,7 @@ impl VisualizerRuntime {
             frequency_restored |= self
                 .frequency_views
                 .set_spectrum_visible(!spectrum_ids.is_empty());
-            // FrequencyViews also consumes the base spectrum for Spectrogram.
-            let mut spectrum = frequency_enabled;
+            let mut spectrum = !spectrum_ids.is_empty();
             let mut visualizer = VisualizerDemand {
                 spectrogram: !spectrogram_ids.is_empty(),
                 ..Default::default()

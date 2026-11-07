@@ -63,6 +63,8 @@ struct FrequencyState {
     last_analysis_sequence: Option<u64>,
     frequencies: Vec<f32>,
     sample_rate: u32,
+    spectrogram_label_domain: Option<(f32, f32)>,
+    spectrum_label_domain: Option<(f32, f32)>,
     material_budget_bytes: Option<u64>,
     latest_levels: Vec<f32>,
     display_time: Option<Duration>,
@@ -107,6 +109,8 @@ impl FrequencyViews {
                 last_analysis_sequence: None,
                 frequencies: Vec::new(),
                 sample_rate: 0,
+                spectrogram_label_domain: None,
+                spectrum_label_domain: None,
                 material_budget_bytes: None,
                 latest_levels: Vec::new(),
                 display_time: None,
@@ -342,10 +346,14 @@ impl FrequencyViews {
     /// or labels, creating GPU publications, or issuing presentation invalidations.
     pub fn collect(&mut self, frame: &AnalysisFrame) {
         let mut data = self.data.borrow_mut();
+        // Full FFT history is independent of the musical-band payload. A
+        // requested but unavailable FFT still advances accepted time so the
+        // next available column cannot paint across the missing interval.
         if !data.enabled
-            || !frame.spectrum_requested
-            || frame.spectrum_db.is_empty()
-            || frame.spectrum_db.len() != frame.frequencies_hz.len()
+            || (!(frame.spectrum_requested
+                && !frame.spectrum_db.is_empty()
+                && frame.spectrum_db.len() == frame.frequencies_hz.len())
+                && !(data.spectrogram.collecting && frame.visualizer.demand.spectrogram))
             || !frame.settings.is_some_and(|settings| {
                 settings.signal_compatible_with(rivu_analysis::AnalysisSettings {
                     fps: data.analysis_rate_hz,
@@ -417,6 +425,12 @@ impl FrequencyViews {
             data.spectrum.last_update = None;
         }
         if !frame.spectrum_requested {
+            if data.spectrogram.collecting && frame.visualizer.demand.spectrogram {
+                data.latest_sample_time =
+                    Some(frame.sample_time.saturating_add(data.sample_time_offset));
+                data.display_time = Some(presentation_time.saturating_add(data.sample_time_offset));
+                data.refresh_frequency_labels();
+            }
             return;
         }
         if frame.spectrum_db.len() != frame.frequencies_hz.len() {
@@ -799,10 +813,16 @@ impl FrequencyState {
     }
 
     fn refresh_frequency_labels(&mut self) {
-        if let Some((_, _, low, high)) = self.visible_range() {
+        if let Some((_, _, low, high)) = self.visible_range()
+            && self.spectrogram_label_domain != Some((low, high))
+        {
+            self.spectrogram_label_domain = Some((low, high));
             self.spectrogram.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
-        if let Some((_, _, low, high)) = self.spectrum_range() {
+        if let Some((_, _, low, high)) = self.spectrum_range()
+            && self.spectrum_label_domain != Some((low, high))
+        {
+            self.spectrum_label_domain = Some((low, high));
             let labels = [note_label(low), note_label(high)];
             if self.spectrum.labels != labels {
                 self.spectrum.labels = labels;
@@ -998,6 +1018,9 @@ mod tests {
             let mut hidden = frame(1.1, -20.0);
             hidden.sample_rate = 96_000;
             hidden.generation += 1;
+            hidden.spectrum_requested = false;
+            hidden.frequencies_hz.clear();
+            hidden.spectrum_db.clear();
             visuals.collect(&hidden);
             assert_eq!(
                 visuals.data.borrow().spectrogram.frequency_labels[1].as_ref(),
@@ -1359,7 +1382,43 @@ mod tests {
     }
 
     #[test]
-    fn omitted_spectrum_preserves_frequency_history_until_signal_invalidation() {
+    fn spectrogram_only_input_publishes_and_scrolls_without_spectrum_data() {
+        let mut visuals = configured_visuals();
+        visuals.set_spectrum_visible(false);
+        let mut audio = frame(1.0, -30.0);
+        audio.spectrum_requested = false;
+        audio.frequencies_hz.clear();
+        audio.spectrum_db.clear();
+        visuals.update(&audio, audio.sample_time);
+        audio.sequence += 1;
+        audio.sample_time = Duration::from_millis(1100);
+        audio.visualizer.spectrogram =
+            vec![-3.0; Config::default().analysis_fft_size as usize / 2].into();
+        visuals.collect(&audio);
+        visuals.update(&audio, Duration::from_secs(1));
+        publish_analysis_views(&visuals, 1);
+        let before = {
+            let data = visuals.data.borrow();
+            assert!(data.latest_levels.is_empty());
+            assert!(data.spectrum.presentations.is_empty());
+            let presentation = data.spectrogram.presentations[&1].clone();
+            assert!(presentation.layers.iter().any(|(_, publication)| {
+                matches!(publication.content(), gpui::GpuContent::Field { values, .. }
+                    if values.iter().any(|&level| level == -3.0))
+            }));
+            presentation.layers[0].0
+        };
+        assert!(visuals.animate(Duration::from_millis(1050)));
+        publish_analysis_views(&visuals, 1);
+        let data = visuals.data.borrow();
+        let after = data.spectrogram.presentations[&1].layers[0].0;
+        let scroll = 0.05 / data.spectrogram.history_limit_seconds as f32;
+        assert!((before.left() - after.left() - scroll).abs() < 1e-6);
+        assert_eq!(before.size, after.size);
+    }
+
+    #[test]
+    fn omitted_spectrum_keeps_live_levels_while_full_bins_update_history() {
         let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -20.0), Duration::from_secs(1));
         let mut omitted = frame(1.1, -40.0);
@@ -1370,8 +1429,17 @@ mod tests {
         {
             let data = visuals.data.borrow();
             assert_eq!(data.latest_levels, vec![-20.0; 4]);
-            assert_eq!(data.spectrogram.len, 1);
+            assert_eq!(data.spectrogram.len, 2);
             assert_eq!(data.frequencies, vec![20.0, 200.0, 2000.0, 20_000.0]);
+        }
+        publish_analysis_views(&visuals, 1);
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.display_time, Some(omitted.sample_time));
+            assert!(data.spectrogram.presentations[&1].layers.iter().any(
+                |(_, publication)| matches!(publication.content(), gpui::GpuContent::Field { values, .. }
+                    if values.iter().any(|&level| level == -40.0))
+            ));
         }
         omitted.settings = None;
         visuals.update(&omitted, omitted.sample_time);
@@ -4124,19 +4192,33 @@ mod tests {
 
     #[test]
     fn missing_fft_snapshot_never_falls_back_to_musical_bands_or_bridges_a_gap() {
-        let mut visuals = configured_visuals();
-        visuals.data.borrow_mut().resize_history(2);
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-        let mut missing = frame(1.1, 0.0);
-        missing.visualizer.spectrogram = Default::default();
-        visuals.update(&missing, missing.sample_time);
-        assert_eq!(visuals.data.borrow().spectrogram.len, 1);
-        visuals.update(&frame(1.2, -50.0), Duration::from_millis(1200));
-        let data = visuals.data.borrow();
-        assert_eq!(data.spectrogram.len, 2);
-        let latest = &data.spectrogram.columns[data.spectrogram.latest.unwrap()];
-        assert_eq!(latest.interval_start, Duration::from_millis(1200));
-        assert_eq!(level_range(&latest.levels), Some((-50.0, -50.0)));
+        for spectrum_requested in [false, true] {
+            let mut visuals = configured_visuals();
+            visuals.data.borrow_mut().resize_history(2);
+            let mut audio = frame(1.0, -10.0);
+            if !spectrum_requested {
+                audio.spectrum_requested = false;
+                audio.frequencies_hz.clear();
+                audio.spectrum_db.clear();
+            }
+            visuals.update(&audio, audio.sample_time);
+            let mut missing = audio.clone();
+            missing.sequence += 1;
+            missing.sample_time = Duration::from_millis(1100);
+            missing.visualizer.spectrogram = Default::default();
+            visuals.update(&missing, missing.sample_time);
+            assert_eq!(visuals.data.borrow().spectrogram.len, 1);
+            audio.sequence += 2;
+            audio.sample_time = Duration::from_millis(1200);
+            audio.visualizer.spectrogram =
+                vec![-50.0; Config::default().analysis_fft_size as usize / 2].into();
+            visuals.update(&audio, audio.sample_time);
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrogram.len, 2);
+            let latest = &data.spectrogram.columns[data.spectrogram.latest.unwrap()];
+            assert_eq!(latest.interval_start, Duration::from_millis(1200));
+            assert_eq!(level_range(&latest.levels), Some((-50.0, -50.0)));
+        }
     }
 
     #[test]

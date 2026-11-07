@@ -39,6 +39,7 @@ pub(super) struct Spectrogram {
     pub(super) presentations: HashMap<u64, Arc<SpectrogramPresentation>>,
     pub(super) assembly: Option<(SpectrogramAssemblyKey, Arc<SpectrogramPresentation>)>,
     history_revision: u64,
+    tiles_history_revision: Option<u64>,
     pub(super) db_range: f32,
     pub(super) interpolate: bool,
     pub(super) history_seconds: u32,
@@ -79,6 +80,7 @@ impl Spectrogram {
             presentations: HashMap::new(),
             assembly: None,
             history_revision: 0,
+            tiles_history_revision: None,
             db_range: config.spectrogram_db_range(),
             interpolate: config.spectrogram_interpolate,
             history_seconds: config.spectrogram_history_seconds,
@@ -447,6 +449,7 @@ impl FrequencyState {
     pub(super) fn invalidate_spectrogram(&mut self) {
         self.spectrogram.tiles.clear();
         self.spectrogram.assembly = None;
+        self.spectrogram.tiles_history_revision = None;
     }
 
     pub(super) fn recolor_spectrogram(&mut self) -> Result<(), String> {
@@ -627,85 +630,94 @@ impl FrequencyState {
             .div_ceil(SPECTROGRAM_TILE_COLUMNS);
         self.spectrogram.tiles.resize_with(tiles, || None);
         let mut layers = Vec::with_capacity(tiles);
+        // Scroll changes placement only. Sampling/appearance invalidation clears
+        // this stamp; otherwise column identities need checking only after audio.
+        let history_changed =
+            self.spectrogram.tiles_history_revision != Some(self.spectrogram.history_revision);
         for tile_index in 0..tiles {
-            let first = tile_index * SPECTROGRAM_TILE_COLUMNS;
-            let last = (first + SPECTROGRAM_TILE_COLUMNS).min(self.spectrogram.history_columns);
-            let mut key: SpectrogramTileKey = [None; SPECTROGRAM_TILE_COLUMNS];
-            let mut start = Duration::MAX;
-            let mut end = Duration::ZERO;
-            for index in first..last {
-                let Some(time) = self.spectrogram.columns[index].sample_time else {
-                    continue;
-                };
-                let column = &self.spectrogram.columns[index];
-                if column.generation != self.spectrogram.generation {
-                    continue;
-                }
-                key[index - first] = Some((column.revision, column.interval_start, time));
-                start = start.min(column.interval_start);
-                end = end.max(time);
-            }
-            if start == Duration::MAX {
-                continue;
-            }
-            if self.spectrogram.tiles[tile_index]
-                .as_ref()
-                .is_none_or(|tile| tile.key != key)
-            {
-                let count = key.iter().flatten().count();
-                let span = end.saturating_sub(start).as_secs_f64().max(1e-9);
-                let mut intervals = [[0.0; 2]; SPECTROGRAM_TILE_COLUMNS];
-                self.spectrogram.tile_values.clear();
-                self.spectrogram.tile_values.resize(count * height, 0.0);
-                let mut offset = 0;
-                for (local, entry) in key.iter().enumerate() {
-                    let Some((_, left, right)) = entry else {
+            if history_changed {
+                let first = tile_index * SPECTROGRAM_TILE_COLUMNS;
+                let last = (first + SPECTROGRAM_TILE_COLUMNS).min(self.spectrogram.history_columns);
+                let mut key: SpectrogramTileKey = [None; SPECTROGRAM_TILE_COLUMNS];
+                let mut start = Duration::MAX;
+                let mut end = Duration::ZERO;
+                for index in first..last {
+                    let Some(time) = self.spectrogram.columns[index].sample_time else {
                         continue;
                     };
-                    intervals[offset] = [
-                        left.saturating_sub(start).as_secs_f64(),
-                        right.saturating_sub(start).as_secs_f64(),
-                    ]
-                    .map(|value| (value / span) as f32);
-                    sample_spectrogram_column(
-                        &self.spectrogram.columns[first + local].levels,
-                        &self.spectrogram.history_indices,
-                        &self.spectrogram.heat_samples,
-                        self.spectrogram.interpolate,
-                        &mut self.spectrogram.tile_values,
-                        count,
-                        offset,
-                    );
-                    offset += 1;
+                    let column = &self.spectrogram.columns[index];
+                    if column.generation != self.spectrogram.generation {
+                        continue;
+                    }
+                    key[index - first] = Some((column.revision, column.interval_start, time));
+                    start = start.min(column.interval_start);
+                    end = end.max(time);
                 }
-                let publication = GpuFrame::field_columns(
-                    &intervals[..count],
-                    height as u32,
-                    &self.spectrogram.tile_values,
-                    self.palette_lut.gpu_palette()?,
-                    GpuFieldParams {
-                        mapping: GpuValueMapping::Linear {
-                            min: -self.spectrogram.db_range,
-                            max: 0.0,
+                if start == Duration::MAX {
+                    self.spectrogram.tiles[tile_index] = None;
+                    continue;
+                }
+                if self.spectrogram.tiles[tile_index]
+                    .as_ref()
+                    .is_none_or(|tile| tile.key != key)
+                {
+                    let count = key.iter().flatten().count();
+                    let span = end.saturating_sub(start).as_secs_f64().max(1e-9);
+                    let mut intervals = [[0.0; 2]; SPECTROGRAM_TILE_COLUMNS];
+                    self.spectrogram.tile_values.clear();
+                    self.spectrogram.tile_values.resize(count * height, 0.0);
+                    let mut offset = 0;
+                    for (local, entry) in key.iter().enumerate() {
+                        let Some((_, left, right)) = entry else {
+                            continue;
+                        };
+                        intervals[offset] = [
+                            left.saturating_sub(start).as_secs_f64(),
+                            right.saturating_sub(start).as_secs_f64(),
+                        ]
+                        .map(|value| (value / span) as f32);
+                        sample_spectrogram_column(
+                            &self.spectrogram.columns[first + local].levels,
+                            &self.spectrogram.history_indices,
+                            &self.spectrogram.heat_samples,
+                            self.spectrogram.interpolate,
+                            &mut self.spectrogram.tile_values,
+                            count,
+                            offset,
+                        );
+                        offset += 1;
+                    }
+                    let publication = GpuFrame::field_columns(
+                        &intervals[..count],
+                        height as u32,
+                        &self.spectrogram.tile_values,
+                        self.palette_lut.gpu_palette()?,
+                        GpuFieldParams {
+                            mapping: GpuValueMapping::Linear {
+                                min: -self.spectrogram.db_range,
+                                max: 0.0,
+                            },
                         },
-                    },
-                    GpuLimits {
-                        max_field_width: SPECTROGRAM_TILE_COLUMNS as u32,
-                        max_field_height: height as u32,
-                        max_field_cells: SPECTROGRAM_TILE_COLUMNS * height,
-                        max_palette_colors: MAX_PALETTE_COLORS,
-                        ..Default::default()
-                    },
-                )
-                .map_err(|error| error.to_string())?;
-                self.spectrogram.tiles[tile_index] = Some(SpectrogramTile {
-                    key,
-                    start,
-                    end,
-                    publication,
-                });
+                        GpuLimits {
+                            max_field_width: SPECTROGRAM_TILE_COLUMNS as u32,
+                            max_field_height: height as u32,
+                            max_field_cells: SPECTROGRAM_TILE_COLUMNS * height,
+                            max_palette_colors: MAX_PALETTE_COLORS,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                    self.spectrogram.tiles[tile_index] = Some(SpectrogramTile {
+                        key,
+                        start,
+                        end,
+                        publication,
+                    });
+                }
             }
-            let tile = self.spectrogram.tiles[tile_index].as_ref().unwrap();
+            let Some(tile) = self.spectrogram.tiles[tile_index].as_ref() else {
+                continue;
+            };
             if tile.end < start_time || tile.start > latest_time {
                 continue;
             }
@@ -736,6 +748,7 @@ impl FrequencyState {
                 .insert(panel_id, Arc::clone(&assembly));
         }
         self.spectrogram.assembly = Some((assembly_key, assembly));
+        self.spectrogram.tiles_history_revision = Some(self.spectrogram.history_revision);
         Ok(())
     }
 

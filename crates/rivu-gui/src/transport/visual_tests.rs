@@ -801,6 +801,74 @@ fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
 }
 
 #[test]
+fn visible_waveform_is_available_before_retained_backlog_finishes() {
+    async_io::block_on(async {
+        let mut f = fixture();
+        let block_frames = rivu_protocol::pcm::PCM_BLOCK_FRAMES;
+        let blocks = PCM_QUEUE_BLOCKS + 1;
+        f.window
+            .retain_output(blocks * block_frames, 48_000, 2)
+            .unwrap();
+        let mut track = crate::test_support::artwork_track("backlog.wav".into());
+        track.sample_rate = 48_000;
+        track.duration = Some(4.0);
+        let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
+        let initial = f.client.waveform.read().clone();
+        let waveform = Arc::clone(&f.client.waveform);
+        let (published, snapshots) = async_channel::unbounded();
+        f.client.set_wakeup(Arc::new(move || {
+            let _ = published.try_send(waveform.read().clone());
+        }));
+        for block in 0..blocks {
+            stereo(
+                &f.window,
+                header(state, (block * block_frames) as u64),
+                if block + 1 == blocks { 0.75 } else { 0.25 },
+                block_frames,
+            );
+        }
+        write_status(&mut f.server, state, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let total = (blocks * block_frames) as u64;
+        let (prefix, complete) = rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            let mut prefix = None;
+            loop {
+                let frame = snapshots.recv().await.unwrap();
+                let count = frame.left_rms_counts.iter().sum::<u64>();
+                if count == 0 {
+                    continue;
+                }
+                if count == total {
+                    break (
+                        prefix.expect("backlog must expose a bounded-yield snapshot"),
+                        frame,
+                    );
+                }
+                if prefix.is_none() {
+                    prefix = Some(frame);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(prefix.left_rms_counts.iter().sum::<u64>() < total);
+        assert!(prefix.peaks.iter().flatten().all(|peak| *peak == 0.25));
+        assert_eq!(prefix.source_generation, initial.source_generation);
+        assert_eq!(prefix.request_epoch, initial.request_epoch);
+        assert!(complete.peaks.contains(&Some(0.75)));
+        assert_eq!(complete.right_rms_counts.iter().sum::<u64>(), total);
+        assert_eq!(complete.rms_counts.iter().sum::<u64>(), total * 2);
+        assert_eq!(complete.source_generation, initial.source_generation);
+        assert_eq!(complete.request_epoch, initial.request_epoch);
+        assert_eq!(
+            complete.revision,
+            f.client.state.summary.lock().frame.revision
+        );
+    });
+}
+
+#[test]
 fn hidden_waveform_collects_without_snapshots_or_wakes_and_show_publishes_immediately() {
     async_io::block_on(async {
         let mut f = fixture();

@@ -315,8 +315,58 @@ The no-history baseline used only Queue, not merely inactive history tabs.
 |===
 
 These observations establish a modest nonzero cost for this workload, not a
-worst-case FFT/rate bound or a power measurement. Source-only optimization
-recommendations from the subsequent read-only scan remain unimplemented.
+worst-case FFT/rate bound or a power measurement. Recommendations from the
+subsequent read-only scan were implemented separately under <<DEC-014>>.
+
+[[DEC-014]]
+=== DEC-014: Remove redundant history work without reducing collection fidelity
+
+Status: implemented and verified, 2026-11-07; depends on <<DEC-013>>.
+
+Spectrogram history consumes full-bin publications independently of the
+musical-band Spectrum payload. Visible Waveform folds every admitted block but
+publishes only the latest summary per bounded drain turn, including backlog
+continuations, preserving synchronous reveal and source/revision/visibility
+fences. Scroll-only Spectrogram frames reuse validated tile metadata and update
+placement rather than revalidating each column. Unchanged physical-frequency
+domains reuse labels; hidden changed domains refresh on paused/stopped reveal.
+Waveform normalization scans combined peaks alone: ingestion, traversal
+replacement, coarsening and full/live merging preserve their channel-maximum
+invariant, including when the normalization maximum decreases.
+
+No analysis cadence, frequency precision, recording coverage or acceptance guard
+is reduced. Existing palette, sampling and resize invalidation remains mandatory.
+For 33 retained admissible visible PCM blocks under stable guards, the 32-block
+drain bound reduces worker summary copies from 33 to 2; source/reveal/configuration
+copies are separate. Each affected normalization reduction visits B rather than
+3B peak slots. After warm-up without invalidation, scrolling avoids C historical
+column inspections while still iterating tile placements; unchanged domains avoid
+frequency/note formatting, not unrelated dB-label work. These are static operation
+counts, independently reviewed, not measured allocation or timing reductions.
+
+Matched GUI-only optimized builds repeated the <<DEC-013>> 48 kHz workload, with
+both history views configured, three five-second process-CPU samples per state,
+and the baseline measured before the new build. GUI CPU means and ranges were:
+
+[cols="2,1,1",options="header"]
+|===
+|State |Before |After
+|Spectrogram visible |9.9% (9.6–10.0%) |9.4% (9.0–9.6%)
+|Waveform visible |8.3% (8.0–8.6%) |7.9% (7.6–8.2%)
+|Both histories hidden |2.2% (2.0–2.4%) |2.1% (2.0–2.2%)
+|===
+
+100% is one logical CPU. Core means remained approximately 1.0%, 1.1% and 1.3–1.4%
+respectively. Overlapping or touching short-sample ranges and sequential rather
+than randomized measurement do not establish stable percentage speedups, power
+savings or a worst-case bound. The removal of duplicate work is the firm result.
+
+Verification includes workspace all-feature lint, 878 related tests, default and
+GUI-only optimized builds, and actual nested-Wayland collection/scrolling, pause
+freeze, stopped higher-rate reveal, stopped resize and Waveform source/seek checks.
+Independent producer-to-consumer review found no introduced correctness defect.
+The preceding scan remained read-only; its recommendations were authorized and
+implemented at this stage.
 
 [[unapproved-candidates]]
 == Unapproved candidates

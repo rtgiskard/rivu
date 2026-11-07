@@ -495,6 +495,7 @@ async fn run_client(
             waveform_key = None;
         }
         drain_again = false;
+        let mut waveform_generation = None;
         if admitted && pcm_enabled && pcm_state.active {
             let latest = window.sequence();
             position = position.max(minimum_position).max(PcmPosition {
@@ -602,17 +603,7 @@ async fn run_client(
                         }
                         waveform_key = Some(key);
                         summary.push_mapped(header.media_start, header.media_step, &folded);
-                        // Hidden views retain media-position history without
-                        // cloning display arrays or waking the GUI per block.
-                        let publish = desired.waveform_presentation_visible;
-                        if publish {
-                            state.waveform.write().clone_from(&summary.frame);
-                        }
-                        drop(summary);
-                        drop(desired);
-                        if publish {
-                            state.wake();
-                        }
+                        waveform_generation = Some(header.generation);
                     }
                 }
                 if ingested {
@@ -644,6 +635,21 @@ async fn run_client(
             staging.write().clone_from(&frame);
         }
         let desired = state.desired.lock();
+        // Publish the latest rolling state at every bounded drain yield, even
+        // while analysis waits to catch up. Setters may revoke acceptance while
+        // folding, so recheck all publication guards in desired -> summary order.
+        let waveform_published = waveform_generation.is_some_and(|generation| {
+            desired.revision == revision
+                && desired.source_generation == Some(generation)
+                && desired.waveform_enabled
+                && desired.visualization_enabled
+                && desired.waveform_presentation_visible
+                && !state.stopped.load(Ordering::Acquire)
+        });
+        if waveform_published {
+            let summary = state.summary.lock();
+            state.waveform.write().clone_from(&summary.frame);
+        }
         if desired.revision == revision
             && desired.display_token == display_token
             && !state.stopped.load(Ordering::Acquire)
@@ -660,7 +666,7 @@ async fn run_client(
             });
         }
         drop(desired);
-        if frame.sequence != previous_sequence {
+        if waveform_published || frame.sequence != previous_sequence {
             state.wake();
         }
     }
