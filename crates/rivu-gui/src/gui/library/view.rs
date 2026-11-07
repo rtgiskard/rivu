@@ -247,6 +247,7 @@ impl Library {
                                     false,
                                     row_height,
                                 )
+                                .bg(crate::gui::appearance::material::row_background(theme, false, false, cx))
                                 .gap_0()
                                 .overflow_hidden()
                                 .child(
@@ -484,6 +485,7 @@ impl Library {
                                 selected,
                                 row_height,
                             )
+                            .bg(crate::gui::appearance::material::row_background(theme, selected, false, cx))
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")
@@ -903,7 +905,10 @@ impl Library {
             ));
         }
         panel
-            .child(self.library_directory_list(panel_id, cx))
+            .child(crate::gui::appearance::texture_styles::list_fade(
+                self.library_directory_list(panel_id, cx),
+                cx,
+            ))
             .into_any_element()
     }
 }

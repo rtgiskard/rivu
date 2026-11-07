@@ -124,12 +124,12 @@ pub fn row_background(
     selected: bool,
     hovered: bool,
 ) -> gpui::Rgba {
-    rgb(match (selected, hovered) {
-        (true, true) => theme.selected_hover,
-        (true, false) => theme.selected,
-        (false, true) => theme.highlight,
-        (false, false) => theme.panel,
-    })
+    match (selected, hovered) {
+        (true, true) => rgb(theme.selected_hover),
+        (true, false) => rgb(theme.selected),
+        (false, true) => rgb(theme.highlight),
+        (false, false) => rgb(theme.panel),
+    }
 }
 
 pub fn tree_row(
@@ -167,7 +167,6 @@ pub fn dropdown_row(
     height: gpui::Pixels,
 ) -> Stateful<Div> {
     list_row_surface(theme, id, selected, height)
-        .when(!selected, |row| row.bg(rgb(theme.panel).alpha(0.0)))
         .hover(move |style| {
             style.bg(rgb(if selected {
                 theme.selected_hover
@@ -304,4 +303,26 @@ pub fn hover_actions(
         .group_hover(group, move |style| {
             style.opacity(1.).bg(row_background(theme, selected, true))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn public_rows_keep_opaque_semantic_backgrounds(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::theme::init_test(cx);
+            let theme = crate::theme::palette(cx);
+            for (selected, hovered, color) in [
+                (false, false, theme.panel),
+                (false, true, theme.highlight),
+                (true, false, theme.selected),
+                (true, true, theme.selected_hover),
+            ] {
+                assert_eq!(row_background(theme, selected, hovered), rgb(color));
+                assert_eq!(row_background(theme, selected, hovered).a, 1.);
+            }
+        });
+    }
 }

@@ -358,19 +358,21 @@ impl ArtworkRuntime {
         let identity = ArtworkIdentity::new(crate::artwork_source(&track));
         let manager = Arc::clone(&self.manager);
         cx.spawn(async move |this, cx| {
-            let loaded = cx
+            let (path, loaded) = cx
                 .background_executor()
-                .spawn(async move { manager.load(crate::artwork_source(&track)) })
+                .spawn(async move {
+                    let loaded = manager.load(crate::artwork_source(&track));
+                    (track.path, loaded)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.loader.finish(&identity) {
                     return;
                 }
                 if this.visible
-                    && this
-                        .track
-                        .as_ref()
-                        .is_some_and(|track| identity.matches(crate::artwork_source(track)))
+                    && this.track.as_ref().is_some_and(|track| {
+                        identity.matches(crate::artwork_source(track)) && track.path == path
+                    })
                 {
                     this.loader.remember_result(identity, loaded.is_some());
                     this.replace_artwork(loaded, cx);
@@ -921,6 +923,85 @@ mod tests {
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
             assert!(owner.view.image(cx).is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn repaired_path_retries_lookup_without_resetting_the_panel_rotation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::layout::{Node, Panel};
+        use gpui::AppContext;
+
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let manager = Arc::new(ArtworkManager::new(directory.path()));
+        let original = crate::test_support::artwork_track(directory.path().join("missing.wav"));
+        assert!(manager.load(crate::artwork_source(&original)).is_none());
+        let mut repaired = original.clone();
+        repaired.path = directory.path().join("repaired.wav");
+        rivu_metadata::artwork::test_support::tagged_wav(&repaired.path);
+        let config = Config::default();
+        let root = Node::Tabs {
+            id: 10,
+            active: 1,
+            panels: vec![Panel {
+                id: 1,
+                kind: "artwork".into(),
+                show_tab_bar: true,
+                audio_visualizer: None,
+                artwork: Some(ArtworkOptions {
+                    mode: ArtworkMode::Rotating,
+                    style: ArtworkStyle::Plain,
+                    ..(&config).into()
+                }),
+            }],
+        };
+        let mut panels = super::super::workspace::WorkspacePanels::default();
+        panels.reconcile(&super::super::layout::Layout {
+            root: Some(root),
+            next_id: 11,
+            locked: true,
+        });
+        let artwork = cx.update(|cx| {
+            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
+            cx.new(|cx| {
+                ArtworkRuntime::new(
+                    manager.clone(),
+                    default,
+                    ArtworkImageRegistry::default(),
+                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                )
+            })
+        });
+        artwork.update(cx, |this, cx| {
+            this.sync(
+                Some(&original),
+                PlaybackStatus::Playing,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+            this.instances.get_mut(&1).unwrap().rotation.angle = 0.75;
+            let frame_generation = this.frame_generation;
+            this.sync(
+                Some(&repaired),
+                PlaybackStatus::Playing,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+            assert_eq!(this.track.as_ref().unwrap().path, repaired.path);
+            assert_angle(&this.instances.get(&1).unwrap().rotation, 0.75);
+            assert_eq!(this.frame_generation, frame_generation.wrapping_add(1));
+        });
+        cx.run_until_parked();
+        artwork.update(cx, |this, cx| {
+            let expected = manager.cached(crate::artwork_source(&repaired)).unwrap();
+            assert!(!this.view.replace(Some(expected), cx));
+            assert_angle(&this.instances.get(&1).unwrap().rotation, 0.75);
         });
     }
 

@@ -118,6 +118,7 @@ impl WindowView {
                             });
                         }
                         DialogSurface::QueueReplacement => self.dismiss_queue_replace(window, cx),
+                        DialogSurface::TextureControls => self.close_material_controls(cx),
                         DialogSurface::PlaylistEditor => {
                             self.playlists.update(cx, |playlists, cx| {
                                 playlists.cancel_playlist_name(window, cx)

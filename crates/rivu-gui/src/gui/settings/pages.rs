@@ -1209,6 +1209,11 @@ impl Settings {
                                 ),
                                 settings.field(Field::GpuMaterialBudgetMib, cx),
                             ))
+                            .child(settings.pair(
+                                Field::GpuFilterBudgetMib,
+                                Field::GpuFilterMaxDepth,
+                                cx,
+                            ))
                             .child(row().child(visual_switch(
                                 &self.i18n,
                                 "settings-visualization-disabled",

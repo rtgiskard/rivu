@@ -1187,6 +1187,9 @@ impl Render for AlbumBrowser {
                                         && this.playback_status == PlaybackStatus::Playing,
                                     &this.i18n,
                                 )
+                                .bg(crate::gui::appearance::material::row_background(
+                                    theme, false, false, cx,
+                                ))
                                 .group("album-track-row")
                                 .relative()
                                 .gap_0()

@@ -190,6 +190,7 @@ impl WindowView {
     pub(in crate::gui) fn render_node(
         &mut self,
         node: &Node,
+        material_frame: &appearance::material::MaterialFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -206,7 +207,7 @@ impl WindowView {
                 let boundaries = boundaries.clone();
                 let mut panes = Vec::with_capacity(children.len());
                 for (index, child) in children.iter().enumerate() {
-                    let content = self.render_node(child, window, cx);
+                    let content = self.render_node(child, material_frame, window, cx);
                     let gutter = (index + 1 < children.len()).then(|| {
                         let unlocked = !self.workspace.layouts.current().locked;
                         let dragging = matches!(
@@ -561,6 +562,11 @@ impl WindowView {
                     .border_color(rgb(theme.structure_border))
                     .rounded_sm()
                     .overflow_hidden();
+                let kind = panels
+                    .iter()
+                    .find(|panel| panel.id == active)
+                    .map_or("", |panel| panel.kind.as_str());
+                panel = material_frame.panel(panel, kind, theme, window.scale_factor());
                 if show_tab_bar {
                     panel = panel.child(tabs);
                 }

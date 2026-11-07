@@ -394,6 +394,277 @@ state. No per-layout scroll snapshots are kept.
 Albums routes PageUp/PageDown only to its displayed grid or track-list viewport;
 switching regions preserves the grid's retained position.
 
+== Session material exploration
+
+The application owns material sessions, artwork demand and controls. Source-image
+effects, ordered scene filters and procedural water execution are maintained in
+https://github.com/rtgiskard/gpui-wgpu[gpui-wgpu]; both patched crates use the same
+revision pinned in the workspace manifest. Rivu does not carry a renderer copy.
+
+The footer application menu opens *Material…*, a unified selector and adjustment
+panel. Original is a standalone choice; the twenty-six studies are grouped as
+follows, without changing their rendering compositions:
+
+* Texture:
+** Satin glass: restrained gradients and fine panel edges
+** Artwork atmosphere: cover-derived atmosphere in playback and artwork panels
+** Deep glass: a shared cover-derived backdrop beneath translucent panels
+** Spotlight stage: stronger playback emphasis with quieter reading-panel edges
+** Borderless mist: soft surfaces with reduced panel boundaries
+** Backdrop frost: blur of the actual scene painted behind each panel
+* Water:
+** Quiet water: expanding elliptical wavefronts and curved crest highlights
+** Rain ripples: scattered raindrop impacts with outward-moving damped ripple trains
+** Shallow stream: directional flow with elongated refracted light
+** Mirror lake: wide sky reflection broken by fine horizontal wind
+** Clear crystal: nearly colorless refracting sheets and broad curved light
+* Experimental (collapsed initially):
+** Prismatic architecture: faceted panes with moving specular reflections
+** Nocturne light: opaque reading space with local breathing playback illumination
+** Mirror lake: vertically reflected artwork with travelling horizontal displacement
+** Gradient translucency: spatially varying panel tint and alpha
+** Feathered artwork: linear and radial source-alpha masks
+** Moving sheen: local travelling highlights behind panel content
+** Fading scroll edges: vertical composite masks on Library and Queue viewports
+** Cover atmosphere: shader sampling blur of the shared cover source
+** Continuous water: one reflected cover field with continuous UV displacement
+** Paper grain: stable surface fibers and image grain
+** Cover dissolve: a bounded previous/current artwork transition
+** Celtic storybook: original flat woodland, leaves, braided water and paper composition
+** CG Water: independent procedural perspective water and sky reflection
+** After rain: sparse fading rain impacts on overcast shallow water
+** Water garden: soft leaf shadows over a refracting green water bed
+
+The same panel selects every preset and exposes only the parameters supported by
+the current selection: panel opacity, cover feather, sheen highlight, grain
+strength, color levels, water displacement, wave strength, water highlight, cover
+blur, backdrop blur, list edge fade, cover transition and motion speed. These are
+adjustments to a predefined composition, not arbitrary effect stacking.
+
+Original is the startup selection, with material effects enabled. Enable material
+effects is independent of that selection: turning it off renders Original without
+changing the selected material or its edited parameters. Choosing a preset while
+effects are off does not enable effects. Turning effects back on restores the
+selected composition. Selecting Original instead changes the selected identity
+to Original.
+
+The enable state, selection and per-preset parameters belong to the desktop
+process: switching away and back restores each preset's edits. Closing the last
+window exits that process, so reopening starts with Original and default parameters
+even while Core remains running. Reset selected preset restores only the current
+preset's defaults. Switching materials
+changes neither semantic theme colors, playback,
+queue state, configuration files nor saved-layout syntax. Menus and dialogs retain
+their opaque elevated surfaces and existing input barriers.
+
+One material session owns the selected identity and each preset's edited parameters.
+A static material specification supplies preset defaults, control capabilities and
+the composition recipe; the selector and controls consume the same catalog. Selection,
+reset and parameter edits commit through window coordination. The window-local
+atmosphere runtime reconciles material identity, transition policy, track and
+visibility in one resource-demand update. Material actions update only that
+demand, not unrelated features; track, layout and window lifecycle changes use
+the same entry. Identity or enablement changes and edits to list-edge fade
+invalidate cached appearance consumers. Other parameter edits notify only the
+root composition and controls. Crossing zero transition duration updates predecessor
+ownership immediately, including while paused. These transitions do not depend on
+a Core revision or render-time control reconciliation. The shell owns control-card
+attachment and focus, not the session's parameter lifetime.
+
+Before constructing the layout, the window samples one material frame from the
+existing atmosphere owner. Root and panel decorations consume the same accepted
+source pair and transition weight. The frame shares source handles without copying
+decoded pixels; it is not a second image cache, timer or long-lived state owner.
+
+Artwork demand follows the actual composition scope. Deep glass, the Experimental
+artwork-reflection Mirror lake, and the source-image studies from Gradient
+translucency through Celtic storybook have root consumers that remain active
+without a playback or artwork panel. Artwork atmosphere and Spotlight stage
+consume the atmosphere in playback-class panels. CG Water, Rain ripples, Shallow
+stream, the Water group's Mirror lake, After rain, Water garden and Clear crystal
+do not request material artwork.
+Full-cover materials contribute viewport-sized demand to the same tier selection
+and generation acknowledgements as ordinary artwork panels. The 64-by-64 ambient
+derivative requests source pixels only while being generated; its ready cache
+does not retain a low-tier source. Removing an artwork panel preserves an active
+material's derivative, but releases source pixels if no other source consumer
+needs them. Switching to a full-cover material requests its source tier again.
+Source handles cannot restart work after their material lease is retired. Budget
+changes cancel both source and ambient work, retaining old scene pixels until
+the usual generation/frame fence.
+For Artwork atmosphere, Deep glass and Spotlight stage, the atmosphere consumer shares artwork acquisition, source decoding and
+the existing decoded-image budget with artwork panels. It derives a static,
+blurred 64-by-64 image from the first decoded frame off the GUI thread. This
+small derivative does not eliminate the cost of decoding the full source image.
+The effect uses ordinary GPUI image and gradient composition, not live backdrop
+blur or desktop/compositor transparency, and adds no animation timer.
+
+Track changes invalidate the old atmosphere immediately; obsolete completions
+cannot publish for a newer track. Missing, corrupt or budget-rejected images leave
+the semantic gradient in place rather than retaining the previous cover. Leaving
+an artwork-dependent material or hiding the window releases its atmosphere
+consumer's image references; other artwork consumers retain their own ownership.
+Turning material effects off also stops material animation and releases the
+material consumer's current and previous artwork references. Ordinary artwork
+panels and visualizations keep their independent behavior and ownership.
+
+Prismatic architecture, Nocturne light, Quiet water and the Experimental
+artwork-reflection Mirror lake use GPUI's synchronized animation clock, not
+independent application timers. Motion runs only while material effects are enabled, the window is active,
+and reduced motion is disabled, with positive motion speed. Disabling audio
+visualizations does not affect material motion or cover transitions.
+Nocturne light keeps reading panels still; its playback illumination moves.
+Artwork-panel and audio-visualization FPS limits share their own window-local
+frame gate; they do not throttle material motion or image transitions.
+
+Rain ripples models scattered raindrop impacts on shallow water. Each impact launches an
+outward-moving train of damped ripples; overlapping surface gradients drive
+procedural-bed refraction and reflected light together. Impact positions, timing
+and strengths vary within a deterministic seamless cycle rather than repeating
+fixed rings or decorative arcs. Wave strength zero leaves a static surface.
+This remains a bounded procedural scene, not a fluid simulation or refraction of
+UI content. The other water presets retain their separate compositions.
+
+The Experimental artwork-reflection Mirror lake shares the current viewport-sized decoded tier with the existing artwork owner,
+not the blurred atmosphere derivative. Sixteen clipped views sample one vertically flipped
+field, with phase-offset horizontal displacement of image detail. These views do
+not create independent decodes or animation cursors. Native Metal currently lacks
+this image transformation path and uses the water/light composition without the
+photographic reflection. These studies do not implement physical fluid simulation,
+live desktop transparency, or refraction of arbitrary interface content.
+
+The Material… entry opens an undimmed live-preview adjustment card, including
+while effects are disabled. Turning effects off leaves the card open and shows
+that preview is disabled; selecting a preset or editing its parameters does not
+implicitly enable effects. Original, Texture and Water are directly available;
+Experimental can be expanded to reach the remaining studies. Each selection
+restores its own session parameters. Edits retain the preset identity; returning
+all values to their baseline clears the modified state. Fixed-appearance presets
+show an explanation instead of parameter controls. Supported controls are grouped
+by surface, cover, optics, motion and lists.
+The heading, selector and parameter rows share a scrolling body so every preset
+remains reachable in small viewports. Reset/Close remain outside that body.
+The controls use the application's active language. Closing the card retains
+the selection and each preset's adjustments for this session. Parameters do not
+write theme, playback, layout or configuration data. Transition duration and
+motion speed can both be reduced to exactly zero: zero duration disables the
+dissolve, and zero speed leaves coherent static artwork without retaining a
+transition predecessor. This is a fixed parameter surface, not a user shader
+compiler or node editor.
+The card is a mutually exclusive shell surface, sharing the shell's ordered
+composition and keyboard routing. Tab stays within its focus scope and Escape
+closes it without a preliminary click. A covering metadata confirmation owns
+focus until dismissed. Closing the last window drops both the card and the material
+session; reopening does not revive a stale modal focus owner.
+
+The source-image studies from Gradient translucency through Celtic storybook share
+decoded artwork rather than generating per-frame bitmaps. Image masks,
+sampling blur, UV waves, grain and color quantization compose on one sprite. All
+effect taps clamp to the source atlas tile. Nonzero cover blur uses fixed 9-by-9
+Gaussian sampling with alpha-correct texel interpolation; it can perform up to
+324 texel reads per covered fragment. Exact centers and collapsed axes skip
+zero-weight bilinear taps. Active feather, grain and color-level effects also use
+alpha-correct interpolation for fractional source alpha, while ordinary no-effect
+images retain their hardware sampling path. Sharing a texture does not make this
+work free. Native Metal explicitly rejects these new image/filter operations.
+
+Source-image effects have a fixed order: wave displacement selects the sampling
+center, source blur samples around it, then color quantization precedes grain.
+Feathering masks the resulting image; this is not an arbitrary reorderable chain.
+Backdrop capture and subtree isolation remain separate scene operations because
+their inputs and painter-order boundaries differ from source-image sampling.
+
+Backdrop frost is different from cover blur: it captures already-painted geometry,
+then applies two separable Gaussian passes before the panel foreground.
+Each pass combines adjacent discrete Gaussian taps with one weighted linear
+texture fetch, retaining the three-sigma footprint and clamped edges. For radius
+`r = ceil(3 * sigma)`, the fetch bound drops from `2r + 1` to `r + 1` per fragment
+per pass, without another target or downsampling. Floating-point accumulation
+and hardware interpolation can differ within the renderer's 8-bit tolerance.
+Group edge fade isolates viewport children, including overlaps, and composites their
+premultiplied result once. Headers, tabs and toolbars are outside the list mask.
+Groups containing backdrop blur interpolate the composed parent/group result so
+translucent backdrop alpha is not counted twice. Plain fades retain transparent
+isolation and source-over composition. Frames without backdrop blur draw their
+root directly into the output, retaining only one viewport target per active
+group depth and requiring no final root-copy pass. Frames containing backdrop
+blur additionally retain an offscreen root and shared scratch target; nested
+blur needs no separate backdrop-capture target. The target-byte budget charges
+these renderer-owned targets, not the output. Per-window target storage and
+fade-depth limits are runtime settings; defaults and accepted ranges are in
+link:01_config.adoc#_appearance_and_library_display[Appearance and library display]. Ordered filter markers
+remain capped at 64. Exceeding a configured limit, that marker cap or device texture
+dimensions skips all scene filters for the frame and preserves ordinary content;
+unbalanced filter groups remain rendering errors. Backdrop sigma is capped at
+32 physical pixels after logical-to-physical conversion. The material frame
+resolves its effective logical sigma to `min(requested, 32 / physical_scale)`;
+the session retains the requested value rather than changing its preset when
+output scale changes. Filters introduce painter-order barriers and can reduce
+batching; fade groups use grayscale text coverage.
+They add no production CPU readback or desktop/compositor transparency.
+
+Filter validation and procedural-water counts share one allocation-free scene
+preflight before filter or water resources are established. Scenes with neither
+operation bypass that traversal by inspecting their existing effect collections.
+More than 256 water panels skips all procedural water for that frame. Water and
+filter admission are independent, and both resume on later in-limit frames.
+Filter pipelines are created only for the first admitted filtered frame. An unfiltered
+frame releases filter targets but retains established pipelines for reuse; water alone does not create
+filter resources. Target sizes still follow the viewport: this does not introduce
+a persistent image cache or change the filter budget.
+
+Only an enabled cover transition retains one predecessor. Its clock starts after
+the new source decode is ready; hiding, disabling motion, zero duration or changing
+material identity retires the predecessor. Same-material duration edits retain the
+active clock. A predecessor can observe pending/ready work but never initiate a
+cold decode. Material owners consume real-cover lookups directly: a missing or
+failed target clears obsolete imagery rather than substituting generated default
+artwork. Opaque-cover dissolves compensate source-over alpha to retain
+constant backdrop contribution. Combined feathered masks use ordinary source-over
+coverage rather than exact dual-texture alpha interpolation. Celtic storybook is an original
+storybook-style experiment, not an imported film asset or character reproduction.
+
+The procedural presets are not Continuous water's cover displacement: each paints one independent
+root canvas through `Window::paint_cg_water` and never samples, reflects or distorts
+the album cover or interface text. None requests an artwork-atmosphere consumer. CG Water's fixed
+procedural shader uses perspective and a horizon, analytic multiscale wave
+normals, Fresnel reflection of a procedural sky, water absorption and glints.
+This is an artistic water surface, not physical fluid simulation, real scene/depth
+reflection, desktop transparency, or an image-effect/plugin framework. Panel
+tints remain local and album artwork and foreground text retain their normal
+rendering and input behavior.
+
+The other procedural presets remain independently selectable, not replacements
+or retunings of CG Water. `CgWaterStyle` selects their fixed shader compositions:
+Rain ripples refracts a clear shallow bed with expanding ripples; Shallow stream
+has downstream light filaments rather than rings; the Water group's Mirror lake
+reflects a broad sky through horizontal wind; After rain uses sparse rain packets
+with fading lifetimes; Water garden projects six soft leaf shadows over the water
+bed; Clear crystal bends light through nearly colorless curved sheets.
+All share the root-only canvas and local panel tints,
+leaving foreground content and input geometry unchanged.
+
+Only panel opacity, wave strength, water highlight and speed are exposed for
+procedural presets. Wave strength maps the session's existing `0..16` wave range to normalized
+`0..1` shader amplitude and is displayed as a percentage, not pixel displacement.
+These presets do not expose feather, grain, cover blur, backdrop blur, edge fade,
+color-level or cover-transition controls. Rain ripples starts at 45% panel opacity,
+25% wave strength, 32% highlight and 0.55× speed; CG Water's baseline remains
+unchanged. Selecting a preset restores its own session values and changes the
+selected identity; stale controls from another preset cannot edit it. Reset
+restores only the selected preset's defaults. Modified-state tracking compares
+that preset's session settings with its own baseline.
+All use a 24-second cycle at speed 1 on GPUI's synchronized repeating clock
+with a seamless periodic phase. Inactive windows, reduced motion and
+exact zero speed or wave strength select a static phase without attaching that
+animation. The caller owns scheduling; the renderer receives only bounds and
+scalar parameters. None adds per-frame bitmap generation, image uploads,
+geometry grids or unbounded caches. Their covered pixels still incur procedural
+shader work; this is not a claim of measured performance improvement.
+Unsupported native rendering backends reject procedural water explicitly rather
+than silently substituting artwork.
+
+
 == GUI composition boundaries
 
 GPUI remains the rendering and input framework. Library, Queue, Playlists,

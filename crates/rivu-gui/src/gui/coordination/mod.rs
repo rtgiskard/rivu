@@ -8,6 +8,38 @@ use crate::gui::window::*;
 use manual_actions::ManualAction;
 
 impl WindowView {
+    pub(in crate::gui) fn material_intent(
+        &mut self,
+        intent: appearance::material::MaterialIntent,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = appearance::material::MaterialSession::current(cx);
+        if !cx
+            .default_global::<appearance::material::MaterialSession>()
+            .apply(intent)
+        {
+            return;
+        }
+        let session = appearance::material::MaterialSession::current(cx);
+        let identity_changed =
+            previous.enabled != session.enabled || previous.material != session.material;
+        if identity_changed
+            || (previous.settings.transition_seconds > 0.)
+                != (session.settings.transition_seconds > 0.)
+        {
+            // Retire/re-enable ownership even when no future frame is sampled.
+            // Material actions never reconcile unrelated feature demand.
+            self.reconcile_material_demand(cx);
+        }
+        if identity_changed || previous.settings.edge_fade != session.settings.edge_fade {
+            // Cached descendants own material-dependent rows and list edge fades.
+            cx.refresh_windows();
+        } else {
+            // Panel/backdrop decoration and controls are composed outside those caches.
+            cx.notify();
+        }
+    }
+
     pub(super) fn subscribe_features(
         &self,
         window: &mut Window,
@@ -443,6 +475,23 @@ impl WindowView {
         self.reconcile_feature_demand(cx);
     }
 
+    pub(super) fn reconcile_material_demand(&self, cx: &mut Context<Self>) {
+        let material = appearance::material::Material::current(cx);
+        let transition_seconds =
+            appearance::material::TextureSettings::current(cx).transition_seconds;
+        self.atmosphere.update(cx, |atmosphere, cx| {
+            atmosphere.sync(
+                self.state.current_track(),
+                material,
+                transition_seconds,
+                self.window_visible && !self.state.system.shutting_down,
+                self.panel_demand(crate::gui::shell::panels::PanelKind::Transport.key())
+                    || self.panel_demand(crate::gui::shell::panels::PanelKind::Artwork.key()),
+                cx,
+            );
+        });
+    }
+
     pub(super) fn reconcile_feature_demand(&self, cx: &mut Context<Self>) {
         self.audio_processing.update(cx, |owner, cx| {
             owner.sync_panels(
@@ -451,6 +500,7 @@ impl WindowView {
                 cx,
             )
         });
+        self.reconcile_material_demand(cx);
         let library_visible = self.panel_demand("library");
         let available = !self.workspace.layouts.current().locked
             || self.workspace.panels.contains_kind("library");
