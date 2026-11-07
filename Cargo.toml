@@ -100,5 +100,5 @@ symphonia-format-riff = { path = "vendor/symphonia-format-riff" }
 
 # Pinned GPUI extensions maintained together in the independent renderer repository.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "62678e1e6d77e29f65fc0be3e2c21c755ec9c95b" }
-gpui_wgpu = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "62678e1e6d77e29f65fc0be3e2c21c755ec9c95b" }
+gpui = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "a7fcc341793ee115ea07565c1b6e5e9d5d8ba364" }
+gpui_wgpu = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "a7fcc341793ee115ea07565c1b6e5e9d5d8ba364" }

@@ -662,7 +662,7 @@ percentages from a different implementation.
 == Pinned GPU extensions
 
 `Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
-`62678e1e6d77e29f65fc0be3e2c21c755ec9c95b` from
+`a7fcc341793ee115ea07565c1b6e5e9d5d8ba364` from
 https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
 https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
@@ -734,7 +734,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout 62678e1e6d77e29f65fc0be3e2c21c755ec9c95b
+git checkout a7fcc341793ee115ea07565c1b6e5e9d5d8ba364
 make test
 ----
 
