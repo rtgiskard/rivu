@@ -1,5 +1,8 @@
 = Rivu
 
+image:https://img.shields.io/badge/license-GPLv3-green.svg?style=flat[GPLv3 or later,link=https://www.gnu.org/licenses/gpl-3.0.html]
+image:https://img.shields.io/badge/Ko--fi-F16061.svg?logo=ko-fi&logoColor=white[Support on Ko-fi,link=https://ko-fi.com/E1E8MKPBZ]
+
 Rivu is a lightweight, local-first music player for Linux, with GUI, TUI, and CLI
 access to a shared playback instance that can also run headless.
 
@@ -61,17 +64,19 @@ for scanning and path rules.
 
 === Other interfaces and shutdown
 
+`rivu gui` and `rivu tui` connect to the existing core or start one automatically.
+
 [source,sh]
 ----
-# Run a foreground core without a desktop window
-rivu serve
-
-# Open the TUI, starting a background core if needed
+# Open the TUI
 rivu tui
 
 # Stop the running instance, including its GUI and desktop integrations
 rivu quit
 ----
+
+For an explicit headless setup, `rivu serve` runs the core in the foreground
+without opening either frontend.
 
 Passing explicit paths to `rivu gui PATH...` or `rivu serve PATH...` requests a scan
 within configured library roots; it does not add roots. `rivu gui PATH...` also
@@ -384,3 +389,6 @@ Its playback-management concepts provided the foundation for Rivu's current appr
 
 Rivu is licensed under the https://www.gnu.org/licenses/gpl-3.0.html[GNU General Public License v3.0 or later]
 (GPL-3.0-or-later).
+
+---
+image::https://storage.ko-fi.com/cdn/brandasset/v2/support_me_on_kofi_badge_blue.png[height=80,link='https://ko-fi.com/E1E8MKPBZ']
