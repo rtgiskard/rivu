@@ -316,10 +316,16 @@ impl Core {
         if self.transport.retired.is_some() {
             self.flush_deferred_playback()?;
         }
-        if self
-            .state
-            .current_track()
-            .is_some_and(|track| track.missing)
+        // A failed scan refresh can leave the selected track stale or absent.
+        // The live session identifies the source; Store owns its missing status.
+        let track_id = self
+            .transport
+            .session
+            .as_ref()
+            .map(|session| session.track_id)
+            .or_else(|| self.state.current_track().map(|track| track.id));
+        if let Some(track_id) = track_id
+            && self.store.track_is_missing(track_id)?
         {
             self.stop()?;
         }

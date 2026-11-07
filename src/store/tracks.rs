@@ -1057,6 +1057,13 @@ impl Store {
         Ok((playlists, queue))
     }
 
+    pub(crate) fn track_is_missing(&self, track_id: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1 AND missing=1)")?
+            .query_row([track_id], |row| row.get(0))?)
+    }
+
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;

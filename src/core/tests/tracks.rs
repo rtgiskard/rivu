@@ -1071,6 +1071,101 @@ fn removing_missing_tracks_reuses_queue_playlist_and_recent_cleanup_without_disk
 }
 
 #[test]
+fn removing_missing_tracks_retires_session_after_failed_scan_projection() {
+    for selected_track in [Some(1), Some(2), None] {
+        let (directory, mut core) = fixture();
+        playing(&mut core, 1);
+        let generation = core.transport.generation;
+        let late_started = started_event(&core, Some(10.0));
+        let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+        core.store
+            .apply_scan(&ScanResult {
+                roots: vec![current.path.clone()],
+                ..ScanResult::default()
+            })
+            .unwrap();
+        assert!(core.store.track(1).unwrap().unwrap().missing);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE saved_queue_meta AS SELECT * FROM rivu_meta;
+                 DELETE FROM rivu_meta;",
+            )
+            .unwrap();
+        assert!(core.refresh_queue_tracks().is_err());
+        assert!(core.transport.projection_stale);
+        assert!(Arc::ptr_eq(
+            core.state.current_track.as_ref().unwrap(),
+            &current
+        ));
+        assert!(!core.state.current_track().unwrap().missing);
+        connection
+            .execute_batch(
+                "INSERT INTO rivu_meta SELECT * FROM saved_queue_meta;
+                 DROP TABLE saved_queue_meta;",
+            )
+            .unwrap();
+
+        // A missing or unrelated UI selection must not hide the live source.
+        core.state.current_track = selected_track.map(|id| {
+            if id == 1 {
+                Arc::clone(&current)
+            } else {
+                Arc::new(core.track(id).unwrap())
+            }
+        });
+        core.command(Command::RemoveMissingTracks).unwrap();
+        assert!(core.store.track(1).unwrap().is_none());
+        assert!(core.transport.session.is_none());
+        assert!(core.transport.retired.is_none());
+        assert_ne!(core.transport.generation, generation);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert!(core.state.current_track.is_none());
+        assert_eq!(core.state.queue.current_id, None);
+        assert_eq!(queue_entries(&core), [(2, 2), (3, 2), (4, 3), (5, 4)]);
+        assert_queue_saved(&core);
+
+        core.audio_event(late_started).unwrap();
+        core.audio_event(AudioEvent::Ended {
+            generation,
+            bitrate_bps: None,
+        })
+        .unwrap();
+        assert!(core.transport.session.is_none());
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, None);
+    }
+}
+
+#[test]
+fn removing_missing_tracks_preserves_session_when_only_cached_track_is_missing() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let generation = core.transport.generation;
+    let impacts = core
+        .store
+        .apply_scan(&ScanResult {
+            roots: vec![core.track(2).unwrap().path],
+            ..ScanResult::default()
+        })
+        .unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
+    Arc::make_mut(core.state.current_track.as_mut().unwrap()).missing = true;
+    assert!(!core.store.track(1).unwrap().unwrap().missing);
+
+    core.command(Command::RemoveMissingTracks).unwrap();
+    assert!(core.store.track(2).unwrap().is_none());
+    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 1);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.state.current_track().unwrap().id, 1);
+    assert!(!core.state.current_track().unwrap().missing);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(queue_entries(&core), [(1, 1), (4, 3), (5, 4)]);
+    assert_queue_saved(&core);
+}
+
+#[test]
 fn track_removal_validates_the_set_before_stopping_playback() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
