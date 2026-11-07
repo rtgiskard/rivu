@@ -85,6 +85,11 @@ scan and check results, Playlists shows imports, and Queue shows file additions.
 Rejected requests have separate dismissible errors and do not replace accepted
 task feedback. See <<cancellation,Cancellation>> for waiting, status, and shutdown.
 
+Failed desktop media tasks offer a Copy button beside Dismiss in the result
+heading. Copy preserves the complete error message, including text truncated in
+the panel; it neither dismisses the result nor changes the task. Library scan
+errors stay in Library rather than replacing the window-global notification.
+
 Cancelling a desktop file chooser changes neither configuration nor existing
 errors; this also applies to playlist import and export.
 

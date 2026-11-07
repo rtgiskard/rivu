@@ -384,6 +384,24 @@ This changes PCM lifetime, not the budget, graph result or model execution polic
 Evidence and resolution:
 link:90_open_issues.adoc#model-boundary-retirement[model-boundary retirement].
 
+[[DEC-013]]
+=== DEC-013: Keep scan error copying with the retained task result
+
+Status: implemented, 2026-11-07.
+
+Failed media-task results expose Copy beside Dismiss in their existing heading.
+Copy writes the full projected message to the clipboard without mutating or
+dismissing the task. Library scan failures remain local to Library; copying does
+not require publishing them as window-global errors. Reuse the existing icon
+button and clipboard API without adding a notification or selection mechanism.
+User behavior is documented in link:02_library.adoc[Roots and scanning].
+
+An isolated nested-Wayland run produced a real missing-root scan failure. A
+virtual-pointer click on Copy followed by a clipboard read preserved the exact
+full error beyond the visible truncation, while the failed result stayed open.
+`make lint`, the Core scan-error ownership regression, and existing GUI Library
+tests passed. This verifies the nested-compositor path, not host-desktop input.
+
 == Unapproved candidates
 
 Status: not adopted or authorized, 2026-11-06. These are investigation candidates,

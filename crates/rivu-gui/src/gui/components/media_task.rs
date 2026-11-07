@@ -1,6 +1,6 @@
 //! Accepted media-task progress shared by its owning Library, Queue or Playlists surface.
 use crate::projection::GuiSystemSnapshot;
-use gpui::{Context, Div, SharedString, div, prelude::*, px, relative, rgb};
+use gpui::{ClipboardItem, Context, Div, SharedString, div, prelude::*, px, relative, rgb};
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::model::MediaTaskOwner;
 use rivu_protocol::model::{Command, ScanPhase};
@@ -81,9 +81,28 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                 ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
             )
         });
+    let message: SharedString = system.scan_message.clone().into();
     let actions = panel_header_actions()
         .min_w_8()
         .min_h_8()
+        .when(failed, |slot| {
+            let message = message.clone();
+            slot.child(
+                IconButton::new(
+                    ("media-task-copy-error", panel_id),
+                    "",
+                    i18n.text("shell-copy-message").to_owned(),
+                )
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Regular,
+                    cx,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(message.to_string()));
+                    },
+                ),
+            )
+        })
         .when(system.scanning, |slot| {
             slot.child(
                 IconButton::new(
@@ -146,7 +165,6 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default()
         .into();
-    let message: SharedString = system.scan_message.clone().into();
     // Keep phases in fixed cells; only dismissal removes the accepted-task surface.
     column()
         .gap_1()
