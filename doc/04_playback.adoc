@@ -244,8 +244,7 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 
 The TUI additionally supports `Ctrl+Home` / `Ctrl+End` to seek to the track's
 start/known end; `Ctrl+End` does nothing when duration is unknown. The GUI does
-not bind these keys or the TUI's bare `q` action; use its window controls and
-menus instead.
+not bind these keys; use its playback controls instead.
 
 Bare Left/Right are reserved for container navigation, not seeking. Home/End
 select the first/last item in lists supporting row navigation. Enter opens a
@@ -416,9 +415,10 @@ error. Messages still share the bottom row rather than adding extra rows.
 |`:help` |Open the scrollable help page, including command descriptions
 |===
 
-Bare `q` outside editors and `Ctrl+C` close only the client. Unknown commands and
-rejected shutdown requests show errors without closing it; uncertain shutdown
-outcomes are not automatically retried.
+`Ctrl+C` closes only the current TUI from every input mode. Bare `q` has no action
+outside editors and remains ordinary text inside them. Escape cancels or returns;
+it never closes the client. Unknown commands and rejected shutdown requests show
+errors without closing it; uncertain shutdown outcomes are not automatically retried.
 
 Recent shows up to 256 unique tracks in recent-play order, with titles, counts,
 and local timestamps where space permits. The playing or paused track uses its
@@ -504,11 +504,11 @@ and errors are distinct; ordinary playback updates do not replace a visible fail
 
 Left goes to a parent directory; Left/Esc leaves playlist details.
 With search closed, Esc returns from Library tree or playlist catalog to Queue.
-`q` closes the client outside the query editor and also works while waiting for
-Core startup or the initial connection. Ctrl-C exits from every view, including
-editors, overlays, and startup waiting. `SIGINT` and `SIGTERM` also close only the
-client. These exits cancel frontend readiness waiting and restore terminal mode,
-screen, and cursor; the independent Core keeps its own lifetime and is not stopped.
+At Queue's outermost level, Esc has no action. Ctrl-C closes the current TUI from
+every view, including editors, overlays, Core startup, and initial connection
+waiting. `SIGINT` and `SIGTERM` also close only the client. These exits cancel
+frontend readiness waiting and restore terminal mode, screen, and cursor; the
+independent Core keeps its own lifetime and playback is not stopped.
 
 Core shutdown exits normally; a lost connection without shutdown state reports an error.
 

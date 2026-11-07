@@ -384,7 +384,6 @@ mod startup_tests {
     #[test]
     fn loading_owner_keeps_close_input_responsive_and_drops_pending_startup() {
         for close in [
-            Some(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
             Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             None,
         ] {
@@ -406,7 +405,15 @@ mod startup_tests {
                 |_| {
                     assert!(polled.load(Ordering::Relaxed));
                     waits += 1;
-                    assert_eq!(waits, 1, "pending startup must not consume close input");
+                    if waits <= 2 {
+                        let code = if waits == 1 {
+                            KeyCode::Char('q')
+                        } else {
+                            KeyCode::Esc
+                        };
+                        return Ok(Some(Event::Key(KeyEvent::from(code))));
+                    }
+                    assert_eq!(waits, 3, "pending startup must not consume close input");
                     if let Some(key) = close {
                         Ok(Some(Event::Key(key)))
                     } else {
@@ -416,7 +423,7 @@ mod startup_tests {
                 },
             )
             .unwrap();
-            assert_eq!(waits, 1);
+            assert_eq!(waits, 3);
             assert!(dropped.load(Ordering::Relaxed));
         }
     }

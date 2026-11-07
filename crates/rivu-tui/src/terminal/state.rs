@@ -1710,7 +1710,6 @@ impl UiState {
                 self.mark_local_change();
                 return KeyAction::Ignored;
             }
-            Action::Close => return KeyAction::Quit,
             Action::Details => {
                 self.open_details();
                 return KeyAction::Ignored;

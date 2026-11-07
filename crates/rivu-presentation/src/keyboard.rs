@@ -167,7 +167,6 @@ static BINDINGS: &[Binding] = &[
         Cancel,
         "keyboard-clear-search"
     ),
-    binding!("q", "q", 0, TUI & !QUERY, Close, "keyboard-close"),
     binding!(
         "c",
         "Ctrl+C",
@@ -675,7 +674,6 @@ mod tests {
             ("m", Action::Favorite),
             ("space", Action::Toggle),
             ("/", Action::Search),
-            ("q", Action::Close),
         ] {
             assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
         }
@@ -785,7 +783,7 @@ mod tests {
     #[test]
     fn terminal_only_actions_do_not_leak_into_desktop_contexts() {
         for (key, control, action) in [
-            ("q", false, Action::Close),
+            ("c", true, Action::Close),
             ("home", true, Action::SeekStart),
             ("end", true, Action::SeekEnd),
         ] {

@@ -70,10 +70,50 @@ fn command_editor_cancels_bounds_unicode_and_rejects_unknown_commands() {
     assert_eq!(ui.command_input.as_ref().unwrap().len(), 252);
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
     assert!(ui.command_input.is_none());
-    assert!(matches!(
-        ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
-        KeyAction::Quit
-    ));
+}
+
+#[test]
+fn client_exit_requires_explicit_input_and_ctrl_c_works_in_every_input_mode() {
+    let state = TuiSnapshot::default();
+    for mode in 0..5 {
+        for cancel_first in [false, true] {
+            let mut ui = UiState::default();
+            match mode {
+                1 => ui.open_search(),
+                2 => ui.command_input = Some(String::new()),
+                3 => ui.show_help = true,
+                4 => ui.details_active = true,
+                _ => {}
+            }
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
+                KeyAction::Ignored
+            ));
+            if mode == 1 {
+                assert_eq!(ui.search.query, "q");
+            } else if mode == 2 {
+                assert_eq!(ui.command_input.as_deref(), Some("q"));
+            }
+            if cancel_first {
+                assert!(matches!(
+                    ui.key_action(KeyEvent::from(KeyCode::Esc), &state),
+                    KeyAction::Ignored
+                ));
+                assert!(!ui.search.active);
+                assert!(ui.command_input.is_none());
+                assert!(!ui.show_help);
+                assert!(!ui.details_active);
+                assert!(matches!(ui.view, View::Queue));
+            }
+            assert!(matches!(
+                ui.key_action(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    &state
+                ),
+                KeyAction::Quit
+            ));
+        }
+    }
 }
 
 #[test]
@@ -2348,34 +2388,6 @@ fn returning_to_parent_restores_selection_and_middle_of_viewport() {
 }
 
 #[test]
-fn interrupt_exits_editors_and_overlays_without_dispatching_core_commands() {
-    let state = TuiSnapshot::default();
-    let mut screens = vec![
-        UiState::default(),
-        UiState {
-            search: SearchState {
-                active: true,
-                editing: true,
-                ..SearchState::default()
-            },
-            ..UiState::default()
-        },
-        UiState {
-            show_help: true,
-            ..UiState::default()
-        },
-        UiState {
-            details_active: true,
-            ..UiState::default()
-        },
-    ];
-    let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    for ui in &mut screens {
-        assert!(matches!(ui.key_action(interrupt, &state), KeyAction::Quit));
-    }
-}
-
-#[test]
 fn question_mark_opens_help_except_when_owned_by_query_input() {
     let state = TuiSnapshot::default();
     for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
@@ -2536,7 +2548,10 @@ fn terminal_routes_playback_chords_and_exit_without_stopping_core() {
         ));
     }
     assert!(matches!(
-        ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
+        ui.key_action(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &state
+        ),
         KeyAction::Quit
     ));
 }
