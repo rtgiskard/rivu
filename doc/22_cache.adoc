@@ -164,8 +164,9 @@ unmounted submenu trigger. Cancellation preserves the physical reader gate until
 completion; retirement notifies the window even when its logical result is stale.
 |Duplicate review
 |Stable selected identities survive reference refreshes, but commands require
-current facts. Dismissal requests task cancellation without joining the worker;
-late admission cannot reopen the review.
+current facts. A failed or timed-out status read does not release the relocation
+task identity or automatically retry. Dismissal still requests cancellation without
+joining the worker; late admission cannot reopen the review.
 |===
 
 Debounced reads recheck demand before submission; abandoned timers release only

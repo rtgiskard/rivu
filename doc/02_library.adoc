@@ -674,6 +674,8 @@ rejected rather than merged. Correct the reported conflict before retrying.
 
 Closing the review requests cancellation of its ongoing verification. Cancellation
 before commit leaves identities unchanged; it cannot undo a completed commit.
+A status-read failure does not establish task completion: the review retains its
+task identity, so closing it can still request cancellation.
 CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
 final outcome; otherwise query status or cancel using that ID. The running core
 retains the latest 32 task results, not persistent task history.

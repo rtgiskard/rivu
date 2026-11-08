@@ -107,6 +107,7 @@ struct DuplicateReview {
     busy: Option<Busy>,
     task_query_pending: bool,
     task_read_timed_out: bool,
+    task_read_failed: Option<(u64, u64)>,
     feedback: Option<ReviewFeedback>,
 }
 
@@ -236,7 +237,11 @@ impl DuplicateReview {
     }
 
     fn begin_task_read(&mut self, id: u64) -> Option<u64> {
-        if !self.open || self.task_id() != Some(id) || self.task_query_pending {
+        if !self.open
+            || self.task_id() != Some(id)
+            || self.task_query_pending
+            || self.task_read_failed == Some((self.epoch, id))
+        {
             return None;
         }
         self.task_query_pending = true;
@@ -267,7 +272,7 @@ impl DuplicateReview {
             }
             Err(QueryError::RevisionChanged | QueryError::Cancelled) => TaskReadOutcome::Ignored,
             result => {
-                self.busy = None;
+                self.task_read_failed = Some((epoch, id));
                 self.feedback = Some(match result {
                     Err(error) => ReviewFeedback::ReadFailed(error.to_string()),
                     _ => ReviewFeedback::Localized("gl-verification-response", StatusKind::Error),
@@ -282,7 +287,7 @@ impl DuplicateReview {
         if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
             return false;
         }
-        self.busy = None;
+        self.task_read_failed = Some((epoch, id));
         self.feedback = Some(ReviewFeedback::ReadFailed(
             response.result.unwrap_err().to_string(),
         ));
@@ -2269,7 +2274,8 @@ mod tests {
         review.busy = Some(Busy::Relocating(7));
         let epoch = review.begin_task_read(7).unwrap();
         assert!(review.timeout_task_read(epoch, 7, timeout_response()));
-        assert!(review.busy.is_none());
+        assert_eq!(review.task_id(), Some(7));
+        assert_eq!(review.cancellable_task(), Some(7));
         assert!(review.task_query_pending);
         assert!(matches!(
             &review.feedback,
@@ -2797,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_and_mismatched_retained_status_release_busy_with_feedback() {
+    fn mismatched_retained_status_preserves_task_until_terminal_status() {
         let mut review = ready_review();
         review.confirm(true);
         let (epoch, _) = review.submit(false).unwrap();
@@ -2807,12 +2813,10 @@ mod tests {
             review.accept_task_read(epoch, 7, task_response(8, RelocationPhase::Completed)),
             TaskReadOutcome::Failed
         ));
-        assert!(review.busy.is_none());
+        assert_eq!(review.task_id(), Some(7));
         assert!(!review.task_query_pending);
-        review.confirm(true);
-        let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, ack(true, Some(8)));
-        let mut failed = task(8, RelocationPhase::Failed);
+        assert!(review.begin_task_read(7).is_none());
+        let mut failed = task(7, RelocationPhase::Failed);
         failed.error = Some("verification failed".into());
         assert!(review.accept_task(&failed));
         assert!(
@@ -2914,7 +2918,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_read_error_is_terminal_for_review_but_does_not_release_page_workers() {
+    fn retained_read_error_preserves_task_and_does_not_release_page_workers() {
         let mut review = ready_review();
         review.request_groups(0, QueryRevisions::default());
         assert!(review.begin_groups().is_some());
@@ -2932,12 +2936,39 @@ mod tests {
             review.accept_task_read(epoch, 7, response),
             TaskReadOutcome::Failed
         ));
-        assert!(review.busy.is_none());
+        assert_eq!(review.task_id(), Some(7));
+        assert_eq!(review.cancellable_task(), Some(7));
+        assert!(review.begin_task_read(7).is_none());
         assert!(!review.task_query_pending);
         assert!(review.groups_loading);
         assert!(matches!(
             &review.feedback,
             Some(ReviewFeedback::ReadFailed(_))
         ));
+    }
+
+    #[test]
+    fn failed_task_reads_keep_close_cancellation_and_reject_late_completion() {
+        for timeout in [false, true] {
+            let mut review = ready_review();
+            review.busy = Some(Busy::Relocating(7));
+            let epoch = review.begin_task_read(7).unwrap();
+            if timeout {
+                assert!(review.timeout_task_read(epoch, 7, timeout_response()));
+            } else {
+                assert!(matches!(
+                    review.accept_task_read(epoch, 7, timeout_response()),
+                    TaskReadOutcome::Failed
+                ));
+            }
+            assert!(review.begin_task_read(7).is_none());
+            assert_eq!(review.close(), Some(7));
+            assert!(matches!(
+                review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
+                TaskReadOutcome::Ignored
+            ));
+            assert!(!review.open);
+            assert!(review.busy.is_none());
+        }
     }
 }
