@@ -275,6 +275,24 @@ impl DenoiseConfig {
         }
         Ok(())
     }
+
+    /// Validate every constructor precondition without allocating DSP state.
+    /// Profile identity remains required even for a zero-wet bypass.
+    pub fn validate_for_processor(
+        &self,
+        sample_rate: u32,
+        channels: usize,
+        profile: Option<&NoiseProfile>,
+    ) -> Result<()> {
+        self.validate_for_format(sample_rate, channels)?;
+        if self.mode == DenoiseMode::Profile {
+            let Some(profile) = profile else {
+                anyhow::bail!("profile denoise requires an explicitly captured noise segment");
+            };
+            profile.validate(sample_rate, channels, self.fft_size)?;
+        }
+        Ok(())
+    }
 }
 
 /// Frozen linked-channel noise PSD. Capture only an explicitly selected noise

@@ -1372,17 +1372,13 @@ impl Source {
             let mut end_frames = 0;
             while offset < count {
                 let position = frame + offset as u64;
-                while mappings
-                    .front()
-                    .is_some_and(|mapping| mapping.0 <= position)
-                {
-                    *anchor = mappings.pop_front().expect("present render media boundary");
-                }
-                let start =
-                    anchor.1 + position.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
-                let length = mappings.front().map_or(count - offset, |mapping| {
-                    (count - offset).min((mapping.0 - position) as usize)
-                });
+                let (start, length) = super::timeline::mapped_span(
+                    mappings,
+                    anchor,
+                    position,
+                    count - offset,
+                    sample_rate,
+                );
                 let block = &samples[offset * channels..(offset + length) * channels];
                 let (first, end) = snapshot.read_range.map_or((0, length), |range| {
                     let first = ((range.start_seconds - start) * f64::from(sample_rate))
@@ -1444,19 +1440,15 @@ impl Source {
             if !samples.len().is_multiple_of(channels) {
                 bail!("Rendered PCM contains an incomplete frame");
             }
-            let discard = lead
-                .saturating_sub(input_frames)
-                .min((samples.len() / channels) as u64);
-            if discard < (samples.len() / channels) as u64 {
-                let frame = (input_frames + discard).saturating_sub(lead);
-                let media = start_seconds + (discard as f64 - lead as f64) / f64::from(sample_rate);
-                let anchor = mappings.back().copied().unwrap_or(media_anchor);
-                let expected =
-                    anchor.1 + frame.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
-                if (media - expected).abs() > 0.5 / f64::from(sample_rate) {
-                    mappings.push_back((frame, media));
-                }
-            }
+            super::timeline::record_mapping(
+                &mut mappings,
+                media_anchor,
+                input_frames,
+                samples.len() / channels,
+                lead,
+                start_seconds,
+                sample_rate,
+            );
             input_frames += (samples.len() / channels) as u64;
             for block in samples.chunks(super::graph::GRAPH_BLOCK_FRAMES * channels) {
                 if remaining == Some(0) || stop_frame.is_some_and(|end| end_frames >= end) {
@@ -1468,14 +1460,12 @@ impl Source {
                         .as_ref()
                         .is_none_or(rivu_dsp::equalizer::iir::Equalizer::is_bypassed)
                 {
-                    let discard = skip.min(block.len() / channels);
-                    skip -= discard;
-                    let mut block = &block[discard * channels..];
-                    if let Some(remaining) = &mut remaining {
-                        let frames = (block.len() / channels).min(*remaining as usize);
-                        block = &block[..frames * channels];
-                        *remaining -= frames as u64;
-                    }
+                    let range = super::timeline::published_range(
+                        block.len() / channels,
+                        &mut skip,
+                        &mut remaining,
+                    );
+                    let block = &block[range.start * channels..range.end * channels];
                     end_frames = end_frames.max(emit_pcm(
                         published_frames,
                         block,
@@ -1490,14 +1480,13 @@ impl Source {
                 if processed && let Some(graph) = &mut graph {
                     graph.process_interleaved(&mut pending)?;
                 }
-                let discard = skip.min(pending.len() / channels);
-                skip -= discard;
-                pending.drain(..discard * channels);
-                if let Some(remaining) = &mut remaining {
-                    let frames = (pending.len() / channels).min(*remaining as usize);
-                    pending.truncate(frames * channels);
-                    *remaining -= frames as u64;
-                }
+                let range = super::timeline::published_range(
+                    pending.len() / channels,
+                    &mut skip,
+                    &mut remaining,
+                );
+                pending.copy_within(range.start * channels..range.end * channels, 0);
+                pending.truncate(range.len() * channels);
                 if let Some(equalizer) = &mut equalizer {
                     equalizer.process(&mut pending)?;
                 }
@@ -1514,8 +1503,9 @@ impl Source {
             && stop_frame.is_none_or(|end| end_frames < end)
             && let Some(graph) = &mut graph
         {
-            let mut remaining = remaining.unwrap_or(input_frames.saturating_sub(published_frames));
-            while remaining > 0 && stop_frame.is_none_or(|end| end_frames < end) {
+            let mut remaining =
+                Some(remaining.unwrap_or(input_frames.saturating_sub(published_frames)));
+            while remaining != Some(0) && stop_frame.is_none_or(|end| end_frames < end) {
                 check_cancelled(Some(cancelled))?;
                 pending.resize(super::graph::GRAPH_BLOCK_FRAMES * channels, 0.0);
                 let produced = graph.finish_interleaved(&mut pending)?;
@@ -1523,10 +1513,9 @@ impl Source {
                     bail!("Active graph ended before its captured source timeline");
                 }
                 pending.truncate(produced * channels);
-                let discard = skip.min(produced);
-                skip -= discard;
-                pending.drain(..discard * channels);
-                let frames = (pending.len() / channels).min(remaining as usize);
+                let range = super::timeline::published_range(produced, &mut skip, &mut remaining);
+                let frames = range.len();
+                pending.copy_within(range.start * channels..range.end * channels, 0);
                 pending.truncate(frames * channels);
                 equalizer
                     .as_mut()
@@ -1539,7 +1528,6 @@ impl Source {
                     &mut media_anchor,
                 )?);
                 published_frames += frames as u64;
-                remaining -= frames as u64;
             }
         }
         check_cancelled(Some(cancelled))?;

@@ -5,6 +5,7 @@ use super::{
     graph::GraphRunner,
     output::{Output, OutputError, OutputOptions},
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
+    timeline::{mapped_span, published_range, record_mapping, remaining_frames},
 };
 use crate::capture::{PcmAudioIdentity, PcmControl, PcmProducer};
 use anyhow::{Result, bail};
@@ -248,11 +249,11 @@ impl Playback {
             );
         }
         let graph_skip_frames = graph.as_ref().map_or(0, GraphRunner::latency_frames);
-        let graph_output_remaining = graph.as_ref().and_then(|graph| {
-            graph.published_frames().map(|frames| {
-                frames.saturating_sub((start * source.info().sample_rate as f64).round() as u64)
-            })
-        });
+        let graph_output_remaining = remaining_frames(
+            graph.as_ref().and_then(GraphRunner::published_frames),
+            start,
+            source.info().sample_rate,
+        );
         analyzer.set_generation(generation);
         let output = Output::new(
             source.info().sample_rate,
@@ -367,11 +368,11 @@ impl Playback {
             graph.reset();
             self.graph_skip_frames = graph.latency_frames();
             self.before_skip_frames = graph.source_lead_frames();
-            self.graph_output_remaining = graph.published_frames().map(|frames| {
-                frames.saturating_sub(
-                    (position * self.source.info().sample_rate as f64).round() as u64
-                )
-            });
+            self.graph_output_remaining = remaining_frames(
+                graph.published_frames(),
+                position,
+                self.source.info().sample_rate,
+            );
         }
         self.before_output_frames = 0;
         self.graph_input_frames = 0;
@@ -567,24 +568,15 @@ impl Playback {
                     let borrowed = self.graph.is_none() && self.equalizer.is_bypassed();
                     if let Some(graph) = &self.graph {
                         let lead = graph.source_lead_frames() as u64;
-                        let skip = lead
-                            .saturating_sub(self.graph_input_frames)
-                            .min((frames.len() / channels) as u64);
-                        if skip < (frames.len() / channels) as u64 {
-                            let frame = (self.graph_input_frames + skip).saturating_sub(lead);
-                            let media = start_seconds
-                                + (skip as f64 - lead as f64) / f64::from(sample_rate);
-                            let anchor = self
-                                .graph_mapping
-                                .back()
-                                .copied()
-                                .unwrap_or(self.graph_media);
-                            let expected = anchor.1
-                                + frame.saturating_sub(anchor.0) as f64 / f64::from(sample_rate);
-                            if (media - expected).abs() > 0.5 / f64::from(sample_rate) {
-                                self.graph_mapping.push_back((frame, media));
-                            }
-                        }
+                        record_mapping(
+                            &mut self.graph_mapping,
+                            self.graph_media,
+                            self.graph_input_frames,
+                            frames.len() / channels,
+                            lead,
+                            start_seconds,
+                            sample_rate,
+                        );
                         if self.graph_input_frames > graph.source_lead_frames() as u64
                             && discontinuity
                         {
@@ -592,16 +584,18 @@ impl Playback {
                                 self.graph_input_frames - graph.source_lead_frames() as u64,
                             );
                         }
-                        let skip = self.before_skip_frames.min(frames.len() / channels);
-                        self.before_skip_frames -= skip;
-                        let mut samples = &frames[skip * channels..];
-                        if let Some(total) = graph.published_frames() {
-                            let remaining = total.saturating_sub(
-                                (self.base_position * sample_rate as f64).round() as u64
-                                    + self.before_output_frames,
-                            );
-                            samples = &samples[..samples.len().min(remaining as usize * channels)];
-                        }
+                        let mut remaining = crate::timeline::remaining_frames(
+                            graph.published_frames(),
+                            self.base_position,
+                            sample_rate,
+                        )
+                        .map(|left| left.saturating_sub(self.before_output_frames));
+                        let range = published_range(
+                            frames.len() / channels,
+                            &mut self.before_skip_frames,
+                            &mut remaining,
+                        );
+                        let samples = &frames[range.start * channels..range.end * channels];
                         if self.visualization.signal == VisualizationSignal::Before {
                             let limit = frames.len() / channels
                                 + graph
@@ -706,22 +700,15 @@ impl Playback {
         if self.graph.is_some() {
             let submitted =
                 self.graph_output_frames - (self.pending.len() / channels) as u64 + start as u64;
-            while self
-                .graph_mapping
-                .front()
-                .is_some_and(|mapping| mapping.0 <= submitted)
-            {
-                self.graph_media = self
-                    .graph_mapping
-                    .pop_front()
-                    .expect("present media boundary");
-            }
-            media_start = self.graph_media.1
-                + submitted.saturating_sub(self.graph_media.0) as f64
-                    / f64::from(self.source.info().sample_rate);
-            if let Some(mapping) = self.graph_mapping.front() {
-                end = end.min(start + (mapping.0 - submitted) as usize);
-            }
+            let (media, count) = mapped_span(
+                &mut self.graph_mapping,
+                &mut self.graph_media,
+                submitted,
+                end - start,
+                self.source.info().sample_rate,
+            );
+            media_start = media;
+            end = start + count;
             while self.graph_gaps.front().is_some_and(|gap| *gap <= submitted) {
                 self.graph_gaps.pop_front();
                 if let Some(producer) = &mut self.visualization.producer {
@@ -787,15 +774,14 @@ impl Playback {
             PendingTap::Direct(VisualizationSignal::After)
         };
         if self.graph.is_some() {
-            let skip = self.graph_skip_frames.min(self.pending.len() / channels);
-            self.graph_skip_frames -= skip;
-            self.pending.copy_within(skip * channels.., 0);
-            self.pending.truncate(self.pending.len() - skip * channels);
-            if let Some(remaining) = &mut self.graph_output_remaining {
-                let frames = (self.pending.len() / channels).min(*remaining as usize);
-                self.pending.truncate(frames * channels);
-                *remaining -= frames as u64;
-            }
+            let range = published_range(
+                self.pending.len() / channels,
+                &mut self.graph_skip_frames,
+                &mut self.graph_output_remaining,
+            );
+            self.pending
+                .copy_within(range.start * channels..range.end * channels, 0);
+            self.pending.truncate(range.len() * channels);
             self.graph_output_frames += (self.pending.len() / channels) as u64;
         }
         // Monitor EQ remains separate from the persisted processing graph.

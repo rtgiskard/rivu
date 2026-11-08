@@ -137,6 +137,8 @@ mod graph;
 mod output;
 mod pcm;
 mod playback;
+mod processor;
+mod timeline;
 pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
 mod render;
 mod source;
@@ -145,6 +147,7 @@ mod worker;
 pub use channels::Channel;
 pub use graph::{GraphPlan, GraphRunner};
 pub use output::devices;
+pub use processor::{NativeNodePlan, NativeProcessor};
 pub use render::{RenderFormat, SourceRenderer};
 use rivu_protocol::audio::{PlaybackRange, SourceIdentity};
 pub use source::{

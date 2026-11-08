@@ -2,10 +2,7 @@
 use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
 use anyhow::bail;
-use rivu_dsp::{
-    denoise::{BlockDenoiser, DenoiseMode, Denoiser, NoiseProfile, ProfileCollector},
-    equalizer::{fir::FirEqualizer, iir::Equalizer},
-};
+use rivu_dsp::denoise::{DenoiseMode, NoiseProfile, ProfileCollector};
 use std::collections::BTreeMap;
 
 const BLOCK: usize = 256;
@@ -98,9 +95,20 @@ enum Processor {
     Source(audio::PcmAudio),
     Decoder,
     Pass,
-    Iir(Equalizer),
-    Fir(FirEqualizer),
-    Denoise(Box<BlockDenoiser>),
+    Iir(rivu_dsp::equalizer::iir::Equalizer),
+    Fir(rivu_dsp::equalizer::fir::FirEqualizer),
+    Denoise(Box<rivu_dsp::denoise::BlockDenoiser>),
+}
+
+impl From<audio::NativeProcessor> for Processor {
+    fn from(processor: audio::NativeProcessor) -> Self {
+        match processor {
+            audio::NativeProcessor::Pass => Self::Pass,
+            audio::NativeProcessor::Iir(eq) => Self::Iir(eq),
+            audio::NativeProcessor::Fir(eq) => Self::Fir(eq),
+            audio::NativeProcessor::Denoise(denoise) => Self::Denoise(denoise),
+        }
+    }
 }
 struct Node {
     inputs: Vec<Edge>,
@@ -179,6 +187,7 @@ impl Engine {
         let mut latency = 0;
         let mut frames = self.source.as_ref().map_or(0, audio::PcmAudio::frames);
         let processor;
+        let mut timing = (0, 0);
         if let Some(boundary) = boundaries.get(&port) {
             ensure!(boundary.start_frame <= 0, "Invalid causal graph boundary");
             latency = boundary.start_frame.unsigned_abs();
@@ -249,52 +258,18 @@ impl Engine {
                 );
                 edge.delay = vec![0.0; samples];
             }
-            processor = match kind {
-                GraphNodeKind::Source => unreachable!(),
-                GraphNodeKind::Output | GraphNodeKind::Mix { .. } => Processor::Pass,
-                GraphNodeKind::Equalizer {
-                    config,
-                    implementation,
-                } => {
-                    config.validate_for_stream(self.rate, self.channels)?;
-                    implementation.validate()?;
-                    if !config.enabled {
-                        Processor::Pass
-                    } else {
-                        match implementation {
-                            EqImplementation::Iir => {
-                                Processor::Iir(Equalizer::new(config, self.rate, self.channels)?)
-                            }
-                            EqImplementation::LinearPhase { taps } => Processor::Fir(
-                                FirEqualizer::new(config, self.rate, self.channels, *taps)?,
-                            ),
-                        }
-                    }
-                }
-                GraphNodeKind::Denoise { config, .. } => {
-                    let profile = profiles.get(&port.node).cloned();
-                    let denoiser =
-                        Denoiser::new(self.rate, self.channels, config.clone(), profile)?;
-                    if config.is_bypassed() {
-                        Processor::Pass
-                    } else {
-                        Processor::Denoise(Box::new(BlockDenoiser::new(denoiser, BLOCK)?))
-                    }
-                }
-                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => {
-                    bail!("Missing prepared neural boundary")
-                }
-            };
+            if matches!(
+                kind,
+                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
+            ) {
+                bail!("Missing prepared neural boundary");
+            }
+            let plan = audio::NativeNodePlan::new(kind, self.rate, self.channels)?;
+            timing = plan.timing_frames();
+            processor = plan.prepare(profiles.get(&port.node), BLOCK)?.into();
         }
         let input_frames = frames;
-        let (delay, tail) = match &processor {
-            Processor::Fir(fir) => (fir.latency_frames() as u64, fir.tail_frames() as u64),
-            Processor::Denoise(denoise) => {
-                let delay = denoise.lookahead_frames() as u64;
-                (delay, delay)
-            }
-            _ => (0, 0),
-        };
+        let (delay, tail) = (timing.0 as u64, timing.1 as u64);
         latency = latency
             .checked_add(delay)
             .context("Graph latency overflow")?;
@@ -407,7 +382,6 @@ impl Engine {
                         end.saturating_sub(position).min(frames as u64) as usize
                     });
                     match &mut node.processor {
-                        Processor::Source(_) | Processor::Decoder | Processor::Pass => {}
                         Processor::Iir(eq) => eq.process(output)?,
                         Processor::Fir(eq) => eq.process_interleaved(output)?,
                         Processor::Denoise(denoise) => denoise.process(
@@ -416,6 +390,8 @@ impl Engine {
                             input_end.is_some_and(|end| position + count as u64 >= end),
                             &mut || cancel.load(Ordering::Acquire),
                         )?,
+                        Processor::Pass => {}
+                        Processor::Source(_) | Processor::Decoder => unreachable!(),
                     }
                 }
             }
@@ -2629,6 +2605,82 @@ mod tests {
             let expected = input.map(f32::to_bits);
             runner.process_interleaved(&mut input).unwrap();
             assert_eq!(input.map(f32::to_bits), expected);
+        }
+    }
+
+    #[test]
+    fn offline_zero_wet_profile_validates_before_exact_mono_stereo_bypass() {
+        use rivu_dsp::denoise::DenoiseConfig;
+        for layout in [
+            Arc::<[audio::Channel]>::from([audio::Channel::FrontCenter]),
+            Arc::<[audio::Channel]>::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]),
+        ] {
+            let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+            let mut builder =
+                audio::PcmBuilder::new(48000, Arc::clone(&layout), Arc::clone(&budget)).unwrap();
+            let expected = [-0.0, 0.25, -0.5, 0.0];
+            builder.push(&expected).unwrap();
+            let input = builder.finish().unwrap();
+            let config = DenoiseConfig {
+                mode: DenoiseMode::Profile,
+                fft_size: 256,
+                wet: 0.0,
+                ..Default::default()
+            };
+            let graph = chain(vec![GraphNodeKind::Denoise {
+                config,
+                profile: Some(NoiseSelection {
+                    start_seconds: 0.0,
+                    end_seconds: 1.0 / 48000.0,
+                }),
+            }]);
+            let target = GraphPort { node: 2, port: 0 };
+            let cancel = AtomicBool::new(false);
+            let compile = |profiles: &BTreeMap<u64, NoiseProfile>| {
+                let mut engine = Engine::new(&input);
+                let index = engine.compile(&graph, target, &BTreeMap::new(), profiles, &cancel)?;
+                Ok::<_, anyhow::Error>((engine, index))
+            };
+            assert!(compile(&BTreeMap::new()).is_err());
+            let mut profile = NoiseProfile {
+                sample_rate: 48000,
+                channels: layout.len(),
+                fft_size: 256,
+                captured_frames: 1,
+                power: vec![0.0; 129],
+            };
+            profile.power[0] = f32::NAN;
+            assert!(compile(&BTreeMap::from([(3, profile.clone())])).is_err());
+            profile.power[0] = 0.0;
+            profile.channels += 1;
+            assert!(compile(&BTreeMap::from([(3, profile.clone())])).is_err());
+            profile.channels = layout.len();
+            let (engine, index) = compile(&BTreeMap::from([(3, profile.clone())])).unwrap();
+            let output = engine.render(index, Arc::clone(&budget), &cancel).unwrap();
+            assert_eq!(output.start_frame, 0);
+            assert_eq!(output.pcm.layout(), &layout);
+            let mut actual = [0.0; 4];
+            assert_eq!(output.pcm.read_frames(0, &mut actual), 4 / layout.len());
+            assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+
+            let mut invalid = graph.clone();
+            let GraphNodeKind::Denoise { config, .. } = &mut invalid.nodes[2].kind else {
+                unreachable!("fixture has a denoise node");
+            };
+            config.hum.enabled = true;
+            config.hum.fundamental_hz = 1000.0;
+            config.hum.harmonics = 32;
+            assert!(
+                Engine::new(&input)
+                    .compile(
+                        &invalid,
+                        target,
+                        &BTreeMap::new(),
+                        &BTreeMap::from([(3, profile)]),
+                        &cancel,
+                    )
+                    .is_err()
+            );
         }
     }
 

@@ -445,13 +445,7 @@ impl Denoiser {
         config: DenoiseConfig,
         profile: Option<NoiseProfile>,
     ) -> Result<Self> {
-        config.validate_for_format(sample_rate, channels)?;
-        if config.mode == DenoiseMode::Profile {
-            let Some(profile) = &profile else {
-                bail!("profile denoise requires an explicitly captured noise segment");
-            };
-            profile.validate(sample_rate, channels, config.fft_size)?;
-        }
+        config.validate_for_processor(sample_rate, channels, profile.as_ref())?;
         let size = config.fft_size;
         let hop = size / 4;
         let bypass = config.is_bypassed();

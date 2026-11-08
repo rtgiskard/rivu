@@ -7,12 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::processor::{NativeNodePlan, NativeProcessor};
 use anyhow::{Context, Result, bail, ensure};
-use rivu_dsp::{
-    denoise::{BlockDenoiser, DenoiseMode, Denoiser},
-    equalizer::fir::FirEqualizer,
-    equalizer::iir::Equalizer,
-};
+use rivu_dsp::denoise::{BlockDenoiser, DenoiseMode};
 use rivu_format::config::processing_graph::{
     EqImplementation, GraphNodeKind, GraphPort, ProcessingGraph,
 };
@@ -57,13 +54,6 @@ impl DelayLine {
     }
 }
 
-enum Processor {
-    Source,
-    Pass,
-    Iir(Equalizer),
-    Fir(FirEqualizer),
-    Denoise(Box<BlockDenoiser>),
-}
 struct Input {
     node: usize,
     gain: f64,
@@ -72,7 +62,8 @@ struct Input {
 struct Node {
     id: u64,
     inputs: Vec<Input>,
-    processor: Processor,
+    // None is the source boundary; all downstream nodes own a native processor.
+    processor: Option<NativeProcessor>,
     output: Vec<f32>,
     // Logical nodes retain identity/timing/counts; only physical owners store PCM.
     output_node: usize,
@@ -121,7 +112,6 @@ struct PlannedNode {
     port: GraphPort,
     inputs: Vec<Input>,
     source: bool,
-    bypassed: bool,
     needs_sum: bool,
     latency: usize,
     input_latency: usize,
@@ -153,31 +143,16 @@ impl GraphPlan<'_> {
         let mut nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
         for mut planned in self.nodes {
             let processor = if planned.source {
-                Processor::Source
-            } else if planned.bypassed {
-                Processor::Pass
+                None
             } else {
-                match &graph.node(planned.port.node)?.kind {
-                    GraphNodeKind::Output | GraphNodeKind::Mix { .. } => Processor::Pass,
-                    GraphNodeKind::Equalizer {
-                        config,
-                        implementation,
-                    } => match implementation {
-                        EqImplementation::Iir => {
-                            Processor::Iir(Equalizer::new(config, self.sample_rate, self.channels)?)
-                        }
-                        EqImplementation::LinearPhase { taps } => Processor::Fir(
-                            FirEqualizer::new(config, self.sample_rate, self.channels, *taps)?,
-                        ),
-                    },
-                    GraphNodeKind::Denoise { config, .. } => {
-                        Processor::Denoise(Box::new(BlockDenoiser::new(
-                            Denoiser::new(self.sample_rate, self.channels, config.clone(), None)?,
-                            GRAPH_BLOCK_FRAMES,
-                        )?))
-                    }
-                    _ => unreachable!("admitted graph processor"),
-                }
+                Some(
+                    NativeNodePlan::new(
+                        &graph.node(planned.port.node)?.kind,
+                        self.sample_rate,
+                        self.channels,
+                    )?
+                    .prepare(None, GRAPH_BLOCK_FRAMES)?,
+                )
             };
             for input in &mut planned.inputs {
                 input.delay = DelayLine::new(
@@ -185,11 +160,12 @@ impl GraphPlan<'_> {
                     self.channels,
                 );
             }
-            let output_node = if matches!(processor, Processor::Pass) && !planned.needs_sum {
-                nodes[planned.inputs[0].node].output_node
-            } else {
-                nodes.len()
-            };
+            let output_node =
+                if processor.as_ref().is_some_and(NativeProcessor::is_pass) && !planned.needs_sum {
+                    nodes[planned.inputs[0].node].output_node
+                } else {
+                    nodes.len()
+                };
             let owns_output = output_node == nodes.len();
             nodes.push(Node {
                 id: planned.port.node,
@@ -386,7 +362,26 @@ impl GraphRunner {
                     }
                 }
             }
-            let bypassed = !is_source && is_bypassed(&graph_node.kind);
+            let native = if is_source {
+                None
+            } else {
+                match &graph_node.kind {
+                    GraphNodeKind::Denoise { config, .. } => ensure!(
+                        config.mode != DenoiseMode::Profile,
+                        "profile denoise requires offline profile capture; use a cached prefix in Hybrid mode"
+                    ),
+                    GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => bail!(
+                        "node {} requires model inference and is unsupported realtime; select Hybrid or Offline execution",
+                        port.node
+                    ),
+                    _ => {}
+                }
+                Some(NativeNodePlan::new(
+                    &graph_node.kind,
+                    sample_rate,
+                    channels,
+                )?)
+            };
             let needs_sum = !is_source
                 && !(inputs.len() == 1
                     && inputs[0].gain == 1.0
@@ -397,11 +392,12 @@ impl GraphRunner {
                 has_sum = true;
             }
             // Bound cumulative state and work before preparing any processor.
-            let (extra_state, extra_work) = if is_source || bypassed {
-                (0, 0)
-            } else {
-                estimate(&graph_node.kind, sample_rate, channels)?
-            };
+            let (extra_state, extra_work) =
+                if native.as_ref().is_none_or(NativeNodePlan::is_bypassed) {
+                    (0, 0)
+                } else {
+                    estimate(&graph_node.kind, sample_rate, channels)?
+                };
             state_bytes =
                 state_bytes.saturating_add(extra_state + GRAPH_BLOCK_FRAMES * channels * 4);
             // Keep output admission conservative even for aliased logical nodes.
@@ -422,39 +418,9 @@ impl GraphRunner {
                 work_per_frame.saturating_mul(u64::from(sample_rate)) <= MAX_WORK_PER_SECOND,
                 "realtime graph exceeds arithmetic work budget; use Hybrid or Offline execution"
             );
-            let (latency, tail) = if is_source {
-                (0, 0)
-            } else {
-                match &graph_node.kind {
-                    GraphNodeKind::Source => unreachable!(),
-                    GraphNodeKind::Output | GraphNodeKind::Mix { .. } => (0, 0),
-                    GraphNodeKind::Equalizer {
-                        config,
-                        implementation,
-                    } => {
-                        config.validate_for_stream(sample_rate, channels)?;
-                        match implementation {
-                            EqImplementation::Iir => (0, 0),
-                            EqImplementation::LinearPhase { taps } => {
-                                FirEqualizer::timing_frames(config, *taps)
-                            }
-                        }
-                    }
-                    GraphNodeKind::Denoise { config, .. } => {
-                        ensure!(
-                            config.mode != DenoiseMode::Profile,
-                            "profile denoise requires offline profile capture; use a cached prefix in Hybrid mode"
-                        );
-                        config.validate_for_format(sample_rate, channels)?;
-                        let latency = config.lookahead_frames();
-                        (latency, latency)
-                    }
-                    GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => bail!(
-                        "node {} requires model inference and is unsupported realtime; select Hybrid or Offline execution",
-                        port.node
-                    ),
-                }
-            };
+            let (latency, tail) = native
+                .as_ref()
+                .map_or((0, 0), NativeNodePlan::timing_frames);
             let latency = upstream_latency + latency;
             ensure!(
                 latency <= sample_rate as usize * 2,
@@ -465,7 +431,6 @@ impl GraphRunner {
                 port,
                 inputs,
                 source: is_source,
-                bypassed,
                 needs_sum,
                 latency,
                 input_latency: upstream_latency,
@@ -551,11 +516,8 @@ impl GraphRunner {
             for input in &mut node.inputs {
                 input.delay.reset();
             }
-            match &mut node.processor {
-                Processor::Source | Processor::Pass => {}
-                Processor::Iir(eq) => eq.reset(),
-                Processor::Fir(eq) => eq.reset(),
-                Processor::Denoise(denoise) => denoise.reset(),
+            if let Some(native) = &mut node.processor {
+                native.reset();
             }
         }
     }
@@ -621,7 +583,7 @@ impl GraphRunner {
             });
             node.output[output_frames * self.channels..chunk.len()].fill(0.0);
             let output = &mut node.output[..output_frames * self.channels];
-            if matches!(node.processor, Processor::Source) {
+            if node.processor.is_none() {
                 if self.source_frames.is_none() {
                     output.copy_from_slice(&chunk[..output.len()]);
                 }
@@ -655,17 +617,11 @@ impl GraphRunner {
                         .saturating_sub(self.processed_frames)
                         .min(output_frames as u64) as usize
                 });
-                match &mut node.processor {
-                    Processor::Source | Processor::Pass => {}
-                    Processor::Iir(eq) => eq.process(output)?,
-                    Processor::Fir(eq) => eq.process_interleaved(output)?,
-                    Processor::Denoise(denoise) => {
-                        let eof = self.source_frames.is_some_and(|source| {
-                            self.processed_frames + frames as u64 >= source + node.input_tail as u64
-                        });
-                        denoise
-                            .process(output, input_frames * self.channels, eof, &mut || false)?;
-                    }
+                if let Some(native) = &mut node.processor {
+                    let eof = self.source_frames.is_some_and(|source| {
+                        self.processed_frames + frames as u64 >= source + node.input_tail as u64
+                    });
+                    native.process(output, input_frames * self.channels, eof, &mut || false)?;
                 }
             }
             node.blocks = node.blocks.saturating_add(1);
@@ -718,16 +674,6 @@ fn visit(
     }
     ordered.push(port);
     Ok(())
-}
-
-// Use the DSP-owned bypass rules without skipping constructor validation.
-// An enabled flat FIR still has convolution latency and must not be bypassed.
-fn is_bypassed(kind: &GraphNodeKind) -> bool {
-    match kind {
-        GraphNodeKind::Equalizer { config, .. } => !config.enabled,
-        GraphNodeKind::Denoise { config, .. } => config.is_bypassed(),
-        _ => false,
-    }
 }
 
 fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(usize, u64)> {
@@ -795,6 +741,7 @@ fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivu_dsp::equalizer::iir::Equalizer;
     use rivu_dsp::{
         denoise::DenoiseConfig,
         equalizer::config::{EqBand, EqualizerConfig, FilterKind, MAX_BANDS},
@@ -963,11 +910,6 @@ mod tests {
             8 * GRAPH_BLOCK_FRAMES * 2 * 4
         );
         assert_eq!(runner.estimated_work_per_frame(), 7 * 2);
-        assert!(
-            runner.nodes[1..]
-                .iter()
-                .all(|node| matches!(node.processor, Processor::Pass))
-        );
         let original: Vec<_> = (0..2048)
             .flat_map(|frame| [(frame as f32 * 0.017).sin(), -0.0])
             .collect();
@@ -1074,10 +1016,6 @@ mod tests {
                                 3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
                             );
                             assert_eq!(runner.latency_frames(), config.lookahead_frames());
-                            assert_eq!(
-                                matches!(runner.nodes[1].processor, Processor::Pass),
-                                config.is_bypassed()
-                            );
                         }
                     }
                 }
