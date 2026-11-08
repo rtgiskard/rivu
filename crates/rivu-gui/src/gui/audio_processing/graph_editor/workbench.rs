@@ -525,21 +525,28 @@ impl AudioProcessing {
             .as_ref()
             .is_some_and(|task| !task.phase.is_terminal());
         let busy = self.graph_busy() || running;
-        let mode = self.tr(mode_label(self.graph_editor.mode));
+        let mode = self.tr(if self.graph_editor.mode == GraphExecutionMode::Auto {
+            "processing-graph-auto-short"
+        } else {
+            mode_label(self.graph_editor.mode)
+        });
         let mode_control = self.workbench_dropdown(panel, WorkbenchMenu::Mode, mode, cx);
-        let mut controls = row().flex_wrap().gap_2().child(
-            row()
-                .flex_shrink_0()
-                .gap_1()
-                .pr_2()
-                .border_r_1()
-                .border_color(rgb(theme.border))
-                .child(caption(theme, self.tr("processing-workspace-mode")).whitespace_nowrap())
-                .child(mode_control),
-        );
+        let mut controls = row()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .child(mode_control);
         let no_input = self.input_track().is_none();
         for (output, label) in [
-            (false, "processing-graph-preview"),
+            (
+                false,
+                if self.graph_editor.mode == GraphExecutionMode::Offline {
+                    "processing-graph-calculate-selected"
+                } else {
+                    "processing-graph-preview"
+                },
+            ),
             (true, "processing-graph-run"),
         ] {
             let target = self
@@ -561,39 +568,47 @@ impl AudioProcessing {
             } else {
                 self.graph_editor.target_port
             };
-            let label = target.map_or_else(
+            let audition_blocked = !output
+                && self.graph_editor.mode != GraphExecutionMode::Offline
+                && self.state.system.config.processing_bypassed;
+            let mut hint = target.map_or_else(
                 || self.tr(label).to_string(),
                 |node| {
                     format!(
-                        "{} · #{} · {}",
+                        "{} · {} #{} · {} {}",
                         self.tr(label),
+                        self.tr(node_label(&node.kind)),
                         node.id,
-                        self.graph_output_label(&node.kind, port as usize),
+                        self.tr("processing-result-port"),
+                        port,
                     )
                 },
             );
+            if audition_blocked {
+                hint.push_str(&format!("\n{}", self.tr("processing-audition-bypassed")));
+            }
             controls = controls.child(disabled_control(
                 theme,
-                button(
+                rivu_ui::button_with_hint(
                     SharedString::from(format!("execute-{panel}-{output}")),
-                    label,
+                    self.tr(label),
+                    hint,
                     cx,
                     move |this, _, cx| this.graph_run_target(output, cx),
                 )
-                .gap_1()
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .child(rivu_ui::icon(if output { "󰑮" } else { "" }, cx))
+                .debug_selector(move || format!("execute-{panel}-{output}"))
                 .when(output, |view| {
                     view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
                 }),
-                busy || no_input || target.is_none(),
+                busy || no_input || target.is_none() || audition_blocked,
             ));
         }
         let mut footer = column()
             .flex_shrink_0()
             .gap_1()
-            .p_2()
+            .py_1()
             .border_t_1()
             .border_color(rgb(theme.border))
             .child(controls);
@@ -665,7 +680,7 @@ impl AudioProcessing {
             && self.graph_editor.workbench_choices.is_open();
         let hint = self.tr(match menu {
             WorkbenchMenu::Add => "processing-workspace-add-node",
-            WorkbenchMenu::Mode => "processing-workspace-mode",
+            WorkbenchMenu::Mode => "processing-workspace-mode-help",
             WorkbenchMenu::Fft => "processing-fft",
         });
         let measured = Rc::clone(

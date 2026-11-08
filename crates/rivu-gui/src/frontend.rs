@@ -76,7 +76,8 @@ fn analysis_invalidated_by_config(previous: &Config, next: &Config) -> bool {
         || previous.output_device != next.output_device
         || previous.pipewire_auto_mix != next.pipewire_auto_mix
         || (next.visualization_signal == rivu_format::config::VisualizationSignal::After
-            && previous.equalizer != next.equalizer)
+            && (previous.equalizer != next.equalizer
+                || previous.processing_bypassed != next.processing_bypassed))
 }
 
 impl Shared {
@@ -941,6 +942,12 @@ mod tests {
             };
             let mut next = previous.clone();
             next.equalizer.enabled = !previous.equalizer.enabled;
+            assert_eq!(
+                analysis_invalidated_by_config(&previous, &next),
+                signal == rivu_format::config::VisualizationSignal::After
+            );
+            let mut next = previous.clone();
+            next.processing_bypassed = !previous.processing_bypassed;
             assert_eq!(
                 analysis_invalidated_by_config(&previous, &next),
                 signal == rivu_format::config::VisualizationSignal::After

@@ -8,6 +8,25 @@ use crate::{
 use std::{path::PathBuf, sync::Arc};
 
 #[test]
+fn master_bypass_wire_requires_explicit_boolean_and_preserves_direction() {
+    for bypassed in [false, true] {
+        let mut encoded = Vec::new();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(Command::ProcessingBypass { bypassed })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command");
+        };
+        assert!(matches!(Command::try_from(command).unwrap(),
+            Command::ProcessingBypass { bypassed: actual } if actual == bypassed));
+    }
+    assert!(serde_json::from_str::<Command>("\"ProcessingBypass\"").is_err());
+    assert!(serde_json::from_str::<Command>(r#"{"ProcessingBypass":{}}"#).is_err());
+}
+
+#[test]
 fn exact_playlist_summary_round_trips_ids_and_optional_results() {
     use crate::{model::PlaylistSummary, response::ViewResponse};
     let mut encoded = Vec::new();
@@ -2070,6 +2089,7 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
             current_track: None,
             source_generation: 43,
             processing_audition: Some(audition),
+            processing_selection: Some(audition),
         }),
         system: Some(crate::model::SystemState {
             scan_owner: Some(MediaTaskOwner::Playlist),
@@ -2087,6 +2107,7 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
     let snapshot = observed.snapshot();
     assert_eq!(snapshot.source_generation, 43);
     assert_eq!(snapshot.processing_audition, Some(audition));
+    assert_eq!(snapshot.processing_selection, Some(audition));
     assert_eq!(snapshot.system.scan_owner, Some(MediaTaskOwner::Playlist));
 }
 

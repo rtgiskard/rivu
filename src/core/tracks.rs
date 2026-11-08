@@ -50,6 +50,23 @@ impl Core {
         &mut self,
         mut track: Option<Track>,
     ) -> Result<()> {
+        if self.preferences.settings().processing_bypassed
+            && let Some(id) = self.processing.audition_id()
+            && let Some(result) = self
+                .processing
+                .results()
+                .iter()
+                .find(|result| result.status.id == id)
+            && track.as_ref().is_none_or(|track| {
+                track.id != result.track.id
+                    || track.path != result.track.path
+                    || track.cue != result.track.cue
+                    || track.decoder_hint != result.track.decoder_hint
+                    || track.fingerprint != result.track.fingerprint
+            })
+        {
+            self.processing.select_audition(None);
+        }
         if let Some(track) = track.as_mut()
             && let Some(playback) = self
                 .transport

@@ -158,6 +158,10 @@ impl Core {
     }
     pub(in crate::core) fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
         anyhow::ensure!(
+            config.processing_bypassed == self.preferences.settings().processing_bypassed,
+            "Playback bypass changes require ProcessingBypass commands"
+        );
+        anyhow::ensure!(
             config.processing_graph == self.preferences.settings().processing_graph,
             "Processing graph changes require revision-checked ProcessingGraphEdit commands"
         );
@@ -171,7 +175,7 @@ impl Core {
             config.media_read_buffer_mib != previous.media_read_buffer_mib,
             config.volume != self.preferences.live().volume,
             config.visualization_signal != previous.visualization_signal,
-            config.equalizer != previous.equalizer,
+            !config.processing_bypassed && config.equalizer != previous.equalizer,
             config.ffmpeg_enabled != previous.ffmpeg_enabled,
         ];
         // No other producer can consume these slots while Core persists.

@@ -157,29 +157,24 @@ impl AudioProcessing {
                 ProcessingOperation::Separate => "processing-separation",
                 ProcessingOperation::Graph => "processing-routing-graph",
             });
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{} #{} · {operation} · {} · {phase}",
-                    self.context.i18n.text("processing-task"),
-                    id,
-                    task.source_path
-                        .file_name()
-                        .map(|name| name.to_string_lossy())
-                        .unwrap_or_else(|| "—".into()),
-                ),
-            ));
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{}: {} / {}",
-                    self.context.i18n.text("processing-progress"),
-                    task.completed,
-                    task.total
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "?".to_owned())
-                ),
-            ));
+            content = content.child(
+                caption(
+                    theme,
+                    format!(
+                        "{operation} · {phase} · {} / {}",
+                        task.completed,
+                        task.total
+                            .map(|total| total.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                    ),
+                )
+                .id(("processing-task-status", panel))
+                .tooltip(rivu_ui::text_tooltip(format!(
+                    "{} #{id}\n{}",
+                    self.tr("processing-task"),
+                    task.source_path.display(),
+                ))),
+            );
             if let Some(total) = task.total.filter(|n| *n > 0) {
                 content = content.child(
                     rivu_ui::ProgressBar::new(
@@ -206,6 +201,10 @@ impl AudioProcessing {
             }
             if let Some(outputs) = &task.outputs {
                 content = content.child(caption(theme, self.tr("processing-audition-source")));
+                if state.system.config.processing_bypassed {
+                    content =
+                        content.child(caption(theme, self.tr("processing-audition-bypassed")));
+                }
                 let mut auditions = row().flex_wrap().gap_1();
                 let modes = [
                     (AuditionMode::Original, "processing-original", true),
@@ -227,7 +226,8 @@ impl AudioProcessing {
                     ),
                 ];
                 for (mode, label, _) in modes.into_iter().filter(|(_, _, available)| *available) {
-                    auditions = auditions.child(
+                    auditions = auditions.child(disabled_control(
+                        theme,
                         button(
                             SharedString::from(format!("audition-{panel}-{mode:?}")),
                             self.tr(label),
@@ -235,7 +235,8 @@ impl AudioProcessing {
                             move |this, _, cx| this.audition(id, mode, cx),
                         )
                         .debug_selector(move || format!("processing-audition-{panel}-{mode:?}")),
-                    );
+                        state.system.config.processing_bypassed,
+                    ));
                 }
                 content = content.child(auditions);
                 if outputs.vocals && outputs.accompaniment {
@@ -252,7 +253,8 @@ impl AudioProcessing {
                             self.tr("processing-accompaniment-gain"),
                             cx,
                         ))
-                        .child(
+                        .child(disabled_control(
+                            theme,
                             button(
                                 ("apply-mix-gains", panel),
                                 self.tr("processing-apply-mix"),
@@ -260,7 +262,8 @@ impl AudioProcessing {
                                 move |this, _, cx| this.audition(id, AuditionMode::Mix, cx),
                             )
                             .self_start(),
-                        );
+                            state.system.config.processing_bypassed,
+                        ));
                 }
             }
             content = content.child(activate_control(
@@ -353,13 +356,17 @@ impl AudioProcessing {
             .file_name()
             .map(|name| name.to_string_lossy())
             .unwrap_or_else(|| "—".into());
-        let mut summary = format!(
-            "{} #{id} · {source} · {phase} · {} / {}",
-            self.tr("processing-task"),
+        let summary = format!(
+            "{phase} · {} / {}",
             task.completed,
             task.total
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".into())
+        );
+        let mut details = format!(
+            "{} #{id} · {source}\n{}\n{summary}",
+            self.tr("processing-task"),
+            task.source_path.display(),
         );
         if let Some(graph) = &task.settings.graph {
             let mode = task
@@ -374,7 +381,7 @@ impl AudioProcessing {
                     })
                 })
                 .unwrap_or_else(|| "—".into());
-            summary.push_str(&format!(
+            details.push_str(&format!(
                 " · {mode} · {}",
                 self.tr(
                     if graph.audio_eq(&self.state.system.config.processing_graph) {
@@ -385,7 +392,7 @@ impl AudioProcessing {
                 )
             ));
             if let Some(target) = task.settings.graph_target {
-                summary.push_str(&format!(
+                details.push_str(&format!(
                     " · {} #{}:{}",
                     self.tr("processing-result-target"),
                     target.node,
@@ -393,33 +400,61 @@ impl AudioProcessing {
                 ));
             }
         }
-        let mut actions = rivu_ui::panel_header_actions();
+        let mut actions = row().min_w_0().flex_wrap().gap_1();
         if self.page != Page::Results {
-            actions = actions.child(button(
-                ("graph-show-results", panel),
-                self.tr("processing-tab-results"),
-                cx,
-                move |this, _, cx| this.show_graph_results(panel, cx),
-            ));
+            actions = actions.child(
+                button(
+                    ("graph-show-results", panel),
+                    self.tr("processing-view-results"),
+                    cx,
+                    move |this, _, cx| this.show_graph_results(panel, cx),
+                )
+                .flex_shrink_0()
+                .whitespace_nowrap(),
+            );
         }
         if !matches!(
             task.phase,
             ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
         ) {
-            actions = actions.child(button(
-                ("graph-cancel-task", panel),
-                self.tr("processing-cancel"),
-                cx,
-                move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
-            ));
+            actions = actions.child(
+                button(
+                    ("graph-cancel-task", panel),
+                    self.tr("processing-cancel"),
+                    cx,
+                    move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
+                )
+                .flex_shrink_0()
+                .whitespace_nowrap(),
+            );
         }
-        rivu_ui::panel_heading_row(
-            caption(theme, summary.clone())
-                .truncate()
-                .id(("processing-task-summary", panel))
-                .tooltip(rivu_ui::text_tooltip(summary)),
-            actions,
-        )
+        let mut content = column().min_w_0().gap_1().child(
+            row()
+                .min_w_0()
+                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .child(
+                    caption(theme, summary)
+                        .min_w(rems(8.))
+                        .flex_1()
+                        .truncate()
+                        .id(("processing-task-summary", panel))
+                        .tooltip(rivu_ui::text_tooltip(details)),
+                )
+                .child(actions),
+        );
+        if let Some(total) = task.total.filter(|total| *total > 0) {
+            content = content.child(
+                rivu_ui::ProgressBar::new(
+                    ("processing-summary-progress", panel),
+                    (task.completed as f64 / total as f64) as f32,
+                    self.tr("processing-progress"),
+                )
+                .render(cx),
+            );
+        }
+        content
     }
 
     fn choose_graph_export_path(&mut self, panel: u64, task_id: u64, cx: &mut Context<Self>) {
@@ -564,15 +599,17 @@ impl AudioProcessing {
         if task.phase == ProcessingPhase::Complete {
             let ready = if task.graph_exported_path.is_some() {
                 "processing-graph-export-ready"
-            } else if matches!(
-                task.settings.graph_mode,
-                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
-            ) {
+            } else if task.settings.graph_mode == Some(GraphExecutionMode::Hybrid) {
+                "processing-result-hybrid-prepared"
+            } else if task.settings.graph_mode == Some(GraphExecutionMode::Realtime) {
                 "processing-result-live-prepared"
             } else {
                 "processing-graph-memory-ready"
             };
             content = content.child(caption(theme, self.tr(ready)));
+        }
+        if self.state.system.config.processing_bypassed {
+            content = content.child(caption(theme, self.tr("processing-audition-bypassed")));
         }
         if graph_action_run(task).is_some() {
             content = content.child(
@@ -636,7 +673,8 @@ impl AudioProcessing {
                                 port.port
                             ),
                         ))
-                        .child(
+                        .child(disabled_control(
+                            theme,
                             button(
                                 SharedString::from(format!(
                                     "graph-audition-{panel}-{id}-{}-{}",
@@ -660,7 +698,8 @@ impl AudioProcessing {
                             .debug_selector(move || {
                                 format!("graph-audition-{panel}-{id}-{}-{}", port.node, port.port)
                             }),
-                        )
+                            self.state.system.config.processing_bypassed,
+                        ))
                         .child(
                             button(
                                 SharedString::from(format!(

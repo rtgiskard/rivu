@@ -75,7 +75,7 @@ struct Node {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GraphSnapshot {
+pub struct GraphSnapshot {
     graph: std::sync::Arc<ProcessingGraph>,
     target: GraphPort,
     boundary: Option<GraphPort>,
@@ -93,7 +93,7 @@ impl GraphSnapshot {
         )
     }
 
-    pub(crate) fn prepare(&self) -> Result<GraphRunner> {
+    pub fn prepare(&self) -> Result<GraphRunner> {
         let mut runner = GraphRunner::prepare(
             std::sync::Arc::clone(&self.graph),
             self.target,
@@ -451,7 +451,7 @@ impl GraphRunner {
         })
     }
 
-    pub(crate) fn snapshot(&self) -> GraphSnapshot {
+    pub fn snapshot(&self) -> GraphSnapshot {
         GraphSnapshot {
             graph: std::sync::Arc::clone(&self.graph),
             target: self.target,

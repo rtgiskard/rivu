@@ -2791,6 +2791,299 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
 }
 
 #[test]
+fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    core.processing_bypass(true).unwrap();
+    core.processing_bypass(false).unwrap();
+    let generation = core.transport.generation;
+    core.audio_event(AudioEvent::Failed {
+        generation,
+        message: "reopen rejected".into(),
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert!(core.preferences.settings().processing_bypassed);
+    assert!(
+        Config::load(&core.state.configuration.config_path)
+            .unwrap()
+            .processing_bypassed
+    );
+    assert!(core.processing.audition_projection().is_none());
+    assert!(core.processing.audition_graph.is_none());
+}
+
+#[test]
+fn master_bypass_stop_and_next_source_revoke_retained_selection() {
+    for change_source in [false, true] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        write_pcm_frames(&directory.path().join("2.wav"), 100);
+        let _commands = recording_audio(&mut core);
+        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+            .unwrap();
+        complete(&mut core);
+        core.processing_bypass(true).unwrap();
+        if change_source {
+            core.command(Command::Play { track_id: 2 }).unwrap();
+        } else {
+            core.stop().unwrap();
+        }
+        assert!(core.processing.audition_projection().is_none());
+        assert!(core.processing.audition_graph.is_none());
+        core.processing_bypass(false).unwrap();
+        core.publish();
+        assert!(core.shared.read().processing_selection.is_none());
+        assert!(core.shared.read().processing_audition.is_none());
+    }
+}
+
+#[test]
+fn master_bypass_is_core_owned_across_full_configuration_commits() {
+    let (_directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    let stale = core.preferences.settings().clone();
+    core.processing_bypass(true).unwrap();
+    core.configure(stale).unwrap_err();
+    assert!(core.preferences.settings().processing_bypassed);
+    let mut config = core.preferences.checkpoint();
+    config.equalizer.enabled = true;
+    core.configure(Arc::new(config)).unwrap();
+    assert!(core.preferences.settings().equalizer.enabled);
+    assert!(!core.playback_equalizer().enabled);
+    core.processing_bypass(false).unwrap();
+    assert!(core.playback_equalizer().enabled);
+}
+
+#[test]
+fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
+    let (_directory, mut core) = fixture();
+    let commands = recording_audio(&mut core);
+    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
+    core.processing_bypass(true).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Equalizer(_)
+        ));
+    }
+    core.equalizer_edit(EqualizerEdit::PreampDb(-7.0)).unwrap();
+    let mut config = core.preferences.checkpoint();
+    config.equalizer.output_gain_db = -2.0;
+    core.configure(Arc::new(config)).unwrap();
+    assert!(core.preferences.settings().equalizer.enabled);
+    assert!(core.preferences.settings().processing_bypassed);
+    loop {
+        let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!matches!(command, AudioCommand::Equalizer(_)));
+        if matches!(command, AudioCommand::OutputSettings { .. }) {
+            break;
+        }
+    }
+    core.processing_bypass(false).unwrap();
+    assert!(
+        matches!(commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Equalizer(config) if config.enabled && config.preamp_db == -7.0
+            && config.output_gain_db == -2.0)
+    );
+    core.processing_bypass(false).unwrap();
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn master_bypass_cached_roundtrip_preserves_selection_position_and_new_eq() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let commands = recording_audio(&mut core);
+    core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+        .unwrap();
+    let selected = core.processing.audition_projection();
+    started(&mut core, Some(4096.0 / 48000.0)).unwrap();
+    core.seek(0.035).unwrap();
+    core.processing_bypass(true).unwrap();
+    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
+    core.equalizer_edit(EqualizerEdit::PreampDb(-3.0)).unwrap();
+    while commands.try_recv().is_ok() {}
+    core.processing_bypass(false).unwrap();
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert_eq!(core.state.playback.position, 0.035);
+    loop {
+        if let AudioCommand::Audition {
+            pcm: Some(_),
+            start_seconds,
+            ..
+        } = commands.recv_timeout(Duration::from_secs(2)).unwrap()
+        {
+            assert_eq!(start_seconds, 0.035);
+            break;
+        }
+    }
+    core.publish();
+    assert_eq!(core.shared.read().processing_audition, selected);
+    assert_eq!(core.shared.read().processing_selection, selected);
+}
+
+#[test]
+fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
+    for mode in [GraphExecutionMode::Realtime, GraphExecutionMode::Hybrid] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        if mode == GraphExecutionMode::Hybrid {
+            edit_preferences(&mut core, |config| {
+                let graph = &mut config.processing_graph;
+                graph.next_id = 5;
+                graph.nodes.push(GraphNode {
+                    id: 3,
+                    position: [0.0; 2],
+                    kind: GraphNodeKind::Denoise {
+                        config: rivu_dsp::denoise::DenoiseConfig {
+                            mode: rivu_dsp::denoise::DenoiseMode::Profile,
+                            ..Default::default()
+                        },
+                        profile: Some(NoiseSelection {
+                            start_seconds: 0.0,
+                            end_seconds: 0.04,
+                        }),
+                    },
+                });
+                graph.nodes.push(GraphNode {
+                    id: 4,
+                    position: [0.0; 2],
+                    kind: GraphNodeKind::Equalizer {
+                        config: rivu_dsp::equalizer::config::EqualizerConfig {
+                            enabled: true,
+                            preamp_db: -1.0,
+                            ..Default::default()
+                        },
+                        implementation: EqImplementation::Iir,
+                    },
+                });
+                graph.edges = [(1, 3), (3, 4), (4, 2)]
+                    .into_iter()
+                    .map(|(from, to)| GraphEdge {
+                        from: graph_port(from, 0),
+                        to: graph_port(to, 0),
+                    })
+                    .collect();
+            });
+        }
+        let commands = recording_audio(&mut core);
+        core.processing_graph_run(1, graph_port(2, 0), mode)
+            .unwrap();
+        complete(&mut core);
+        let selected = core.processing.audition_projection().unwrap();
+        assert_eq!(selected.mode, Some(mode));
+        if mode == GraphExecutionMode::Hybrid {
+            assert_eq!(
+                core.processing_status(1).unwrap().settings.graph_boundary,
+                Some(graph_port(3, 0))
+            );
+            assert!(core.processing.audition_pcm.is_some());
+        }
+        let before = core.transport.generation;
+        core.processing_bypass(true).unwrap();
+        assert!(core.processing.audition_graph.is_some());
+        while commands.try_recv().is_ok() {}
+        core.processing_graph_edit(
+            0,
+            GraphEdit::Move {
+                id: 2,
+                position: [12.0, 7.0],
+            },
+        )
+        .unwrap();
+        core.processing_bypass(false).unwrap();
+        assert_eq!(core.processing.audition_projection(), Some(selected));
+        assert!(core.transport.generation > before);
+        loop {
+            if let AudioCommand::GraphAudition { runner, .. } =
+                commands.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                assert_eq!(runner.sample_rate(), 48000);
+                break;
+            }
+        }
+        core.processing_bypass(true).unwrap();
+        std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap();
+        let generation = core.transport.generation;
+        core.processing_bypass(false).unwrap_err();
+        assert!(core.preferences.settings().processing_bypassed);
+        assert_eq!(core.transport.generation, generation);
+        assert!(core.processing.audition_projection().is_none());
+        core.processing_bypass(false).unwrap();
+        assert!(!core.preferences.settings().processing_bypassed);
+    }
+}
+
+#[test]
+fn master_bypass_resume_capacity_and_save_failure_keep_selection_and_original() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let _commands = recording_audio(&mut core);
+    core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+        .unwrap();
+    core.processing_bypass(true).unwrap();
+    let selected = core.processing.audition_projection();
+    let generation = core.transport.generation;
+    let (commands, receive) = async_channel::bounded(1);
+    let previous = core.engine.replace_commands(commands);
+    core.processing_bypass(false).unwrap_err();
+    assert!(receive.try_recv().is_err());
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert!(core.preferences.settings().processing_bypassed);
+    core.engine.replace_commands(previous);
+    let commands = recording_audio(&mut core);
+    core.state.configuration.config_path = directory.path().to_path_buf();
+    core.processing_bypass(false).unwrap_err();
+    assert!(commands.try_recv().is_err());
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert_eq!(core.transport.generation, generation);
+    assert!(core.preferences.settings().processing_bypassed);
+}
+
+#[test]
+fn master_bypass_rejects_audition_but_allows_background_graph_and_export() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let commands = recording_audio(&mut core);
+    core.processing_bypass(true).unwrap();
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
+        .unwrap();
+    complete(&mut core);
+    assert!(core.pending_processing_audition.is_none());
+    assert!(core.processing.audition_id().is_none());
+    assert!(
+        core.processing_graph_audition(1, graph_port(2, 0))
+            .unwrap_err()
+            .to_string()
+            .contains("bypassed")
+    );
+    assert!(
+        core.audition_processing(1, AuditionMode::Original, 0.0, 0.0)
+            .unwrap_err()
+            .to_string()
+            .contains("bypassed")
+    );
+    let destination = directory.path().join("bypassed.wav");
+    core.processing_graph_export(1, graph_port(2, 0), destination.clone())
+        .unwrap();
+    complete(&mut core);
+    assert!(destination.is_file());
+    assert!(commands.try_recv().is_err());
+    assert!(core.preferences.settings().processing_bypassed);
+}
+
+#[test]
 fn monitor_bypass_without_selected_audition_uses_actual_command_capacity() {
     for monitor_enabled in [false, true] {
         for available in 0..=2 {
@@ -2809,7 +3102,7 @@ fn monitor_bypass_without_selected_audition_uses_actual_command_capacity() {
                     .unwrap();
             }
             let _previous_commands = core.engine.replace_commands(commands);
-            let result = core.command(Command::ProcessingBypass);
+            let result = core.command(Command::ProcessingBypass { bypassed: true });
             if monitor_enabled && available == 0 {
                 result.unwrap_err();
                 assert_eq!(core.preferences.settings(), &baseline);
@@ -2820,7 +3113,7 @@ fn monitor_bypass_without_selected_audition_uses_actual_command_capacity() {
             } else {
                 result.unwrap();
                 let mut expected = (*baseline).clone();
-                expected.equalizer.enabled = false;
+                expected.processing_bypassed = true;
                 assert_eq!(**core.preferences.settings(), expected);
                 assert_eq!(
                     Config::load(&core.state.configuration.config_path).unwrap(),
@@ -2867,7 +3160,8 @@ fn selected_bypass_recovers_metadata_before_admitting_or_saving_the_cutover() {
     core.transport.projection_stale = true;
     let (commands, receive) = async_channel::bounded(3);
     let _previous_commands = core.engine.replace_commands(commands);
-    core.command(Command::ProcessingBypass).unwrap_err();
+    core.command(Command::ProcessingBypass { bypassed: true })
+        .unwrap_err();
     assert_eq!(core.preferences.settings(), &baseline);
     assert_eq!(
         std::fs::read(&core.state.configuration.config_path).unwrap(),
@@ -2894,9 +3188,13 @@ fn selected_bypass_recovers_metadata_before_admitting_or_saving_the_cutover() {
             listened_seconds: 0.04,
         },
     );
-    core.command(Command::ProcessingBypass).unwrap();
-    assert!(!core.preferences.settings().equalizer.enabled);
-    assert!(core.processing.audition_projection().is_none());
+    core.command(Command::ProcessingBypass { bypassed: true })
+        .unwrap();
+    assert!(core.preferences.settings().equalizer.enabled);
+    assert_eq!(core.processing.audition_projection(), Some(selected));
+    core.publish();
+    assert!(core.shared.read().processing_audition.is_none());
+    assert_eq!(core.shared.read().processing_selection, Some(selected));
 }
 
 #[test]
@@ -2935,10 +3233,10 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     let queue = core.state.queue.clone();
     let track = core.state.current_track.clone();
     let denoise = core.preferences.settings().denoise.clone();
-    core.command(Command::ProcessingBypass).unwrap();
-    let mut expected = equalizer;
-    expected.enabled = false;
-    assert_eq!(core.preferences.settings().equalizer, expected);
+    core.command(Command::ProcessingBypass { bypassed: true })
+        .unwrap();
+    assert_eq!(core.preferences.settings().equalizer, equalizer);
+    assert!(core.preferences.settings().processing_bypassed);
     assert_eq!(core.preferences.settings().denoise, denoise);
     assert_eq!(core.state.queue, queue);
     assert_eq!(core.state.current_track, track);
@@ -2946,8 +3244,10 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     assert_eq!(core.state.playback.position, 0.065);
     assert_eq!(core.transport.session.as_ref().unwrap().heard, 2.52);
     assert!(core.transport.session.as_ref().unwrap().counted);
-    assert!(core.processing.audition_projection().is_none());
-    assert!(core.processing.audition_id().is_none());
+    assert_eq!(core.processing.audition_id(), Some(1));
+    core.publish();
+    assert!(core.shared.read().processing_audition.is_none());
+    assert_eq!(core.shared.read().processing_selection.unwrap().id, 1);
     assert_eq!(
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
@@ -2972,7 +3272,8 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
             ))
             .unwrap();
         core.engine.replace_commands(commands);
-        core.command(Command::ProcessingBypass).unwrap();
+        core.command(Command::ProcessingBypass { bypassed: true })
+            .unwrap();
         assert_eq!(core.processing.cancellation_requested(1), Some(false));
         core.processing_event(event);
         assert_eq!(
@@ -3011,7 +3312,8 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
         crate::processing::Event::MixFinished { result: Ok(_), .. }
     ));
     let generation = core.transport.generation;
-    core.command(Command::ProcessingBypass).unwrap();
+    core.command(Command::ProcessingBypass { bypassed: true })
+        .unwrap();
     core.processing_event(event);
     assert_eq!(core.transport.generation, generation);
     assert!(core.processing.audition_id().is_none());
@@ -3278,7 +3580,7 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
         },
     );
     assert_eq!(uncached.processing_id, Some(3));
-    core.processing_bypass().unwrap();
+    core.processing_bypass(true).unwrap();
     complete(&mut core);
     let export = processing_command_ack(
         &mut core,
@@ -3319,7 +3621,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
             &event,
             crate::processing::Event::MixFinished { result: Ok(_), .. }
         ));
-        core.processing_bypass().unwrap();
+        core.processing_bypass(true).unwrap();
         match change {
             "file" => std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap(),
             "decoder" => core
@@ -3409,7 +3711,7 @@ fn processing_mix_ack_reports_admission_but_synchronous_audition_does_not() {
         assert_eq!(ack.processing_id, expected);
     }
     let event = mix_completion(&mut core);
-    core.processing_bypass().unwrap();
+    core.processing_bypass(true).unwrap();
     core.processing_event(event);
     assert_eq!(
         core.processing_status(1).unwrap().phase,

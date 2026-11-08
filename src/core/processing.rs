@@ -2,28 +2,108 @@ use super::*;
 use anyhow::ensure;
 
 impl Core {
-    pub(in crate::core) fn processing_bypass(&mut self) -> Result<()> {
-        let audition = self.processing.audition_id();
-        if audition.is_some() {
-            // Queue recovery can deliver metadata; finish it before reserving the
-            // cutover and committing a disabled monitor configuration.
+    pub(in crate::core) fn processing_bypass(&mut self, bypassed: bool) -> Result<()> {
+        if self.preferences.settings().processing_bypassed == bypassed {
+            return Ok(());
+        }
+        let selected = self.processing.audition_projection();
+        if selected.is_some() {
             self.ensure_queue_control_ready()?;
         }
         let monitor_enabled = self.preferences.settings().equalizer.enabled;
-        let commands = usize::from(monitor_enabled) + 2 * usize::from(audition.is_some());
-        self.engine.ensure_command_capacity(commands)?;
-        if monitor_enabled {
-            self.equalizer_edit(EqualizerEdit::Enabled(false))?;
+        self.engine.ensure_command_capacity(
+            usize::from(monitor_enabled) + 2 * usize::from(selected.is_some()),
+        )?;
+        let mut config = self.preferences.checkpoint();
+        config.processing_bypassed = bypassed;
+        if let Some(selection) = selected {
+            let pcm = self.processing.audition_pcm.clone();
+            let graph = self.processing.audition_graph.clone();
+            if !bypassed {
+                let valid = self
+                    .processing
+                    .results()
+                    .iter()
+                    .find(|result| result.status.id == selection.id)
+                    .context("Resume target is no longer retained")
+                    .and_then(|result| {
+                        let track = self.processing_source(result)?;
+                        ensure!(
+                            self.state.current_track.as_ref().is_some_and(|current| {
+                                current.id == track.id
+                                    && current.path == track.path
+                                    && current.cue == track.cue
+                                    && current.decoder_hint == track.decoder_hint
+                            }),
+                            "Resume target does not belong to the current source"
+                        );
+                        Ok(())
+                    });
+                if let Err(error) = valid {
+                    self.processing.select_audition(None);
+                    return Err(error.context("Resume target is stale; bypass remains enabled"));
+                }
+            }
+            let runner = if bypassed {
+                None
+            } else {
+                match graph
+                    .as_ref()
+                    .map(audio::GraphSnapshot::prepare)
+                    .transpose()
+                {
+                    Ok(runner) => runner,
+                    Err(error) => {
+                        self.processing.select_audition(None);
+                        return Err(
+                            error.context("Resume target is unavailable; bypass remains enabled")
+                        );
+                    }
+                }
+            };
+            // Capacity and persistence failures do not revoke selection.
+            self.audition_pcm_with_config(
+                selection.id,
+                if bypassed { None } else { pcm.clone() },
+                runner,
+                Some(config),
+            )?;
+            self.processing
+                .select_audition(Some((selection.id, self.transport.generation)));
+            if let (Some(output), Some(mode)) = (selection.output, selection.mode) {
+                self.processing.select_graph_audition(
+                    selection.id,
+                    self.transport.generation,
+                    output,
+                    mode,
+                );
+            }
+            self.processing.audition_pcm = pcm;
+            self.processing.audition_graph = graph;
+            if !bypassed {
+                self.transport.processing_resume_generation = Some(self.transport.generation);
+            }
+        } else {
+            self.write_config(&config)?;
+            self.preferences.accept(Arc::new(config));
+            if monitor_enabled {
+                self.engine
+                    .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;
+            }
         }
-        // Revoking audition intent does not cancel the rendering/export owner.
+        // Background work retains its resources but loses the right to start audio.
         self.pending_processing_audition = None;
-        if let Some(id) = audition
-            && let Err(error) = self.audition_pcm(id, None)
-        {
-            self.stop()?;
-            return Err(error);
-        }
         Ok(())
+    }
+
+    pub(in crate::core) fn playback_equalizer(
+        &self,
+    ) -> rivu_dsp::equalizer::config::EqualizerConfig {
+        let mut equalizer = self.preferences.settings().equalizer.clone();
+        if self.preferences.settings().processing_bypassed {
+            equalizer.enabled = false;
+        }
+        equalizer
     }
 
     pub(in crate::core) fn processing_graph_edit(
@@ -53,7 +133,7 @@ impl Core {
         let id =
             self.processing
                 .start_graph(track, self.preferences.settings().clone(), request)?;
-        if mode != GraphExecutionMode::Offline {
+        if mode != GraphExecutionMode::Offline && !self.preferences.settings().processing_bypassed {
             self.pending_processing_audition = Some((id, self.transport.generation));
         }
         Ok(id)
@@ -64,6 +144,10 @@ impl Core {
         id: u64,
         node: GraphPort,
     ) -> Result<Option<u64>> {
+        ensure!(
+            !self.preferences.settings().processing_bypassed,
+            "Playback processing is bypassed; turn bypass off before auditioning"
+        );
         let result = self
             .processing
             .results()
@@ -246,7 +330,8 @@ impl Core {
     }
     fn commit_processing_config(&mut self, config: Config) -> Result<()> {
         config.validate()?;
-        let equalizer_changed = config.equalizer != self.preferences.settings().equalizer;
+        let equalizer_changed = !config.processing_bypassed
+            && config.equalizer != self.preferences.settings().equalizer;
         if equalizer_changed {
             self.engine.ensure_command_capacity(1)?;
         }
@@ -564,7 +649,9 @@ impl Core {
                             && pending_id == id
                         {
                             self.pending_processing_audition = None;
-                            let outcome = if generation != self.transport.generation {
+                            let outcome = if self.preferences.settings().processing_bypassed
+                                || generation != self.transport.generation
+                            {
                                 Ok(())
                             } else if let Some(runner) = self.processing.take_graph_runner(id) {
                                 self.processing_graph_audition_prepared(id, runner)
@@ -618,7 +705,8 @@ impl Core {
                     return;
                 }
                 let cancelled = self.processing.finish_task(id).unwrap();
-                let requested = self.pending_processing_audition == Some((id, generation));
+                let requested = !self.preferences.settings().processing_bypassed
+                    && self.pending_processing_audition == Some((id, generation));
                 if self
                     .pending_processing_audition
                     .is_some_and(|(task, _)| task == id)
@@ -687,6 +775,10 @@ impl Core {
         vocal_gain_db: f32,
         accompaniment_gain_db: f32,
     ) -> Result<Option<u64>> {
+        ensure!(
+            !self.preferences.settings().processing_bypassed,
+            "Playback processing is bypassed; turn bypass off before auditioning"
+        );
         let result = self
             .processing
             .results()
@@ -777,6 +869,19 @@ impl Core {
         pcm: Option<audio::PcmAudio>,
         graph: Option<audio::GraphRunner>,
     ) -> Result<()> {
+        self.audition_pcm_with_config(id, pcm, graph, None)
+    }
+
+    fn audition_pcm_with_config(
+        &mut self,
+        id: u64,
+        pcm: Option<audio::PcmAudio>,
+        graph: Option<audio::GraphRunner>,
+        config: Option<Config>,
+    ) -> Result<()> {
+        let bypassing = config
+            .as_ref()
+            .is_some_and(|config| config.processing_bypassed);
         ensure!(
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before publishing processing results"
@@ -793,23 +898,25 @@ impl Core {
             .context("Audition requires the processing source to be the current queue track")?
             .as_ref()
             .clone();
-        let admitted_source =
-            if let Some(result) = self.processing.results().iter().find(|r| r.status.id == id) {
-                self.processing_source(result)?;
-                result.stamp
-            } else {
-                crate::processing::SourceStamp::read(&track.path)?
-            };
+        let admitted_source = if bypassing {
+            crate::processing::SourceStamp::read(&track.path)?
+        } else if let Some(result) = self.processing.results().iter().find(|r| r.status.id == id) {
+            self.processing_source(result)?;
+            result.stamp
+        } else {
+            crate::processing::SourceStamp::read(&track.path)?
+        };
         ensure!(
-            track.path == status.source_path
-                && track.cue == status.source_cue
-                && self
-                    .processing
-                    .results()
-                    .iter()
-                    .find(|result| result.status.id == id)
-                    .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
-                && format!("{admitted_source:?}") == status.source_version,
+            bypassing
+                || (track.path == status.source_path
+                    && track.cue == status.source_cue
+                    && self
+                        .processing
+                        .results()
+                        .iter()
+                        .find(|result| result.status.id == id)
+                        .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
+                    && format!("{admitted_source:?}") == status.source_version),
             "Processing result is stale"
         );
         ensure!(
@@ -840,8 +947,30 @@ impl Core {
             })
             .transpose()?;
         self.engine.ensure_command_capacity(2)?;
+        let previous = config.as_ref().map(|_| self.preferences.checkpoint());
+        if let Some(config) = config.as_ref() {
+            self.write_config(config)?;
+        }
+        let replacement = match self.prepare_source_replacement() {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                if let Some(previous) = previous {
+                    self.write_config(&previous)?;
+                }
+                return Err(error);
+            }
+        };
         self.pending_processing_audition = None;
-        let replacement = self.prepare_source_replacement()?;
+        if let Some(config) = config {
+            let monitor_enabled = config.equalizer.enabled;
+            self.preferences.accept(Arc::new(config));
+            if monitor_enabled {
+                self.engine
+                    .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;
+            }
+        }
+        let selected_pcm = pcm.clone();
+        let selected_graph = graph.as_ref().map(audio::GraphRunner::snapshot);
         let is_graph = graph.is_some();
         let original = pcm.is_none();
         let source_info = if original {
@@ -905,6 +1034,8 @@ impl Core {
         self.commit_source_replacement(command)?;
         let selected = (!original || is_graph).then_some((id, self.transport.generation));
         self.processing.select_audition(selected);
+        self.processing.audition_pcm = selected_pcm;
+        self.processing.audition_graph = selected_graph;
         if let Some((target, mode)) = graph_selection {
             self.processing
                 .select_graph_audition(id, self.transport.generation, target, mode);

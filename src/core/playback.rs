@@ -18,6 +18,7 @@ pub(super) struct PlaybackOwner {
     pub(super) selection_pending: bool,
     pub(super) history: Vec<u64>,
     pub(super) history_cursor: usize,
+    pub(super) processing_resume_generation: Option<u64>,
     live_source: Option<u64>,
     physically_closed_source: Option<u64>,
 }
@@ -31,6 +32,7 @@ impl PlaybackOwner {
     }
 
     pub(super) fn admit_source(&mut self) {
+        self.processing_resume_generation = None;
         self.progress_seek_revision = 0;
         self.live_source = Some(self.generation);
         self.physically_closed_source = None;
@@ -182,7 +184,7 @@ impl Core {
                 config,
                 message,
             } if generation.is_none_or(|value| value == self.transport.generation)
-                && *config == self.preferences.settings().equalizer =>
+                && *config == self.playback_equalizer() =>
             {
                 self.state.system.last_error = Some(message);
             }
@@ -193,6 +195,7 @@ impl Core {
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
             AudioEvent::Started { generation, info } if generation == self.transport.generation => {
+                self.transport.processing_resume_generation = None;
                 if let Err(error) = self.playback_started(info) {
                     self.stop().with_context(|| format!("{error:#}"))?;
                     return Err(error);
@@ -236,7 +239,11 @@ impl Core {
                 generation,
                 message,
             } if generation == self.transport.generation => {
+                let resume_failed = self.transport.processing_resume_generation == Some(generation);
                 self.stop().with_context(|| message.clone())?;
+                if resume_failed {
+                    self.processing_bypass(true)?;
+                }
                 self.state.system.last_error = Some(message);
             }
             event @ (AudioEvent::OutputSettingsFailed { .. }
@@ -701,6 +708,7 @@ impl Core {
             self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
         }
         self.processing.select_audition(None);
+        self.transport.processing_resume_generation = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
         self.state.playback.stopped_source_generation = self.transport.physically_closed_source;

@@ -27,6 +27,8 @@ pub struct ClientSnapshot {
     pub playback: PlaybackState,
     pub source_generation: u64,
     pub processing_audition: Option<ProcessingAudition>,
+    /// Retained resume target; actual processing_audition is empty while bypassed.
+    pub processing_selection: Option<ProcessingAudition>,
     pub system: SystemState,
     pub configuration: ConfigurationState,
 }
@@ -894,9 +896,10 @@ pub enum Command {
     KeepTrackIndependent {
         track_id: i64,
     },
-    /// Return current playback to its source and disable monitor EQ without
-    /// changing stored effect parameters or cancelling offline work.
-    ProcessingBypass,
+    /// Bypass or restore playback processing independently of effect settings.
+    ProcessingBypass {
+        bypassed: bool,
+    },
     EqualizerEdit {
         edit: EqualizerEdit,
     },

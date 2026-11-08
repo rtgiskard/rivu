@@ -145,7 +145,7 @@ mod source;
 mod worker;
 
 pub use channels::Channel;
-pub use graph::{GraphPlan, GraphRunner};
+pub use graph::{GraphPlan, GraphRunner, GraphSnapshot};
 pub use output::devices;
 pub use processor::{NativeNodePlan, NativeProcessor};
 pub use render::{RenderFormat, SourceRenderer};

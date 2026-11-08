@@ -270,6 +270,11 @@ and restoration/neural defaults do not implicitly insert graph nodes.
 The graph edit revision is a runtime-only optimistic-edit token, not a TOML field.
 Unknown graph fields are rejected, as elsewhere in configuration.
 
+`playback.processing_bypassed` defaults to `false`. It bypasses playback
+processing without changing `equalizer.enabled` or effect parameters;
+see link:27_audio_processing.adoc#playback-bypass[Playback bypass]. Retained
+audition selections remain session-owned and are not restored after restart.
+
 For example, this sets Monitor EQ and restoration defaults without constructing
 a processing graph:
 

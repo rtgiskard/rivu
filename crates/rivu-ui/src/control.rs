@@ -62,13 +62,22 @@ pub fn button_style(
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
     let label = label.into();
+    text_button_surface(theme, id, label.clone(), label)
+}
+
+fn text_button_surface(
+    theme: &'static rivu_format::palette::Palette,
+    id: impl Into<ElementId>,
+    label: SharedString,
+    hint: SharedString,
+) -> Stateful<Div> {
     control_surface(theme, id)
         .role(Role::Button)
         .aria_label(label.clone())
         .justify_center()
         .max_w_full()
-        .when(!label.is_empty(), |control| {
-            control.tooltip(text_tooltip(label.clone()))
+        .when(!hint.is_empty(), |control| {
+            control.tooltip(text_tooltip(hint))
         })
         .child(div().min_w_0().truncate().child(label))
 }
@@ -82,6 +91,22 @@ pub fn button<T: 'static>(
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     activate_control(button_style(theme, id, label), cx, action)
+}
+
+/// Text button whose accessible label and tooltip carry distinct information.
+pub fn button_with_hint<T: 'static>(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Stateful<Div> {
+    let theme = crate::theme::palette(cx);
+    activate_control(
+        text_button_surface(theme, id, label.into(), hint.into()),
+        cx,
+        action,
+    )
 }
 
 /// Sortable list header control with shared active-direction styling.

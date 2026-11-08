@@ -16,17 +16,15 @@ measured observations from remaining acceptance gaps.
 
 == Practical workflow
 
-Add the Audio processing panel from the layout catalog. Its single-line tabs
-scroll horizontally: Processing graph, Monitor EQ, Restoration, Speech enhancement,
-Separation and Results. Switching tabs does not run a job, change audition or
+Add the Audio processing panel from the layout catalog. It provides Processing
+graph, Monitor EQ, Restoration, Speech enhancement, Separation and Results.
+Switching tabs does not run a job, change audition or
 discard drafts. Multiple panels share drafts and Core-owned settings; focus,
 cursor geometry and scroll state are panel-local. Monitor EQ affects playback
 independently of graph-node EQ.
 
-The footer identifies the source track, rate, channels, selected audition and
-transport state. Its bypass tooltip reports Monitor EQ's enabled state; the A/B
-tooltip describes the backup or the first swap. Keep headroom when boosting or
-remixing: there is no implicit loudness matching or limiter.
+Keep headroom when boosting or remixing: there is no implicit loudness matching
+or limiter.
 
 . Make the desired input track current in playback; it may remain paused while
   configuring or rendering. CLI processing commands accept an explicit track ID.
@@ -34,34 +32,45 @@ remixing: there is no implicit loudness matching or limiter.
   configure that operation; neural backends need explicit preparation below.
 . For a combined chain, connect graph ports, apply field drafts, then Preview a
   node output or Run an Output node with the chosen execution mode.
-. Follow the task summary to completion; use the selected-audio line to confirm
-  what is actually being auditioned, then compare with Original at fixed levels.
+. Follow the task to completion; confirm the actual audition before comparing
+  with Original at fixed levels.
 . To keep a graph output, Export WAV to a new file. Retained audition results
   alone do not survive session retirement.
 
-The selected-audio line is Core's admitted source, not a guess from the latest
-task: it identifies the retained run, exact graph port and live/hybrid/cached path,
-with Playing, Paused or Stopped reported separately. Explicit Offline runs do
-not select their results. Auto, Realtime and Hybrid runs request audition when
-ready, provided their pending selection has not been revoked and the playback
-generation has not changed in the meantime.
+Core reports the actual audition independently of the latest task, identifying
+the retained run, graph port and live/hybrid/cached path separately from transport
+state. While bypassed, the actual route is Original and a separate selection
+identifies the eligible resume target.
+Explicit Offline runs do not select their results. Auto, Realtime and Hybrid runs
+request audition when ready only if bypass is off, their pending selection has
+not been revoked and the playback generation has not changed in the meantime.
 Return to original addresses the currently selected audition, even when the latest
 task belongs to a different run. Invalid node/port requests leave the prior
 selection unchanged; playback retirement clears it.
 
 [[playback-bypass]]
-The footer's bypass button or `rivu processing bypass` disables Monitor EQ and
-returns any live, hybrid or cached audition to Original. It preserves parameters,
-graph, queue and retained results; rendering/export continue. It also revokes
-pending automatic audition, so a late result cannot undo the bypass. Re-enabling
-EQ or selecting a retained output requires an explicit action. When fully
-bypassed, the footer button enables Monitor EQ only; it does not restore the prior
-graph audition. There is no separate enable switch in the Equalizer tab.
+The footer's bypass icon temporarily routes playback to Original without changing
+EQ enablement, effect parameters or the selected processing configuration.
+Cancelling bypass restores the still-valid selected audition and the configured
+Monitor EQ state. It never enables an independently disabled EQ. Track replacement
+or source invalidation must not restore an old track's output.
+If a retained target fails source validation, resume reports an error, clears that
+selection and leaves bypass active. A subsequent explicit resume can enable the
+current Monitor EQ state without the rejected audition. Failure to open a resumed
+source stops playback conservatively and restores bypass rather than selecting a
+different algorithm or source.
 
-With a selected audition, queue recovery and command-capacity admission precede
-the bypass commit; insufficient capacity leaves EQ and audition unchanged.
-Without one, disabling EQ reserves only its own command, and revoking pending
-audition alone needs no audio-command capacity.
+The persisted `playback.processing_bypassed` setting is independent of `equalizer.enabled`.
+Parameter editing remains available while master bypass is active, subject to
+each effect's own enablement. Rendering and export continue; entering bypass
+revokes pending automatic audition, and late results cannot cancel bypass.
+Explicit audition requires cancelling bypass first. Retained audition audio
+remains session-owned rather than being persisted with the bypass preference.
+
+Use `rivu processing bypass on` to enter bypass and
+`rivu processing bypass off` to resume processing. Both are explicit, idempotent
+state requests rather than toggles, so multiple clients do not race a stale
+display state.
 
 === Node graph desktop workflow
 
@@ -106,13 +115,14 @@ The denoise node's FFT selector offers only 256, 512, 1024, 2048, 4096 and 8192
 samples. Selecting a size changes the draft, not the committed node. It is
 independent of the visualization analysis FFT setting.
 
+Auto selects an execution path, not a quality level. Preview selected executes
+the selected node output's ancestors; in Offline mode it computes without
+selecting an audition. Process output targets the first Output node. To process
+another Output, select it and use Preview selected, or use its ID in the CLI.
+Neither action applies drafts implicitly.
 
-Preview executes the selected node output's ancestors. Run targets the first
-Output node, identified by ID on its button; select another Output and Preview
-it, or use its ID in the CLI. Neither action applies drafts implicitly. The task
-summary reports captured revision/settings, actual execution mode and progress,
-independently of later edits. Results contains retained outputs and export controls.
-Audition and export use the frozen run, not the current editor. Desktop Export WAV
+Audition and export use the frozen run and captured settings, not the current
+editor. Results retains outputs for audition and export. Desktop Export WAV
 requires an absolute path naming a new file in an existing directory; the CLI
 also accepts relative destinations.
 
@@ -166,11 +176,11 @@ Bands outside the plotted frequency range remain valid. Their nodes show an
 edge marker and retain the exact frequency in the selected-band hint and
 tooltip; clamping the plotted position does not retune the band.
 
-
-While Monitor EQ is off, configuration, preset and reset controls are locked;
-curve selection and values remain visible. A/B stays available to reverse a swap
-to a disabled configuration. Disabling preserves drafts and selection without
-applying them on re-enable. See <<playback-bypass,the footer bypass behavior>>.
+Monitor EQ can be enabled independently of master bypass. While EQ is off,
+configuration, preset and reset controls are locked; curve selection and values
+remain visible. A/B stays available to reverse a swap to a disabled configuration.
+Disabling preserves drafts and selection without applying them on re-enable.
+Master bypass does not lock an enabled EQ's editor; see <<playback-bypass,Playback bypass>>.
 
 Peak, low/high shelf, low/high pass, bandpass and notch filters are available.
 Q controls resonance/bandwidth except for shelves, which use shelf slope S

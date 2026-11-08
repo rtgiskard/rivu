@@ -859,6 +859,7 @@ impl AudioProcessing {
                 _ => true,
             }
             || self.state.system.processing_audition != state.system.processing_audition
+            || self.state.system.processing_selection != state.system.processing_selection
             || self.state.playback.status != state.playback.status
             || format_changed
             || title_changed;
@@ -992,6 +993,16 @@ impl AudioProcessing {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if self.state.system.config.processing_bypassed
+            && matches!(
+                command,
+                Command::AuditionProcessing { .. } | Command::ProcessingGraphAudition { .. }
+            )
+        {
+            self.error = Some(self.tr("processing-audition-bypassed").to_string());
+            cx.notify();
+            return;
+        }
         self.send_field(command, None, cx);
     }
 
@@ -2456,7 +2467,7 @@ impl AudioProcessing {
             ProcessingOperation::Graph => true,
         };
         let drafts = self.page_has_parameter_drafts();
-        let mut actions = row().gap_1().flex_shrink_0();
+        let mut actions = row().flex_wrap().gap_1().min_w_0();
         if drafts {
             actions = actions.child(disabled_control(
                 theme,
@@ -2564,6 +2575,11 @@ impl AudioProcessing {
     }
 
     fn audition(&mut self, id: u64, mode: AuditionMode, cx: &mut Context<Self>) {
+        if self.state.system.config.processing_bypassed {
+            self.error = Some(self.tr("processing-audition-bypassed").to_string());
+            cx.notify();
+            return;
+        }
         let gains = match mode {
             AuditionMode::Original | AuditionMode::Denoised => (Ok(0.), Ok(0.)),
             AuditionMode::Vocals => (self.text(FieldKey::VocalGain, cx).parse::<f32>(), Ok(0.)),
@@ -2662,63 +2678,88 @@ impl AudioProcessing {
             rivu_protocol::model::PlaybackStatus::Paused => "gl-paused",
             rivu_protocol::model::PlaybackStatus::Stopped => "gl-stopped",
         });
-        let selected_audio = match self.state.system.processing_audition {
-            Some(audition) => {
-                let target = audition
-                    .output
-                    .map(|port| format!(" · #{}:{}", port.node, port.port))
-                    .unwrap_or_default();
-                let mode = audition
-                    .mode
-                    .map(|mode| {
-                        self.tr(match mode {
-                            rivu_protocol::model::GraphExecutionMode::Auto => {
-                                "processing-graph-auto"
-                            }
-                            rivu_protocol::model::GraphExecutionMode::Realtime => {
-                                "processing-graph-realtime"
-                            }
-                            rivu_protocol::model::GraphExecutionMode::Hybrid => {
-                                "processing-graph-hybrid"
-                            }
-                            rivu_protocol::model::GraphExecutionMode::Offline => {
-                                "processing-graph-cached"
-                            }
-                        })
+        let audio_label = |audition: Option<rivu_protocol::model::ProcessingAudition>| {
+            audition.map_or_else(
+                || self.tr("processing-workspace-original"),
+                |audition| {
+                    self.tr(match audition.mode {
+                        Some(rivu_protocol::model::GraphExecutionMode::Auto) => {
+                            "processing-graph-auto"
+                        }
+                        Some(rivu_protocol::model::GraphExecutionMode::Realtime) => {
+                            "processing-graph-realtime"
+                        }
+                        Some(rivu_protocol::model::GraphExecutionMode::Hybrid) => {
+                            "processing-graph-hybrid"
+                        }
+                        Some(rivu_protocol::model::GraphExecutionMode::Offline) => {
+                            "processing-graph-cached"
+                        }
+                        None => "processing-workspace-processed",
                     })
-                    .unwrap_or_else(|| self.tr("processing-workspace-processed"));
-                format!(
-                    "{} #{}{target} · {mode}",
-                    self.tr("processing-task"),
-                    audition.id
-                )
-            }
-            None => self.tr("processing-workspace-original").to_string(),
+                },
+            )
         };
-        let selected_audio_text = match self.state.current_track() {
-            Some(track) => format!(
-                "{}: {selected_audio} · {transport} · {} · {} Hz · {} ch",
+        let actual = self.state.system.processing_audition;
+        let selection = self.state.system.processing_selection;
+        let mut selected_audio_text = format!(
+            "{}: {} · {transport}",
+            self.tr("processing-workspace-actual-audio"),
+            audio_label(actual),
+        );
+        if self.state.system.config.processing_bypassed {
+            selected_audio_text
+                .push_str(&format!(" · {}", self.tr("processing-workspace-bypassed")));
+        } else if self.state.system.config.equalizer.enabled {
+            selected_audio_text.push_str(&format!(
+                " · {}",
+                self.tr("processing-workspace-monitor-on")
+            ));
+        }
+        if selection != actual {
+            selected_audio_text.push_str(&format!(
+                " · {}: {}",
                 self.tr("processing-workspace-selected-audio"),
+                audio_label(selection),
+            ));
+        }
+        let mut audio_details = selected_audio_text.clone();
+        for (label, audition) in [
+            ("processing-workspace-selected-audio", selection),
+            ("processing-workspace-actual-audio", actual),
+        ] {
+            if let Some(audition) = audition {
+                audio_details.push_str(&format!(
+                    "\n{}: {} #{}",
+                    self.tr(label),
+                    audio_label(Some(audition)),
+                    audition.id
+                ));
+                if let Some(port) = audition.output {
+                    audio_details.push_str(&format!(" · #{}:{}", port.node, port.port));
+                }
+            }
+        }
+        if let Some(track) = self.state.current_track() {
+            audio_details.push_str(&format!(
+                "\n{} · {} Hz · {} ch\n{}",
                 track.title,
                 track.sample_rate,
                 track.channels,
-            ),
-            None => format!(
-                "{}: {selected_audio} · {transport} · —",
-                self.tr("processing-workspace-selected-audio"),
-            ),
-        };
-        let selected_audio = caption(theme, selected_audio_text.clone())
+                track.path.display()
+            ));
+        }
+        let selected_audio = caption(theme, selected_audio_text)
             .min_w_0()
             .truncate()
             .id(("processing-audition-status", panel))
-            .tooltip(rivu_ui::text_tooltip(selected_audio_text));
+            .tooltip(rivu_ui::text_tooltip(audio_details));
         let mut selected_audio = row()
             .min_w_0()
             .gap_2()
             .items_center()
             .child(selected_audio.flex_1());
-        if let Some(audition) = self.state.system.processing_audition {
+        if let Some(audition) = self.state.system.processing_selection {
             let id = audition.id;
             selected_audio = selected_audio.child(
                 IconButton::new(
@@ -2741,25 +2782,16 @@ impl AudioProcessing {
                     .whitespace_nowrap(),
             );
         }
-        let bypassed = !self.state.system.config.equalizer.enabled
-            && self.state.system.processing_audition.is_none();
+        let bypassed = self.state.system.config.processing_bypassed;
         selected_audio = selected_audio.child(
             IconButton::new(
                 ("processing-bypass", panel),
                 "󰓅",
-                SharedString::from(format!(
-                    "{}\n{}",
-                    self.tr(if bypassed {
-                        "processing-workspace-enable-monitor"
-                    } else {
-                        "processing-workspace-bypass"
-                    }),
-                    self.tr(if self.state.system.config.equalizer.enabled {
-                        "processing-workspace-monitor-on"
-                    } else {
-                        "processing-workspace-monitor-off"
-                    }),
-                )),
+                self.tr(if bypassed {
+                    "processing-workspace-resume"
+                } else {
+                    "processing-workspace-bypass"
+                }),
             )
             .toggled(bypassed)
             .selected_fill(false)
@@ -2768,20 +2800,15 @@ impl AudioProcessing {
                 IconButtonDensity::Compact,
                 cx,
                 |this, _, cx| {
-                    if !this.state.system.config.equalizer.enabled
-                        && this.state.system.processing_audition.is_none()
-                    {
-                        this.send(
-                            Command::EqualizerEdit {
-                                edit: EqualizerEdit::Enabled(true),
-                            },
-                            cx,
-                        );
-                    } else {
-                        this.send(Command::ProcessingBypass, cx);
-                    }
+                    this.send(
+                        Command::ProcessingBypass {
+                            bypassed: !this.state.system.config.processing_bypassed,
+                        },
+                        cx,
+                    );
                 },
             )
+            .debug_selector(move || format!("processing-bypass-{panel}"))
             .text_color(rgb(if bypassed {
                 theme.warning
             } else {

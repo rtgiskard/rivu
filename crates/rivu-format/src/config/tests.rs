@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn master_bypass_defaults_false_and_roundtrips_independently_of_eq() {
+    let original = "# preserve\n[playback]\nvolume_percent = 45\n";
+    let baseline = from_toml(original).unwrap();
+    assert!(!baseline.processing_bypassed);
+    let mut config = baseline.clone();
+    config.processing_bypassed = true;
+    config.equalizer.enabled = true;
+    config.equalizer.preamp_db = -5.5;
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert!(saved.contains("# preserve"));
+    assert!(saved.contains("processing_bypassed = true"));
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+    assert!(from_toml("[playback]\nprocessing_bypassed = 1").is_err());
+    assert!(from_toml("[playback]\nprocessing_bypass = true").is_err());
+}
+
+#[test]
 fn material_preferences_round_trip_defaults_and_independent_presets() {
     let original = "# Keep theme spelling\n[interface]\ntheme = 'rivu_dark'\n";
     let baseline = from_toml(original).unwrap();

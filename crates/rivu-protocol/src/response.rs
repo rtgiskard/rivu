@@ -279,6 +279,7 @@ pub struct PlaybackSnapshot {
     pub current_track: Option<Arc<Track>>,
     pub source_generation: u64,
     pub processing_audition: Option<crate::model::ProcessingAudition>,
+    pub processing_selection: Option<crate::model::ProcessingAudition>,
 }
 
 /// Requested independently from system state, including an authoritative empty task.
@@ -358,6 +359,7 @@ impl ObservedState {
             }
             state.source_generation = section.source_generation;
             state.processing_audition = section.processing_audition;
+            state.processing_selection = section.processing_selection;
             applied.playback = current.playback;
         }
         if let Some(section) = response.queue {
@@ -474,6 +476,7 @@ mod tests {
                 current_track: None,
                 source_generation: 0,
                 processing_audition: None,
+                processing_selection: None,
             }),
             ..StateResponse::default()
         };

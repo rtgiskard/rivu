@@ -172,6 +172,8 @@ pub(crate) struct Service {
     history: std::collections::VecDeque<ProcessingTaskStatus>,
     next_id: u64,
     audition: Option<(ProcessingAudition, u64)>,
+    pub(crate) audition_pcm: Option<audio::PcmAudio>,
+    pub(crate) audition_graph: Option<audio::GraphSnapshot>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
     #[cfg(test)]
@@ -195,6 +197,8 @@ impl Service {
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
             audition: None,
+            audition_pcm: None,
+            audition_graph: None,
             #[cfg(test)]
             panic_after_processing: false,
             #[cfg(test)]
@@ -458,6 +462,10 @@ impl Service {
 
     /// Keep the selected audio pinned until Core commits another audio source.
     pub(crate) fn select_audition(&mut self, selection: Option<(u64, u64)>) {
+        if selection.is_none() {
+            self.audition_pcm = None;
+            self.audition_graph = None;
+        }
         self.audition = selection.map(|(id, generation)| {
             (
                 ProcessingAudition {

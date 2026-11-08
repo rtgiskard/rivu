@@ -306,6 +306,7 @@ impl CoreHandle {
                 current_track: state.current_track.clone(),
                 source_generation: state.source_generation,
                 processing_audition: state.processing_audition,
+                processing_selection: state.processing_selection,
             }),
             queue: sections.queue.then(|| state.queue.clone()),
             library: sections.library.then(|| state.library.clone()),

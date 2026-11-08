@@ -384,7 +384,7 @@ impl EqualizerEditor {
             self.take_field_drag();
         }
         if !config.enabled {
-            // Bypass cancels unissued live intent, not the text or commands
+            // Turning EQ off cancels unissued live intent, not the text or commands
             // already owned by the serialized queue. Re-enable is editability only.
             for field in self.fields.values_mut() {
                 field.auto_pending = false;
@@ -2103,18 +2103,37 @@ impl EqualizerEditor {
             ));
         }
         let mut precision = column().gap_1().min_w_0();
-        let presets =
-            row()
-                .min_w_0()
-                .items_start()
-                .gap_2()
-                .when(self.target == EqTarget::Monitor, |view| {
-                    let preset = self
-                        .owner
-                        .update(cx, |owner, cx| owner.preset_view(panel, window, cx))
-                        .ok();
-                    view.child(div().flex_1().max_w_full().min_w_0().children(preset))
-                });
+        let presets = row()
+            .min_w_0()
+            .items_start()
+            .gap_2()
+            .child(
+                rivu_ui::IconButton::new(
+                    ("eq-enable", panel),
+                    "󰓃",
+                    self.tr(if self.config.enabled {
+                        "processing-eq-disable"
+                    } else {
+                        "processing-eq-enable"
+                    }),
+                )
+                .toggled(self.config.enabled)
+                .enabled(!self.blocked && self.pending == 0)
+                .build(
+                    rivu_ui::IconButtonStyle::Quiet,
+                    rivu_ui::IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| this.eq(EqualizerEdit::Enabled(!this.config.enabled), cx),
+                )
+                .debug_selector(move || format!("eq-enable-{panel}")),
+            )
+            .when(self.target == EqTarget::Monitor, |view| {
+                let preset = self
+                    .owner
+                    .update(cx, |owner, cx| owner.preset_view(panel, window, cx))
+                    .ok();
+                view.child(div().flex_1().max_w_full().min_w_0().children(preset))
+            });
         let reset_controls = row()
             .gap_1()
             .flex_shrink_0()
@@ -2165,17 +2184,15 @@ impl EqualizerEditor {
             .min_w_0()
             .flex_wrap()
             .gap_2()
-            .when(self.target == EqTarget::Monitor, |view| {
-                view.child(presets.flex_shrink_0())
-            })
+            .child(presets.flex_shrink_0())
             .child(
                 row()
                     .min_w_0()
                     .flex_1()
+                    .flex_wrap()
                     .gap_1()
                     .justify_end()
                     .id(("eq-bank-tools", panel))
-                    .overflow_x_scroll()
                     .child(reset_controls),
             );
         let eq = &self.config;
@@ -3385,6 +3402,66 @@ mod tests {
             runtime.handle.gui_snapshot().system.config.equalizer,
             original
         );
+    }
+
+    #[gpui::test]
+    fn eq_switch_locks_only_eq_edits_while_master_bypass_preserves_editability(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+        let original = runtime.handle.config_snapshot().equalizer.clone();
+        assert!(
+            futures::executor::block_on(
+                runtime
+                    .handle
+                    .request_ack(Command::ProcessingBypass { bypassed: true })
+            )
+            .ack
+            .is_success()
+        );
+        owner.update(cx, |owner, cx| {
+            owner.reconcile(owner.context.snapshot(), cx);
+            owner.command_active = true;
+        });
+        draw(cx, handle);
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.config, original);
+            assert!(!editor.input_locked());
+            assert!(!editor.reset_locked(cx));
+        });
+        click(cx, handle, "eq-enable-7");
+        owner.read_with(cx, |owner, _| {
+            assert!(matches!(
+                owner.commands.front().unwrap().command,
+                Command::EqualizerEdit {
+                    edit: EqualizerEdit::Enabled(false)
+                }
+            ));
+        });
+        acknowledge_front(cx, &runtime, &owner, true);
+        draw(cx, handle);
+        editor.update(cx, |editor, cx| {
+            assert!(editor.input_locked());
+            assert!(editor.reset_locked(cx));
+            editor.eq(EqualizerEdit::PreampDb(3.5), cx);
+        });
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        let mut expected = original;
+        expected.enabled = false;
+        assert_eq!(runtime.handle.config_snapshot().equalizer, expected);
+        assert!(runtime.handle.config_snapshot().processing_bypassed);
+
+        click(cx, handle, "eq-ab-7");
+        acknowledge_front(cx, &runtime, &owner, true);
+        assert!(runtime.handle.config_snapshot().processing_bypassed);
+        draw(cx, handle);
+        click(cx, handle, "eq-enable-7");
+        acknowledge_front(cx, &runtime, &owner, true);
+        draw(cx, handle);
+        editor.update(cx, |editor, cx| editor.eq(EqualizerEdit::PreampDb(3.5), cx));
+        acknowledge_front(cx, &runtime, &owner, true);
+        assert_eq!(runtime.handle.config_snapshot().equalizer.preamp_db, 3.5);
+        assert!(runtime.handle.config_snapshot().processing_bypassed);
     }
 
     #[gpui::test]

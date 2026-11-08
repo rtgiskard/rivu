@@ -128,6 +128,7 @@ macro_rules! config_wire_fields {
             media_read_buffer_mib: u32,
             ffmpeg_enabled: bool,
             pipewire_auto_mix: bool,
+            processing_bypassed: bool,
             equalizer: rivu_dsp::equalizer::config::EqualizerConfig,
             denoise: rivu_dsp::denoise::DenoiseConfig,
             neural: rivu_format::config::NeuralConfig,

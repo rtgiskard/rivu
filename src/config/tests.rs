@@ -661,6 +661,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         media_read_buffer_mib: 8,
         ffmpeg_enabled: true,
         pipewire_auto_mix: false,
+        processing_bypassed: true,
         spectrum_style: SpectrumStyle::Solid,
         visualization_palette: VisualizationPalette::Magma,
         visualization_background: "#101820".parse().unwrap(),

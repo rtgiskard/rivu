@@ -33,6 +33,7 @@ pub struct GuiSystemSnapshot {
     pub relocation_task: Option<rivu_protocol::model::RelocationTaskStatus>,
     pub processing: Option<Arc<rivu_protocol::model::ProcessingTaskStatus>>,
     pub processing_audition: Option<ProcessingAudition>,
+    pub processing_selection: Option<ProcessingAudition>,
 }
 
 impl GuiSystemSnapshot {
@@ -69,6 +70,7 @@ impl GuiSnapshot {
                 relocation_task: state.system.relocation_task.clone(),
                 processing: state.system.processing.clone(),
                 processing_audition: state.processing_audition,
+                processing_selection: state.processing_selection,
             },
         }
     }
@@ -91,5 +93,36 @@ impl GuiSnapshot {
         query: &rivu_protocol::model::Query,
     ) -> rivu_protocol::response::QueryRevisions {
         self.library.query_revisions_for(query, self.queue.revision)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use rivu_protocol::model::{GraphExecutionMode, GraphPort};
+
+    #[test]
+    fn retained_selection_is_not_projected_as_actual_audio_during_bypass() {
+        let selection = ProcessingAudition {
+            id: 42,
+            output: Some(GraphPort { node: 7, port: 1 }),
+            mode: Some(GraphExecutionMode::Hybrid),
+        };
+        let mut state = ClientSnapshot {
+            processing_selection: Some(selection),
+            ..Default::default()
+        };
+        Arc::make_mut(&mut state.configuration.config).processing_bypassed = true;
+        let snapshot = GuiSnapshot::from_client(&state, Default::default());
+        assert_eq!(snapshot.system.processing_selection, Some(selection));
+        assert_eq!(snapshot.system.processing_audition, None);
+        assert!(snapshot.system.config.processing_bypassed);
+
+        Arc::make_mut(&mut state.configuration.config).processing_bypassed = false;
+        state.processing_audition = Some(selection);
+        let snapshot = GuiSnapshot::from_client(&state, Default::default());
+        assert_eq!(snapshot.system.processing_selection, Some(selection));
+        assert_eq!(snapshot.system.processing_audition, Some(selection));
     }
 }

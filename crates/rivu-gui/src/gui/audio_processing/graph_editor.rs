@@ -1150,6 +1150,14 @@ impl AudioProcessing {
     }
 
     fn graph_run_target(&mut self, output: bool, cx: &mut Context<Self>) {
+        if !output
+            && self.graph_editor.mode != GraphExecutionMode::Offline
+            && self.state.system.config.processing_bypassed
+        {
+            self.error = Some(self.tr("processing-audition-bypassed").to_string());
+            cx.notify();
+            return;
+        }
         if self.graph_busy()
             || self
                 .state
@@ -2035,6 +2043,105 @@ mod tests {
     }
 
     #[gpui::test]
+    fn master_switch_uses_persisted_flag_independently_of_eq(cx: &mut TestAppContext) {
+        cx.update(Input::init);
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        processing.update(cx, |this, _| this.command_active = true);
+        let window = cx.open_window(size(px(900.), px(700.)), {
+            let processing = processing.clone();
+            move |_, _| WorkbenchWindow(processing)
+        });
+        let handle = window.into();
+        for (eq_enabled, bypassed) in [(false, false), (true, false), (false, true), (true, true)] {
+            processing.update(cx, |this, cx| {
+                let config = Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config);
+                config.equalizer.enabled = eq_enabled;
+                config.processing_bypassed = bypassed;
+                cx.notify();
+            });
+            draw(cx, handle);
+            let position = gpui::VisualTestContext::from_window(handle, cx)
+                .debug_bounds("processing-bypass-7")
+                .unwrap()
+                .center();
+            press(cx, handle, position);
+            release(cx, handle, position);
+            processing.update(cx, |this, _| {
+                assert_eq!(this.commands.len(), 1);
+                assert!(matches!(
+                    this.commands.pop_front().unwrap().command,
+                    Command::ProcessingBypass { bypassed: next } if next == !bypassed
+                ));
+                assert_eq!(this.state.system.config.equalizer.enabled, eq_enabled);
+                this.pending = 0;
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn bypass_blocks_auditions_but_keeps_calculation_and_export(cx: &mut TestAppContext) {
+        cx.update(Input::init);
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            this.command_active = true;
+            let state = Rc::make_mut(&mut this.state);
+            Arc::make_mut(&mut state.system.config).processing_bypassed = true;
+            state.current_track = Some(Arc::new(crate::test_support::artwork_track(
+                "source.wav".into(),
+            )));
+            this.graph_editor.selected = Some(1);
+            this.graph_editor.mode = GraphExecutionMode::Auto;
+            this.graph_run_target(false, cx);
+            assert!(this.commands.is_empty());
+            assert_eq!(
+                this.error.as_deref(),
+                Some(this.context.i18n.text("processing-audition-bypassed"))
+            );
+            this.send(
+                Command::ProcessingGraphAudition {
+                    id: 1,
+                    node: GraphPort { node: 1, port: 0 },
+                },
+                cx,
+            );
+            this.audition(1, AuditionMode::Denoised, cx);
+            assert!(this.commands.is_empty());
+
+            this.graph_run_target(true, cx);
+            assert!(matches!(
+                this.commands.pop_front().unwrap().command,
+                Command::ProcessingGraphRun {
+                    mode: GraphExecutionMode::Auto,
+                    ..
+                }
+            ));
+            this.pending = 0;
+            this.graph_editor.mode = GraphExecutionMode::Offline;
+            this.graph_run_target(false, cx);
+            assert!(matches!(
+                this.commands.pop_front().unwrap().command,
+                Command::ProcessingGraphRun {
+                    mode: GraphExecutionMode::Offline,
+                    ..
+                }
+            ));
+            this.pending = 0;
+            this.send(
+                Command::ProcessingGraphExport {
+                    id: 1,
+                    node: GraphPort { node: 1, port: 0 },
+                    path: "new.wav".into(),
+                },
+                cx,
+            );
+            assert!(matches!(
+                this.commands.pop_front().unwrap().command,
+                Command::ProcessingGraphExport { .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn retained_results_keep_actions_and_export_focus_across_terminal_phases(
         cx: &mut TestAppContext,
     ) {
@@ -2114,6 +2221,47 @@ mod tests {
                 "out.wav"
             );
         });
+        processing.update(cx, |this, cx| {
+            this.command_active = true;
+            Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config).processing_bypassed =
+                true;
+            cx.notify();
+        });
+        draw(cx, handle);
+        let position = gpui::VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-audition-7-1-1-0")
+            .unwrap()
+            .center();
+        press(cx, handle, position);
+        release(cx, handle, position);
+        processing.read_with(cx, |this, _| {
+            assert!(this.commands.is_empty());
+            assert!(
+                this.error.is_none(),
+                "disabled native action never reaches the command guard"
+            );
+        });
+        let position = gpui::VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-export-7-1-1-0")
+            .unwrap()
+            .center();
+        press(cx, handle, position);
+        release(cx, handle, position);
+        processing.update(cx, |this, cx| {
+            assert!(matches!(
+                this.commands.pop_front().unwrap().command,
+                Command::ProcessingGraphExport { id: 1, .. }
+            ));
+            this.pending = 0;
+            this.command_active = false;
+            Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config).processing_bypassed =
+                false;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        })
+        .unwrap();
         // Cancellation and audition/export failure change the receipt, not the frozen graph.
         for phase in [ProcessingPhase::Cancelled, ProcessingPhase::Failed] {
             processing.update(cx, |this, _| {

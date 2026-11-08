@@ -145,6 +145,7 @@ fn show_processing(
 ) -> Result<()> {
     let response = session.get_state(StateSections {
         processing: true,
+        playback: true,
         configuration: true,
         ..Default::default()
     })?;
@@ -154,6 +155,7 @@ fn show_processing(
         .context("Missing configuration state")?
         .config;
     let instance_id = super::tasks::instance_id(session)?;
+    let playback = response.playback.context("Missing playback state")?;
     if json {
         let processing = state
             .task
@@ -163,10 +165,13 @@ fn show_processing(
         let value = if graph_only {
             serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
         } else {
-            serde_json::json!({"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
+            serde_json::json!({"processing_bypassed":config.processing_bypassed,"processing_selection":playback.processing_selection,"processing_audition":playback.processing_audition,"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
         };
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
+        println!("processing_bypassed: {}", config.processing_bypassed);
+        println!("processing_selection: {:?}", playback.processing_selection);
+        println!("processing_audition: {:?}", playback.processing_audition);
         show_settings(
             i18n,
             &config,
@@ -196,7 +201,9 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
     let command = match action {
         ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),
         ProcessingAction::Setup(_) => unreachable!("setup does not use a Core session"),
-        ProcessingAction::Bypass => Command::ProcessingBypass,
+        ProcessingAction::Bypass { mode } => Command::ProcessingBypass {
+            bypassed: matches!(mode, super::args::Switch::On),
+        },
         ProcessingAction::Graph(action) => match action {
             ProcessingGraphAction::Show => {
                 return show_processing(i18n, &mut session, json, true);

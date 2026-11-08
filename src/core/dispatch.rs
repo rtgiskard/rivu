@@ -290,9 +290,9 @@ impl Core {
             device: self.preferences.live().output_device.clone(),
             auto_mix: self.preferences.settings().pipewire_auto_mix,
         });
-        let _ = self.engine.send(AudioCommand::Equalizer(Arc::new(
-            self.preferences.settings().equalizer.clone(),
-        )));
+        let _ = self
+            .engine
+            .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())));
         let _ = self.engine.send(AudioCommand::VisualizationSignal(
             self.preferences.settings().visualization_signal,
         ));
@@ -485,7 +485,11 @@ impl Core {
     pub(in crate::core) fn publish(&mut self) {
         self.preferences.project(&mut self.state);
         self.state.processing = self.processing.current_projection();
-        self.state.processing_audition = self.processing.audition_projection();
+        self.state.processing_selection = self.processing.audition_projection();
+        self.state.processing_audition = self
+            .state
+            .processing_selection
+            .filter(|_| !self.preferences.settings().processing_bypassed);
         self.state.source_generation = self.transport.generation;
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         let changes = {
@@ -516,6 +520,7 @@ impl Core {
                 shared.source_generation = self.state.source_generation;
                 shared.current_track = self.state.current_track.clone();
                 shared.processing_audition = self.state.processing_audition;
+                shared.processing_selection = self.state.processing_selection;
             }
             if changed.queue {
                 shared.queue = self.state.queue.clone();

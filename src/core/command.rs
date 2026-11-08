@@ -177,7 +177,7 @@ impl Core {
             }
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
-            Command::ProcessingBypass => self.processing_bypass()?,
+            Command::ProcessingBypass { bypassed } => self.processing_bypass(bypassed)?,
             Command::EqualizerEdit { edit } => self.equalizer_edit(edit)?,
             Command::DenoiseEdit { patch } => self.denoise_edit(*patch)?,
             Command::NeuralEdit { patch } => self.neural_edit(*patch)?,

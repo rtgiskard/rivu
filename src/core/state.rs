@@ -14,6 +14,7 @@ pub(crate) struct CoreState {
     /// Audio source ownership, independent of metadata and transport state.
     pub(crate) source_generation: u64,
     pub(crate) processing_audition: Option<ProcessingAudition>,
+    pub(crate) processing_selection: Option<ProcessingAudition>,
     pub(crate) processing: Option<Arc<ProcessingTaskStatus>>,
     pub(crate) system: SystemState,
     pub(crate) configuration: ConfigurationState,
@@ -66,7 +67,8 @@ impl CoreState {
             playback: self.playback != previous.playback
                 || self.source_generation != previous.source_generation
                 || current_track_changed
-                || self.processing_audition != previous.processing_audition,
+                || self.processing_audition != previous.processing_audition
+                || self.processing_selection != previous.processing_selection,
             queue: self.queue != previous.queue,
             library: self.library.revision != previous.library.revision
                 || self.library.structure_revision != previous.library.structure_revision

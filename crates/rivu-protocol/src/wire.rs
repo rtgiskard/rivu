@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 20;
+pub const PROTOCOL_VERSION: u8 = 21;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -540,7 +540,9 @@ pub enum WireCommand {
         index: Option<u64>,
         expected_revision: Option<u64>,
     },
-    ProcessingBypass,
+    ProcessingBypass {
+        bypassed: bool,
+    },
     DeduplicatePlaylist {
         playlist_id: i64,
         expected_revision: u64,
@@ -1326,7 +1328,7 @@ impl From<Command> for WireCommand {
             },
             Command::CancelRelocation { id } => Self::CancelRelocation { id },
             Command::KeepTrackIndependent { track_id } => Self::KeepTrackIndependent { track_id },
-            Command::ProcessingBypass => Self::ProcessingBypass,
+            Command::ProcessingBypass { bypassed } => Self::ProcessingBypass { bypassed },
             Command::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
             Command::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             Command::NeuralEdit { patch } => Self::NeuralEdit { patch },
@@ -1623,7 +1625,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::KeepTrackIndependent { track_id } => {
                 Self::KeepTrackIndependent { track_id }
             }
-            WireCommand::ProcessingBypass => Self::ProcessingBypass,
+            WireCommand::ProcessingBypass { bypassed } => Self::ProcessingBypass { bypassed },
             WireCommand::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
             WireCommand::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             WireCommand::NeuralEdit { patch } => Self::NeuralEdit { patch },

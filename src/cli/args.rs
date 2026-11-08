@@ -107,8 +107,11 @@ pub(super) enum PlaybackAction {
 pub(super) enum ProcessingAction {
     /// Show authoritative equalizer, denoise, neural settings and latest task.
     Show,
-    /// Bypass all playback effects, keep their parameters and offline tasks.
-    Bypass,
+    /// Set master playback bypass on/off; keep EQ settings and background tasks.
+    Bypass {
+        #[arg(value_enum)]
+        mode: Switch,
+    },
     /// Inspect, edit and execute the persisted audio node graph.
     #[command(subcommand)]
     Graph(ProcessingGraphAction),
@@ -990,6 +993,19 @@ mod tests {
 mod graph_tests {
     use super::{Action, Args, ProcessingAction, ProcessingGraphAction};
     use clap::Parser;
+
+    #[test]
+    fn master_bypass_requires_explicit_on_or_off() {
+        for (value, expected) in [("on", true), ("off", false)] {
+            let args = Args::try_parse_from(["rivu", "processing", "bypass", value]).unwrap();
+            let Some(Action::Processing(ProcessingAction::Bypass { mode })) = args.action else {
+                panic!("expected master bypass");
+            };
+            assert_eq!(matches!(mode, super::Switch::On), expected);
+        }
+        assert!(Args::try_parse_from(["rivu", "processing", "bypass"]).is_err());
+        assert!(Args::try_parse_from(["rivu", "processing", "bypass", "toggle"]).is_err());
+    }
 
     #[test]
     fn graph_edit_requires_explicit_optimistic_revision_and_preserves_negative_json() {

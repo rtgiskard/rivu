@@ -444,6 +444,25 @@ atomic; replaying incremental display events would duplicate database rules.
 See link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[storage query contracts]
 and link:22_cache.adoc[query retention].
 
+[[DEC-017]]
+=== DEC-017: Playback bypass is independent of effect enablement
+
+Status: implemented, 2026-11-09.
+
+Persist master playback bypass separately from Monitor EQ enablement. Bypass
+changes the heard route, not the user's effect configuration, and must be
+reversible without enabling an independently disabled effect. Keep the public
+actual audition distinct from the retained selection eligible for resumption.
+The latter is session-owned, source-bound and subject to the existing PCM budget;
+it is not a durable instruction to replay an old track after restart.
+
+Core owns explicit bypass intent; neither effect edits nor late task completion
+may override it. Route changes require queue admission and saving before
+acceptance. Resumption validates the source and reconstructs the frozen
+live/hybrid runner rather than deriving a route from current editor settings.
+See link:27_audio_processing.adoc#playback-bypass[Playback bypass] for operation,
+selection retirement and failure behavior.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 
