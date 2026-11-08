@@ -1130,8 +1130,10 @@ retains the active task and latest 32 terminal results. Unknown/evicted IDs fail
 for external admission); `playlist_id` confirms a subsequent playlist commit even
 if refresh failed. A failed task is not evidence of zero side effects; after an
 uncertain worker failure, absent confirmation is not proof that no commit happened.
-An uncertain worker outcome disables database business operations until restart;
-after reopening, inspect committed data before submitting any missing operation.
+Only an unresolved transaction outcome disables database business operations until
+restart. A confirmed commit survives later projection or worker-retirement failure;
+missing views recover on demand without replaying admission. After an unknown
+outcome, reopen and inspect committed data before submitting any missing operation.
 `CancelScan` requests cancellation before Saving and is rejected during Saving;
 its Ack never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.

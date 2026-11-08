@@ -8,14 +8,34 @@ pub(in crate::core) enum Event {
         reply: oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
     },
     Prepared(Result<library::ExternalAdmission>),
-    Saved(Box<Saved>),
+    SavingRetired(Result<()>),
+}
+
+/// Evidence for the single admission transaction, independent of view reads.
+#[derive(Debug, Default)]
+enum AdmissionCommit {
+    #[default]
+    NotAttempted,
+    Pending,
+    NotCommitted,
+    Confirmed {
+        inserted: usize,
+        impacts: crate::store::CatalogChanges,
+    },
+    Unknown,
+}
+
+impl AdmissionCommit {
+    fn retire(&mut self) {
+        if matches!(self, Self::Pending) {
+            *self = Self::Unknown;
+        }
+    }
 }
 
 pub(in crate::core) struct Saved {
-    committed: bool,
-    uncertain: bool,
-    impacts: Option<crate::store::CatalogChanges>,
-    queue: Option<(usize, Result<QueueState>)>,
+    commit: AdmissionCommit,
+    queue: Option<Result<QueueState>>,
     track_total: Option<Result<usize>>,
     history: Option<Result<Vec<HistoryEntry>>>,
     current_track: Option<Result<Option<Track>>>,
@@ -27,9 +47,7 @@ pub(in crate::core) struct Saved {
 impl Saved {
     fn new(rejected: usize, errors: Vec<String>) -> Self {
         Self {
-            committed: false,
-            uncertain: false,
-            impacts: None,
+            commit: AdmissionCommit::NotAttempted,
             queue: None,
             track_total: None,
             history: None,
@@ -40,11 +58,37 @@ impl Saved {
         }
     }
 
-    fn uncertain(error: impl Into<anyhow::Error>) -> Self {
+    fn unknown(error: impl Into<anyhow::Error>) -> Self {
         let mut saved = Self::new(0, Vec::new());
-        saved.uncertain = true;
+        saved.commit = AdmissionCommit::Unknown;
         saved.error = Some(error.into());
         saved
+    }
+
+    fn failed(&mut self, error: anyhow::Error) {
+        self.commit.retire();
+        self.error = Some(match self.error.take() {
+            Some(previous) => previous.context(error),
+            None => error,
+        });
+    }
+
+    fn admit(
+        &mut self,
+        transaction: impl FnOnce() -> Result<(usize, crate::store::CatalogChanges, usize)>,
+    ) -> Option<crate::store::CatalogChanges> {
+        self.commit = AdmissionCommit::Pending;
+        match transaction() {
+            Ok((inserted, impacts, _)) => {
+                self.commit = AdmissionCommit::Confirmed { inserted, impacts };
+                Some(impacts)
+            }
+            Err(error) => {
+                self.commit = AdmissionCommit::NotCommitted;
+                self.error = Some(error.context("External audio admission was not committed"));
+                None
+            }
+        }
     }
 }
 
@@ -57,9 +101,8 @@ impl Drop for SavingCompletion {
     fn drop(&mut self) {
         if let Some(mut saved) = self.saved.take() {
             if thread::panicking() {
-                saved.uncertain = true;
-                saved.error = Some(anyhow::anyhow!(
-                    "External audio saving panicked; database changes may already be committed; inspect the queue before retrying"
+                saved.failed(anyhow::anyhow!(
+                    "External audio saving panicked; recorded transaction outcomes are retained, but prepared projections may be stale"
                 ));
             }
             if let Some(sender) = self.sender.take() {
@@ -71,18 +114,11 @@ impl Drop for SavingCompletion {
 
 fn save_external(
     path: PathBuf,
-    mut prepared: library::ExternalAdmission,
+    prepared: library::ExternalAdmission,
     index: Option<usize>,
     current_id: Option<u64>,
-    sender: oneshot::Sender<Saved>,
+    mut completion: SavingCompletion,
 ) {
-    let mut completion = SavingCompletion {
-        sender: Some(sender),
-        saved: Some(Saved::new(
-            prepared.rejected,
-            std::mem::take(&mut prepared.errors),
-        )),
-    };
     let saved = completion.saved.as_mut().unwrap();
     let store = match Store::open(&path) {
         Ok(store) => store,
@@ -91,33 +127,34 @@ fn save_external(
             return;
         }
     };
-    let (inserted, impacts, _) = match store.admit_external_queue(&prepared, index, current_id) {
-        Ok(committed) => committed,
-        Err(error) => {
-            saved.error = Some(error.context("External audio admission was not committed"));
-            return;
-        }
+    let Some(impacts) = saved.admit(|| store.admit_external_queue(&prepared, index, current_id))
+    else {
+        return;
     };
-    saved.committed = true;
-    saved.impacts = Some(impacts);
-    saved.queue = Some((inserted, store.queue_projection(0)));
+    // Publish the prepared bundle only after all reads finish. A projection
+    // panic leaves every missing view dirty without erasing the commit facts.
+    let queue = store.queue_projection(0);
     let dependencies = impacts.dependencies(false);
-    if dependencies.refresh_track_total {
-        saved.track_total = Some(store.track_count());
-    }
-    if dependencies.refresh_history {
-        saved.history = Some(store.history(MAX_QUERY_ROWS));
-    }
-    if impacts.current_track == Some(true) {
-        saved.current_track = Some((|| {
+    let track_total = dependencies
+        .refresh_track_total
+        .then(|| store.track_count());
+    let history = dependencies
+        .refresh_history
+        .then(|| store.history(MAX_QUERY_ROWS));
+    let current_track = (impacts.current_track == Some(true)).then(|| {
+        (|| {
             current_id
                 .map(|id| store.queue_track_id(id))
                 .transpose()?
                 .map(|id| store.track(id))
                 .transpose()
                 .map(Option::flatten)
-        })());
-    }
+        })()
+    });
+    saved.queue = Some(queue);
+    saved.track_total = track_total;
+    saved.history = history;
+    saved.current_track = current_track;
 }
 
 /// Preparation is cancellable. Saving is an explicit, non-cancellable phase;
@@ -126,6 +163,7 @@ pub(in crate::core) struct ExternalAdmissionTask {
     pub(in crate::core) status: ScanTaskStatus,
     events: mpsc::Receiver<Event>,
     finished: oneshot::Receiver<Event>,
+    saving_facts: Option<oneshot::Receiver<Saved>>,
     database_path: PathBuf,
     index: Option<usize>,
     expected_revision: Option<u64>,
@@ -161,13 +199,30 @@ impl ExternalAdmissionTask {
         futures::select! {
             result = finished => result.unwrap_or_else(|_| {
                 if is_saving {
-                    Event::Saved(Box::new(Saved::uncertain(anyhow::anyhow!("External audio saving ended without a result; database changes may already be committed"))))
+                    Event::SavingRetired(Err(anyhow::anyhow!("External audio saving supervisor ended without a result")))
                 } else {
                     Event::Prepared(Err(anyhow::anyhow!("External audio preparation ended without a result; nothing was registered or queued")))
                 }
             }),
             event = event => event,
         }
+    }
+
+    fn saving_result(&mut self, result: Result<()>) -> Saved {
+        let retired = self.join();
+        let mut saved = self
+            .saving_facts
+            .take()
+            .and_then(|mut facts| facts.try_recv().ok().flatten())
+            .unwrap_or_else(|| {
+                Saved::unknown(anyhow::anyhow!(
+                    "External audio saving worker produced no completion facts"
+                ))
+            });
+        for error in [result.err(), retired.err()].into_iter().flatten() {
+            saved.failed(error);
+        }
+        saved
     }
 
     fn join(&mut self) -> Result<()> {
@@ -313,6 +368,7 @@ impl Core {
             },
             events,
             finished,
+            saving_facts: None,
             database_path,
             index,
             expected_revision,
@@ -353,7 +409,7 @@ impl Core {
             self.retain_external(task.status.clone());
             return;
         }
-        let prepared = match result {
+        let mut prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
                 task.status.progress.phase = ScanPhase::Failed;
@@ -401,16 +457,21 @@ impl Core {
         let index = task.index;
         let current_id = self.state.queue.current_id;
         let workers = self.workers.clone();
+        // Own completion before scheduling: even an unpolled supervisor or an
+        // unexecuted blocking job reports NotAttempted when its closure drops.
+        let completion = SavingCompletion {
+            sender: Some(facts_tx),
+            saved: Some(Saved::new(
+                prepared.rejected,
+                std::mem::take(&mut prepared.errors),
+            )),
+        };
+        task.saving_facts = Some(facts_rx);
         task.worker = Some(self.executor.spawn(async move {
-            let joined = workers.execute(move || {
-                save_external(path, prepared, index, current_id, facts_tx);
-            }).await;
-            let mut saved = facts_rx.await.unwrap_or_else(|_| Saved::uncertain(anyhow::anyhow!("External audio saving worker produced no completion facts")));
-            if let Err(error) = joined {
-                saved.uncertain = true;
-                saved.error = Some(anyhow::anyhow!("External audio saving worker failed: {error}; database changes may already be committed"));
-            }
-            let _ = finished_tx.send(Event::Saved(Box::new(saved)));
+            let joined = workers
+                .execute(move || save_external(path, prepared, index, current_id, completion))
+                .await;
+            let _ = finished_tx.send(Event::SavingRetired(joined));
         }));
         task.finished = finished;
         self.active_external_admission = Some(task);
@@ -423,20 +484,23 @@ impl Core {
             return;
         };
         if let Err(error) = task.join() {
-            saved.uncertain = true;
-            saved.error = Some(error);
+            saved.failed(error);
         }
-        task.status.library_committed = saved.committed;
-        // Confirmed effects remain authoritative even when later retirement
-        // fails. Publish their tokens before isolating an uncertain outcome,
-        // without reading or applying potentially stale view projections.
-        if let Some(impacts) = saved.impacts {
-            self.announce_catalog_changes(impacts);
-        }
-        if saved.committed && (saved.uncertain || saved.impacts.is_none()) {
-            self.store.invalidate_caches();
-        }
-        if saved.uncertain {
+        saved.commit.retire();
+        let (committed, queued) = match saved.commit {
+            AdmissionCommit::Confirmed { inserted, impacts } => {
+                self.announce_catalog_changes(impacts);
+                // Tokens and missing views are independent. None is not a
+                // successful empty projection and must remain recoverable.
+                self.transport.projection_stale |= saved.queue.is_none();
+                self.projections.current_track |= impacts.current_track.unwrap_or(impacts.library)
+                    && saved.current_track.is_none();
+                (true, inserted)
+            }
+            _ => (false, 0),
+        };
+        task.status.library_committed = committed;
+        if matches!(saved.commit, AdmissionCommit::Unknown) {
             self.database_outcome_uncertain();
             task.status.progress.phase = ScanPhase::Failed;
             task.status.message = "Database outcome is uncertain; restart Rivu".into();
@@ -452,8 +516,7 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(format!("{error:#}"));
         }
-        let queued = saved.queue.as_ref().map_or(0, |(inserted, _)| *inserted);
-        if let Some((_, queue)) = saved.queue
+        if let Some(queue) = saved.queue
             && let Err(error) = self.accept_queue_projection(queue)
         {
             errors.push(format!(
@@ -478,7 +541,7 @@ impl Core {
                 )),
             }
         }
-        task.status.message = if saved.committed {
+        task.status.message = if committed {
             format!(
                 "Queued {queued} external audio occurrences; skipped {} invalid paths",
                 saved.rejected
@@ -532,7 +595,12 @@ impl Core {
                 let _ = reply.send(result);
             }
             Event::Prepared(result) => self.finish_external_preparation(result),
-            Event::Saved(saved) => self.finish_external_saving(*saved),
+            Event::SavingRetired(result) => {
+                if let Some(task) = self.active_external_admission.as_mut() {
+                    let saved = task.saving_result(result);
+                    self.finish_external_saving(saved);
+                }
+            }
         }
     }
 
@@ -542,15 +610,15 @@ impl Core {
         };
         if task.is_saving() {
             let joined = task.join();
-            let mut saved = match task.finished.try_recv().ok().flatten() {
-                Some(Event::Saved(saved)) => *saved,
-                _ => Saved::uncertain(anyhow::anyhow!(
-                    "External audio saving ended without completion facts during shutdown"
-                )),
+            let event = task.finished.try_recv().ok().flatten();
+            let mut saved = match event {
+                Some(Event::SavingRetired(result)) => task.saving_result(result),
+                _ => task.saving_result(Err(anyhow::anyhow!(
+                    "External audio saving supervisor ended without a result during shutdown"
+                ))),
             };
             if let Err(error) = joined {
-                saved.uncertain = true;
-                saved.error = Some(error);
+                saved.failed(error);
             }
             self.finish_external_saving(saved);
         } else {
@@ -571,6 +639,212 @@ impl Core {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Keep authoritative facts independent from the supervisor's result, just
+    // like production. Both the blocking closure and supervisor can unwind.
+    fn install_panicking_saving(core: &mut Core, work: impl FnOnce(&mut Saved) + Send + 'static) {
+        let (_, events) = async_channel::bounded(3);
+        let (finished_tx, finished) = oneshot::channel();
+        let (facts_tx, saving_facts) = oneshot::channel();
+        let completion = SavingCompletion {
+            sender: Some(facts_tx),
+            saved: Some(Saved::new(0, Vec::new())),
+        };
+        let workers = core.workers.clone();
+        let worker = core.executor.spawn(async move {
+            let _finished = finished_tx;
+            let _ = workers
+                .execute(move || {
+                    let mut completion = completion;
+                    work(completion.saved.as_mut().unwrap());
+                })
+                .await;
+            panic!("injected saving supervisor panic before forwarding retirement");
+        });
+        core.active_external_admission = Some(ExternalAdmissionTask {
+            status: ScanTaskStatus {
+                id: 1,
+                progress: ScanProgress {
+                    phase: ScanPhase::Saving,
+                    processed: 1,
+                    total: Some(1),
+                    errors: 0,
+                    path: None,
+                },
+                message: String::new(),
+                library_committed: false,
+                playlist_id: None,
+                error: None,
+            },
+            events,
+            finished,
+            saving_facts: Some(saving_facts),
+            database_path: PathBuf::new(),
+            index: None,
+            expected_revision: None,
+            cancellation: library::ScanCancellation::default(),
+            worker: Some(worker),
+        });
+    }
+
+    fn complete_test_saving(core: &mut Core, shutdown: bool) {
+        if shutdown {
+            core.shutdown_external_admission();
+        } else {
+            let event = futures::executor::block_on(
+                core.active_external_admission
+                    .as_mut()
+                    .unwrap()
+                    .next_event(),
+            );
+            core.external_admission_event(event);
+        }
+    }
+
+    #[test]
+    fn unstarted_saving_job_preserves_not_attempted_facts() {
+        let (sender, mut facts) = oneshot::channel();
+        let completion = SavingCompletion {
+            sender: Some(sender),
+            saved: Some(Saved::new(0, Vec::new())),
+        };
+        let job = move || {
+            let mut completion = completion;
+            completion
+                .saved
+                .as_mut()
+                .unwrap()
+                .admit(|| panic!("an unstarted job must never attempt its transaction"));
+        };
+        drop(job);
+        let saved = facts.try_recv().unwrap().unwrap();
+        assert!(matches!(saved.commit, AdmissionCommit::NotAttempted));
+        assert!(saved.error.is_none());
+    }
+
+    #[test]
+    fn saving_panics_only_quarantine_an_in_flight_transaction() {
+        for shutdown in [false, true] {
+            // Not attempted, confirmed rollback, and executing without a result
+            // must survive both blocking and supervisor panic identically.
+            for stage in 0..3 {
+                let (_directory, mut core) = super::super::tests::fixture_with_database(None);
+                let before = core.state.query_revisions();
+                let queue = core.store.queue_ids().unwrap();
+                install_panicking_saving(&mut core, move |saved| {
+                    match stage {
+                        0 => {}
+                        1 => {
+                            saved.admit(|| bail!("injected ordinary admission error"));
+                            assert!(matches!(saved.commit, AdmissionCommit::NotCommitted));
+                        }
+                        2 => {
+                            saved.admit(|| panic!("injected transaction panic"));
+                        }
+                        _ => unreachable!(),
+                    }
+                    panic!("injected panic outside transaction");
+                });
+                complete_test_saving(&mut core, shutdown);
+                let status = core.scan_results.back().unwrap();
+                assert!(!status.library_committed);
+                assert_eq!(status.progress.phase, ScanPhase::Failed);
+                assert!(status.error.is_some());
+                assert_eq!(core.database_maintenance_active(), stage == 2);
+                assert_eq!(core.state.query_revisions(), before);
+                assert_eq!(core.store.queue_ids().unwrap(), queue);
+                if stage == 2 {
+                    assert!(
+                        core.command(Command::Enqueue { track_ids: vec![1] })
+                            .is_err()
+                    );
+                    assert!(core.save_queue().is_err());
+                    core.command(Command::Volume { value: 0.37 }).unwrap();
+                } else {
+                    core.save_queue().unwrap();
+                    core.command(Command::Enqueue { track_ids: vec![1] })
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projection_panic_after_commit_publishes_facts_and_recovers_without_replaying() {
+        for shutdown in [false, true] {
+            let (directory, mut core) = super::super::tests::fixture_with_database(None);
+            let before = core.state.query_revisions();
+            let before_queue = core.store.queue_ids().unwrap();
+            let before_total = core.state.library.track_total;
+            let database_path = directory.path().join("library.db");
+            let prepared = library::ExternalAdmission::from_test_records(
+                vec![library::ScanRecord {
+                    path: directory.path().join("projection-panic.wav"),
+                    size: 1,
+                    modified_ns: 1,
+                    fingerprint: Some(blake3::hash(b"admission-panic").to_hex().to_string()),
+                    media: MediaInfo {
+                        title: "Admission panic".into(),
+                        artist: String::new(),
+                        album: "Admission".into(),
+                        duration: Some(1.0),
+                        codec: "pcm".into(),
+                        channels: 1,
+                        sample_rate: 8_000,
+                        bitrate_bps: None,
+                        bitrate_exact: false,
+                        track_number: None,
+                        disc_number: None,
+                        bits_per_sample: Some(16),
+                        release_date: None,
+                    },
+                }],
+                vec![0, 0],
+            );
+            install_panicking_saving(&mut core, move |saved| {
+                let store = Store::open(&database_path).unwrap();
+                saved
+                    .admit(|| store.admit_external_queue(&prepared, None, None))
+                    .unwrap();
+                // A successful early read is only part of a prepared bundle.
+                let _partial_queue = store.queue_projection(0).unwrap();
+                panic!("injected projection panic after confirmed commit and partial read");
+            });
+            complete_test_saving(&mut core, shutdown);
+            let status = core.scan_results.back().unwrap();
+            assert!(status.library_committed);
+            assert_eq!(status.progress.phase, ScanPhase::Failed);
+            assert!(status.message.contains("Queued 2"));
+            assert!(status.error.is_some());
+            assert!(!core.database_maintenance_active());
+            let after = core.state.query_revisions();
+            assert_ne!(after.library, before.library);
+            assert_ne!(after.structure, before.structure);
+            assert_ne!(after.queue, before.queue);
+            assert_ne!(after.album, before.album);
+            assert_ne!(after.duplicate_groups, before.duplicate_groups);
+            assert_ne!(after.duplicate_members, before.duplicate_members);
+            assert!(core.transport.projection_stale);
+            assert!(core.projections.track_total);
+            assert!(core.transport.history_pending);
+            assert_eq!(core.state.queue.total, before_queue.len());
+            assert_eq!(core.state.library.track_total, before_total);
+            let committed_queue = core.store.queue_ids().unwrap();
+            assert_eq!(&committed_queue[..before_queue.len()], &before_queue);
+            assert_eq!(committed_queue.len(), before_queue.len() + 2);
+            core.ensure_queue_control_ready().unwrap();
+            let demand = core.projection_demand();
+            let prepared = projections::PreparedProjections::read(&core.store, demand);
+            core.complete_projection_recovery(demand, prepared);
+            assert!(!core.transport.projection_stale);
+            assert!(!core.projections.track_total);
+            assert!(!core.transport.history_pending);
+            assert_eq!(core.state.queue.total, before_queue.len() + 2);
+            assert_eq!(core.state.library.track_total, before_total + 1);
+            assert_eq!(core.store.queue_ids().unwrap(), committed_queue);
+            assert_eq!(core.store.track_count().unwrap(), before_total + 1);
+        }
+    }
 
     #[test]
     fn preparation_drop_joins_physical_worker_after_cancellation() {
@@ -618,6 +892,7 @@ mod tests {
             },
             events,
             finished,
+            saving_facts: None,
             database_path: PathBuf::new(),
             index: None,
             expected_revision: None,
@@ -631,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_retirement_preserves_known_committed_revisions() {
+    fn retirement_failure_preserves_known_committed_revisions_without_quarantine() {
         let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let before = core.state.query_revisions();
         let (_, events) = async_channel::bounded(3);
@@ -653,24 +928,31 @@ mod tests {
             },
             events,
             finished,
+            saving_facts: None,
             database_path: directory.path().join("library.db"),
             index: None,
             expected_revision: None,
             cancellation: library::ScanCancellation::default(),
             worker: None,
         });
-        let mut saved = Saved::uncertain(anyhow::anyhow!("retirement failed after commit"));
-        saved.committed = true;
-        saved.impacts = Some(crate::store::CatalogChanges {
-            changed: true,
-            library: true,
-            structure: true,
-            queue: true,
-            albums: true,
-            duplicate_groups: true,
-            duplicate_members: true,
-            ..Default::default()
+        let mut saved = Saved::new(0, Vec::new());
+        saved.admit(|| {
+            Ok((
+                1,
+                crate::store::CatalogChanges {
+                    changed: true,
+                    library: true,
+                    structure: true,
+                    queue: true,
+                    albums: true,
+                    duplicate_groups: true,
+                    duplicate_members: true,
+                    ..Default::default()
+                },
+                1,
+            ))
         });
+        saved.failed(anyhow::anyhow!("retirement failed after commit"));
         core.finish_external_saving(saved);
         let after = core.state.query_revisions();
         assert_ne!(after.library, before.library);
@@ -679,7 +961,7 @@ mod tests {
         assert_ne!(after.album, before.album);
         assert_ne!(after.duplicate_groups, before.duplicate_groups);
         assert_ne!(after.duplicate_members, before.duplicate_members);
-        assert!(core.database_maintenance_active());
+        assert!(!core.database_maintenance_active());
         let status = core.scan_results.back().unwrap();
         assert!(status.library_committed);
         assert_eq!(status.progress.phase, ScanPhase::Failed);
@@ -690,10 +972,12 @@ mod tests {
         let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let (_, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
+        let (facts_tx, saving_facts) = oneshot::channel();
         let worker = core.executor.spawn(async move {
             let mut saved = Saved::new(0, Vec::new());
-            saved.committed = true;
-            let _ = finished_tx.send(Event::Saved(Box::new(saved)));
+            saved.admit(|| Ok((0, crate::store::CatalogChanges::default(), 0)));
+            let _ = facts_tx.send(saved);
+            let _ = finished_tx.send(Event::SavingRetired(Ok(())));
             panic!("injected saving supervisor failure after completion");
         });
         core.active_external_admission = Some(ExternalAdmissionTask {
@@ -713,6 +997,7 @@ mod tests {
             },
             events,
             finished,
+            saving_facts: Some(saving_facts),
             database_path: directory.path().join("library.db"),
             index: None,
             expected_revision: None,
@@ -720,7 +1005,7 @@ mod tests {
             worker: Some(worker),
         });
         core.shutdown_external_admission();
-        assert!(core.database_maintenance_active());
+        assert!(!core.database_maintenance_active());
         let status = core.scan_results.back().unwrap();
         assert!(status.library_committed);
         assert_eq!(status.progress.phase, ScanPhase::Failed);
@@ -761,11 +1046,18 @@ mod tests {
                     .next_event()
                     .await
             });
-            if let Event::Saved(saved) = event {
-                assert!(saved.committed);
-                core.external_admission_event(Event::Saved(Box::new(Saved::uncertain(
-                    anyhow::anyhow!("completion facts lost after commit"),
-                ))));
+            if matches!(event, Event::SavingRetired(_)) {
+                let mut facts = core
+                    .active_external_admission
+                    .as_mut()
+                    .unwrap()
+                    .saving_facts
+                    .take()
+                    .unwrap();
+                let saved = facts.try_recv().unwrap().unwrap();
+                assert!(matches!(saved.commit, AdmissionCommit::Confirmed { .. }));
+                drop(saved);
+                core.external_admission_event(event);
                 break;
             }
             core.external_admission_event(event);
