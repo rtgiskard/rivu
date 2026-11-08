@@ -292,10 +292,11 @@ impl QueuePage {
             self.rows.clear_pages();
             self.rows.fetch_size = 0;
         }
-        if !ReadKind::Queue.changed(previous, next, filter) {
+        let changes = ReadKind::Queue.changes(previous, next, filter);
+        if !changes.rows_changed {
             return;
         }
-        if !ReadKind::Queue.changed_without_bitrate(previous, next, filter) {
+        if !changes.coordinates_changed {
             self.rows.clear_pages();
             return;
         }
@@ -522,21 +523,24 @@ impl View {
             recent.sync(next, query);
             return false;
         }
-        let rows_changed = self
+        let changes = self
             .query_kind(false)
-            .is_some_and(|kind| kind.changed(previous, next, query));
-        let coordinates_changed = self
-            .query_kind(false)
-            .is_some_and(|kind| kind.changed_without_bitrate(previous, next, query));
+            .map(|kind| kind.changes(previous, next, query))
+            .unwrap_or_default();
+        let rows_changed = changes.rows_changed;
+        let coordinates_changed = changes.coordinates_changed;
         let query_changed = if matches!(self, Self::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some())
         {
             self.query_kind(true)
-                .is_some_and(|kind| kind.changed(previous, next, query))
+                .is_some_and(|kind| kind.changes(previous, next, query).rows_changed)
         } else {
             rows_changed
         };
         if let Self::PlaylistDetail { detail, playlists } = self {
-            if ReadKind::PlaylistSummary(detail.playlist_id).changed(previous, next, "") {
+            if ReadKind::PlaylistSummary(detail.playlist_id)
+                .changes(previous, next, "")
+                .rows_changed
+            {
                 detail.summary_dirty = true;
             }
             let compact = Query::PlaylistEntryLocations {
@@ -568,7 +572,9 @@ impl View {
             }
         }
         if let Self::Tree(tree) = self
-            && ReadKind::OtherTracksCount.changed(previous, next, "")
+            && ReadKind::OtherTracksCount
+                .changes(previous, next, "")
+                .rows_changed
         {
             tree.other_present = None;
         }

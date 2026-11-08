@@ -283,6 +283,12 @@ pub(super) enum ReadTarget<Text, Location> {
 
 pub(super) type ReadKind<'a> = ReadTarget<&'a str, &'a Path>;
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct ReadChanges {
+    pub(super) rows_changed: bool,
+    pub(super) coordinates_changed: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ReadDemand<'a> {
     pub(super) kind: ReadKind<'a>,
@@ -439,36 +445,25 @@ impl ReadKind<'_> {
         }
     }
 
-    pub(super) fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot, filter: &str) -> bool {
-        let playlist_id = self.playlist_id();
-        if previous.query_revisions(playlist_id) == next.query_revisions(playlist_id) {
-            return false;
-        }
-        let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
-        query.stamp(previous.query_revisions(playlist_id))
-            != query.stamp(next.query_revisions(playlist_id))
-    }
-
-    pub(super) fn changed_without_bitrate(
+    pub(super) fn changes(
         self,
         previous: &TuiSnapshot,
         next: &TuiSnapshot,
         filter: &str,
-    ) -> bool {
+    ) -> ReadChanges {
         let playlist_id = self.playlist_id();
-        if previous
-            .query_revisions(playlist_id)
-            .with_bitrate_revision(0)
-            == next.query_revisions(playlist_id).with_bitrate_revision(0)
-        {
-            return false;
+        let previous = previous.query_revisions(playlist_id);
+        let next = next.query_revisions(playlist_id);
+        if previous == next {
+            return ReadChanges::default();
         }
         let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
-        query.stamp(
-            previous
-                .query_revisions(playlist_id)
-                .with_bitrate_revision(0),
-        ) != query.stamp(next.query_revisions(playlist_id).with_bitrate_revision(0))
+        let previous = query.stamp(previous).revisions();
+        let next = query.stamp(next).revisions();
+        ReadChanges {
+            rows_changed: previous != next,
+            coordinates_changed: previous.with_bitrate_revision(0) != next.with_bitrate_revision(0),
+        }
     }
 }
 
