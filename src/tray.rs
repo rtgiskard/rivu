@@ -631,10 +631,8 @@ impl DbusMenu {
             }
             return;
         }
-        let snapshot = self.data.read().snapshot.clone();
         let command = match id {
-            2 if snapshot.status == PlaybackStatus::Playing => Command::Pause,
-            2 => Command::Resume,
+            2 => Command::Toggle,
             3 => Command::Previous,
             4 => Command::Next,
             6 => Command::ToggleShuffle,

@@ -525,7 +525,9 @@ The tray requires session D-Bus and a StatusNotifier-compatible host. Failure
 does not prevent the window or playback; a later watcher is registered automatically.
 The host resolves the `rivu` theme icon, so install icons using the
 link:../readme.adoc#build-and-install[installation instructions]. The tray menu
-offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit application.
+offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit application. Play/Pause
+toggles Core's state at command execution; the asynchronously updated menu label
+does not determine the transport command.
 
 == Artwork panel
 
