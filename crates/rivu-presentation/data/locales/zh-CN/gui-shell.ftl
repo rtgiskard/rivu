@@ -227,7 +227,7 @@ shell-back = 返回
 shell-clear-queue-confirm = 清空队列中的全部 { $count } 项？
 shell-version-features = { $features ->
     [none] { $version }
-   *[other] { $version } (+{ $features })
+   *[other] { $version }（{ $features }）
     }
 processing-routing-graph = 音频处理图
 processing-graph-undo = 撤销

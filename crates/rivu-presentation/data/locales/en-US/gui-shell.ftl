@@ -227,7 +227,7 @@ shell-back = Back
 shell-clear-queue-confirm = Clear all { $count } queued entries?
 shell-version-features = { $features ->
     [none] { $version }
-   *[other] { $version } (+{ $features })
+   *[other] { $version } ({ $features })
     }
 processing-routing-graph = Processing graph
 processing-graph-undo = Undo
