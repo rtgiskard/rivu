@@ -127,12 +127,8 @@ pub(super) struct RetiredPlayback {
 }
 
 fn modified_ns(metadata: &std::fs::Metadata) -> Option<i64> {
-    let modified = metadata.modified().ok()?;
-    let ns = match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_nanos() as i128,
-        Err(error) => -(error.duration().as_nanos() as i128),
-    };
-    i64::try_from(ns).ok().filter(|ns| *ns != i64::MIN)
+    rivu_utils::regular_file::modified_unix_ns(metadata.modified().ok()?)
+        .filter(|ns| *ns != i64::MIN)
 }
 
 fn same_source_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {

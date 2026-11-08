@@ -22,8 +22,6 @@ pub(super) struct RelocationFinished {
 }
 use std::fs::{File, Metadata};
 use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 
 /// Keep the verified descriptor alive until the Core commit boundary.
 pub(in crate::core) struct VerifiedTarget {
@@ -35,14 +33,7 @@ pub(in crate::core) struct VerifiedTarget {
 struct FileIdentity {
     size: u64,
     modified: SystemTime,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(unix)]
-    changed: (i64, i64),
-    #[cfg(not(unix))]
-    created: Option<SystemTime>,
+    version: rivu_protocol::audio::SourceIdentity,
 }
 
 impl FileIdentity {
@@ -56,23 +47,13 @@ impl FileIdentity {
             modified: metadata
                 .modified()
                 .context("Reading target modification time")?,
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(unix)]
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-            #[cfg(not(unix))]
-            created: metadata.created().ok(),
+            version: audio::source_identity_from_metadata(metadata),
         })
     }
 
     fn modified_ns(&self) -> Result<i64> {
-        let ns = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => i128::try_from(duration.as_nanos())?,
-            Err(error) => -i128::try_from(error.duration().as_nanos())?,
-        };
-        let ns = i64::try_from(ns).context("Target modification time is out of range")?;
+        let ns = rivu_utils::regular_file::modified_unix_ns(self.modified)
+            .context("Target modification time is out of range")?;
         ensure!(
             ns != i64::MIN,
             "Target modification time cannot be verified"

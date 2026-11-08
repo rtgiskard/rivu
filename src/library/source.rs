@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 // Reserved in modified_ns for unavailable/out-of-range mtimes, including the
 // sentinel instant itself. This key must never authorize cache reuse; epoch 0 is
@@ -17,17 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(super) const UNCACHEABLE_MODIFIED_NS: i64 = i64::MIN;
 
 pub(super) fn cache_modified_ns(modified: Option<SystemTime>) -> i64 {
-    let Some(modified) = modified else {
-        return UNCACHEABLE_MODIFIED_NS;
-    };
-    let nanoseconds = match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => i128::try_from(duration.as_nanos()).ok(),
-        Err(error) => i128::try_from(error.duration().as_nanos())
-            .ok()
-            .map(|nanoseconds| -nanoseconds),
-    };
-    nanoseconds
-        .and_then(|nanoseconds| i64::try_from(nanoseconds).ok())
+    modified
+        .and_then(rivu_utils::regular_file::modified_unix_ns)
         .unwrap_or(UNCACHEABLE_MODIFIED_NS)
 }
 
