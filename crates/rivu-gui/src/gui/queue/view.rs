@@ -159,7 +159,6 @@ impl Queue {
                             &this.state,
                             DragDestination::Queue,
                             this.library_selection_pending,
-                            this.content_resolution,
                         )
                     }
                 })
@@ -678,7 +677,6 @@ impl Queue {
                 &self.state,
                 destination,
                 self.library_selection_pending,
-                self.content_resolution,
             )
         }
     }
@@ -783,7 +781,6 @@ impl Queue {
             &self.state,
             destination,
             self.library_selection_pending,
-            self.content_resolution,
         ) {
             cx.emit(QueueEvent::DropLibrary(
                 RefCell::new(Some(drag.nodes().to_vec())),
@@ -804,7 +801,6 @@ impl Queue {
             &self.state,
             destination,
             self.library_selection_pending,
-            self.content_resolution,
         ) && let Some(source) = drag.source()
         {
             cx.emit(QueueEvent::DropContent(

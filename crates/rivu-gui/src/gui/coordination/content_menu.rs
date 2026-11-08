@@ -140,7 +140,6 @@ impl WindowView {
             cx.notify();
             return None;
         };
-        self.sync_transfer_state(cx);
         Some(read)
     }
 
@@ -148,7 +147,6 @@ impl WindowView {
         if !self.content_resolution.finish(read) {
             return false;
         }
-        self.sync_transfer_state(cx);
         self.refresh(cx);
         cx.notify();
         read.ticket.is_current() && self.window_visible && !self.state.system.shutting_down

@@ -108,7 +108,6 @@ pub(in crate::gui) struct Playlists {
     panel_visible: bool,
     menu_catalog_demand: bool,
     library_selection_pending: bool,
-    content_resolution: bool,
     focused: bool,
     layout_focus: FocusHandle,
     menu_scope: Option<FocusScope>,
@@ -196,7 +195,6 @@ impl Playlists {
             panel_visible: false,
             menu_catalog_demand: false,
             library_selection_pending: false,
-            content_resolution: false,
             focused: false,
             layout_focus: cx.focus_handle(),
             menu_scope: None,
@@ -355,14 +353,10 @@ impl Playlists {
     pub(in crate::gui) fn set_transfer_state(
         &mut self,
         library_selection_pending: bool,
-        content_resolution: bool,
         cx: &mut Context<Self>,
     ) {
-        if (self.library_selection_pending, self.content_resolution)
-            != (library_selection_pending, content_resolution)
-        {
+        if self.library_selection_pending != library_selection_pending {
             self.library_selection_pending = library_selection_pending;
-            self.content_resolution = content_resolution;
             cx.notify();
         }
     }
@@ -629,7 +623,6 @@ impl Playlists {
             &self.state,
             destination,
             self.library_selection_pending,
-            self.content_resolution,
         )
     }
     fn can_drop_playlist_row(

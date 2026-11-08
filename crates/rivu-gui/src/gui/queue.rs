@@ -78,7 +78,6 @@ pub(in crate::gui) struct Queue {
     visible: bool,
     focused: bool,
     library_selection_pending: bool,
-    content_resolution: bool,
     _subscription: gpui::Subscription,
 }
 
@@ -103,7 +102,6 @@ impl Queue {
             visible: false,
             focused: false,
             library_selection_pending: false,
-            content_resolution: false,
             _subscription: subscription,
         }
     }
@@ -189,14 +187,10 @@ impl Queue {
     pub(in crate::gui) fn set_transfer_state(
         &mut self,
         library_selection_pending: bool,
-        content_resolution: bool,
         cx: &mut Context<Self>,
     ) {
-        if (self.library_selection_pending, self.content_resolution)
-            != (library_selection_pending, content_resolution)
-        {
+        if self.library_selection_pending != library_selection_pending {
             self.library_selection_pending = library_selection_pending;
-            self.content_resolution = content_resolution;
             cx.notify();
         }
     }

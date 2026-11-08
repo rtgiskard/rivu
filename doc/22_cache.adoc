@@ -159,9 +159,10 @@ have a separate owner; reads never overwrite the active input.
 |Opening an album menu retains its identity, not all member IDs. Favorite,
 Unfavorite, and New playlist use one cancellable paged reader only after selection.
 Queue/Playlist copies submit versioned source identity for transactional Core
-resolution. The loading page keeps menu-scope focus instead of restoring an
-unmounted submenu trigger. Cancellation preserves the physical reader gate until
-completion; retirement notifies the window even when its logical result is stale.
+resolution and do not depend on the GUI ID-reader gate. The loading page keeps
+menu-scope focus instead of restoring an unmounted submenu trigger. Cancellation
+preserves the physical reader gate until its matching worker completes; retirement
+notifies the window even when its logical result is stale.
 |Duplicate review
 |Stable selected identities survive reference refreshes, but commands require
 current facts. A failed or timed-out status read does not release the relocation

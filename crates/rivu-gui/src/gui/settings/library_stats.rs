@@ -18,12 +18,13 @@ pub(super) struct RootStats {
     values: HashMap<PathBuf, LibraryRootStats>,
     next: usize,
     // A canceled or timed-out query still owns its physical slot until it returns.
-    in_flight: bool,
+    in_flight: crate::gui::query::ReadReservation,
     error: Option<String>,
     retired: bool,
 }
 
 struct Read {
+    worker: u64,
     query: Query,
     owner_query: Query,
     generation: u64,
@@ -69,11 +70,16 @@ impl RootStats {
     }
 
     fn prepare(&mut self) -> Option<Read> {
-        if self.in_flight || self.retired || self.error.is_some() || self.next == self.roots.len() {
+        if self.in_flight.pending()
+            || self.retired
+            || self.error.is_some()
+            || self.next == self.roots.len()
+        {
             return None;
         }
-        self.in_flight = true;
+        let worker = self.in_flight.begin()?;
         Some(Read {
+            worker,
             query: Query::LibraryRootStats {
                 roots: self.roots[self.next..(self.next + MAX_QUERY_ROWS).min(self.roots.len())]
                     .to_vec(),
@@ -99,8 +105,7 @@ impl RootStats {
     }
 
     fn complete(&mut self, read: Read, response: QueryResponse) {
-        self.in_flight = false;
-        if !self.current(&read) || self.error.is_some() {
+        if !self.in_flight.finish(read.worker) || !self.current(&read) || self.error.is_some() {
             return;
         }
         if matches!(
@@ -289,7 +294,7 @@ mod tests {
         assert_eq!(stats.values.len(), MAX_QUERY_ROWS);
         let read = stats.prepare().unwrap();
         stats.fail(&read, "Timed out".into());
-        assert!(stats.in_flight);
+        assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
         stats.sync(&roots, 2);
         assert!(stats.prepare().is_none());
@@ -340,7 +345,7 @@ mod tests {
                     },
                 );
                 assert!(stats.retired);
-                assert!(!stats.in_flight);
+                assert!(!stats.in_flight.pending());
                 assert!(stats.error.is_none());
                 for _ in 0..3 {
                     assert!(!stats.sync(&roots, 7));
@@ -373,7 +378,7 @@ mod tests {
         assert!(stats.values.is_empty());
         assert!(stats.error.is_none());
         assert!(stats.retired);
-        assert!(!stats.in_flight);
+        assert!(!stats.in_flight.pending());
         assert!(stats.prepare().is_none());
 
         stats.retry();
@@ -389,7 +394,7 @@ mod tests {
         );
         assert!(stats.values.is_empty());
         assert!(stats.error.is_some());
-        assert!(!stats.in_flight);
+        assert!(!stats.in_flight.pending());
         assert!(stats.prepare().is_none());
     }
 
@@ -416,7 +421,7 @@ mod tests {
         stats.fail(&read, "Timed out".into());
         stats.retry();
         assert!(stats.error.is_none());
-        assert!(stats.in_flight);
+        assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
         let late = response(&read, 1, 99);
         stats.complete(read, late);

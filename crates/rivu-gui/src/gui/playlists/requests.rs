@@ -754,7 +754,7 @@ impl PlaylistModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::projection::GuiLibrarySnapshot;
+    use rivu_protocol::model::LibrarySnapshot;
     use std::sync::Arc;
 
     fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
@@ -791,13 +791,13 @@ mod tests {
     #[test]
     fn bitrate_revision_retains_identity_counts_viewport_catalog_and_worker() {
         let mut browser = PlaylistModel::default();
-        let previous = GuiLibrarySnapshot::default();
-        let latest = GuiLibrarySnapshot {
+        let previous = LibrarySnapshot::default();
+        let latest = LibrarySnapshot {
             bitrate_revision: 1,
             ..previous.clone()
         };
-        let revisions = previous.query_revisions(Some(1));
-        let current = latest.query_revisions(Some(1));
+        let revisions = previous.query_revisions(0, Some(1));
+        let current = latest.query_revisions(0, Some(1));
         browser.select_playlist(1, "one".into(), 0);
         browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
@@ -1652,9 +1652,46 @@ mod tests {
     }
 
     #[test]
+    fn debounced_search_does_not_add_a_second_quiet_interval() {
+        for kind in [ViewRequestKind::Summaries, ViewRequestKind::Entries] {
+            let mut model = PlaylistModel::default();
+            let query = Some("needle".to_owned());
+            let request = if kind == ViewRequestKind::Summaries {
+                model.search_playlists(query.clone());
+                Query::PlaylistSummaries {
+                    query,
+                    offset: 0,
+                    limit: 20,
+                }
+            } else {
+                model.select_playlist(1, "one".into(), 0);
+                model.search_playlist_entries(query.clone());
+                Query::PlaylistEntries {
+                    playlist_id: 1,
+                    query,
+                    offset: 0,
+                    limit: 20,
+                }
+            };
+            let (_, delay) = model
+                .requests
+                .prepare_view(
+                    kind,
+                    request,
+                    1,
+                    QueryRevisions::default(),
+                    0,
+                    Instant::now(),
+                )
+                .unwrap();
+            assert_eq!(delay, Duration::ZERO);
+        }
+    }
+
+    #[test]
     fn playlist_query_owners_separate_metadata_catalog_and_occurrences() {
         use rivu_protocol::model::Query;
-        let mut library = GuiLibrarySnapshot::default();
+        let mut library = LibrarySnapshot::default();
         Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 0);
         let summaries = Query::PlaylistSummaries {
             query: None,
@@ -1672,19 +1709,19 @@ mod tests {
             playlist_id: 1,
             entry_ids: vec![3],
         };
-        let before = library.query_revisions(Some(1));
+        let before = library.query_revisions(0, Some(1));
         library.revision += 1;
-        let metadata = library.query_revisions(Some(1));
+        let metadata = library.query_revisions(0, Some(1));
         assert_eq!(summaries.stamp(before), summaries.stamp(metadata));
         assert_ne!(entries.stamp(before), entries.stamp(metadata));
         assert_eq!(compact.stamp(before), compact.stamp(metadata));
         library.playlist_revision += 1;
-        let renamed = library.query_revisions(Some(1));
+        let renamed = library.query_revisions(0, Some(1));
         assert_ne!(summaries.stamp(metadata), summaries.stamp(renamed));
         assert_eq!(entries.stamp(metadata), entries.stamp(renamed));
         assert_eq!(compact.stamp(metadata), compact.stamp(renamed));
         Arc::make_mut(&mut library.playlist_entry_revisions).remove(&1);
-        let deleted = library.query_revisions(Some(1));
+        let deleted = library.query_revisions(0, Some(1));
         assert_ne!(compact.stamp(renamed), compact.stamp(deleted));
     }
 

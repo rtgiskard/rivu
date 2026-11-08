@@ -516,12 +516,10 @@ impl WindowView {
 
     pub(super) fn sync_transfer_state(&self, cx: &mut Context<Self>) {
         let pending = self.library.read(cx).library_range_pending();
-        self.queue.update(cx, |owner, cx| {
-            owner.set_transfer_state(pending, self.content_resolution.pending(), cx)
-        });
-        self.playlists.update(cx, |owner, cx| {
-            owner.set_transfer_state(pending, self.content_resolution.pending(), cx)
-        });
+        self.queue
+            .update(cx, |owner, cx| owner.set_transfer_state(pending, cx));
+        self.playlists
+            .update(cx, |owner, cx| owner.set_transfer_state(pending, cx));
     }
 
     pub(super) fn reconcile_features(&mut self, cx: &mut Context<Self>) {

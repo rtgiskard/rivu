@@ -14,21 +14,18 @@ pub(super) struct CollectionRead {
 #[derive(Default)]
 pub(in crate::gui) struct CollectionResolution {
     epoch: rivu_protocol::query_tracking::QueryEpoch,
-    worker: Option<u64>,
+    worker: crate::gui::query::ReadReservation,
 }
 
 impl CollectionResolution {
+    #[cfg(test)]
     pub(in crate::gui) fn pending(&self) -> bool {
-        self.worker.is_some()
+        self.worker.pending()
     }
 
     pub(super) fn begin(&mut self) -> Option<CollectionRead> {
-        if self.pending() {
-            return None;
-        }
+        let worker = self.worker.begin()?;
         self.epoch.advance();
-        let worker = self.epoch.generation();
-        self.worker = Some(worker);
         Some(CollectionRead {
             worker,
             ticket: self.epoch.ticket(),
@@ -40,7 +37,7 @@ impl CollectionResolution {
     }
 
     pub(super) fn timeout(&mut self, read: &CollectionRead) -> bool {
-        if self.worker != Some(read.worker) || !read.ticket.is_current() {
+        if !self.worker.owns(read.worker) || !read.ticket.is_current() {
             return false;
         }
         self.cancel();
@@ -48,11 +45,7 @@ impl CollectionResolution {
     }
 
     pub(super) fn finish(&mut self, read: &CollectionRead) -> bool {
-        if self.worker != Some(read.worker) {
-            return false;
-        }
-        self.worker = None;
-        true
+        self.worker.finish(read.worker)
     }
 }
 

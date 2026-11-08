@@ -88,16 +88,16 @@ impl PlaylistBrowser {
     }
     pub(in crate::gui) fn refresh_changes(
         &self,
-        previous: &crate::projection::GuiLibrarySnapshot,
-        next: &crate::projection::GuiLibrarySnapshot,
+        previous: &rivu_protocol::model::LibrarySnapshot,
+        next: &rivu_protocol::model::LibrarySnapshot,
     ) -> PlaylistRefresh {
         let summaries_query = Query::PlaylistSummaries {
             query: self.summaries.query.clone(),
             offset: 0,
             limit: 1,
         };
-        let summaries = summaries_query.stamp(previous.query_revisions(None))
-            != summaries_query.stamp(next.query_revisions(None));
+        let summaries = summaries_query.stamp(previous.query_revisions(0, None))
+            != summaries_query.stamp(next.query_revisions(0, None));
         let (entries, entry_payload_only) =
             self.entries
                 .playlist_id
@@ -108,8 +108,8 @@ impl PlaylistBrowser {
                         offset: 0,
                         limit: 1,
                     };
-                    let mut previous = previous.query_revisions(Some(playlist_id));
-                    let next = next.query_revisions(Some(playlist_id));
+                    let mut previous = previous.query_revisions(0, Some(playlist_id));
+                    let next = next.query_revisions(0, Some(playlist_id));
                     let changed = query.stamp(previous) != query.stamp(next);
                     previous.bitrate = next.bitrate;
                     (
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn playlist_reorder_refresh_is_scoped_and_preserves_catalog_payload() {
-        use crate::projection::GuiLibrarySnapshot;
+        use rivu_protocol::model::LibrarySnapshot;
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
@@ -616,7 +616,7 @@ mod tests {
             }],
         });
         playlists.select_entry(41, 3);
-        let previous = GuiLibrarySnapshot::default();
+        let previous = LibrarySnapshot::default();
         let mut next = previous.clone();
         Arc::make_mut(&mut next.playlist_entry_revisions).insert(2, 1);
         assert_eq!(
