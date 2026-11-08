@@ -199,6 +199,50 @@ class ProtocolTests(unittest.TestCase):
         return {"version":VERSION,"task_id":"test","operation":"speech","sample_rate":8000,
                 "channels":1,"frames":8,"model_manifest":"/manifest.json"}
 
+    def test_duration_uses_source_rate_for_both_operations(self):
+        for operation, channels in (("speech", 1), ("speech", 2), ("separate", 2)):
+            for rate in (8000, 44100, 48000, 192000):
+                with self.subTest(operation=operation, channels=channels, rate=rate):
+                    request = {**self.request(), "operation":operation, "channels":channels,
+                               "sample_rate":rate, "frames":14400 * rate}
+                    self.assertEqual(validate_request(request)["frames"], 14400 * rate)
+                    with self.assertRaises(WorkerError) as error:
+                        validate_request({**request, "frames":request["frames"] + 1})
+                    self.assertEqual(error.exception.code, "input_duration")
+
+    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for request protocol validation")
+    def test_schema_separation_requires_stereo_and_speech_preserves_both_layouts(self):
+        import jsonschema
+        schema = json.loads((Path(__file__).parent / "runtime/request.schema.json").read_text())
+        validator = jsonschema.Draft202012Validator(schema)
+        for operation in ("speech", "separate"):
+            for channels in (1, 2):
+                request = {**self.request(), "operation":operation, "channels":channels}
+                with self.subTest(operation=operation, channels=channels):
+                    if operation == "separate" and channels == 1:
+                        self.assertFalse(validator.is_valid(request))
+                        with self.assertRaises(WorkerError) as error:
+                            validate_request(request)
+                        self.assertEqual(error.exception.code, "input_channels")
+                    else:
+                        validator.validate(request)
+                        validate_request(request)
+
+    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for request protocol validation")
+    def test_schema_outer_bound_does_not_replace_semantic_duration_validation(self):
+        import jsonschema
+        schema = json.loads((Path(__file__).parent / "runtime/request.schema.json").read_text())
+        validator = jsonschema.Draft202012Validator(schema)
+        # The schema intentionally cannot multiply sibling fields. A consumer
+        # must still run semantic validation even after schema acceptance.
+        request = {**self.request(), "sample_rate":8000, "frames":14400 * 8000 + 1}
+        validator.validate(request)
+        with self.assertRaises(WorkerError) as error:
+            validate_request(request)
+        self.assertEqual(error.exception.code, "input_duration")
+        validator.validate({**request, "sample_rate":192000, "frames":14400 * 192000})
+        self.assertFalse(validator.is_valid({**request, "sample_rate":192000, "frames":14400 * 192000 + 1}))
+
     def test_controls_reject_nonfinite_wrong_operation_and_unknown(self):
         for parameters in ({"wet_mix":float("nan")}, {"wet_mix":1.1}, {"overlap":0.5}, {"wet_mix":True},
                            {"unknown_control":0}, {"post_filter":0}):
