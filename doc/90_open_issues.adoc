@@ -426,16 +426,15 @@ link:02_library.adoc#errors-and-partial-results[Errors and partial results].
 
 === Repeated playlist import identity resolution
 
-Status: resolved in implementation, 2026-10-31.
+Status: resolved in implementation, 2026-11-08.
 
 Repeated import occurrences reuse identity lookups within that import while
 preserving order, multiplicity, admission rules and separate scan/playlist commits.
 No identity cache survives the import.
 
-A historical CLI probe counted five identity queries across an import with 10,000
-repetitions and a second import with four unique ordinary/CUE identities. A separate
-minimum-duration case retained only accepted entries. Database reads checked order
-and multiplicity; these are query counts, not latency or RSS measurements. See
+Lookup batches contain at most 32 distinct prepared ordinary/CUE identities;
+occurrence count does not multiply those lookups. Failed preparation and missing
+identities remain excluded. See
 link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].
 
 === PCM continuity and frontend readiness from branch review

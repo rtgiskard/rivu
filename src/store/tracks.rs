@@ -827,6 +827,7 @@ impl Store {
         Ok(encoded)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn track_id_for_identity(&self, identity: super::TrackIdentity<'_>) -> Result<Option<i64>> {
         let id = match identity {
             super::TrackIdentity::File(path) => self.conn.prepare_cached("SELECT id FROM tracks WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 AND missing=0")?.query_row([path.to_string_lossy().as_ref()],

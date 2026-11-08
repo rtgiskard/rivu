@@ -26,6 +26,7 @@ pub(crate) use catalog::CatalogChanges;
 pub(crate) use duplicates::PreparedRelocation;
 #[cfg(test)]
 pub(crate) use duplicates::RelocationIdentity;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use scan::TrackIdentity;
 pub(crate) use tracks::PlaybackSource;
 

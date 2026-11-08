@@ -342,6 +342,87 @@ fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSc
 }
 
 impl Store {
+    /// Resolve each successfully prepared identity once, then expand the original
+    /// occurrences. Bounded indexed reads retain neither cloned paths nor payloads.
+    pub(crate) fn imported_track_ids(
+        &self,
+        result: &ScanResult,
+        items: &[crate::library::M3uItem],
+    ) -> Result<Vec<i64>> {
+        let prepared: HashSet<_> = result
+            .tracks()
+            .map(|record| identity(&record.source.path, record.cue))
+            .collect();
+        let mut resolved: HashMap<_, std::ops::Range<usize>> = items
+            .iter()
+            .map(|item| match item.cue_track {
+                Some(number) => TrackIdentity::Cue(item.path.as_path(), number),
+                None => TrackIdentity::File(item.path.as_path()),
+            })
+            .filter(|key| prepared.contains(key))
+            .map(|key| (key, 0..0))
+            .collect();
+        let mut resolved_ids = Vec::with_capacity(resolved.len());
+        let mut unique = resolved.iter_mut();
+        let mut statement = self.conn.prepare_cached(
+            "WITH requested AS MATERIALIZED (
+                SELECT CAST(key AS INTEGER) AS ordinal,
+                    json_extract(value,'$[0]') AS path,
+                    json_extract(value,'$[1]') AS number FROM json_each(?1)
+             ), resolved AS (
+                SELECT r.ordinal,t.id FROM requested r CROSS JOIN tracks t INDEXED BY tracks_path
+                WHERE r.number IS NULL AND t.path=r.path
+                    AND CASE WHEN t.cue_sheet IS NULL THEN 0 ELSE NULL END = 0 AND t.missing=0
+                UNION ALL
+                SELECT r.ordinal,t.id FROM requested r CROSS JOIN tracks t INDEXED BY tracks_cue
+                WHERE r.number IS NOT NULL AND t.cue_sheet IS NOT NULL
+                    AND t.cue_sheet=r.path AND t.cue_number=r.number AND t.missing=0
+             ) SELECT ordinal,id FROM resolved ORDER BY ordinal,id",
+        )?;
+        let mut batch = Vec::with_capacity(32);
+        let mut targets = Vec::with_capacity(32);
+        let mut encoded = Vec::new();
+        loop {
+            batch.clear();
+            targets.clear();
+            for (identity, ids) in unique.by_ref().take(32) {
+                let (path, number) = match identity {
+                    TrackIdentity::File(path) => (*path, None),
+                    TrackIdentity::Cue(path, number) => (*path, Some(*number)),
+                };
+                batch.push((path.to_str().context("Import path is not UTF-8")?, number));
+                targets.push(ids);
+            }
+            if batch.is_empty() {
+                break;
+            }
+            encoded.clear();
+            serde_json::to_writer(&mut encoded, &batch)?;
+            for row in statement.query_map([std::str::from_utf8(&encoded)?], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (ordinal, id) = row?;
+                let range = &mut targets[ordinal as usize];
+                if range.start == range.end {
+                    range.start = resolved_ids.len();
+                }
+                resolved_ids.push(id);
+                range.end = resolved_ids.len();
+            }
+        }
+        let mut ids = Vec::with_capacity(items.len());
+        for item in items {
+            let key = match item.cue_track {
+                Some(number) => TrackIdentity::Cue(&item.path, number),
+                None => TrackIdentity::File(&item.path),
+            };
+            if let Some(matches) = resolved.get(&key) {
+                ids.extend_from_slice(&resolved_ids[matches.clone()]);
+            }
+        }
+        Ok(ids)
+    }
+
     /// Read one reusable source snapshot, preferring an ordinary file identity.
     /// Both branches seek the path/identity index; no unrelated row is decoded.
     pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
@@ -978,5 +1059,106 @@ impl Store {
             self.track_cache.borrow_mut().entries.clear();
         }
         Ok(impacts)
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::library::{M3uItem, ScanRecord};
+
+    #[test]
+    fn imports_resolve_prepared_file_and_cue_identities_in_order_across_batches() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,probe_version) VALUES
+                (1,'/prepared.wav',2),(2,'/unprepared.wav',2);
+             INSERT INTO tracks(id,path,probe_version,missing) VALUES (4,'/missing.wav',2,1);
+             INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,probe_version)
+                VALUES (3,'/prepared.wav','/sheet.cue',7,0,2),
+                       (5,'/prepared.wav','/sheet.cue',8,0,2);",
+        )?;
+        let known = store.known_source(Path::new("/prepared.wav"))?.unwrap();
+        let source = Arc::new(ScanRecord {
+            path: "/prepared.wav".into(),
+            size: known.size,
+            modified_ns: known.modified_ns,
+            fingerprint: known.fingerprint,
+            media: known.media.unwrap(),
+        });
+        let missing = Arc::new(ScanRecord {
+            path: "/missing.wav".into(),
+            ..(*source).clone()
+        });
+        let cue = CueRecord::registered(
+            source.clone(),
+            CueSegment {
+                sheet: "/sheet.cue".into(),
+                number: 7,
+                start_frame: 0,
+                end_frame: None,
+            },
+            RegisteredCueMetadata {
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                track_number: None,
+                disc_number: None,
+                release_date: None,
+            },
+            None,
+        );
+        let mut result = ScanResult {
+            records: vec![source, missing],
+            segments: vec![cue],
+            ..Default::default()
+        };
+        let file = M3uItem {
+            path: "/prepared.wav".into(),
+            cue_track: None,
+        };
+        let mut items = vec![file.clone(); 33];
+        items.push(M3uItem {
+            path: "/sheet.cue".into(),
+            cue_track: Some(7),
+        });
+        items.push(M3uItem {
+            path: "/unprepared.wav".into(),
+            cue_track: None,
+        });
+        items.push(M3uItem {
+            path: "/missing.wav".into(),
+            cue_track: None,
+        });
+        items.push(M3uItem {
+            path: "/sheet.cue".into(),
+            cue_track: Some(8),
+        });
+        items.push(M3uItem {
+            path: "/sheet.cue".into(),
+            cue_track: Some(7),
+        });
+        items.push(file);
+        let mut expected = vec![1; 33];
+        for offset in 0..40 {
+            let id = 100 + offset;
+            let path = PathBuf::from(format!("/unique-{offset}.wav"));
+            store.conn.execute(
+                "INSERT INTO tracks(id,path,probe_version) VALUES(?1,?2,2)",
+                params![id, path.to_str()],
+            )?;
+            result.records.push(Arc::new(ScanRecord {
+                path: path.clone(),
+                ..(*result.records[0]).clone()
+            }));
+            items.push(M3uItem {
+                path,
+                cue_track: None,
+            });
+        }
+        expected.extend([3, 3, 1]);
+        expected.extend(100..140);
+        assert_eq!(store.imported_track_ids(&result, &items)?, expected);
+        Ok(())
     }
 }
