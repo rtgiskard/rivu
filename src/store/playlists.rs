@@ -11,6 +11,36 @@ use rivu_protocol::model::{
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
+const ENTRY_COLUMNS: &str = "e.position,e.id,e.track_id,
+    COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),
+    COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,
+    COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),
+    t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number";
+
+fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistEntryRow> {
+    let position = row.get::<_, i64>(0)? as usize;
+    Ok(PlaylistEntryRow {
+        id: row.get(1)?,
+        track_id: row.get(2)?,
+        position,
+        offset: position,
+        title: row.get(3)?,
+        artist: row.get(4)?,
+        album: row.get(5)?,
+        duration: row.get(8)?,
+        codec: row.get(9)?,
+        path: PathBuf::from(row.get::<_, String>(10)?),
+        channels: row.get::<_, i64>(11)? as u16,
+        sample_rate: row.get::<_, i64>(12)? as u32,
+        bits_per_sample: row.get(13)?,
+        bitrate_bps: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
+        bitrate_exact: row.get(15)?,
+        cue_number: row.get(16)?,
+        missing: row.get::<_, i64>(6)? != 0,
+        favorite: row.get(7)?,
+    })
+}
+
 impl Store {
     pub fn playlist_entry(&self, entry_id: i64) -> Result<Option<PlaylistEntryLocation>> {
         // Positions are contiguous. The covering playlist_order index supplies the last
@@ -242,7 +272,7 @@ impl Store {
             after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
         let start = after.map_or(0, |after| after.offset);
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT e.position,e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
+            "SELECT {ENTRY_COLUMNS} FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} AND (e.position,e.id)>(?3,?4) ORDER BY e.position,e.id LIMIT ?5"
         ))?;
         let mut db_rows = stmt.query(params![playlist_id, query, position, id, limit + 1])?;
         let mut rows = Vec::with_capacity(limit as usize);
@@ -257,32 +287,13 @@ impl Store {
                 position: row.get(0)?,
                 id: row.get(1)?,
             };
-            rows.push(PlaylistEntryRow {
-                id: cursor.id,
-                track_id: row.get(2)?,
-                position: cursor.position as usize,
-                offset: if query.is_some() {
-                    start
-                        .checked_add(rows.len())
-                        .context("Playlist matching offset overflow")?
-                } else {
-                    cursor.position as usize
-                },
-                title: row.get(3)?,
-                artist: row.get(4)?,
-                album: row.get(5)?,
-                duration: row.get(8)?,
-                codec: row.get(9)?,
-                path: PathBuf::from(row.get::<_, String>(10)?),
-                channels: row.get::<_, i64>(11)? as u16,
-                sample_rate: row.get::<_, i64>(12)? as u32,
-                bits_per_sample: row.get(13)?,
-                bitrate_bps: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
-                bitrate_exact: row.get(15)?,
-                cue_number: row.get(16)?,
-                missing: row.get::<_, i64>(6)? != 0,
-                favorite: row.get(7)?,
-            });
+            let mut entry = entry_from_row(row)?;
+            if query.is_some() {
+                entry.offset = start
+                    .checked_add(rows.len())
+                    .context("Playlist matching offset overflow")?;
+            }
+            rows.push(entry);
             last_cursor = Some(BatchContinuation {
                 cursor,
                 offset: start
@@ -372,32 +383,11 @@ impl Store {
         } else {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
-        let mut stmt = self.conn.prepare_cached(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {ENTRY_COLUMNS} FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
         let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut rows = stmt
-            .query_map(params![playlist_id, query, offset, limit], |r| {
-                Ok(PlaylistEntryRow {
-                    id: r.get(0)?,
-                    track_id: r.get(1)?,
-                    position: r.get::<_, i64>(7)? as usize,
-                    offset: r.get::<_, i64>(7)? as usize,
-                    title: r.get(2)?,
-                    artist: r.get(3)?,
-                    album: r.get(4)?,
-                    duration: r.get(8)?,
-                    codec: r.get(9)?,
-                    path: PathBuf::from(r.get::<_, String>(10)?),
-                    channels: r.get::<_, i64>(11)? as u16,
-                    sample_rate: r.get::<_, i64>(12)? as u32,
-                    bits_per_sample: r.get(13)?,
-                    bitrate_bps: r.get::<_, Option<i64>>(14)?.map(|value| value as u64),
-                    bitrate_exact: r.get(15)?,
-                    cue_number: r.get(16)?,
-                    missing: r.get::<_, i64>(5)? != 0,
-                    favorite: r.get(6)?,
-                })
-            })?
+            .query_map(params![playlist_id, query, offset, limit], entry_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if query.is_some() {
             for (index, row) in rows.iter_mut().enumerate() {
@@ -764,6 +754,34 @@ fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
 mod deletion_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn page_and_batch_decode_identical_track_fields_and_matching_offsets() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_title,title_override,raw_artist,raw_album,duration,
+                codec,channels,sample_rate,bits_per_sample,bitrate_bps,bitrate_exact,favorite,missing)
+             VALUES (1,'/audio.flac','raw','Needle','artist','album',12.5,'flac',2,96000,24,123456,1,1,1),
+                    (2,'/other.wav','other',NULL,'','',1.0,'pcm',1,8000,16,NULL,0,0,0);
+             INSERT INTO playlists(id,name) VALUES(1,'decoder');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+                VALUES (10,1,2,0),(11,1,1,1),(12,1,1,2);",
+        )?;
+        for query in [None, Some("needle")] {
+            let page = store.playlist_entries_page(1, query, 0, 10)?;
+            let first = store.playlist_entry_batch(1, query, None, 1, QueryStamp::default())?;
+            let mut rows = first.rows;
+            let mut after = first.next;
+            while after.is_some() {
+                let next = store.playlist_entry_batch(1, query, after, 1, QueryStamp::default())?;
+                rows.extend(next.rows);
+                after = next.next;
+            }
+            assert_eq!(rows, page.rows);
+            assert_eq!(page.total, rows.len());
+        }
+        Ok(())
+    }
 
     #[test]
     fn playlist_entry_location_tracks_reorder_and_deletion_by_identity() -> Result<()> {
