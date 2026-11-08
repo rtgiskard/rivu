@@ -320,7 +320,7 @@ impl SpectrumAnalyzer {
 
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
-        let mut rms = [0.0_f64; 2];
+        let mut energies = [0.0_f64; 2];
         let density_demand = self.visualizer.demand.stereo_density;
         let needs_fft = self.spectrum
             || self.visualizer.demand.spatial_spectrum
@@ -329,20 +329,18 @@ impl SpectrumAnalyzer {
         if needs_fft {
             self.prepare_fft();
         }
-        let mut energies = [0.0_f64; 3];
+        let mut cross = 0.0_f64;
         for (i, samples) in self.rolling[self.head..]
             .iter()
             .chain(&self.rolling[..self.head])
             .enumerate()
         {
-            rms[0] += f64::from(samples[0]).powi(2);
-            rms[1] += f64::from(samples[1]).powi(2);
+            let left = f64::from(samples[0]);
+            let right = f64::from(samples[1]);
+            energies[0] += left * left;
+            energies[1] += right * right;
             if density_demand {
-                let left = samples[0] as f64;
-                let right = samples[1] as f64;
-                energies[0] += left * left;
-                energies[1] += right * right;
-                energies[2] += left * right;
+                cross += left * right;
             }
             if needs_fft {
                 // Pack both real channels; the merged power below preserves
@@ -352,7 +350,7 @@ impl SpectrumAnalyzer {
             }
         }
         if density_demand {
-            let [left, right, cross] = energies;
+            let [left, right] = energies;
             let total = left + right;
             self.visualizer.correlation = (left > 0.0 && right > 0.0)
                 .then(|| (cross / (left * right).sqrt()).clamp(-1.0, 1.0) as f32);
@@ -366,7 +364,7 @@ impl SpectrumAnalyzer {
                 self.visualizer.density = density.snapshot();
             }
         }
-        let rms = rms.map(|power| (power / n as f64).sqrt() as f32);
+        let rms = energies.map(|power| (power / n as f64).sqrt() as f32);
         if !needs_fft {
             return rms;
         }
