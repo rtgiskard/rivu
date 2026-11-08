@@ -4,19 +4,20 @@ use anyhow::{Context, Result, bail, ensure};
 use async_channel::{Receiver, Sender};
 use async_io::Async;
 use futures::{
-    FutureExt, StreamExt,
+    Future, FutureExt, StreamExt,
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     stream::FuturesUnordered,
 };
 use rivu_audio::{AudioRenderSnapshot, RenderEvent};
 use rivu_protocol::{
     audio::{
-        ExpectedSource, PlaybackRange, Request, Response, VERSION, address, encode_frame_into,
-        read_frame, write_frame,
+        ExpectedSource, IO_TIMEOUT, PlaybackRange, Request, Response, VERSION, address,
+        encode_frame_into, read_frame, write_frame,
     },
     model::Query,
     response::{StateSections, ViewResponse},
     transport::timeout,
+    wire::HELLO_TIMEOUT,
 };
 use std::{
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
@@ -25,7 +26,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 const MAX_CLIENTS: usize = 8;
@@ -68,10 +68,10 @@ impl AudioServer {
                     }
                     clients.next().await
                 };
-                let event = futures::select! {
+                let event = futures::select_biased! {
                     _ = stopped.recv().fuse() => Event::Stop,
-                    accepted = listener.accept().fuse() => Event::Accepted(accepted),
                     _ = completed.fuse() => Event::Completed,
+                    accepted = listener.accept().fuse() => Event::Accepted(accepted),
                 };
                 match event {
                     Event::Stop => break,
@@ -134,7 +134,7 @@ async fn session(
 ) -> Result<()> {
     let mut bytes = Vec::new();
     let request = timeout(
-        Duration::from_secs(1),
+        HELLO_TIMEOUT,
         read_frame::<Request>(&mut stream, &mut bytes),
     )
     .await??;
@@ -153,7 +153,7 @@ async fn session(
     .await?;
     let request = futures::select! {
         _ = stopped.recv().fuse() => return Ok(()),
-        request = read_frame::<Request>(&mut stream, &mut bytes).fuse() => request?,
+        request = timeout(IO_TIMEOUT, read_frame::<Request>(&mut stream, &mut bytes)).fuse() => request??,
     };
     let Request::Read {
         expected,
@@ -389,159 +389,174 @@ async fn stream_render(
     let (tx, rx) = async_channel::bounded(BUFFERED_CHUNKS);
     let (buffers, available) = async_channel::bounded(PCM_BUFFERS);
     let initial_buffers = buffers.clone();
-    let _cancel = CancelOnDrop {
+    let output = RenderOutput {
         cancelled: Arc::clone(&cancelled),
-        chunks: rx.clone(),
-        buffers: buffers.clone(),
+        chunks: rx,
+        buffers,
     };
     let cancellation = Arc::clone(&cancelled);
-    let work = workers
-        .execute(move || {
-            let mut batch = None::<PcmBatcher>;
-            let result = rivu_audio::render_stream(
-                &snapshot,
-                config.media_read_buffer_mib,
-                config.ffmpeg_enabled,
-                &cancellation,
-                |event| {
-                    match event {
-                        RenderEvent::Start(format) => {
-                            let layout: Vec<_> = format
-                                .layout
-                                .iter()
-                                .map(|channel| channel.standard_index())
-                                .collect();
-                            ensure!(
-                                rivu_protocol::pcm::valid_layout(&layout),
-                                "Invalid native PCM layout"
-                            );
-                            let batcher = PcmBatcher::new(
-                                format.channels() as usize,
-                                tx.clone(),
-                                available.clone(),
-                                Arc::clone(&cancellation),
-                            )?;
-                            for _ in 0..PCM_BUFFERS {
-                                initial_buffers.send_blocking(Vec::<f32>::with_capacity(
-                                    batcher.sample_limit,
-                                ))?;
-                            }
-                            batch = Some(batcher);
-                            tx.send_blocking(Response::Start {
-                                source,
-                                identity: format.source_identity,
-                                sample_rate: format.sample_rate,
-                                layout,
-                                duration: format.duration,
-                            })?;
+    let work = workers.execute(move || {
+        let mut batch = None::<PcmBatcher>;
+        let result = rivu_audio::render_stream(
+            &snapshot,
+            config.media_read_buffer_mib,
+            config.ffmpeg_enabled,
+            &cancellation,
+            |event| {
+                match event {
+                    RenderEvent::Start(format) => {
+                        let layout: Vec<_> = format
+                            .layout
+                            .iter()
+                            .map(|channel| channel.standard_index())
+                            .collect();
+                        ensure!(
+                            rivu_protocol::pcm::valid_layout(&layout),
+                            "Invalid native PCM layout"
+                        );
+                        let batcher = PcmBatcher::new(
+                            format.channels() as usize,
+                            tx.clone(),
+                            available.clone(),
+                            Arc::clone(&cancellation),
+                        )?;
+                        for _ in 0..PCM_BUFFERS {
+                            initial_buffers
+                                .send_blocking(Vec::<f32>::with_capacity(batcher.sample_limit))?;
                         }
-                        RenderEvent::Pcm {
-                            media_start,
-                            media_step,
-                            samples,
-                        } => {
-                            batch
-                                .as_mut()
-                                .context("Audio renderer omitted start metadata")?
-                                .push(media_start, media_step, samples)?;
+                        batch = Some(batcher);
+                        tx.send_blocking(Response::Start {
+                            source,
+                            identity: format.source_identity,
+                            sample_rate: format.sample_rate,
+                            layout,
+                            duration: format.duration,
+                        })?;
+                    }
+                    RenderEvent::Pcm {
+                        media_start,
+                        media_step,
+                        samples,
+                    } => {
+                        batch
+                            .as_mut()
+                            .context("Audio renderer omitted start metadata")?
+                            .push(media_start, media_step, samples)?;
+                    }
+                    RenderEvent::Complete { frames, duration } => {
+                        if let Some(batch) = &mut batch {
+                            batch.flush()?;
                         }
-                        RenderEvent::Complete { frames, duration } => {
-                            if let Some(batch) = &mut batch {
-                                batch.flush()?;
-                            }
-                            tx.send_blocking(Response::Complete { frames, duration })?
-                        }
+                        tx.send_blocking(Response::Complete { frames, duration })?
                     }
-                    Ok(())
-                },
-            );
-            // A decoder failure can leave a valid partial packet. Preserve it
-            // ahead of Error; cancellation instead drops it and unblocks waits.
-            if result.is_err()
-                && !cancellation.load(Ordering::Acquire)
-                && let Some(batch) = &mut batch
-            {
-                batch.flush()?;
-            }
-            result
-        })
-        .fuse();
-    futures::pin_mut!(work);
-    let mut result = None;
-    let mut extra = [0; 1];
-    loop {
-        if result.is_some() && rx.is_empty() {
-            break;
+                }
+                Ok(())
+            },
+        );
+        // A decoder failure can leave a valid partial packet. Preserve it
+        // ahead of Error; cancellation instead drops it and unblocks waits.
+        if result.is_err()
+            && !cancellation.load(Ordering::Acquire)
+            && let Some(batch) = &mut batch
+        {
+            batch.flush()?;
         }
-        enum Event {
-            Stop,
-            Work(Result<Result<()>>),
-            Chunk(std::result::Result<Response, async_channel::RecvError>),
-        }
-        let event = futures::select! {
-            _ = stopped.recv().fuse() => Event::Stop,
-            _ = reader.read(&mut extra).fuse() => Event::Stop,
-            done = work => Event::Work(done),
-            chunk = rx.recv().fuse() => Event::Chunk(chunk),
-        };
-        match event {
-            Event::Stop => {
-                cancelled.store(true, Ordering::Release);
-                rx.close();
-                buffers.close();
-                if result.is_none() {
-                    let _ = work.await;
-                }
-                return Ok(());
-            }
-            Event::Work(done) => result = Some(done.and_then(|result| result)),
-            Event::Chunk(Ok(chunk)) => {
-                let written = {
-                    let sending = send(writer, &chunk, bytes).fuse();
-                    futures::pin_mut!(sending);
-                    futures::select! {
-                        _ = stopped.recv().fuse() => None,
-                        _ = reader.read(&mut extra).fuse() => None,
-                        result = sending => Some(result),
-                    }
-                };
-                if !matches!(written, Some(Ok(()))) {
-                    cancelled.store(true, Ordering::Release);
-                    rx.close();
-                    buffers.close();
-                    if result.is_none() {
-                        let _ = work.await;
-                    }
-                    return written.unwrap_or(Ok(()));
-                }
-                if let Response::Pcm { mut samples, .. } = chunk {
-                    samples.clear();
-                    let _ = buffers.try_send(samples);
-                }
-            }
-            Event::Chunk(Err(_)) => {
-                if result.is_none() {
-                    result = Some(work.await.and_then(|result| result));
-                }
-                break;
-            }
-        }
-    }
-    if let Some(Err(error)) = result {
-        send(writer, &Response::Error(format!("{error:#}")), bytes).await?;
-    }
-    Ok(())
+        result
+    });
+    output.forward(reader, writer, work, stopped, bytes).await
 }
-struct CancelOnDrop {
+
+struct RenderOutput {
     cancelled: Arc<AtomicBool>,
     chunks: Receiver<Response>,
     buffers: Sender<Vec<f32>>,
 }
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
+impl RenderOutput {
+    fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         self.chunks.close();
         self.buffers.close();
+    }
+
+    async fn forward(
+        &self,
+        reader: &mut (impl AsyncRead + Unpin),
+        writer: &mut (impl AsyncWrite + Unpin),
+        work: impl Future<Output = Result<Result<()>>>,
+        stopped: &Receiver<()>,
+        bytes: &mut Vec<u8>,
+    ) -> Result<()> {
+        let work = work.fuse();
+        futures::pin_mut!(work);
+        let mut result = None;
+        let mut extra = [0; 1];
+        loop {
+            // A ready socket and continuously refilled channel must not turn
+            // this finite request into an unbounded executor turn. Keep every
+            // frame lossless; yield without draining or dropping queued PCM.
+            futures_lite::future::yield_now().await;
+            if result.is_some() && self.chunks.is_empty() {
+                break;
+            }
+            enum Event {
+                Stop,
+                Work(Result<Result<()>>),
+                Chunk(std::result::Result<Response, async_channel::RecvError>),
+            }
+            let event = futures::select_biased! {
+                _ = stopped.recv().fuse() => Event::Stop,
+                _ = reader.read(&mut extra).fuse() => Event::Stop,
+                done = work => Event::Work(done),
+                chunk = self.chunks.recv().fuse() => Event::Chunk(chunk),
+            };
+            match event {
+                Event::Stop => {
+                    self.cancel();
+                    if result.is_none() {
+                        let _ = work.await;
+                    }
+                    return Ok(());
+                }
+                Event::Work(done) => result = Some(done.and_then(|result| result)),
+                Event::Chunk(Ok(chunk)) => {
+                    let written = {
+                        let sending = send(writer, &chunk, bytes).fuse();
+                        futures::pin_mut!(sending);
+                        futures::select_biased! {
+                            _ = stopped.recv().fuse() => None,
+                            _ = reader.read(&mut extra).fuse() => None,
+                            result = sending => Some(result),
+                        }
+                    };
+                    if !matches!(written, Some(Ok(()))) {
+                        self.cancel();
+                        if result.is_none() {
+                            let _ = work.await;
+                        }
+                        return written.unwrap_or(Ok(()));
+                    }
+                    if let Response::Pcm { mut samples, .. } = chunk {
+                        samples.clear();
+                        let _ = self.buffers.try_send(samples);
+                    }
+                }
+                Event::Chunk(Err(_)) => {
+                    if result.is_none() {
+                        result = Some(work.await.and_then(|result| result));
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(Err(error)) = result {
+            send(writer, &Response::Error(format!("{error:#}")), bytes).await?;
+        }
+        Ok(())
+    }
+}
+impl Drop for RenderOutput {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 

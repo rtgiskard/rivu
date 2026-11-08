@@ -176,6 +176,11 @@ and decoder hint), optional playback source generation, explicit Before/After
 signal and optional selected-source-relative range. Core reloads the authoritative
 Track and checks that expectation; clients do not supply authoritative metadata.
 
+The initial Hello frame has a one-second deadline. After the Hello reply, the single
+`Read` request must arrive within five seconds; an idle or incomplete request closes
+the session and releases its admission slot. These admission deadlines do not
+limit an accepted render's lifetime.
+
 `Start` identifies the captured source, native sample rate, channel layout and
 optional full-source duration. Ordered `Pcm` chunks carry sequence, media start,
 media seconds per frame and interleaved float samples; `Complete` carries rendered
@@ -201,11 +206,10 @@ held until the render worker exits, including while a blocking decoder call is
 outstanding. GUI preview policy and summary ownership are defined in
 link:23_visuals.adoc#waveform[Waveform].
 
-Side-channel accept loops and realtime PCM control sessions yield cooperatively
-between requests, including when buffered input and output complete without
-waiting. Finite PCM transmission is backpressured by its bounded queue and socket
-writes, but has no explicit cumulative work budget when both remain immediately
-ready. Frame and client limits do not substitute for a scheduling boundary.
+Side-channel accept loops, realtime PCM control sessions and finite PCM forwarding
+yield cooperatively, including when buffered input and output complete without
+waiting. Finite forwarding remains ordered and lossless under queue and socket
+backpressure; cancellation still retains the physical lease until worker exit.
 
 === Owner execution and retirement
 
