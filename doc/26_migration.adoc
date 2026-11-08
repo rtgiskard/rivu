@@ -81,14 +81,16 @@ referencing system-queue `playlist_entries.id` with `ON DELETE SET NULL`.
 New databases create the current format directly. Its version is defined by
 `SCHEMA_VERSION` in link:../crates/rivu-format/src/database.rs[rivu-format's database contract].
 
-Offline preflight checks tables, readable columns, primary/unique keys, usable
-indexes, the queue singleton and required triggers. Before migration commits,
-all user-defined schema objects must also match a fresh current database by
-identity and definition tokens. Whitespace and unquoted token case are ignored;
-quoted identifiers and literals remain exact. Equivalent hand-written schemas
-can be conservatively rejected. Unexpected objects fail with their names and roll
-back conversion rather than being deleted. Current resources undergo the same
-strict target check without rewriting or backups.
+Check and Apply share strict source preflight against the supported schema,
+including tables, columns, keys, indexes, the queue singleton and required triggers.
+Unsupported or custom definitions are rejected before a backup or conversion.
+Before migration commits, all user-defined schema objects must also match a fresh
+current database by identity and definition tokens. Whitespace and unquoted token
+case are ignored; quoted identifiers and literals remain exact. Equivalent
+hand-written schemas can be conservatively rejected. A failed target check rolls
+back conversion and preserves the complete backup; unexpected objects are never
+deleted. Current resources undergo the same strict target check without rewriting
+or backups.
 
 SQLite-owned objects and file-byte equality are excluded. This is not a full
 integrity or derived-data check; normal application opening uses the cheaper

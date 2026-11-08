@@ -438,7 +438,7 @@ fn version_two_fixture() -> (tempfile::TempDir, Options) {
          UPDATE rivu_meta SET current_queue_entry_id=42;",
     )
     .unwrap();
-    catalog_order::validate(&conn).unwrap();
+    target_schema::validate_catalog_source(&conn).unwrap();
     (directory, options)
 }
 
@@ -513,7 +513,7 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     assert_eq!(applied.backups[0].status, BackupStatus::Complete);
     let backup = Connection::open(&applied.backups[0].path).unwrap();
     assert_eq!(format_version(&backup), source_version);
-    catalog_order::validate(&backup).unwrap();
+    target_schema::validate_catalog_source(&backup).unwrap();
     assert_eq!(occurrence_snapshot(&backup), occurrences);
     assert_eq!(track_snapshot(&backup), tracks);
     assert_eq!(album_snapshot(&backup), albums);
@@ -753,7 +753,43 @@ fn upgraded_history_keeps_album_summary_triggers_writable() {
 }
 
 #[test]
-fn unrecognized_schema_changes_roll_back_without_losing_user_objects() {
+fn schema_two_preflight_rejects_changed_constraints_and_defaults() {
+    for (original, changed) in [
+        (
+            "file_size INTEGER NOT NULL DEFAULT 0",
+            "file_size INTEGER NOT NULL DEFAULT 1",
+        ),
+        (
+            "favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1))",
+            "favorite INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let options = Options {
+            data_dir: directory.path().to_path_buf(),
+            config: directory.path().join("config.toml"),
+            explicit_data_dir: true,
+        };
+        let path = options.data_dir.join("library.db");
+        let conn = Connection::open(&path).unwrap();
+        let schema = include_str!("../tests/fixtures/schema2.sql").replace(original, changed);
+        conn.execute_batch(&schema).unwrap();
+        database::validate_common_structure(&conn).unwrap();
+        let before = fs::read(&path).unwrap();
+        for mode in [Mode::Check, Mode::Apply] {
+            let mut report = Report::default();
+            let error = run(&options, mode, &mut report).expect_err(changed);
+            assert!(format!("{error:#}").contains("Schema definition differs"));
+            assert!(report.backups.is_empty());
+            assert_eq!(format_version(&conn), 2);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::read_dir(&options.data_dir).unwrap().count(), 1);
+        }
+    }
+}
+
+#[test]
+fn unrecognized_schema_changes_fail_preflight_without_losing_user_objects() {
     for (change, retained_value) in [
         (
             "CREATE TABLE private_notes(value TEXT); INSERT INTO private_notes VALUES('keep me');",
@@ -762,6 +798,14 @@ fn unrecognized_schema_changes_roll_back_without_losing_user_objects() {
         (
             "CREATE INDEX custom_title_lookup ON tracks(raw_title);",
             "SELECT name FROM sqlite_schema WHERE name='custom_title_lookup'",
+        ),
+        (
+            "CREATE VIEW custom_titles AS SELECT raw_title FROM tracks;",
+            "SELECT sql FROM sqlite_schema WHERE name='custom_titles'",
+        ),
+        (
+            "CREATE TRIGGER custom_playlist_update AFTER UPDATE ON playlists BEGIN UPDATE tracks SET raw_title='changed' WHERE id=1; END;",
+            "SELECT sql FROM sqlite_schema WHERE name='custom_playlist_update'",
         ),
         (
             "ALTER TABLE tracks ADD COLUMN retired TEXT DEFAULT '  keep me  ';",
@@ -776,29 +820,46 @@ fn unrecognized_schema_changes_roll_back_without_losing_user_objects() {
             "SELECT sql FROM sqlite_schema WHERE name='albums_artist'",
         ),
         (
+            "DROP TRIGGER albums_artist_update;",
+            "SELECT sql FROM sqlite_schema WHERE name='albums_update'",
+        ),
+        (
             "CREATE TABLE sqlitex_notes(value TEXT); INSERT INTO sqlitex_notes VALUES('keep me');",
             "SELECT value FROM sqlitex_notes",
         ),
     ] {
         let (_directory, options) = version_two_fixture();
-        let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
+        let path = options.data_dir.join("library.db");
+        let conn = Connection::open(&path).unwrap();
         conn.execute_batch(change).unwrap();
         let retained: String = conn
             .query_row(retained_value, [], |row| row.get(0))
             .unwrap();
         let occurrences = occurrence_snapshot(&conn);
-        let mut report = Report::default();
-        assert!(run(&options, Mode::Apply, &mut report).is_err(), "{change}");
-        assert_eq!(report.backups.len(), 1);
-        assert_eq!(report.backups[0].status, BackupStatus::Complete);
-        assert_eq!(format_version(&conn), 2);
-        catalog_order::validate(&conn).unwrap();
-        assert_eq!(
-            conn.query_row(retained_value, [], |row| row.get::<_, String>(0))
-                .unwrap(),
-            retained
-        );
-        assert_eq!(occurrence_snapshot(&conn), occurrences);
+        let tracks = track_snapshot(&conn);
+        let albums = album_snapshot(&conn);
+        let before = fs::read(&path).unwrap();
+        let entries = fs::read_dir(&options.data_dir).unwrap().count();
+        let mut failures = Vec::new();
+        for mode in [Mode::Check, Mode::Apply] {
+            let mut report = Report::default();
+            let error = run(&options, mode, &mut report).expect_err(change);
+            failures.push(format!("{error:#}"));
+            assert!(report.backups.is_empty(), "{change}");
+            assert_eq!(report.database_status, "unchanged");
+            assert_eq!(format_version(&conn), 2);
+            assert_eq!(fs::read(&path).unwrap(), before, "{change}");
+            assert_eq!(fs::read_dir(&options.data_dir).unwrap().count(), entries);
+            assert_eq!(
+                conn.query_row(retained_value, [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                retained
+            );
+            assert_eq!(occurrence_snapshot(&conn), occurrences);
+            assert_eq!(track_snapshot(&conn), tracks);
+            assert_eq!(album_snapshot(&conn), albums);
+        }
+        assert_eq!(failures[0], failures[1], "{change}");
     }
 }
 
@@ -807,18 +868,30 @@ fn failed_catalog_migration_rolls_back_schema_version_and_data() {
     let (_directory, options) = version_two_fixture();
     let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
     let occurrences = occurrence_snapshot(&conn);
+    let tracks = track_snapshot(&conn);
+    let albums = album_snapshot(&conn);
     let mut report = Report::default();
-    assert!(
-        apply_database_change(&options, &mut report, |transaction| {
-            catalog_order::apply(transaction)?;
-            bail!("deterministic postcondition failure")
-        })
-        .is_err()
-    );
+    let error = apply_database_change(&options, &mut report, |transaction| {
+        catalog_order::apply(transaction)?;
+        transaction.execute_batch(
+            "CREATE TABLE unexpected(value TEXT);
+             UPDATE tracks SET raw_title='must roll back' WHERE id=1;",
+        )?;
+        target_schema::validate(transaction)
+    })
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("Schema object set differs from a fresh database"));
     assert_eq!(report.backups.len(), 1);
     assert_eq!(report.backups[0].status, BackupStatus::Complete);
-    catalog_order::validate(&conn).unwrap();
+    let backup = Connection::open(&report.backups[0].path).unwrap();
+    target_schema::validate_catalog_source(&backup).unwrap();
+    assert_eq!(occurrence_snapshot(&backup), occurrences);
+    assert_eq!(track_snapshot(&backup), tracks);
+    assert_eq!(album_snapshot(&backup), albums);
+    target_schema::validate_catalog_source(&conn).unwrap();
     assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(track_snapshot(&conn), tracks);
+    assert_eq!(album_snapshot(&conn), albums);
     assert_eq!(
         conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
             row.get::<_, i64>(0)

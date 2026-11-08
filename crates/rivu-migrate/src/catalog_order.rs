@@ -1,24 +1,9 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rivu_format::database;
 use rusqlite::Connection;
 
-pub(super) fn validate(conn: &Connection) -> Result<()> {
-    ensure!(
-        database::inspect(conn)? == database::DatabaseState::Versioned { schema_version: 2 },
-        "Expected database schema 2"
-    );
-    database::validate_common_structure(conn)?;
-    let compatible: bool = conn.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info('playlists') WHERE name='position')",
-        [],
-        |row| row.get(0),
-    )?;
-    ensure!(compatible, "Incompatible schema 2 catalog structure");
-    Ok(())
-}
-
 pub(super) fn apply(conn: &Connection) -> Result<()> {
-    validate(conn)?;
+    super::target_schema::validate_catalog_source(conn)?;
     tracing::info!("Adding playlist catalog positions in playlist-ID order");
     conn.execute_batch(
         "ALTER TABLE playlists ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK(position>=0);

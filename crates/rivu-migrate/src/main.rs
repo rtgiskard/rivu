@@ -39,7 +39,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let args = Args::try_parse().unwrap_or_else(|error| cli_error(error).exit());
-    if let Err(error) = rivu_utils::logging::init(None) {
+    if let Err(error) = rivu_utils::logging::init(None, rivu_utils::logging::StderrFormat::Text) {
         eprintln!("Initializing logging failed: {:#}", TerminalEscaped(error));
         return ExitCode::from(2);
     }

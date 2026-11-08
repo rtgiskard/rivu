@@ -132,7 +132,8 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
         .with_context(|| format!("Opening database read-only {}", path.display()))?;
     let schema_version = match database::inspect(&connection)? {
         database::DatabaseState::Versioned { schema_version: 2 } => {
-            catalog_order::validate(&connection).context("Validating database schema structure")?;
+            target_schema::validate_catalog_source(&connection)
+                .context("Validating database schema structure")?;
             2
         }
         _ => {

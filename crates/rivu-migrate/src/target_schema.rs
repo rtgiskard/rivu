@@ -41,6 +41,25 @@ pub(super) fn validate(conn: &Connection) -> Result<()> {
     database::validate_structure(conn)?;
     let fresh = Connection::open_in_memory()?;
     database::create_current(&fresh)?;
+    validate_objects(conn, &fresh)
+}
+
+pub(super) fn validate_catalog_source(conn: &Connection) -> Result<()> {
+    ensure!(
+        database::inspect(conn)? == database::DatabaseState::Versioned { schema_version: 2 },
+        "Expected database schema 2"
+    );
+    database::validate_common_structure(conn)?;
+    let fresh = Connection::open_in_memory()?;
+    database::create_current(&fresh)?;
+    // Catalog positions are the only schema change this migration supports.
+    // Compare the source against that same authoritative object set before any
+    // backup or write, rather than discovering unsupported objects after ALTER.
+    fresh.execute_batch("ALTER TABLE playlists DROP COLUMN position")?;
+    validate_objects(conn, &fresh)
+}
+
+fn validate_objects(conn: &Connection, fresh: &Connection) -> Result<()> {
     const OBJECTS: &str = "SELECT type,name,tbl_name,sql FROM sqlite_schema
         WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name";
     let mut expected_statement = fresh.prepare(OBJECTS)?;
