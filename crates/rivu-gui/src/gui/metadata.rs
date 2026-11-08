@@ -596,7 +596,13 @@ impl Metadata {
         }
     }
 
-    fn decoder_view(&mut self, panel: u64, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn decoder_view(
+        &mut self,
+        panel: u64,
+        label_width: gpui::Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let hint = self
             .metadata
@@ -645,15 +651,28 @@ impl Metadata {
             Self::choose_hint,
             |this, _, cx| this.close_hint(cx),
         );
+        let trigger = trigger
+            .bg(gpui::transparent_black())
+            .border_color(gpui::transparent_black())
+            .px_0()
+            .w_auto()
+            .min_w(gpui::rems(4.))
+            .ml(-px(1.))
+            .when(self.hint_panel == Some(panel), |trigger| {
+                trigger.bg(rgb(theme.highlight))
+            });
         let mut content = column().gap_1().child(
             row()
                 .gap_4()
-                .child(caption(theme, self.tr("gl-decoder-hint")))
+                .child(
+                    caption(theme, self.tr("gl-decoder-hint"))
+                        .w(label_width)
+                        .flex_shrink_0(),
+                )
                 .child(
                     div()
                         .relative()
-                        .w(gpui::rems(10.))
-                        .min_w_0()
+                        .flex_shrink_0()
                         .child(
                             gpui::canvas(
                                 move |bounds, _, _| measure.set(Some(bounds)),
@@ -674,8 +693,36 @@ impl Metadata {
         );
         if self.hint_panel == Some(panel)
             && self.hint_choices.is_open()
-            && let Some(bounds) = bounds.get()
+            && let Some(mut bounds) = bounds.get()
         {
+            let candidate_width = (0..3)
+                .filter_map(|index| self.hint_choices.item(index))
+                .map(|item| {
+                    let run = gpui::TextRun {
+                        len: item.label.len(),
+                        font: self.ui_font.clone(),
+                        color: rgb(theme.text).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .shape_line(
+                            item.label.clone(),
+                            window.rem_size() * 0.875 * rivu_ui::theme::font_size_scale(cx),
+                            &[run],
+                            None,
+                        )
+                        .width()
+                        .ceil()
+                })
+                .fold(px(0.), gpui::Pixels::max);
+            // Leave room for option padding, popup insets, borders and scrollbar.
+            bounds.size.width = bounds
+                .size
+                .width
+                .max(candidate_width + window.rem_size() * 2.5);
             content = content.child(
                 ChoicePopup::new(
                     ("metadata-decoder-options", panel),
@@ -921,7 +968,6 @@ impl Metadata {
             });
         });
         self.prepare_artwork(cx);
-        let decoder = self.decoder_view(panel_id, window, cx);
         let track = self.metadata.track();
         let id = track.map(|track| track.id);
         let favorite = track.is_some_and(|track| track.favorite);
@@ -1199,6 +1245,7 @@ impl Metadata {
                 .chain(&tags)
                 .map(|fields| &fields[index].0)
                 .chain(edit_labels.iter().map(|fields| &fields[index]))
+                .chain((index == 1).then(|| self.tr("gl-decoder-hint")).as_ref())
                 .chain((index == 0).then_some(&track_kind.0))
                 .map(|label| {
                     let run = gpui::TextRun {
@@ -1225,6 +1272,8 @@ impl Metadata {
             let scale = window.scale_factor();
             px((f32::from(width) * scale).ceil() / scale)
         });
+        let has_cue = cue.is_some();
+        let decoder = self.decoder_view(panel_id, label_widths[1], window, cx);
         let scroll = self
             .context
             .scroll
@@ -1330,14 +1379,25 @@ impl Metadata {
                                     ),
                                 ),
                             ))
-                            .child(label_value_row(
-                                theme,
-                                track_kind.0.clone(),
-                                track_kind.1.clone(),
-                                label_widths[0],
-                                metadata_copy(track_kind.0, track_kind.1, copy_hint.clone(), cx),
-                            ))
-                            .when(cue.is_some(), |file| {
+                            .child(
+                                metadata_row(
+                                    label_value_row(
+                                        theme,
+                                        track_kind.0.clone(),
+                                        track_kind.1.clone(),
+                                        label_widths[0],
+                                        metadata_copy(
+                                            track_kind.0,
+                                            track_kind.1,
+                                            copy_hint.clone(),
+                                            cx,
+                                        ),
+                                    ),
+                                    decoder,
+                                )
+                                .items_center(),
+                            )
+                            .when(has_cue, |file| {
                                 file.child(metadata_rows(
                                     theme,
                                     cue_fields,
@@ -1353,7 +1413,6 @@ impl Metadata {
                         self.tr("gl-metadata"),
                         metadata_rows(theme, metadata, label_widths, copy_hint.clone(), cx),
                     ))
-                    .child(decoder)
                     .child(metadata_group(
                         theme,
                         row()
@@ -1438,7 +1497,7 @@ impl Metadata {
                                     metadata_copy(last_played.0, last_played.1, copy_hint, cx),
                                 ),
                             ))
-                            .when(track.is_some(), |tags| {
+                            .when(id.is_some(), |tags| {
                                 tags.child(match self.artwork_view.measured_image(panel_id, cx) {
                                     Some(image) => artwork_preview(
                                         theme,

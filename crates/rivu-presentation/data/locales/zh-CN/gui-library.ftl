@@ -229,7 +229,7 @@ gl-file = 文件
 
 gl-metadata = 元数据
 
-gl-decoder-hint = 解码器偏好
+gl-decoder-hint = 解码偏好
 
 gl-auto = 自动
 
