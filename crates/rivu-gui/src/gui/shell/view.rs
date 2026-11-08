@@ -404,14 +404,40 @@ impl Render for WindowView {
                             )),
                         ),
                     )
-                    .child(menu_item(
-                        "material-controls",
-                        self.tr("material-menu"),
-                        cx,
-                        |this, _, cx| {
-                            this.toggle_material_controls(cx);
-                        },
-                    ))
+                    .child(
+                        menu_item(
+                            "material-controls",
+                            self.tr("material-menu"),
+                            cx,
+                            |this, _, cx| {
+                                this.toggle_material_controls(cx);
+                            },
+                        )
+                        .child(
+                            rivu_ui::icon(
+                                if material_session.enabled {
+                                    "󰔡"
+                                } else {
+                                    "󰔢"
+                                },
+                                cx,
+                            )
+                            .ml_auto()
+                            .size(rems(1.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(rems(0.875))
+                            .line_height(relative(1.))
+                            .text_color(rgb(
+                                if material_session.enabled {
+                                    theme.accent
+                                } else {
+                                    theme.muted
+                                },
+                            )),
+                        ),
+                    )
                     .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "app-keyboard-help",
