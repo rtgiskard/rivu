@@ -78,6 +78,72 @@ pub(crate) fn collect_stream(
     })?;
     Ok(collected)
 }
+pub(super) fn render_stream(
+    snapshot: &super::AudioRenderSnapshot,
+    media_read_buffer_mib: u32,
+    ffmpeg_enabled: bool,
+    cancelled: &AtomicBool,
+    mut emit: impl FnMut(super::RenderEvent<'_>) -> Result<()>,
+) -> Result<()> {
+    check_cancelled(Some(cancelled))?;
+    let renderer = if let Some(pcm) = &snapshot.pcm {
+        SourceRenderer::from_pcm(pcm.clone(), pcm.identity())?
+    } else {
+        SourceRenderer::open(
+            &snapshot.path,
+            snapshot.range,
+            snapshot.decoder_hint,
+            media_read_buffer_mib,
+            ffmpeg_enabled,
+            cancelled,
+        )?
+    };
+    renderer.finish(cancelled)?;
+    if snapshot
+        .expected_identity
+        .is_some_and(|expected| expected != renderer.format.source_identity)
+    {
+        bail!("Render source differs from the captured active source");
+    }
+    let context = snapshot
+        .graph
+        .as_ref()
+        .map(super::graph::GraphSnapshot::source_context);
+    let graph = if snapshot.signal == rivu_format::config::VisualizationSignal::After {
+        snapshot
+            .graph
+            .as_ref()
+            .map(super::graph::GraphSnapshot::prepare)
+            .transpose()?
+    } else {
+        None
+    };
+    let SourceRenderer {
+        mut source,
+        identity_file,
+        format,
+    } = renderer;
+    source.render_processed(snapshot, cancelled, graph, context, |event| {
+        if matches!(&event, super::RenderEvent::Complete { .. }) {
+            finish_source(identity_file.as_ref(), format.source_identity, cancelled)?;
+        }
+        emit(event)
+    })
+}
+
+fn finish_source(
+    file: Option<&File>,
+    identity: SourceIdentity,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
+    if let Some(file) = file
+        && crate::source_identity(file)? != identity
+    {
+        bail!("Audio render source changed while decoding");
+    }
+    Ok(())
+}
 
 /// Owns one opened decoder, so admission and rendering inspect the same source.
 pub struct SourceRenderer {
@@ -179,13 +245,11 @@ impl SourceRenderer {
     }
 
     pub fn finish(&self, cancelled: &AtomicBool) -> Result<()> {
-        check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
-        if let Some(file) = &self.identity_file
-            && crate::source_identity(file)? != self.format.source_identity
-        {
-            bail!("Audio render source changed while decoding");
-        }
-        Ok(())
+        finish_source(
+            self.identity_file.as_ref(),
+            self.format.source_identity,
+            cancelled,
+        )
     }
 
     pub fn render_pcm(

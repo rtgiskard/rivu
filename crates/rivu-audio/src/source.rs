@@ -1296,72 +1296,6 @@ impl Source {
         }
     }
 
-    pub(super) fn render_stream(
-        snapshot: &super::AudioRenderSnapshot,
-        media_read_buffer_mib: u32,
-        ffmpeg_enabled: bool,
-        cancelled: &AtomicBool,
-        mut emit: impl FnMut(super::RenderEvent<'_>) -> Result<()>,
-    ) -> Result<()> {
-        check_cancelled(Some(cancelled))?;
-        let buffer_len = usize::try_from(media_read_buffer_mib)
-            .context("Audio render media buffer size does not fit usize")?
-            .saturating_mul(super::BYTES_PER_MEBIBYTE);
-        let mut identity_file = None;
-        let mut source = if let Some(pcm) = &snapshot.pcm {
-            Self::from_pcm(pcm.clone(), 0.0)?
-        } else {
-            let file = open_regular_file(&snapshot.path)?;
-            identity_file = Some(
-                file.try_clone()
-                    .context("Retaining render source identity")?,
-            );
-            Self::open_file_with_cancel(
-                &snapshot.path,
-                file,
-                buffer_len,
-                snapshot.decoder_hint,
-                ffmpeg_enabled,
-                false,
-                SourceSelection {
-                    range: snapshot.range,
-                    start: 0.0,
-                },
-                Some(cancelled),
-            )?
-        };
-        check_cancelled(Some(cancelled))?;
-        if snapshot
-            .expected_identity
-            .is_some_and(|expected| expected != source.identity())
-        {
-            bail!("Render source differs from the captured active source");
-        }
-        let context = snapshot
-            .graph
-            .as_ref()
-            .map(super::graph::GraphSnapshot::source_context);
-        let graph = if snapshot.signal == rivu_format::config::VisualizationSignal::After {
-            snapshot
-                .graph
-                .as_ref()
-                .map(super::graph::GraphSnapshot::prepare)
-                .transpose()?
-        } else {
-            None
-        };
-        let identity = source.identity();
-        source.render_processed(snapshot, cancelled, graph, context, |event| {
-            if matches!(&event, super::RenderEvent::Complete { .. })
-                && let Some(file) = &identity_file
-                && source_identity(file)? != identity
-            {
-                bail!("Audio render source changed while decoding");
-            }
-            emit(event)
-        })
-    }
-
     #[cfg(test)]
     fn collect_pcm(
         &mut self,
@@ -1384,7 +1318,7 @@ impl Source {
         Ok(collected)
     }
 
-    fn render_processed(
+    pub(super) fn render_processed(
         &mut self,
         snapshot: &super::AudioRenderSnapshot,
         cancelled: &AtomicBool,

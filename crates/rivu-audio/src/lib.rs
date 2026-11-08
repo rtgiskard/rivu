@@ -222,7 +222,7 @@ pub fn render_stream(
     cancelled: &std::sync::atomic::AtomicBool,
     emit: impl FnMut(RenderEvent<'_>) -> Result<()>,
 ) -> Result<()> {
-    source::Source::render_stream(
+    render::render_stream(
         snapshot,
         media_read_buffer_mib,
         ffmpeg_enabled,
