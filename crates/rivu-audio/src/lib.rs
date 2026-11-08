@@ -398,6 +398,7 @@ pub enum AudioEvent {
         /// Precise selected-stream average, only after complete playback drains.
         bitrate_bps: Option<u64>,
     },
+    /// Final source counters, also published when a stop waiter has timed out.
     DecoderStopped {
         snapshot: AudioSnapshot,
     },
@@ -679,6 +680,8 @@ impl AudioStop {
     /// lifecycle draining and acknowledgement, including cancelled waits.
     /// Acknowledgement includes the final position and listened-time counters,
     /// sampled only after the synchronous worker closes the physical output.
+    /// The same final counters are published as DecoderStopped before the reply;
+    /// returning the event receiver preserves completion after a timeout.
     pub async fn wait(&mut self, mut observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
         let deadline = async_io::Timer::at(self.deadline).fuse();
         futures::pin_mut!(deadline);

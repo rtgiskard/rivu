@@ -233,6 +233,8 @@ impl Worker {
                 let snapshot = self.stop();
                 let _ = reply.send(snapshot);
             }
+                // Completion belongs to the source, not to the lifetime of its waiter.
+                self.event(AudioEvent::DecoderStopped { snapshot });
             AudioCommand::VisualizationEnabled(enabled) => {
                 self.analyzer.set_visualization_enabled(enabled);
                 self.visualization_enabled = enabled;
@@ -563,6 +565,11 @@ impl Worker {
                         decoder_hint: opening.decoder_hint,
                         generation,
                         metadata: opening.metadata,
+                self.last_snapshot = AudioSnapshot {
+                    generation,
+                    position_seconds: opening.start,
+                    listened_seconds: opening.listened_seconds,
+                };
                         start: opening.start,
                         paused: opening.paused,
                         device: self.device.clone(),
@@ -607,13 +614,7 @@ impl Worker {
                 let (_, revision) = self.opening.as_mut().unwrap().pending_seek.take().unwrap();
                 self.reject_seek(revision, error);
             }
-            Err(error) => {
-                self.opening = None;
-                self.event(AudioEvent::Failed {
-                    generation,
-                    message: format!("{error:#}"),
-                });
-            }
+            Err(error) => self.fail(error),
         }
     }
 
@@ -1612,56 +1613,26 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_snapshot_cancel_real_first_frame_prefix_without_lifecycle_events() {
+    fn stop_completion_survives_an_expired_wait_without_replaying_the_command() {
         let file = crate::source::opening_prefix_file(1024, true);
         for hint in opening_hints() {
-            let (mut worker, commands, events, _shutdown) = opening_worker();
-            load_prefix(&mut worker, file.path(), hint, 41);
-            for _ in 0..2 {
+            for expired in [false, true] {
+                let (mut worker, commands, events, _shutdown) = opening_worker();
+                load_prefix(&mut worker, file.path(), hint, 41);
                 worker.poll_opening();
                 assert!(worker.opening.is_some());
-                assert!(worker.playback.is_none());
-                assert!(events.is_empty());
-            }
-            let (reply, mut snapshot) = oneshot::channel();
-            commands
-                .try_send(QueuedAudioCommand::test_unfenced(
-                    AudioCommand::StopAndSnapshot(reply),
-                ))
-                .unwrap();
-            assert!(worker.control_round());
-            assert_eq!(
-                snapshot.try_recv().unwrap().unwrap(),
-                AudioSnapshot {
+                let (wake, _ready) = bounded(1);
+                let mut stop =
+                    AudioStop::new(commands.clone(), wake, events, worker.analyzer.clone());
+                assert!(stop.wait(|_| {}).now_or_never().is_none());
+                let expected = AudioSnapshot {
                     generation: 41,
                     ..Default::default()
                 }
-            );
-            assert!(worker.opening.is_none());
-            worker.poll_opening();
-            assert!(events.is_empty());
-
-            load_prefix(&mut worker, file.path(), hint, 42);
-            worker.poll_opening();
-            assert!(worker.opening.is_some());
-            let (reply, snapshot) = oneshot::channel();
-            drop(snapshot);
-            commands
-                .try_send(QueuedAudioCommand::test_unfenced(
-                    AudioCommand::StopAndSnapshot(reply),
-                ))
-                .unwrap();
-            assert!(worker.control_round());
-            assert_eq!(
-                worker.last_snapshot,
-                AudioSnapshot {
-                    generation: 42,
-                    ..Default::default()
-                }
-            );
-            assert!(worker.opening.is_none());
-            assert!(worker.playback.is_none());
-            assert!(events.is_empty());
+                assert!(worker.opening.is_none());
+                assert!(worker.playback.is_none());
+                assert!(!worker.commands.has_ready());
+            }
         }
     }
 
@@ -1687,6 +1658,27 @@ mod tests {
                 .unwrap();
             assert!(worker.control_round());
             worker.poll_opening();
+                };
+                if expired {
+                    stop.deadline = Instant::now();
+                    assert!(futures::executor::block_on(stop.wait(|_| {})).is_err());
+                    let events = stop.into_events();
+                    assert!(worker.control_round());
+                    assert!(
+                        matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
+                    );
+                    assert!(events.is_empty());
+                } else {
+                    assert!(worker.control_round());
+                    let mut closed = None;
+                    let snapshot = futures::executor::block_on(stop.wait(|event| {
+                        if let AudioEvent::DecoderStopped { snapshot } = event {
+                            closed = Some(snapshot);
+                        }
+                    }))
+                    .unwrap();
+                    assert_eq!(snapshot, expected);
+                    assert_eq!(closed, Some(expected));
             assert!(matches!(
                 events.try_recv(),
                 Ok(AudioEvent::Failed { generation: 42, .. })
@@ -1717,6 +1709,33 @@ mod tests {
                 assert!(worker.opening.is_none());
                 assert!(worker.playback.is_none());
                 assert!(events.is_empty());
+    #[test]
+    fn failed_opening_replaces_the_previous_sources_stop_snapshot() {
+        let valid = crate::source::opening_prefix_file(1024, true);
+        let invalid = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(invalid.path(), b"not an audio stream").unwrap();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, valid.path(), DecoderHint::Native, 40);
+        worker.stop();
+        load_prefix(&mut worker, invalid.path(), DecoderHint::Native, 41);
+        worker.poll_opening();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed { generation: 41, .. })
+        ));
+        let (reply, mut response) = oneshot::channel();
+        worker.command(AudioCommand::StopAndSnapshot(reply));
+        let expected = AudioSnapshot {
+            generation: 41,
+            ..Default::default()
+        };
+        assert_eq!(response.try_recv().unwrap(), Some(expected));
+        assert!(
+            matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
+        );
+        assert!(events.is_empty());
+    }
+
             }
         }
     }

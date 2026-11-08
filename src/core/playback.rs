@@ -103,7 +103,6 @@ pub(super) struct PlaybackSession {
     pub(super) started: bool,
     pub(super) counted: bool,
     pub(super) last_heard_at: Option<i64>,
-    pub(super) activity_updated: bool,
     pub(super) history_removed: bool,
     pub(super) paused_at: Option<i64>,
 }
@@ -117,7 +116,6 @@ impl PlaybackSession {
             self.last_heard_at
                 .map_or(heard_at, |previous| previous.max(heard_at)),
         );
-        self.activity_updated = true;
         true
     }
 }
@@ -127,6 +125,8 @@ pub(super) struct RetiredPlayback {
 }
 
 fn modified_ns(metadata: &std::fs::Metadata) -> Option<i64> {
+    /// The fenced source still owes its final heard-time snapshot.
+    pub(super) pending_close: Option<u64>,
     rivu_utils::regular_file::modified_unix_ns(metadata.modified().ok()?)
         .filter(|ns| *ns != i64::MIN)
 }
@@ -241,6 +241,17 @@ impl Core {
                 // retire a newer source, advance navigation or fence twice.
                 self.transport.confirm_source_closed(snapshot.generation);
                 if snapshot.generation == self.transport.generation {
+            event @ (AudioEvent::Started { generation, .. }
+            | AudioEvent::Progress { generation, .. }
+            | AudioEvent::Ended { generation, .. })
+                if self
+                    .transport
+                    .retired
+                    .as_ref()
+                    .is_some_and(|retired| retired.pending_close == Some(generation)) =>
+            {
+                self.retired_audio_event(event)?;
+            }
                     self.finish_playback(Ok(Some(snapshot)), Ok(()))?;
                 } else {
                     self.state.playback.stopped_source_generation =
@@ -250,8 +261,10 @@ impl Core {
             _ => {}
         }
         Ok(())
+                    self.accept_retired_snapshot(snapshot);
     }
     pub(in crate::core) fn playback_source(
+                    self.flush_deferred_playback()?;
         &self,
         track: &Track,
     ) -> Result<Option<(crate::store::PlaybackSource, std::fs::Metadata)>> {
@@ -370,6 +383,10 @@ impl Core {
             let source = self.playback_source(&track).unwrap_or_else(|error| {
                 tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
                 None
+        anyhow::ensure!(
+            self.transport.retired.is_none(),
+            "Previous audio source has not confirmed its final stop"
+        );
             });
             self.engine.send(AudioCommand::Load {
                 path: track.path.clone(),
@@ -395,7 +412,6 @@ impl Core {
                 started: false,
                 counted: false,
                 last_heard_at: None,
-                activity_updated: false,
                 history_removed: false,
                 paused_at: (status == PlaybackStatus::Paused).then(now),
             });
@@ -480,9 +496,6 @@ impl Core {
             .expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
-        if stats.is_none() {
-            playback.activity_updated = true;
-        }
         self.state.playback.last_heard_at = Some(played_at);
         self.state.playback.duration = info
             .duration
@@ -539,11 +552,76 @@ impl Core {
                 info,
             } if event_generation == generation => self.playback_started(info)?,
             AudioEvent::Progress {
+    fn accept_retired_snapshot(&mut self, snapshot: audio::AudioSnapshot) {
+        let Some(retired) = self
+            .transport
+            .retired
+            .as_mut()
+            .filter(|retired| retired.pending_close == Some(snapshot.generation))
+        else {
+            return;
+        };
+        let heard_at = retired.stats.paused_at.map_or_else(now, |at| now().min(at));
+        if retired
+            .stats
+            .record_heard(snapshot.listened_seconds, heard_at)
+        {
+            self.state.playback.last_heard_at = retired.stats.last_heard_at;
+        }
+        retired.pending_close = None;
+        self.transport.write_deferred = true;
+    }
+
+    fn retired_audio_event(&mut self, event: AudioEvent) -> Result<()> {
+        let mut retired = self
+            .transport
+            .retired
+            .take()
+            .expect("retired producer was checked");
+        let generation = retired
+            .pending_close
+            .expect("retired source is awaiting close");
+        debug_assert!(self.transport.session.is_none());
+        let duration = self.state.playback.duration;
+        let position = self.state.playback.position;
+        self.state.playback.duration = retired.duration;
+        self.transport.session = Some(retired.stats);
+        let result = self.retiring_audio_event(generation, event);
+        retired.duration = self.state.playback.duration;
+        self.state.playback.duration = duration;
+        self.state.playback.position = position;
+        if let Some(stats) = self.transport.session.take() {
+            retired.stats = stats;
+            self.transport.retired = Some(retired);
+            self.transport.write_deferred = true;
+        }
+        result.and(self.flush_deferred_playback())
+    }
+
                 generation: event_generation,
                 position_seconds,
                 listened_seconds,
             } if event_generation == generation => {
                 self.playback_progress(position_seconds, listened_seconds)?;
+            }
+            event @ (AudioEvent::Started { generation, .. }
+            | AudioEvent::Progress { generation, .. }
+            | AudioEvent::Ended { generation, .. })
+                if self
+                    .transport
+                    .retired
+                    .as_ref()
+                    .is_some_and(|retired| retired.pending_close == Some(generation)) =>
+            {
+                self.retired_audio_event(event)?
+            }
+            AudioEvent::DecoderStopped { snapshot } => {
+                self.transport.confirm_source_closed(snapshot.generation);
+                if snapshot.generation == generation {
+                    self.playback_progress(snapshot.position_seconds, snapshot.listened_seconds)?;
+                } else {
+                    self.accept_retired_snapshot(snapshot);
+                }
             }
             AudioEvent::Ended {
                 generation: event_generation,
@@ -611,6 +689,7 @@ impl Core {
         self.state.playback.position = 0.0;
         self.state.playback.stopped_source_generation = self.transport.physically_closed_source;
         let (snapshot, stopped) = match snapshot {
+            self.accept_retired_snapshot(*snapshot);
             Ok(snapshot) => (snapshot, Ok(())),
             Err(error) => (None, Err(error)),
         };
@@ -625,6 +704,7 @@ impl Core {
                 .paused_at
                 .map_or_else(now, |paused_at| now().min(paused_at));
             if playback.record_heard(snapshot.listened_seconds, heard_at) {
+        let pending_close = snapshot.as_ref().err().and(self.transport.live_source);
                 self.state.playback.last_heard_at = playback.last_heard_at;
             }
         }
@@ -648,6 +728,7 @@ impl Core {
     pub(in crate::core) fn stop_playback(&mut self) -> Result<()> {
         let mut stop = self.engine.stop_request();
         let generation = self.transport.generation;
+                pending_close,
         let mut bookkeeping = Ok(());
         // Only the persistent synchronous business owner enters this wait.
         // The application executor remains free, and the stop handle is the sole audio
@@ -920,6 +1001,7 @@ impl Core {
             let count = self.count_play();
             let activity = if let Some((track_id, at)) =
                 self.transport.session.as_ref().and_then(|playback| {
+        let pending_close = retired.as_ref().and_then(|playback| playback.pending_close);
                     (playback.started && !playback.history_removed)
                         .then_some((playback.track_id, playback.last_heard_at))
                         .and_then(|(id, at)| at.map(|at| (id, at)))
@@ -940,10 +1022,10 @@ impl Core {
         })();
         if retired_duration.is_some() {
             if let Some(stats) = self.transport.session.take()
-                && result.is_err()
+                && (result.is_err() || pending_close.is_some())
             {
-                // Park facts on failure; explicit commands and shutdown recover
-                // them before another playback can replace this bounded owner.
+                // Preserve unsettled producer facts until both physical close
+                // and statistics persistence have completed.
                 self.transport.retired = Some(RetiredPlayback {
                     stats,
                     duration: self.state.playback.duration,
@@ -963,3 +1045,4 @@ impl Core {
         Ok(())
     }
 }
+                    pending_close,

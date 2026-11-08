@@ -2025,36 +2025,34 @@ fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
     assert_eq!(error.to_string(), "Output stop unavailable");
     assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].played_at, 17);
     assert_eq!(play_count(&core, 1), 1);
-    assert!(core.transport.retired.is_none());
+    let retired = core.transport.retired.as_ref().unwrap();
+    assert!(retired.stats.counted);
+    assert_eq!(retired.stats.last_heard_at, Some(17));
     assert!(core.transport.session.is_none());
     assert_eq!(core.state.playback.stopped_source_generation, None);
 }
 
 #[test]
-fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
-    for confirmed in [false, true] {
+fn late_stop_snapshot_finishes_accounting_once_without_refencing_or_navigation() {
+    for deferred in [false, true] {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
         let source = core.transport.generation;
-        let snapshot = audio::AudioSnapshot {
-            generation: source,
-            position_seconds: 3.0,
-            listened_seconds: 3.0,
-        };
-        let result = core.finish_playback(
-            if confirmed {
-                Ok(Some(snapshot))
-            } else {
-                Err(anyhow::anyhow!("stop unavailable"))
-            },
-            Ok(()),
+        let session = core.transport.session.as_mut().unwrap();
+        session.paused_at = Some(17);
+        session.last_heard_at = Some(17);
+        assert!(
+            core.finish_playback(Err(anyhow::anyhow!("stop deadline")), Ok(()))
+                .is_err()
         );
-        assert_eq!(result.is_ok(), confirmed);
         let generation = core.transport.generation;
         let revision = core.state.playback.seek_revision;
-        let receipt = confirmed.then_some(source);
-        assert_eq!(core.state.playback.stopped_source_generation, receipt);
-        // Even an apparently matching idle snapshot cannot claim another close.
+        assert_eq!(play_count(&core, 1), 0);
+        assert_eq!(
+            core.transport.retired.as_ref().unwrap().pending_close,
+            Some(source)
+        );
+        // An unrelated successful idle response cannot settle the old source.
         core.finish_playback(
             Ok(Some(audio::AudioSnapshot {
                 generation,
@@ -2064,20 +2062,76 @@ fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
             Ok(()),
         )
         .unwrap();
-        assert_eq!(core.state.playback.stopped_source_generation, receipt);
-        assert_eq!(core.transport.generation, generation);
-        assert_eq!(core.state.playback.seek_revision, revision);
-        assert_eq!(play_count(&core, 1), u64::from(confirmed));
-        if !confirmed {
-            // A late physical close settles only the original unresolved source.
+        assert!(core.transport.retired.is_some());
+        if deferred {
+            core.database_unavailable = true;
+        }
+        let snapshot = audio::AudioSnapshot {
+            generation: source,
+            position_seconds: 2.01,
+            listened_seconds: 2.01,
+        };
+        for _ in 0..2 {
             core.audio_event(AudioEvent::DecoderStopped { snapshot })
                 .unwrap();
-            core.audio_event(AudioEvent::DecoderStopped { snapshot })
-                .unwrap();
-            assert_eq!(core.state.playback.stopped_source_generation, Some(source));
-            assert_eq!(core.transport.generation, generation);
-            assert_eq!(core.state.playback.seek_revision, revision);
+        }
+        if deferred {
             assert_eq!(play_count(&core, 1), 0);
         }
     }
+}
+        progress(&mut core, 2.0, 2.0);
+            core.database_unavailable = false;
+            core.flush_deferred_playback().unwrap();
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].played_at, 17);
+        assert!(core.transport.retired.is_none());
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.playback.position, 0.0);
+        assert_eq!(core.transport.generation, generation);
+        assert_eq!(core.state.playback.seek_revision, revision);
+        assert_eq!(core.state.playback.stopped_source_generation, Some(source));
+        assert_eq!(core.state.queue.current_id, Some(1));
+        playing(&mut core, 2);
+        let newer = core.transport.generation;
+        core.audio_event(AudioEvent::DecoderStopped { snapshot })
+            .unwrap();
+        assert_eq!(core.transport.generation, newer);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(play_count(&core, 2), 0);
+
+#[test]
+fn late_started_and_progress_belong_to_the_unsettled_retired_source_only() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 1);
+    let source = core.transport.generation;
+    let started = started_event(&core, Some(10.0));
+    assert!(
+        core.finish_playback(Err(anyhow::anyhow!("stop deadline")), Ok(()))
+            .is_err()
+    );
+    core.audio_event(started).unwrap();
+    core.audio_event(AudioEvent::Progress {
+        generation: source,
+        position_seconds: 2.0,
+        listened_seconds: 2.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 0.0);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(play_count(&core, 1), 0);
+    // A repeated Stop can also return the cached final snapshot of the old source.
+    core.finish_playback(
+        Ok(Some(audio::AudioSnapshot {
+            generation: source,
+            position_seconds: 2.01,
+            listened_seconds: 2.01,
+        })),
+        Ok(()),
+    )
+    .unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    assert!(core.transport.retired.is_none());
+    assert_eq!(core.state.library.history[0].track_id, 1);
 }
