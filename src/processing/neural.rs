@@ -119,29 +119,19 @@ impl Decoder {
     }
 }
 
-pub(super) fn run(request: ModelRequest<'_>, progress: &mut ProgressReporter<'_>) -> ModelOutcome {
-    let mut provenance = ModelProvenance::default();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_model(request, progress, &mut provenance)
-    }))
-    .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
-    ModelOutcome { provenance, result }
+pub(super) struct PreparedModel {
+    native: bool,
+    id: Option<String>,
+    manifest: std::path::PathBuf,
 }
 
-fn run_model(
-    request: ModelRequest<'_>,
-    progress: &mut ProgressReporter<'_>,
+pub(super) fn prepare(
+    operation: ProcessingOperation,
+    config: &rivu_format::config::NeuralConfig,
+    sample_rate: u32,
+    layout: &[audio::Channel],
     provenance: &mut ModelProvenance,
-) -> Result<AudioOutputs> {
-    let ModelRequest {
-        task_id,
-        operation,
-        input,
-        config,
-        budget,
-        cancel,
-    } = request;
-    check_cancel(cancel)?;
+) -> Result<PreparedModel> {
     ensure!(
         matches!(
             operation,
@@ -151,9 +141,9 @@ fn run_model(
     );
     let speech = operation == ProcessingOperation::Speech;
     ensure!(
-        input.layout().as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight]
-            || (speech && input.layout().as_ref() == [audio::Channel::FrontCenter]),
-        "Neural input speaker layout unsupported"
+        layout == [audio::Channel::FrontLeft, audio::Channel::FrontRight]
+            || (speech && layout == [audio::Channel::FrontCenter]),
+        "Neural graph node has unsupported channel layout (speaker layout); speech supports mono/stereo; vocal separation requires a stereo source"
     );
     let manifest = if speech {
         &config.speech_manifest
@@ -162,7 +152,6 @@ fn run_model(
     }
     .as_ref()
     .context("Missing model manifest")?;
-    // Dispatch before touching Python paths; native bundles have no Python runtime.
     let mut contents = Vec::new();
     std::fs::File::open(manifest)
         .context("Opening model manifest")?
@@ -175,18 +164,115 @@ fn run_model(
     let metadata: serde_json::Value =
         serde_json::from_slice(&contents).context("Reading model manifest")?;
     provenance.id = metadata["id"].as_str().map(str::to_owned);
+    if let Some(declared) = metadata.get("operation") {
+        ensure!(
+            declared == if speech { "speech" } else { "separate" },
+            "Model manifest operation does not match the requested operation"
+        );
+    }
     if metadata["backend"] == "onnx" {
         ensure!(speech, "Native ONNX models support speech only");
+        ensure!(
+            config.device == rivu_format::config::NeuralDevice::Cpu,
+            "Native GTCRN/UL-UNAS support CPU only; no device fallback"
+        );
+        ensure!(
+            !config.speech_post_filter,
+            "post_filter is supported only by DeepFilterNet3, not native GTCRN/UL-UNAS"
+        );
+        ensure!(
+            (8_000..=384_000).contains(&sample_rate),
+            "Native speech supports 8000..384000 Hz source rates"
+        );
+        #[cfg(feature = "onnx")]
+        if let Some(id) = metadata["id"].as_str() {
+            super::native_speech::Kind::from_id(id)?;
+        }
+        #[cfg(not(feature = "onnx"))]
+        bail!("Native ONNX inference requires a build with the onnx feature enabled");
+    } else {
+        ensure!(
+            metadata.get("backend").is_none() || metadata["backend"] == "python",
+            "Unsupported model backend"
+        );
+        ensure!(
+            (8_000..=192_000).contains(&sample_rate),
+            "Python neural models support 8000..192000 Hz source rates"
+        );
+        ensure!(
+            !speech || !config.speech_post_filter || metadata["id"] == "DeepFilterNet3",
+            "post_filter is supported only by DeepFilterNet3"
+        );
+        ensure!(
+            config.worker.is_file(),
+            "Neural worker does not exist: {}",
+            config.worker.display()
+        );
+        // Reject configured path mismatches before materializing PCM. The worker
+        // binds its actual process identity and validates artifact hashes itself.
+        if let Some(runtime) = metadata.get("runtime") {
+            let interpreter = if speech {
+                &config.speech_interpreter
+            } else {
+                &config.separation_interpreter
+            };
+            let absolute_interpreter = std::path::absolute(interpreter)?;
+            ensure!(
+                runtime["worker"].as_str().map(std::path::Path::new)
+                    == Some(config.worker.canonicalize()?.as_path())
+                    && runtime["model_manifest"].as_str().map(std::path::Path::new)
+                        == Some(manifest.canonicalize()?.as_path())
+                    && runtime["interpreter"].as_str().map(std::path::Path::new)
+                        == Some(absolute_interpreter.as_path()),
+                "Configured neural runtime differs from the provisioned model runtime"
+            );
+        }
+    }
+    Ok(PreparedModel {
+        native: metadata["backend"] == "onnx",
+        id: provenance.id.clone(),
+        manifest: manifest.clone(),
+    })
+}
+
+pub(super) fn run(
+    request: ModelRequest<'_>,
+    mut model: PreparedModel,
+    progress: &mut ProgressReporter<'_>,
+) -> ModelOutcome {
+    let mut provenance = ModelProvenance {
+        id: model.id.take(),
+        sha256: None,
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_model(request, model, progress, &mut provenance)
+    }))
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
+    ModelOutcome { provenance, result }
+}
+
+fn run_model(
+    request: ModelRequest<'_>,
+    model: PreparedModel,
+    progress: &mut ProgressReporter<'_>,
+    provenance: &mut ModelProvenance,
+) -> Result<AudioOutputs> {
+    let ModelRequest {
+        task_id,
+        operation,
+        input,
+        config,
+        budget,
+        cancel,
+    } = request;
+    check_cancel(cancel)?;
+    let speech = operation == ProcessingOperation::Speech;
+    if model.native {
         #[cfg(feature = "onnx")]
         return super::native_speech::run(input, config, budget, cancel, progress, provenance);
         #[cfg(not(feature = "onnx"))]
         bail!("Native ONNX inference requires a build with the onnx feature enabled");
     }
-    ensure!(
-        config.worker.is_file(),
-        "Neural worker does not exist: {}",
-        config.worker.display()
-    );
     let mut parameters = if speech {
         serde_json::json!({"wet_mix":config.speech_wet_mix,"attenuation_limit_db":config.speech_attenuation_limit_db})
     } else {
@@ -199,7 +285,7 @@ fn run_model(
     let request = serde_json::to_vec(&serde_json::json!({
         "version":WORKER_REQUEST_VERSION,"task_id":task_id,"operation":if speech {"speech"} else {"separate"},
         "sample_rate":input.sample_rate(),"channels":input.channels(),"frames":input.frames(),
-        "model_manifest":manifest,"parameters":parameters,"threads":config.threads,
+        "model_manifest":model.manifest,"parameters":parameters,"threads":config.threads,
         "device":if config.device == rivu_format::config::NeuralDevice::Cpu {"cpu"} else {"cuda"}
     }))?;
     let mut outgoing = Vec::with_capacity(MAX_FRAME + 5);
@@ -473,6 +559,85 @@ mod tests {
     use std::{io::Cursor, sync::atomic::AtomicBool};
 
     #[test]
+    fn runtime_preflight_binds_worker_manifest_and_lexical_interpreter_identity() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("manifest.json");
+        let worker = directory.path().join("worker.py");
+        let other_worker = directory.path().join("other-worker.py");
+        let interpreter = directory.path().join("venv-python");
+        let other_interpreter = directory.path().join("other-venv-python");
+        std::fs::write(&worker, b"not executed by preflight").unwrap();
+        std::fs::write(&other_worker, b"not executed by preflight").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        symlink(&executable, &interpreter).unwrap();
+        symlink(&executable, &other_interpreter).unwrap();
+        let config = rivu_format::config::NeuralConfig {
+            worker: worker.clone(),
+            speech_manifest: Some(manifest.clone()),
+            speech_interpreter: interpreter.clone(),
+            ..Default::default()
+        };
+        let write_manifest = |runtime: &serde_json::Value| {
+            std::fs::write(
+                &manifest,
+                serde_json::json!({
+                    "id":"DeepFilterNet3", "operation":"speech", "runtime":runtime,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let runtime = serde_json::json!({
+            "worker":worker, "model_manifest":manifest, "interpreter":interpreter,
+        });
+        write_manifest(&runtime);
+        let prepare_model = |config: &rivu_format::config::NeuralConfig| {
+            prepare(
+                ProcessingOperation::Speech,
+                config,
+                48_000,
+                &[audio::Channel::FrontCenter],
+                &mut ModelProvenance::default(),
+            )
+        };
+        assert!(prepare_model(&config).is_ok());
+        let mut changed = config.clone();
+        changed.worker = other_worker;
+        assert!(
+            prepare_model(&changed)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Configured neural runtime")
+        );
+        changed = config.clone();
+        changed.speech_interpreter = other_interpreter;
+        // Canonicalizing both would wrongly accept two distinct virtualenv paths.
+        assert_eq!(
+            changed.speech_interpreter.canonicalize().unwrap(),
+            interpreter.canonicalize().unwrap()
+        );
+        assert!(
+            prepare_model(&changed)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Configured neural runtime")
+        );
+        let mut changed_runtime = runtime;
+        changed_runtime["model_manifest"] = serde_json::json!(directory.path().join("other.json"));
+        write_manifest(&changed_runtime);
+        assert!(
+            prepare_model(&config)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Configured neural runtime")
+        );
+    }
+
+    #[test]
     fn subprocess_success_preserves_pcm_and_maps_stems() {
         subprocess_fixture(ProcessingOperation::Separate, 2, 8201, "success", None);
     }
@@ -658,17 +823,31 @@ if outcome == 'complete-then-nonzero':
         let (tx, rx) = async_channel::bounded(8);
         let mut progress = ProgressReporter::new(&tx, 7);
         progress.report(ProcessingPhase::Rendering, 0, None);
-        let outcome_result = run(
-            ModelRequest {
-                task_id: 7,
-                operation,
-                input: &input,
-                config: &config,
-                budget: Arc::clone(&budget),
-                cancel: &AtomicBool::new(false),
+        let mut prepared_provenance = ModelProvenance::default();
+        let outcome_result = match prepare(
+            operation,
+            &config,
+            input.sample_rate(),
+            input.layout(),
+            &mut prepared_provenance,
+        ) {
+            Ok(model) => run(
+                ModelRequest {
+                    task_id: 7,
+                    operation,
+                    input: &input,
+                    config: &config,
+                    budget: Arc::clone(&budget),
+                    cancel: &AtomicBool::new(false),
+                },
+                model,
+                &mut progress,
+            ),
+            Err(error) => ModelOutcome {
+                provenance: prepared_provenance,
+                result: Err(error),
             },
-            &mut progress,
-        );
+        };
         let result = outcome_result.result;
         let provenance = outcome_result.provenance;
         if matches!(

@@ -762,6 +762,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
             &mut status,
             &AtomicBool::new(false),
             &mut progress,
+            BTreeMap::new(),
         )
         .err()
         .expect("graph unexpectedly succeeded");
@@ -791,6 +792,121 @@ fn retained_graph_failures_report_the_responsible_node_once() {
             Some(failed)
         );
         assert_eq!(budget.used_bytes(), 0);
+    }
+}
+
+#[test]
+fn model_capability_rejections_precede_source_pcm_allocation() {
+    for graph in [false, true] {
+        for (metadata, rate, post_filter, device, expected) in [
+            (
+                serde_json::json!({"backend":"onnx"}),
+                8000,
+                false,
+                rivu_format::config::NeuralDevice::Cuda,
+                "CPU only",
+            ),
+            (
+                serde_json::json!({"backend":"onnx"}),
+                8000,
+                true,
+                rivu_format::config::NeuralDevice::Cpu,
+                "post_filter",
+            ),
+            (
+                serde_json::json!({"backend":"onnx", "id":"unsupported"}),
+                8000,
+                false,
+                rivu_format::config::NeuralDevice::Cpu,
+                if cfg!(feature = "onnx") {
+                    "Unsupported native speech model"
+                } else {
+                    "onnx feature"
+                },
+            ),
+            (
+                serde_json::json!({"backend":"unsupported"}),
+                8000,
+                false,
+                rivu_format::config::NeuralDevice::Cpu,
+                "Unsupported model backend",
+            ),
+            (
+                serde_json::json!({"operation":"separate"}),
+                8000,
+                false,
+                rivu_format::config::NeuralDevice::Cpu,
+                "manifest operation",
+            ),
+            (
+                serde_json::json!({"id":"MossFormer2_SE_48K"}),
+                8000,
+                true,
+                rivu_format::config::NeuralDevice::Cpu,
+                "post_filter",
+            ),
+            (
+                serde_json::json!({"id":"DeepFilterNet3"}),
+                384000,
+                false,
+                rivu_format::config::NeuralDevice::Cpu,
+                "8000..192000",
+            ),
+        ] {
+            let (directory, old, track, mut config) = fixture();
+            drop(old);
+            let mut writer = hound::WavWriter::create(
+                &track.path,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate: rate,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                },
+            )
+            .unwrap();
+            for sample in PCM {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            let manifest = directory.path().join("manifest.json");
+            fs::write(&manifest, metadata.to_string()).unwrap();
+            let neural = rivu_format::config::NeuralConfig {
+                speech_manifest: Some(manifest.clone()),
+                worker: manifest,
+                device,
+                speech_post_filter: post_filter,
+                ..Default::default()
+            };
+            // A decoded source cannot fit: the capability error proves rejection
+            // happened before full-source allocation, not merely before inference.
+            let mut service = Service::with_memory_limit(1);
+            let error = if graph {
+                completed_graph(
+                    &mut service,
+                    &track,
+                    graph_config(vec![GraphNodeKind::Speech { config: neural }]),
+                )
+                .err()
+                .unwrap()
+            } else {
+                Arc::make_mut(&mut config).neural = neural;
+                service
+                    .start(track, config, ProcessingOperation::Speech, None)
+                    .unwrap();
+                loop {
+                    if let Event::Finished { id, result } = next_event(&mut service) {
+                        service.finish_task(id).unwrap();
+                        break result.err().unwrap();
+                    }
+                }
+            };
+            assert!(
+                format!("{error:#}").contains(expected),
+                "graph={graph}: {error:#}"
+            );
+            assert_eq!(service.memory_bytes(), 0);
+        }
     }
 }
 
@@ -1548,6 +1664,7 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
                 &mut result.status.clone(),
                 &AtomicBool::new(false),
                 &mut progress,
+                BTreeMap::new(),
             )
             .unwrap();
             let retained = samples(&retained[&GraphPort { node: 2, port: 0 }].pcm);

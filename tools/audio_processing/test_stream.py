@@ -133,6 +133,7 @@ class FramingTests(unittest.TestCase):
                 def write(stem, samples):
                     outputs.setdefault(stem, []).append(samples.copy())
                 with patch.object(worker, "validate_manifest", return_value=manifest), \
+                     patch.object(worker, "validate_execution"), \
                      patch.object(worker, "canonical_digest", return_value="model-hash"), \
                      patch.object(worker, "check_packages"), patch.object(worker, "deny_network"), \
                      patch.object(worker, "CORE_SECONDS", 1), patch.object(worker, "CONTEXT_SECONDS", 1), \
@@ -197,7 +198,7 @@ class StreamEntrypointTests(unittest.TestCase):
             for corrupted in (False, True):
                 if corrupted:
                     (base / manifest["license_evidence"]).write_text("changed bundle evidence")
-                completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
+                completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
                                            input=wire, capture_output=True, timeout=30)
                 self.assertNotEqual(completed.returncode, 0)
                 stream, events = io.BytesIO(completed.stdout), []
@@ -210,6 +211,37 @@ class StreamEntrypointTests(unittest.TestCase):
                 self.assertEqual(models, [] if corrupted else [
                     {"id":manifest["id"], "sha256":worker.canonical_digest(manifest)}])
 
+    def test_real_subprocess_rejects_other_worker_and_interpreter(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            bundle_fixture(base)
+            other = base / "other"
+            other.mkdir()
+            bundle_fixture(other)
+            alternate_python = base / "other-python"
+            alternate_python.symlink_to(sys.executable)
+            request = {"version":worker.VERSION, "task_id":"identity", "operation":"speech",
+                       "sample_rate":8000, "channels":1, "frames":1,
+                       "model_manifest":str(base / "manifest.json"), "parameters":{"wet_mix":0}}
+            wire = input_stream(request, np.zeros((1, 1), dtype="<f4"))
+            for interpreter, script, message in (
+                (sys.executable, other / "runtime/worker.py", "executing worker"),
+                (str(alternate_python), base / "runtime/worker.py", "executing interpreter"),
+            ):
+                with self.subTest(message=message):
+                    completed = subprocess.run([interpreter, "-B", str(script), "--stream"],
+                                               input=wire, capture_output=True, cwd=base, timeout=30)
+                    self.assertNotEqual(completed.returncode, 0, completed.stderr.decode())
+                    stream, events = io.BytesIO(completed.stdout), []
+                    while stream.tell() < len(completed.stdout):
+                        kind, payload = worker.read_frame(stream)
+                        self.assertEqual(kind, worker.JSON_FRAME)
+                        events.append(json.loads(payload))
+                    self.assertEqual(events[-1]["code"], "model_runtime")
+                    self.assertIn(message, events[-1]["message"])
+                    self.assertFalse(any(event["type"] == "complete" for event in events))
+
     def test_real_dry_worker_preserves_pcm_bits(self):
         import numpy as np
         with tempfile.TemporaryDirectory() as directory:
@@ -220,7 +252,7 @@ class StreamEntrypointTests(unittest.TestCase):
             request = {"version":worker.VERSION,"task_id":"real-dry-stream","operation":"speech","sample_rate":8000,
                        "channels":2,"frames":len(audio),"model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
-            completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
+            completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
                                        input=input_stream(request, audio), capture_output=True, cwd=base, timeout=30)
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             stream, pcm, events = io.BytesIO(completed.stdout), bytearray(), []
@@ -333,7 +365,7 @@ raise SystemExit(result)
             wire = input_stream(request, audio)
             if malformed is not None:
                 wire = malformed(wire)
-            command = [sys.executable, "-B", "-c", script, str(Path(worker.__file__).parent),
+            command = [sys.executable, "-B", "-c", script, str(base / "runtime"),
                        str(operation == "speech" and wet == 0), str(inference_failure)]
             environment = {**os.environ,"PYTHONDONTWRITEBYTECODE":"1"}
             if held_open_suffix is None:

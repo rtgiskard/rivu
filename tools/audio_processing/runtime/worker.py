@@ -149,6 +149,16 @@ def validate_manifest(path, operation):
                 "model_dependencies", "dependency metadata does not match model pin: " + name)
     return manifest
 
+def validate_execution(manifest):
+    """Bind admitted metadata to this executing worker and Python environment."""
+    runtime = manifest["runtime"]
+    require(Path(__file__).resolve() == Path(runtime["worker"]).resolve(),
+            "model_runtime", "executing worker differs from provisioned worker")
+    # Resolving a venv interpreter symlink would erase its environment identity.
+    require(os.path.abspath(sys.executable) == runtime["interpreter"],
+            "model_runtime", "executing interpreter differs from provisioned interpreter")
+
+
 def deny_network():
     def blocked(*args, **kwargs):
         raise WorkerError("network_forbidden", "inference worker is offline; run explicit preparation separately")
@@ -298,6 +308,8 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
     manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = validate_manifest(manifest_path, request["operation"])
+    if not collect_report:
+        validate_execution(manifest)
     model = {"id":manifest["id"], "sha256":canonical_digest(manifest)}
     emit("progress", stage="inspect", completed=1, total=1, model=model)
     controls = request.get("parameters", {})

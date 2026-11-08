@@ -641,12 +641,69 @@ fn release_unreachable_pcm(
     release_unreachable_source(graph, target, boundaries, stop_at, input)
 }
 
+pub(super) fn prepare_models(
+    status: &mut ProcessingTaskStatus,
+    sample_rate: u32,
+    layout: &[audio::Channel],
+    cancel: &AtomicBool,
+    tx: &Sender<Event>,
+) -> Result<BTreeMap<u64, neural::PreparedModel>> {
+    let target = status
+        .settings
+        .graph_boundary
+        .or(status.settings.graph_target)
+        .context("Missing graph target")?;
+    let order = status
+        .settings
+        .graph
+        .as_ref()
+        .context("Missing graph snapshot")?
+        .ancestors(target)?;
+    let mut models = BTreeMap::new();
+    for id in order {
+        check_cancel(cancel)?;
+        let mut provenance = ModelProvenance::default();
+        let model = {
+            let graph = status
+                .settings
+                .graph
+                .as_ref()
+                .context("Missing graph snapshot")?;
+            let (operation, config) = match &graph.node(id)?.kind {
+                GraphNodeKind::Speech { config } => (ProcessingOperation::Speech, config),
+                GraphNodeKind::Separate { config } => (ProcessingOperation::Separate, config),
+                _ => continue,
+            };
+            neural::prepare(operation, config, sample_rate, layout, &mut provenance)
+        };
+        let entry = status
+            .graph_nodes
+            .iter_mut()
+            .find(|entry| entry.node == id)
+            .context("Missing graph node status")?;
+        entry.model_id = provenance.id;
+        entry.model_sha256 = provenance.sha256;
+        match model {
+            Ok(model) => {
+                models.insert(id, model);
+            }
+            Err(error) => {
+                node_event(status, id, ProcessingPhase::Processing, None, tx);
+                node_failure(status, id, &error, cancel, tx);
+                return Err(error);
+            }
+        }
+    }
+    Ok(models)
+}
+
 pub(super) fn execute(
     input: audio::PcmAudio,
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
+    mut models: BTreeMap<u64, neural::PreparedModel>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
     let tx = progress.sender;
     let graph = status
@@ -738,14 +795,6 @@ pub(super) fn execute(
                     } else {
                         ProcessingOperation::Separate
                     };
-                    ensure!(
-                        if operation == ProcessingOperation::Speech {
-                            (1..=2).contains(&channels)
-                        } else {
-                            channels == 2
-                        },
-                        "Neural graph node has unsupported channel layout"
-                    );
                     let mut engine =
                         Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
                     let upstream = engine.compile(
@@ -769,6 +818,7 @@ pub(super) fn execute(
                             budget: Arc::clone(&budget),
                             cancel,
                         },
+                        models.remove(&id).context("Missing admitted model")?,
                         progress,
                     );
                     let entry = status

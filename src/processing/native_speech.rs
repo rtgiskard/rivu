@@ -41,12 +41,12 @@ const MAX_MANIFEST: u64 = 256 * 1024;
 const MAX_BUNDLE: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     Gtcrn,
     UlUnas,
 }
 impl Kind {
-    fn from_id(id: &str) -> Result<Self> {
+    pub(super) fn from_id(id: &str) -> Result<Self> {
         match id {
             "GTCRN" => Ok(Self::Gtcrn),
             "UL_UNAS" => Ok(Self::UlUnas),

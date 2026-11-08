@@ -24,7 +24,7 @@
         "additionalProperties": false,
         "properties": {
           "wet_mix": {"type": "number", "minimum": 0, "maximum": 1, "default": 1, "description": "Source-rate linear dry/wet blend. Zero preserves original samples bit-exactly."},
-          "attenuation_limit_db": {"type": "number", "minimum": 0, "maximum": 100, "default": 80, "description": "Minimum spectral mask gain, not waveform clipping or level normalization."},
+          "attenuation_limit_db": {"type": "number", "minimum": 0, "maximum": 100, "default": 80, "description": "Backend-specific suppression limit: MossFormer2 floors spectral mask magnitude at 10^(-dB/20); DeepFilterNet3 passes atten_lim_db to upstream enhance (dry/enhanced spectral mixing). Not waveform clipping or level normalization."},
           "post_filter": {"type": "boolean", "default": false, "description": "Only DeepFilterNet3 supports this parameter. Presence is rejected for MossFormer2, including false."}
         }
       }}}

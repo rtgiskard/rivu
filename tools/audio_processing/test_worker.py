@@ -20,12 +20,12 @@ def export_request():
             "output_dir":"/new-output","model_manifest":"/manifest.json"}
 
 def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provenance=None):
-    """Current admission fixture, not a downloadable or executable model."""
+    """Current admission fixture with real sidecars but synthetic model metadata."""
     import sys
     runtime = base / "runtime"
     runtime.mkdir(exist_ok=True)
     for name in RUNTIME_FILES:
-        (runtime / name).write_text("Synthetic sidecar fixture: " + name)
+        (runtime / name).write_bytes((Path(__file__).parent / "runtime" / name).read_bytes())
     evidence = base / "weight-license.txt"
     evidence.write_text("Factual test provenance; no permission grant.")
     manifest = {"version":1, "operation":operation, "id":model, "packages":{"fixture":"1"},

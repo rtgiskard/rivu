@@ -374,6 +374,11 @@ In a source checkout, inference code and schemas live in
 entry points remain in `tools/audio_processing/`. A checkout-based worker path is
 `tools/audio_processing/runtime/worker.py`. Provisioned Python bundles use their
 own `runtime/worker.py` snapshot, not the checkout's worker path.
+Application streaming binds the manifest's runtime paths to the worker and
+interpreter actually executing the request, in addition to validating their
+hashes. Interpreter identity preserves the selected virtual-environment path;
+resolving it to another path to the same base executable does not establish the
+same runtime environment.
 
 Keep the complete provisioned bundle together: hashed runtime sidecars/schema,
 model assets and license/dependency records. Its manifest binds bundle paths,
@@ -417,6 +422,9 @@ Detailed hashes and timing/energy evidence are collected only for this explicit
 export. The actual UTF-8 `result.json`, including its final newline, is limited
 to 8 MiB. Completion follows closed and checked audio files and a successfully
 written report; failure removes the new export directory.
+These offline adapters record the implementation and interpreter actually used.
+Their reports do not prove that a provisioned bundle's runtime snapshot executed
+when the adapter used the checkout implementation instead.
 Both Python entrypoints validate inference controls before constructing stream
 input or creating export outputs. File export opens one source descriptor for
 metadata, bounded hashing and PCM reads; replacement or in-place mutation rejects
@@ -451,6 +459,10 @@ speech accepts 8–384 kHz. Speech accepts Front Center mono or Front Left/Front
 Right stereo in that order, while separation requires that stereo layout. Other
 speaker identities or permutations are rejected rather than guessed from channel
 count. Speech channels are inferred independently, so stereo image can change.
+Attenuation controls are backend-specific: MossFormer2 uses a spectral-mask floor,
+DeepFilterNet3 uses its upstream dry/enhanced spectral blend, and native speech
+uses its own time-domain dry/enhanced weighting. Equal control names do not imply
+identical algorithms.
 Inference rate conversion is explicit: 16 kHz for native speech, 48 kHz for Python
 speech and 44.1 kHz for separation. Output preserves the original rate, layout
 and exact frame count. No implicit downmix or duplicated mono separation is offered.
@@ -504,6 +516,10 @@ the overall operation can be `failed` while valid outputs remain available for
 later selection or export. Eviction changes availability, not the recorded
 operation outcome. Model nodes preserve independently known model identity and
 verified hashes even if inference fails; the enclosing operation remains a graph.
+Capabilities inferable from the manifest and actual decoder format are checked
+before whole-source PCM allocation or native-prefix execution. This preflight does
+not replace the model runner's full artifact/hash validation or the Python
+worker's check of its actual executing runtime identity.
 
 Native preparation checks cancellation between decoder calls; decoder/filesystem
 operations have no hard cancellation-time guarantee. Retained audition also

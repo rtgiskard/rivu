@@ -139,17 +139,6 @@ pub(super) fn run(
     let renderer = open_source()?;
     let mut progress = ProgressReporter::new(tx, status.id);
     let native = renderer.format().clone();
-    ensure!(
-        status.operation != ProcessingOperation::Separate
-            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
-        "Vocal separation requires a stereo source; no implicit channel conversion is performed"
-    );
-    ensure!(
-        status.operation != ProcessingOperation::Speech
-            || native.layout.as_ref() == [audio::Channel::FrontCenter]
-            || native.layout.as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
-        "Speech enhancement supports mono/stereo speaker layouts only"
-    );
     status.sample_rate = Some(native.sample_rate);
     status.channels = Some(native.channels());
     let mut runner = None;
@@ -210,6 +199,35 @@ pub(super) fn run(
             runner,
         });
     }
+    let model = if matches!(
+        status.operation,
+        ProcessingOperation::Speech | ProcessingOperation::Separate
+    ) {
+        let mut provenance = super::ModelProvenance::default();
+        let model = neural::prepare(
+            status.operation,
+            &config.neural,
+            native.sample_rate,
+            &native.layout,
+            &mut provenance,
+        );
+        if model.is_err() {
+            let _ = tx.send_blocking(Event::Model {
+                id: status.id,
+                provenance,
+            });
+        }
+        Some(model?)
+    } else {
+        None
+    };
+    let native_graph =
+        status.operation == ProcessingOperation::Graph && graph::native_only(&status)?;
+    let models = if status.operation == ProcessingOperation::Graph && !native_graph {
+        graph::prepare_models(&mut status, native.sample_rate, &native.layout, cancel, tx)?
+    } else {
+        BTreeMap::new()
+    };
     progress.report(ProcessingPhase::Rendering, 0, None);
     let mut graph_outputs = BTreeMap::new();
     let mut pending_export = None;
@@ -234,7 +252,7 @@ pub(super) fn run(
             denoised: Some(pcm),
             ..Default::default()
         }
-    } else if status.operation == ProcessingOperation::Graph && graph::native_only(&status)? {
+    } else if native_graph {
         let native_output = graph::execute_native(
             renderer,
             &open_source,
@@ -258,6 +276,7 @@ pub(super) fn run(
                 &mut status,
                 cancel,
                 &mut progress,
+                models,
             )?;
             AudioOutputs::default()
         } else {
@@ -270,6 +289,7 @@ pub(super) fn run(
                     budget: Arc::clone(&budget),
                     cancel,
                 },
+                model.context("Missing admitted model")?,
                 &mut progress,
             );
             status.model_id.clone_from(&outcome.provenance.id);
