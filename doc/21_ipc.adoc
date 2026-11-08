@@ -201,9 +201,11 @@ held until the render worker exits, including while a blocking decoder call is
 outstanding. GUI preview policy and summary ownership are defined in
 link:23_visuals.adoc#waveform[Waveform].
 
-Both side-channel accept and session loops yield cooperatively between requests,
-including when buffered control input and output complete without waiting. Frame
-and client limits do not substitute for this scheduling boundary.
+Side-channel accept loops and realtime PCM control sessions yield cooperatively
+between requests, including when buffered input and output complete without
+waiting. Finite PCM transmission is backpressured by its bounded queue and socket
+writes, but has no explicit cumulative work budget when both remain immediately
+ready. Frame and client limits do not substitute for a scheduling boundary.
 
 === Owner execution and retirement
 
@@ -599,7 +601,9 @@ configuration or acknowledge an unread configuration revision. Selected sections
 including simultaneous runtime/configuration changes, come from one publication.
 
 Each in-flight Watch owns its revision subscription. Reply, disconnection or
-cancellation releases that registration without waiting for another publication.
+cancellation drops the receiver immediately. The closed registration is pruned
+on the next subscription or state-changing publication; it cannot wake the
+retired Watch while awaiting that physical removal.
 
 The Queue state section is constant-size: `{total, current_id, current_position,
 revision}`. It never embeds all occurrence IDs or track metadata. Queue content
@@ -776,8 +780,10 @@ catalog baseline without an entry token may start an entry traversal
 retains its summary baseline while capturing each playlist's entry baseline
 separately. Clients match the error variant, not diagnostic text. Other failures
 return `QueryError::Message`. In-process demand cancellation can instead return
-`QueryError::Cancelled` before dispatch; it does not interrupt SQL already running
-or act as an IPC cancellation request. Without `expected`, track and summary
+`QueryError::Cancelled` before dispatch or during execution. A request-scoped
+SQLite progress callback cooperatively interrupts running SQL; cancellation does
+not release the reader until its snapshot is physically retired. It is not an
+IPC cancellation request. Without `expected`, track and summary
 batches do not reserve consistency between requests; occurrence continuations
 still enforce their embedded scope. All use bounded results and explicit restart,
 not a database snapshot retained for an arbitrarily slow client.
