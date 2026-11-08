@@ -138,9 +138,7 @@ impl StereoRenderer {
     pub(super) fn configure(&self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = config.analysis_settings();
-        let reset = settings.fft_size != data.settings.fft_size
-            || settings.window != data.settings.window
-            || settings.signal != data.settings.signal;
+        let reset = !data.settings.signal_compatible_with(settings);
         let colors_changed = data.primary != config.effect_primary_color.rgb()
             || data.secondary != config.effect_secondary_color.rgb();
         let recolor = colors_changed || data.db_range != config.reactive_db_range();
@@ -271,11 +269,10 @@ impl StereoState {
     }
 
     fn update(&mut self, frame: &AnalysisFrame) {
-        if !frame.settings.is_some_and(|settings| {
-            settings.fft_size == self.settings.fft_size
-                && settings.window == self.settings.window
-                && settings.signal == self.settings.signal
-        }) {
+        if !frame
+            .settings
+            .is_some_and(|settings| settings.signal_compatible_with(self.settings))
+        {
             self.clear();
             return;
         }

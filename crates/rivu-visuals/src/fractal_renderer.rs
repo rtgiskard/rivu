@@ -129,9 +129,7 @@ impl FractalRenderer {
     pub(super) fn configure(&self, config: &VisualParameters) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = config.analysis_settings();
-        let reset = data.settings.fft_size != settings.fft_size
-            || data.settings.window != settings.window
-            || data.settings.signal != settings.signal;
+        let reset = !data.settings.signal_compatible_with(settings);
         let colors = [
             config.effect_primary_color.rgb(),
             config.effect_secondary_color.rgb(),
@@ -274,11 +272,10 @@ impl FractalState {
     }
 
     fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
-        if !frame.settings.is_some_and(|s| {
-            s.fft_size == self.settings.fft_size
-                && s.window == self.settings.window
-                && s.signal == self.settings.signal
-        }) {
+        if !frame
+            .settings
+            .is_some_and(|settings| settings.signal_compatible_with(self.settings))
+        {
             self.reset();
             return;
         }
@@ -310,8 +307,8 @@ impl FractalState {
                 .band_rms
                 .map(|v| response(v, self.db_range, self.sensitivity)),
             energy: response(
-                ((frame.rms_left * frame.rms_left + frame.rms_right * frame.rms_right) * 0.5)
-                    .sqrt(),
+                ((f64::from(frame.rms_left).powi(2) + f64::from(frame.rms_right).powi(2)) * 0.5)
+                    .sqrt() as f32,
                 self.db_range,
                 self.sensitivity,
             ),
@@ -672,6 +669,22 @@ mod tests {
     fn accept(visual: &FractalRenderer, frame: &AnalysisFrame) {
         visual.update(frame, frame.sample_time);
         visual.animate(frame.sample_time);
+    }
+
+    #[test]
+    fn finite_hot_stereo_rms_drives_fractals_instead_of_becoming_silence() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for rms in [[f32::MAX; 2], [1e20, 0.0]] {
+                let visual = plot(style);
+                let mut hot = frame(1000);
+                [hot.rms_left, hot.rms_right] = rms;
+                visual.update(&hot, hot.sample_time);
+                assert_eq!(visual.data.borrow().previous_energy, 1.0);
+            }
+        }
     }
 
     #[test]

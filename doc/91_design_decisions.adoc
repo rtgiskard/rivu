@@ -444,7 +444,7 @@ Native streaming export has been adopted separately under <<DEC-009>>.
 |Pixels before thumbnail persistence |Cold-display latency versus retained bytes and shutdown ownership; see <<DEC-008>>
 |Dedicated collection write owner |Core tail latency; preserve write leases, revision authority and physical completion
 |Disk-staged scans |Ordinary scans retain discovered paths and prepared records until saving; the import-only retained-data budget does not cap them. Bound peak retention while preserving CUE/relocation facts and atomic reconcile
-|Spatial-only snapshot pool |Reduce payload copying; account for slot exhaustion and independently retained payloads
+|Spatial-only snapshot pool |Not adopted: current deep copies reuse capacity and preserve complete, independently retained payloads. A bounded pool adds residency and changes slow-consumer behavior when slots exhaust; copying alone does not establish a runtime bottleneck
 |Spectrogram capacity compaction |Reduce capacity high-water retention; account for copying and old/new overlap without reducing sampling precision
 |Callback scratch removal or finer scheduling |Measure copy/control costs; preserve wrap/frame atomicity, branches and refill headroom
 |ONNX Session reuse |Repeated short-job startup versus resident arenas; preserve model/config identity, retirement and task-local recurrent state

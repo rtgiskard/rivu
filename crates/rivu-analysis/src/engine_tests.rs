@@ -402,6 +402,19 @@ fn density_ingests_the_entire_stream_not_only_latest_fft_tail() {
 }
 
 #[test]
+fn channel_rms_retains_finite_full_range_pcm() {
+    for samples in [[f32::MAX, -f32::MAX / 2.0], [1e20, -2e20], [1e-30, -2e-30]] {
+        let mut analyzer =
+            SpectrumAnalyzer::new(AnalysisSettings::from(&Config::default()), 48_000, false);
+        for _ in 0..analyzer.rolling.len() {
+            analyzer.push(samples);
+        }
+        assert_eq!(analyzer.transform(), samples.map(f32::abs));
+        assert!(analyzer.fft.is_none());
+    }
+}
+
+#[test]
 fn time_domain_demand_skips_fft_without_shortening_window_or_cadence() {
     for visualizer in [
         VisualizerDemand::default(),
@@ -432,8 +445,21 @@ fn time_domain_demand_skips_fft_without_shortening_window_or_cadence() {
             [[0.5, -0.25]; 511].into_iter(),
             &mut frame,
         );
-        let untouched = Complex32::new(123.0, -456.0);
-        engine.analyzer.as_mut().unwrap().frequency.fill(untouched);
+        let analyzer = engine.analyzer.as_ref().unwrap();
+        assert!(analyzer.fft.is_none());
+        assert_eq!(analyzer.rolling.len(), engine.settings.fft_size as usize);
+        assert_eq!(
+            analyzer.frequency.capacity()
+                + analyzer.window.capacity()
+                + analyzer.scratch.capacity(),
+            0
+        );
+        assert_eq!(
+            analyzer.frequencies.capacity()
+                + analyzer.bands.capacity()
+                + analyzer.levels.capacity(),
+            0
+        );
         let now = Instant::now();
         assert_eq!(engine.publication_delay(now), None);
         assert!(!engine.publish(&mut frame, now));
@@ -482,14 +508,13 @@ fn time_domain_demand_skips_fft_without_shortening_window_or_cadence() {
         let interval = Duration::from_secs_f64(1.0 / engine.settings.fps as f64);
         assert_eq!(engine.publication_delay(now), Some(interval));
         assert!(engine.publish(&mut frame, now + interval));
-        assert!(
-            engine
-                .analyzer
-                .as_ref()
-                .unwrap()
-                .frequency
-                .iter()
-                .all(|bin| *bin == untouched)
+        let analyzer = engine.analyzer.as_ref().unwrap();
+        assert!(analyzer.fft.is_none());
+        assert_eq!(
+            analyzer.frequency.capacity()
+                + analyzer.window.capacity()
+                + analyzer.scratch.capacity(),
+            0
         );
     }
 }
@@ -594,6 +619,135 @@ fn frequency_demand_transitions_preserve_partial_window_and_restore_outputs() {
             assert_eq!(frequency, expected);
         } else {
             expected_fft = Some(frequency.clone());
+        }
+    }
+}
+
+#[test]
+fn lazy_fft_matches_warm_analysis_across_demand_and_signal_changes() {
+    let base = AnalysisSettings {
+        fft_size: 512,
+        ..AnalysisSettings::from(&Config::default())
+    };
+    let large = AnalysisSettings {
+        fft_size: 1024,
+        ..base
+    };
+    let hann = AnalysisSettings {
+        window: AnalysisWindow::Hann,
+        ..large
+    };
+    let before = AnalysisSettings {
+        signal: rivu_format::config::VisualizationSignal::Before,
+        ..hann
+    };
+    let time_only = DisplayDemand {
+        enabled: true,
+        ..Default::default()
+    };
+    let frequency = DisplayDemand {
+        spectrum: true,
+        ..time_only
+    };
+    let mut cold = AnalysisEngine::new(base);
+    let mut warm = AnalysisEngine::new(base);
+    let mut actual = AnalysisFrame::default();
+    let mut expected = AnalysisFrame::default();
+    let mut sequence = 0;
+    let mut start = 0;
+    let now = Instant::now();
+    for (case, (settings, sample_rate)) in [
+        (base, 48_000),
+        (large, 48_000),
+        (hann, 48_000),
+        (before, 48_000),
+        (before, 96_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let state = PcmState {
+            active: true,
+            sample_rate,
+            ..Default::default()
+        };
+        let token = case as u64 * 4;
+        cold.configure(settings, time_only, state, token, &mut actual);
+        warm.configure(settings, frequency, state, token, &mut expected);
+        let n = settings.fft_size as usize;
+        let prefix: Vec<_> = (0..n - 1)
+            .map(|i| {
+                [
+                    (i as f32 * 0.071).sin() * 0.5,
+                    (i as f32 * 0.037).cos() * 0.25,
+                ]
+            })
+            .collect();
+        assert!(cold.ingest(
+            header(state, sequence, start),
+            prefix.iter().copied(),
+            &mut actual
+        ));
+        assert!(warm.ingest(
+            header(state, sequence, start),
+            prefix.into_iter(),
+            &mut expected
+        ));
+        sequence += 1;
+        start += (n - 1) as u64;
+        cold.request_frame();
+        assert!(!cold.publish(&mut actual, now + Duration::from_secs(case as u64 * 4)));
+        let analyzer = cold.analyzer.as_ref().unwrap();
+        assert_eq!((analyzer.rolling.len(), analyzer.filled), (n, n - 1));
+        assert!(analyzer.fft.is_none(), "case {case}");
+
+        cold.configure(settings, frequency, state, token + 1, &mut actual);
+        warm.configure(settings, frequency, state, token + 1, &mut expected);
+        for (offset, demand, samples) in [
+            (1, frequency, vec![[0.75, -0.5]]),
+            (2, time_only, vec![[0.375, -0.625]; n]),
+            (3, frequency, vec![[0.5, 0.25]]),
+        ] {
+            cold.configure(settings, demand, state, token + offset, &mut actual);
+            warm.configure(settings, frequency, state, token + offset, &mut expected);
+            let previous_fft = cold.analyzer.as_ref().unwrap().frequency.clone();
+            let count = samples.len() as u64;
+            assert!(cold.ingest(
+                header(state, sequence, start),
+                samples.iter().copied(),
+                &mut actual
+            ));
+            assert!(warm.ingest(
+                header(state, sequence, start),
+                samples.into_iter(),
+                &mut expected
+            ));
+            sequence += 1;
+            start += count;
+            cold.request_frame();
+            warm.request_frame();
+            let at = now + Duration::from_secs(case as u64 * 4 + offset);
+            assert!(cold.publish(&mut actual, at));
+            assert!(warm.publish(&mut expected, at));
+            assert_eq!(
+                [actual.rms_left, actual.rms_right],
+                [expected.rms_left, expected.rms_right]
+            );
+            assert_eq!(actual.generation, expected.generation);
+            assert_eq!(actual.sample_time, expected.sample_time);
+            let analyzer = cold.analyzer.as_ref().unwrap();
+            assert_eq!(analyzer.rolling, warm.analyzer.as_ref().unwrap().rolling);
+            if demand.spectrum {
+                assert_eq!(actual.frequencies_hz, expected.frequencies_hz);
+                assert_eq!(actual.spectrum_db, expected.spectrum_db);
+                assert_eq!(
+                    analyzer.frequency,
+                    warm.analyzer.as_ref().unwrap().frequency
+                );
+            } else {
+                assert!(actual.spectrum_db.is_empty());
+                assert_eq!(analyzer.frequency, previous_fft);
+            }
         }
     }
 }

@@ -103,12 +103,13 @@ fn musical_frequencies(sample_rate: u32) -> Vec<f32> {
     frequencies
 }
 
-/// FFT plans and frame-sized storage exist only after accepted audio arrives.
+/// The full rolling window exists for all demand; FFT state is prepared only
+/// when a frequency-domain consumer first needs it on this analyzer's timeline.
 struct SpectrumAnalyzer {
     settings: AnalysisSettings,
     sample_rate: u32,
     spectrum: bool,
-    fft: Arc<dyn Fft<f32>>,
+    fft: Option<Arc<dyn Fft<f32>>>,
     scratch: Vec<Complex32>,
     frequency: Vec<Complex32>,
     window: Vec<f32>,
@@ -135,6 +136,44 @@ struct SpectrumAnalyzer {
 impl SpectrumAnalyzer {
     fn new(settings: AnalysisSettings, sample_rate: u32, spectrum: bool) -> Self {
         let n = settings.fft_size as usize;
+        let mut analyzer = Self {
+            settings,
+            sample_rate,
+            spectrum,
+            scratch: Vec::new(),
+            frequency: Vec::new(),
+            fft: None,
+            window: Vec::new(),
+            normalization: 0.0,
+            power_normalization: 0.0,
+            drive_bins: [(0, 0); 3],
+            levels: Vec::new(),
+            frequencies: Vec::new(),
+            bands: Vec::new(),
+            rolling: vec![[0.0; 2]; n],
+            head: 0,
+            filled: 0,
+            generation: 0,
+            metadata_dirty: true,
+            visualizer: VisualizerFrame::default(),
+            density: None,
+            pcm_snapshots: None,
+            spectrogram_snapshots: None,
+            bin_powers: Vec::new(),
+        };
+        if spectrum {
+            analyzer.prepare_fft();
+        }
+        analyzer
+    }
+
+    fn prepare_fft(&mut self) {
+        if self.fft.is_some() {
+            return;
+        }
+        let n = self.rolling.len();
+        let settings = self.settings;
+        let sample_rate = self.sample_rate;
         let fft = FftPlanner::<f32>::new().plan_fft_forward(n);
         let window: Vec<f32> = (0..n)
             .map(|i| {
@@ -177,31 +216,16 @@ impl SpectrumAnalyzer {
                 }
             })
             .collect();
-        Self {
-            settings,
-            sample_rate,
-            spectrum,
-            scratch: vec![Complex32::default(); fft.get_inplace_scratch_len()],
-            frequency: vec![Complex32::default(); n],
-            fft,
-            window,
-            normalization,
-            power_normalization,
-            drive_bins,
-            levels: vec![-140.0; frequencies.len()],
-            frequencies,
-            bands,
-            rolling: vec![[0.0; 2]; n],
-            head: 0,
-            filled: 0,
-            generation: 0,
-            metadata_dirty: true,
-            visualizer: VisualizerFrame::default(),
-            density: None,
-            pcm_snapshots: None,
-            spectrogram_snapshots: None,
-            bin_powers: Vec::new(),
-        }
+        self.scratch = vec![Complex32::default(); fft.get_inplace_scratch_len()];
+        self.frequency = vec![Complex32::default(); n];
+        self.fft = Some(fft);
+        self.window = window;
+        self.normalization = normalization;
+        self.power_normalization = power_normalization;
+        self.drive_bins = drive_bins;
+        self.levels = vec![-140.0; frequencies.len()];
+        self.frequencies = frequencies;
+        self.bands = bands;
     }
 
     #[cfg(test)]
@@ -296,20 +320,23 @@ impl SpectrumAnalyzer {
 
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
-        let mut rms = [0.0_f32; 2];
+        let mut rms = [0.0_f64; 2];
         let density_demand = self.visualizer.demand.stereo_density;
         let needs_fft = self.spectrum
             || self.visualizer.demand.spatial_spectrum
             || self.visualizer.demand.band_energy
             || self.visualizer.demand.spectrogram;
+        if needs_fft {
+            self.prepare_fft();
+        }
         let mut energies = [0.0_f64; 3];
         for (i, samples) in self.rolling[self.head..]
             .iter()
             .chain(&self.rolling[..self.head])
             .enumerate()
         {
-            rms[0] += samples[0] * samples[0];
-            rms[1] += samples[1] * samples[1];
+            rms[0] += f64::from(samples[0]).powi(2);
+            rms[1] += f64::from(samples[1]).powi(2);
             if density_demand {
                 let left = samples[0] as f64;
                 let right = samples[1] as f64;
@@ -339,11 +366,13 @@ impl SpectrumAnalyzer {
                 self.visualizer.density = density.snapshot();
             }
         }
-        let rms = [(rms[0] / n as f32).sqrt(), (rms[1] / n as f32).sqrt()];
+        let rms = rms.map(|power| (power / n as f64).sqrt() as f32);
         if !needs_fft {
             return rms;
         }
         self.fft
+            .as_ref()
+            .expect("frequency demand prepares the FFT")
             .process_with_scratch(&mut self.frequency, &mut self.scratch);
         if self.visualizer.demand.spatial_spectrum {
             self.visualizer.spatial.clear();
@@ -1012,7 +1041,7 @@ mod tests {
             .unwrap()
             .each_ref()
             .map(|slot| slot.as_ptr());
-        let fft = Arc::clone(&analyzer.fft);
+        let fft = Arc::clone(analyzer.fft.as_ref().unwrap());
         let frequency = analyzer.frequency.as_ptr();
         let mut frame = AnalysisFrame::default();
         let mut retained = Vec::new();
@@ -1062,7 +1091,7 @@ mod tests {
                 .map(|slot| slot.as_ptr()),
             pointers
         );
-        assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+        assert!(Arc::ptr_eq(analyzer.fft.as_ref().unwrap(), &fft));
         assert_eq!(analyzer.frequency.as_ptr(), frequency);
 
         let weak = analyzer
@@ -1354,7 +1383,7 @@ mod tests {
     #[test]
     fn demand_relinquishes_unused_payloads_and_reuses_active_storage() {
         let mut analyzer = visualizer_analyzer(ALL_DEMAND);
-        let fft = analyzer.fft.clone();
+        let fft = Arc::clone(analyzer.fft.as_ref().unwrap());
         let frequency = analyzer.frequency.as_ptr();
         let mut frame = AnalysisFrame::default();
         for _ in 0..8 {
@@ -1423,7 +1452,7 @@ mod tests {
             analyzer.set_visualizer_demand(VisualizerDemand::default());
             frame.visualizer.clone_from(&analyzer.visualizer);
             assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
-            assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+            assert!(Arc::ptr_eq(analyzer.fft.as_ref().unwrap(), &fft));
             assert_eq!(analyzer.frequency.as_ptr(), frequency);
         }
     }

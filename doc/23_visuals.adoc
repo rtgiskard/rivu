@@ -48,6 +48,10 @@ prediction. This limits gross prefetch lead; it is not strict A/V synchronizatio
 Spectrum combines channel energy rather than averaging signed channels, so
 opposite-phase stereo does not cancel. Optional spatial analysis retains the
 channels' relationship.
+Time-domain-only demand keeps the complete rolling window and RMS without
+preparing FFT plans or frequency-domain storage. Frequency demand prepares those
+resources lazily for the same window. RMS squares and accumulation use `f64`,
+including the two-channel energy combination, before publishing `f32` values.
 
 === PCM admission
 
