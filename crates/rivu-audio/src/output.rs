@@ -262,7 +262,7 @@ impl Output {
         let target = target_name(options.device)?;
         let rate = source_rate;
         let source_channels = source_layout.len();
-        if source_channels > rivu_shm::MAX_PCM_CHANNELS {
+        if source_channels > rivu_protocol::pcm::MAX_PCM_CHANNELS {
             bail!("Decoded speaker layout exceeds native PCM channel limit");
         }
         let capacity = output_capacity(rate, source_channels)?;

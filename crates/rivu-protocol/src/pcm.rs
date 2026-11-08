@@ -44,6 +44,22 @@ pub struct PcmHeader {
     pub gap: bool,
 }
 pub const PCM_BLOCK_FRAMES: usize = 1024;
+pub const MAX_PCM_CHANNELS: usize = 18;
+
+/// Canonical native speaker IDs, with each speaker present at most once.
+pub fn valid_layout(layout: &[u32]) -> bool {
+    if layout.is_empty() || layout.len() > MAX_PCM_CHANNELS {
+        return false;
+    }
+    let mut seen = 0_u32;
+    for &channel in layout {
+        if channel >= MAX_PCM_CHANNELS as u32 || seen & (1 << channel) != 0 {
+            return false;
+        }
+        seen |= 1 << channel;
+    }
+    true
+}
 /// Maximum native output prefetch; shared retention derives its bound from this budget.
 pub const PCM_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
@@ -65,6 +81,88 @@ pub const DEADLINE: Duration = Duration::from_secs(5);
 pub const MAGIC: &[u8; 8] = b"RIVUPCM6";
 pub const REQUEST_SIZE: usize = 16;
 pub const STATUS_SIZE: usize = 72;
+pub const WELCOME_SIZE: usize = 16;
+pub const MAX_SHARED_PATH: usize = 4096;
+pub const MAX_CLIENTS: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlRequest {
+    Hello { instance: u32 },
+    Subscribe { enabled: bool, revision: u64 },
+}
+
+impl ControlRequest {
+    pub fn encode(self) -> [u8; REQUEST_SIZE] {
+        let mut bytes = [0; REQUEST_SIZE];
+        match self {
+            Self::Hello { instance } => {
+                bytes[8..].copy_from_slice(&u64::from(instance).to_le_bytes())
+            }
+            Self::Subscribe { enabled, revision } => {
+                bytes[0] = 1;
+                bytes[1] = u8::from(enabled);
+                bytes[8..].copy_from_slice(&revision.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8; REQUEST_SIZE]) -> Result<Self> {
+        ensure!(bytes[2..8] == [0; 6], "Invalid PCM request padding");
+        let value = word(&bytes[8..]);
+        match bytes[0] {
+            0 => {
+                ensure!(bytes[1] == 0 && value != 0, "Invalid PCM Hello");
+                Ok(Self::Hello {
+                    instance: u32::try_from(value).context("Invalid PCM instance")?,
+                })
+            }
+            1 => {
+                ensure!(bytes[1] <= 1, "Invalid PCM subscription flags");
+                Ok(Self::Subscribe {
+                    enabled: bytes[1] != 0,
+                    revision: value,
+                })
+            }
+            _ => anyhow::bail!("Unknown PCM control request"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Welcome {
+    pub instance: u32,
+    pub path_length: usize,
+}
+
+impl Welcome {
+    fn validate(self) -> Result<Self> {
+        ensure!(self.instance != 0, "Invalid PCM welcome instance");
+        ensure!(
+            self.path_length != 0 && self.path_length <= MAX_SHARED_PATH,
+            "Invalid shared PCM path length"
+        );
+        Ok(self)
+    }
+
+    pub fn encode(self) -> Result<[u8; WELCOME_SIZE]> {
+        self.validate()?;
+        let mut bytes = [0; WELCOME_SIZE];
+        bytes[..8].copy_from_slice(MAGIC);
+        bytes[8..12].copy_from_slice(&self.instance.to_le_bytes());
+        bytes[12..].copy_from_slice(&(self.path_length as u32).to_le_bytes());
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8; WELCOME_SIZE]) -> Result<Self> {
+        ensure!(&bytes[..8] == MAGIC, "Invalid PCM welcome magic");
+        Self {
+            instance: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            path_length: u32::from_le_bytes(bytes[12..].try_into().unwrap()) as usize,
+        }
+        .validate()
+    }
+}
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
     let base = crate::wire::address(data_dir)?;
     let mut name = base
@@ -74,14 +172,7 @@ pub fn address(data_dir: &Path) -> Result<SocketAddr> {
     name.extend_from_slice(b".pcm.v6");
     Ok(SocketAddr::from_abstract_name(name)?)
 }
-pub fn request(operation: u8, bits: u8, value: u64) -> [u8; REQUEST_SIZE] {
-    let mut bytes = [0; REQUEST_SIZE];
-    bytes[0] = operation;
-    bytes[1] = bits;
-    bytes[8..].copy_from_slice(&value.to_le_bytes());
-    bytes
-}
-pub fn word(bytes: &[u8]) -> u64 {
+fn word(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().unwrap())
 }
 pub struct ControlReader<const N: usize> {
@@ -185,6 +276,88 @@ mod tests {
         task::{Context as TaskContext, Poll},
     };
     #[test]
+    fn control_requests_require_canonical_flags_padding_and_instance_width() {
+        for request in [
+            ControlRequest::Hello { instance: 7 },
+            ControlRequest::Subscribe {
+                enabled: false,
+                revision: 0,
+            },
+            ControlRequest::Subscribe {
+                enabled: true,
+                revision: u64::MAX,
+            },
+        ] {
+            let encoded = request.encode();
+            assert_eq!(ControlRequest::decode(&encoded).unwrap(), request);
+            for index in 2..8 {
+                let mut invalid = encoded;
+                invalid[index] = 1;
+                assert!(ControlRequest::decode(&invalid).is_err());
+            }
+            let mut invalid = encoded;
+            invalid[1] = 2;
+            assert!(ControlRequest::decode(&invalid).is_err());
+            let mut invalid = encoded;
+            invalid[0] = 2;
+            assert!(ControlRequest::decode(&invalid).is_err());
+        }
+        for instance in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut invalid = ControlRequest::Hello { instance: 7 }.encode();
+            invalid[8..].copy_from_slice(&instance.to_le_bytes());
+            assert!(ControlRequest::decode(&invalid).is_err());
+        }
+        let mut invalid = ControlRequest::Hello { instance: 7 }.encode();
+        invalid[1] = 1;
+        assert!(ControlRequest::decode(&invalid).is_err());
+    }
+
+    #[test]
+    fn welcome_bounds_and_native_layout_ids_are_shared_and_canonical() {
+        for path_length in [1, MAX_SHARED_PATH] {
+            let welcome = Welcome {
+                instance: u32::MAX,
+                path_length,
+            };
+            let encoded = welcome.encode().unwrap();
+            assert_eq!(Welcome::decode(&encoded).unwrap(), welcome);
+            let mut invalid = encoded;
+            invalid[0] ^= 1;
+            assert!(Welcome::decode(&invalid).is_err());
+            let mut invalid = encoded;
+            invalid[8..12].fill(0);
+            assert!(Welcome::decode(&invalid).is_err());
+            for length in [0, MAX_SHARED_PATH as u32 + 1, u32::MAX] {
+                let mut invalid = encoded;
+                invalid[12..].copy_from_slice(&length.to_le_bytes());
+                assert!(Welcome::decode(&invalid).is_err());
+            }
+        }
+        for (instance, path_length) in [(0, 1), (7, 0), (7, MAX_SHARED_PATH + 1)] {
+            assert!(
+                Welcome {
+                    instance,
+                    path_length
+                }
+                .encode()
+                .is_err()
+            );
+        }
+        assert!(valid_layout(&[0]));
+        assert!(valid_layout(
+            &(0..MAX_PCM_CHANNELS as u32).rev().collect::<Vec<_>>()
+        ));
+        for invalid in [
+            &[][..],
+            &[0, 0],
+            &[MAX_PCM_CHANNELS as u32],
+            &[0; MAX_PCM_CHANNELS + 1],
+        ] {
+            assert!(!valid_layout(invalid));
+        }
+    }
+
+    #[test]
     fn status_round_trips_and_rejects_noncanonical_flags_and_padding() {
         futures::executor::block_on(async {
             let state = PcmState {
@@ -273,7 +446,11 @@ mod tests {
     #[test]
     fn notification_cancellation_preserves_partial_control_frame() {
         futures::executor::block_on(async {
-            let expected = request(1, 1, 123);
+            let expected = ControlRequest::Subscribe {
+                enabled: true,
+                revision: 123,
+            }
+            .encode();
             let mut stream = Fragmented {
                 bytes: expected,
                 offset: 0,

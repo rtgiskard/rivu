@@ -9,7 +9,7 @@ use futures_lite::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 };
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,40 +145,15 @@ struct FrameWriter<'a> {
     limit: usize,
 }
 
-impl Write for FrameWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > 4 + self.limit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IPC frame exceeds maximum size",
-            ));
-        }
-        let required = self.bytes.len() + bytes.len();
-        if required > self.bytes.capacity() && required > FRAME_GROWTH_THRESHOLD {
-            let target = required
-                .max(self.bytes.capacity().saturating_mul(2))
-                .min(4 + self.limit);
-            self.bytes.reserve_exact(target - self.bytes.len());
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 impl FrameWriter<'_> {
     fn encode<T: Serialize>(&mut self, message_type: u8, value: &T) -> Result<()> {
-        self.bytes.clear();
-        self.bytes.resize(6, 0);
-        self.bytes[4] = PROTOCOL_VERSION;
-        self.bytes[5] = message_type;
-        postcard::to_io(value, &mut *self).context("Encoding IPC message")?;
-        let length = u32::try_from(self.bytes.len() - 4).context("IPC frame is too large")?;
-        self.bytes[..4].copy_from_slice(&length.to_le_bytes());
-        Ok(())
+        crate::framing::encode(
+            value,
+            &[PROTOCOL_VERSION, message_type],
+            self.limit,
+            self.bytes,
+        )
+        .context("Encoding IPC message")
     }
 }
 
@@ -265,10 +240,7 @@ async fn fill_frame<S: AsyncRead + Unpin>(
             bail!("IPC connection closed while reading frame");
         }
     }
-    let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
-    if length > limit {
-        bail!("IPC frame exceeds maximum size");
-    }
+    let length = crate::framing::decode_length(pending[..4].try_into().unwrap(), limit)?;
     pending.reserve((4 + length).saturating_sub(pending.len()));
     while pending.len() < 4 + length {
         let need = 4 + length - pending.len();

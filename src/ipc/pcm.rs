@@ -9,9 +9,9 @@ use futures::{
     stream::FuturesUnordered,
 };
 use rivu_protocol::pcm::{
-    ControlReader, DEADLINE, MAGIC, PcmPosition, REQUEST_SIZE, address, word, write_status,
+    ControlReader, ControlRequest, DEADLINE, MAX_CLIENTS, PcmPosition, REQUEST_SIZE, Welcome,
+    address, write_status,
 };
-use rivu_shm::MAX_CLIENTS;
 use std::{
     collections::BTreeMap,
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
@@ -187,21 +187,29 @@ async fn serve_client(
     instance_id: u32,
 ) -> Result<()> {
     let mut request_reader = ControlReader::<REQUEST_SIZE>::new();
-    let hello =
-        rivu_protocol::transport::timeout(DEADLINE, request_reader.read(&mut stream)).await??;
+    let hello = ControlRequest::decode(
+        &rivu_protocol::transport::timeout(DEADLINE, request_reader.read(&mut stream)).await??,
+    )?;
     ensure!(
-        hello[0] == 0 && word(&hello[8..]) == u64::from(instance_id),
+        hello
+            == ControlRequest::Hello {
+                instance: instance_id
+            },
         "PCM instance does not match command connection"
     );
-    let mut welcome = Vec::from(*MAGIC);
-    welcome.extend_from_slice(&instance_id.to_le_bytes());
+    let mut welcome = Vec::new();
     {
         use std::os::unix::ffi::OsStrExt;
         let state = state.borrow();
         let path = state.handle.pcm.window().share_path();
         let root = path.as_os_str().as_bytes();
-        ensure!(root.len() <= 4096, "Shared PCM path is too long");
-        welcome.extend_from_slice(&(root.len() as u32).to_le_bytes());
+        welcome.extend_from_slice(
+            &Welcome {
+                instance: instance_id,
+                path_length: root.len(),
+            }
+            .encode()?,
+        );
         welcome.extend_from_slice(root);
     }
     rivu_protocol::transport::timeout(DEADLINE, stream.write_all(&welcome)).await??;
@@ -222,13 +230,16 @@ async fn serve_client(
             result = notifications.recv().fuse() => { result.context("PCM publisher stopped")?; None },
         };
         if let Some(command) = command {
-            ensure!(
-                command[0] == 1 && command[1] <= 1,
-                "Unknown PCM subscription request"
-            );
-            revision = word(&command[8..]);
+            let ControlRequest::Subscribe {
+                enabled,
+                revision: next_revision,
+            } = ControlRequest::decode(&command)?
+            else {
+                anyhow::bail!("Expected PCM subscription request");
+            };
+            revision = next_revision;
             let mut state = state.borrow_mut();
-            state.clients.get_mut(&id).unwrap().0 = command[1] != 0;
+            state.clients.get_mut(&id).unwrap().0 = enabled;
             state.aggregate();
             minimum_position = state.handle.pcm.frontier();
         }
@@ -240,7 +251,7 @@ async fn serve_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_protocol::pcm::{PcmHeader, PcmState, STATUS_SIZE, decode_status, request};
+    use rivu_protocol::pcm::{PcmHeader, PcmState, STATUS_SIZE, WELCOME_SIZE, decode_status};
     use std::io::{Read, Write};
     use std::time::Duration;
 
@@ -257,14 +268,16 @@ mod tests {
             stream
                 .set_write_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            stream.write_all(&request(0, 0, 7)).unwrap();
-            let mut welcome = [0; 16];
+            stream
+                .write_all(&ControlRequest::Hello { instance: 7 }.encode())
+                .unwrap();
+            let mut welcome = [0; WELCOME_SIZE];
             stream.read_exact(&mut welcome).unwrap();
-            assert_eq!(&welcome[..8], MAGIC);
-            assert_eq!(u32::from_le_bytes(welcome[8..12].try_into().unwrap()), 7);
-            let length = u32::from_le_bytes(welcome[12..].try_into().unwrap()) as usize;
-            assert!(length <= 4096);
-            stream.read_exact(&mut vec![0; length]).unwrap();
+            let welcome = Welcome::decode(&welcome).unwrap();
+            assert_eq!(welcome.instance, 7);
+            stream
+                .read_exact(&mut vec![0; welcome.path_length])
+                .unwrap();
             Self(stream)
         }
 
@@ -276,7 +289,7 @@ mod tests {
 
         fn subscribe(&mut self, enabled: bool, revision: u64) -> Status {
             self.0
-                .write_all(&request(1, u8::from(enabled), revision))
+                .write_all(&ControlRequest::Subscribe { enabled, revision }.encode())
                 .unwrap();
             loop {
                 let status = self.status();
@@ -297,6 +310,33 @@ mod tests {
     }
 
     #[test]
+    fn malformed_hello_is_rejected_before_registration_or_welcome() {
+        for index in 1..8 {
+            let (handle, _queries) = CoreHandle::test_query_port();
+            let initial = handle.pcm.state();
+            let state = std::rc::Rc::new(std::cell::RefCell::new(ServerState {
+                handle: handle.clone(),
+                clients: BTreeMap::new(),
+            }));
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut hello = ControlRequest::Hello { instance: 7 }.encode();
+            hello[index] = 1;
+            peer.write_all(&hello).unwrap();
+            let result = async_io::block_on(serve_client(
+                Async::new(stream).unwrap(),
+                state.clone(),
+                1,
+                7,
+            ));
+            assert!(result.is_err(), "byte {index}");
+            assert!(state.borrow().clients.is_empty());
+            assert_eq!(handle.pcm.state(), initial);
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        }
+    }
+
+    #[test]
     fn pipelined_subscription_yields_before_disconnect_retires_capture() {
         use std::{
             future::Future,
@@ -311,9 +351,21 @@ mod tests {
         }));
         let (stream, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut requests = Vec::from(request(0, 0, 7));
-        requests.extend_from_slice(&request(1, 1, 11));
-        requests.extend_from_slice(&request(1, 0, 12));
+        let mut requests = Vec::from(ControlRequest::Hello { instance: 7 }.encode());
+        requests.extend_from_slice(
+            &ControlRequest::Subscribe {
+                enabled: true,
+                revision: 11,
+            }
+            .encode(),
+        );
+        requests.extend_from_slice(
+            &ControlRequest::Subscribe {
+                enabled: false,
+                revision: 12,
+            }
+            .encode(),
+        );
         peer.write_all(&requests).unwrap();
         peer.shutdown(std::net::Shutdown::Write).unwrap();
         let stream = Async::new(stream).unwrap();
@@ -323,12 +375,11 @@ mod tests {
             let mut serving = std::pin::pin!(serve_client(stream, state.clone(), 1, 7));
             let mut context = Context::from_waker(Waker::noop());
             assert!(serving.as_mut().poll(&mut context).is_pending());
-            let mut welcome = [0; 16];
+            let mut welcome = [0; WELCOME_SIZE];
             peer.read_exact(&mut welcome).unwrap();
-            assert_eq!(&welcome[..8], MAGIC);
-            let length = u32::from_le_bytes(welcome[12..].try_into().unwrap()) as usize;
-            assert!(length <= 4096);
-            peer.read_exact(&mut vec![0; length]).unwrap();
+            let welcome = Welcome::decode(&welcome).unwrap();
+            assert_eq!(welcome.instance, 7);
+            peer.read_exact(&mut vec![0; welcome.path_length]).unwrap();
 
             // Even with the next request and EOF already readable, the first ACK
             // returns control so the session can be retired before the next intent.
@@ -474,7 +525,16 @@ mod tests {
         assert_eq!(second.subscribe(true, 1).0, enabled);
         assert_eq!(first.subscribe(false, 2).0, enabled);
         // An unchanged aggregate must not queue a broadcast before this ACK.
-        observer.0.write_all(&request(1, 0, 12)).unwrap();
+        observer
+            .0
+            .write_all(
+                &ControlRequest::Subscribe {
+                    enabled: false,
+                    revision: 12,
+                }
+                .encode(),
+            )
+            .unwrap();
         assert_eq!(observer.status(), (enabled, 12, PcmPosition::default()));
         drop(second);
         let disabled = observer.capture(enabled.capture + 1).0;
@@ -488,7 +548,7 @@ mod tests {
         // revokes the previous capture identity even without any audio frames.
         let mut requests = Vec::new();
         for (enabled, revision) in [(true, 3), (false, 4), (true, 5)] {
-            requests.extend_from_slice(&request(1, u8::from(enabled), revision));
+            requests.extend_from_slice(&ControlRequest::Subscribe { enabled, revision }.encode());
         }
         first.0.write_all(&requests).unwrap();
         let resumed = first.capture(disabled.capture + 3).0;

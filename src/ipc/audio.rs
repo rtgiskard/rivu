@@ -406,6 +406,15 @@ async fn stream_render(
                 |event| {
                     match event {
                         RenderEvent::Start(format) => {
+                            let layout: Vec<_> = format
+                                .layout
+                                .iter()
+                                .map(|channel| channel.standard_index())
+                                .collect();
+                            ensure!(
+                                rivu_protocol::pcm::valid_layout(&layout),
+                                "Invalid native PCM layout"
+                            );
                             let batcher = PcmBatcher::new(
                                 format.channels() as usize,
                                 tx.clone(),
@@ -422,11 +431,7 @@ async fn stream_render(
                                 source,
                                 identity: format.source_identity,
                                 sample_rate: format.sample_rate,
-                                layout: format
-                                    .layout
-                                    .iter()
-                                    .map(|channel| channel.standard_index())
-                                    .collect(),
+                                layout,
                                 duration: format.duration,
                             })?;
                         }

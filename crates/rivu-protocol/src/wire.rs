@@ -1,4 +1,4 @@
-mod endpoint;
+pub(crate) mod endpoint;
 pub use endpoint::{address, connect, verify_peer};
 #[macro_use]
 mod config_fields;

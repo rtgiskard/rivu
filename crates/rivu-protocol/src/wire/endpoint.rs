@@ -45,7 +45,12 @@ pub fn verify_peer(stream: &impl AsFd) -> Result<()> {
 }
 
 pub async fn connect(data_dir: &Path) -> Result<Async<UnixStream>> {
-    let address = address(data_dir)?;
+    connect_address(&address(data_dir)?).await
+}
+
+pub(crate) async fn connect_address(
+    address: &std::os::unix::net::SocketAddr,
+) -> Result<Async<UnixStream>> {
     let name = address
         .as_abstract_name()
         .context("IPC address is not an abstract Unix socket")?;
@@ -58,4 +63,29 @@ pub async fn connect(data_dir: &Path) -> Result<Async<UnixStream>> {
     let stream = Async::<UnixStream>::connect(path).await?;
     verify_peer(&stream)?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+
+    #[test]
+    fn async_abstract_connect_preserves_maximum_and_embedded_nul_names() {
+        async_io::block_on(async {
+            for length in [106, 107] {
+                let mut name = format!("rivu-connect-{}-{length}", std::process::id()).into_bytes();
+                name.push(0);
+                name.resize(length, b'x');
+                let address = SocketAddr::from_abstract_name(name).unwrap();
+                let listener = UnixListener::bind_addr(&address).unwrap();
+                let client = connect_address(&address).await.unwrap();
+                let (peer, _) = listener.accept().unwrap();
+                verify_peer(&peer).unwrap();
+                drop(client);
+            }
+            let pathname = SocketAddr::from_pathname("/tmp/rivu-not-abstract").unwrap();
+            assert!(connect_address(&pathname).await.is_err());
+        });
+    }
 }

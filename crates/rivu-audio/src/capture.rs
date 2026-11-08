@@ -1,8 +1,8 @@
 //! Continuous bounded native PCM capture. Audio admission never waits for its observer.
 use crate::Channel;
 use rivu_format::config::VisualizationSignal;
-use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PcmHeader, PcmPosition, PcmState};
-use rivu_shm::{MAX_PCM_CHANNELS, SharedPcmWindow};
+use rivu_protocol::pcm::{MAX_PCM_CHANNELS, PCM_BLOCK_FRAMES, PcmHeader, PcmPosition, PcmState};
+use rivu_shm::SharedPcmWindow;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},

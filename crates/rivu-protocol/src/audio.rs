@@ -9,13 +9,9 @@ use futures_lite::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    io::{self, Write},
     os::{
         linux::net::SocketAddrExt,
-        unix::{
-            ffi::OsStrExt,
-            net::{SocketAddr, UnixStream},
-        },
+        unix::net::{SocketAddr, UnixStream},
     },
     path::{Path, PathBuf},
     time::Duration,
@@ -130,57 +126,13 @@ pub fn address(data_dir: &Path) -> Result<SocketAddr> {
     Ok(SocketAddr::from_abstract_name(name)?)
 }
 pub async fn connect(data_dir: &Path) -> Result<Async<UnixStream>> {
-    let address = address(data_dir)?;
-    let name = address
-        .as_abstract_name()
-        .context("Expected abstract audio address")?;
-    let mut bytes = [0; 108];
-    ensure!(name.len() + 1 < bytes.len(), "Audio address is too long");
-    bytes[1..=name.len()].copy_from_slice(name);
-    let path = Path::new(std::ffi::OsStr::from_bytes(&bytes[..name.len() + 1]));
-    let stream = Async::<UnixStream>::connect(path).await?;
-    crate::wire::verify_peer(&stream)?;
-    Ok(stream)
-}
-struct FrameWriter<'a>(&'a mut Vec<u8>);
-
-impl Write for FrameWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let required = self.0.len().saturating_add(bytes.len());
-        if required > 4 + MAX_FRAME {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Audio frame exceeds its byte limit",
-            ));
-        }
-        if required > self.0.capacity() {
-            let target = required
-                .max(self.0.capacity().saturating_mul(2))
-                .min(4 + MAX_FRAME);
-            self.0.reserve_exact(target - self.0.len());
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    crate::wire::endpoint::connect_address(&address(data_dir)?).await
 }
 
 /// Encode directly into session storage, checking the limit before each append.
 /// On failure no partial frame remains available to send.
 pub fn encode_frame_into<T: Serialize>(value: &T, bytes: &mut Vec<u8>) -> Result<()> {
-    bytes.clear();
-    bytes.resize(4, 0);
-    if let Err(error) = postcard::to_io(value, FrameWriter(bytes)) {
-        bytes.clear();
-        release_large_buffer(bytes);
-        return Err(error).context("Encoding audio frame");
-    }
-    let length = (bytes.len() - 4) as u32;
-    bytes[..4].copy_from_slice(&length.to_le_bytes());
-    Ok(())
+    crate::framing::encode(value, &[], MAX_FRAME, bytes).context("Encoding audio frame")
 }
 
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
@@ -203,8 +155,7 @@ pub async fn read_frame<T: DeserializeOwned>(
     stream.read_exact(&mut prefix[..1]).await?;
     let result = timeout(IO_TIMEOUT, async {
         stream.read_exact(&mut prefix[1..]).await?;
-        let length = u32::from_le_bytes(prefix) as usize;
-        ensure!(length <= MAX_FRAME, "Audio frame exceeds its byte limit");
+        let length = crate::framing::decode_length(prefix, MAX_FRAME)?;
         bytes.clear();
         if length > bytes.capacity() {
             bytes.reserve_exact(length);
@@ -226,15 +177,7 @@ pub async fn write_frame(
     bytes: &mut Vec<u8>,
 ) -> Result<()> {
     let result = timeout(IO_TIMEOUT, async {
-        ensure!(
-            bytes.len() >= 4 && bytes.len() <= 4 + MAX_FRAME,
-            "Invalid encoded audio frame length"
-        );
-        ensure!(
-            u32::from_le_bytes(bytes[..4].try_into().expect("checked prefix")) as usize
-                == bytes.len() - 4,
-            "Invalid encoded audio frame prefix"
-        );
+        crate::framing::validate_encoded(bytes, MAX_FRAME)?;
         stream.write_all(bytes).await?;
         stream.flush().await?;
         Ok(())
@@ -249,6 +192,7 @@ pub async fn write_frame(
 mod framing_tests {
     use super::*;
     use crate::transport::RETAINED_BUFFER_LIMIT;
+    use std::io::Write;
 
     #[test]
     fn encoder_bounds_each_append_and_recovers_after_oversized_values() {

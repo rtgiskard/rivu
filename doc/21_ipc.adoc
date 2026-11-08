@@ -121,6 +121,9 @@ link:../crates/rivu-protocol/src/pcm.rs[the PCM control contract].
 Its control socket carries 16-byte requests and 72-byte status
 records, including the observed audible output-frame cursor and a logical-block
 sequence plus consumed frame offset, not a predicted presentation deadline.
+Requests use canonical typed Hello and subscription records: reserved bytes are
+zero, Hello has no subscription flags, and the bound instance is a nonzero `u32`.
+Malformed records are rejected before registration or capture-state changes.
 The handshake supplies a Core-owned sealed memfd path;
 clients map that same window read-only. The `/proc/<pid>/fd/<fd>` path identifies
 a live descriptor, not a permanent window: after close, its number can be reused.
@@ -177,6 +180,9 @@ Track and checks that expectation; clients do not supply authoritative metadata.
 optional full-source duration. Ordered `Pcm` chunks carry sequence, media start,
 media seconds per frame and interleaved float samples; `Complete` carries rendered
 frame count and duration. A CUE selection is the origin for range and media time.
+Realtime and finite layouts contain 1–18 unique standard channel IDs; both
+endpoints validate the same count, ID range and uniqueness constraints before
+exposing native channels to consumers.
 The renderer captures immutable actual source, graph and monitor EQ state. After
 rerenders that snapshot; it does not retrieve historical output. Reconstruction
 errors are explicit, never a fallback to a different source or graph.

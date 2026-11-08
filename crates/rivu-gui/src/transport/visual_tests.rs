@@ -693,9 +693,14 @@ fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window
         let mut hello = [0; REQUEST_SIZE];
         stream.read_exact(&mut hello).unwrap();
         let root = path.as_os_str().as_encoded_bytes();
-        let mut welcome = Vec::from(*MAGIC);
-        welcome.extend_from_slice(&43u32.to_le_bytes());
-        welcome.extend_from_slice(&(root.len() as u32).to_le_bytes());
+        let mut welcome = Vec::from(
+            Welcome {
+                instance: 43,
+                path_length: root.len(),
+            }
+            .encode()
+            .unwrap(),
+        );
         welcome.extend_from_slice(root);
         stream.write_all(&welcome).unwrap();
     });
@@ -715,7 +720,10 @@ async fn subscribe_waveform(f: &mut Fixture, track: &Track, generation: u64) -> 
         request[1], 1,
         "waveform-only enables the shared PCM producer"
     );
-    let revision = rivu_protocol::pcm::word(&request[8..]);
+    let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
+    else {
+        panic!("expected subscription");
+    };
     let state = PcmState {
         epoch: 2,
         generation,
@@ -1011,7 +1019,10 @@ fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() 
             .read(&mut f.server)
             .await
             .unwrap();
-        let revision = rivu_protocol::pcm::word(&request[8..]);
+        let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
+        else {
+            panic!("expected subscription");
+        };
         let next = PcmState {
             epoch: 6,
             generation: 2,
@@ -1106,7 +1117,10 @@ fn hidden_waveform_master_disable_and_shutdown_fence_collection_and_full_scans()
             request[1], 0,
             "master disable releases the PCM subscription"
         );
-        let revision = rivu_protocol::pcm::word(&request[8..]);
+        let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
+        else {
+            panic!("expected subscription");
+        };
         let token = f.client.state.desired.lock().display_token;
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             while f.client.analysis.read().display_token != token {

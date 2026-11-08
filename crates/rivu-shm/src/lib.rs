@@ -6,7 +6,9 @@
 //! replaced while a reader uses them. This is deliberately best-effort observation,
 //! not a lossless queue or an A/V synchronization mechanism.
 use anyhow::{Context, Result, ensure};
-use rivu_protocol::pcm::{PCM_BLOCK_FRAMES, PCM_OUTPUT_MAX_BYTES, PcmHeader, PcmPosition};
+use rivu_protocol::pcm::{
+    MAX_PCM_CHANNELS, PCM_BLOCK_FRAMES, PCM_OUTPUT_MAX_BYTES, PcmHeader, PcmPosition, valid_layout,
+};
 use std::{
     fs::File,
     io,
@@ -17,9 +19,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
 };
 
-pub const MAX_CLIENTS: usize = 16;
 pub const PCM_QUEUE_BLOCKS: usize = 32;
-pub const MAX_PCM_CHANNELS: usize = 18;
 // Retain output prefetch, 200 ms observer headroom, and observation history.
 // Native-channel strides avoid multiplying the maximum mono frame count by 18.
 const MAX_PREFETCH_SAMPLES: usize = PCM_OUTPUT_MAX_BYTES / size_of::<f32>();
@@ -591,20 +591,6 @@ impl SharedPcmBlock<'_> {
         self.slot.revision.load(Ordering::Acquire) == self.revision
             && self.storage.configuration.load(Ordering::Acquire) == self.configuration
     }
-}
-
-fn valid_layout(layout: &[u32]) -> bool {
-    if layout.is_empty() || layout.len() > MAX_PCM_CHANNELS {
-        return false;
-    }
-    let mut seen = 0_u32;
-    for &channel in layout {
-        if channel >= MAX_PCM_CHANNELS as u32 || seen & (1 << channel) != 0 {
-            return false;
-        }
-        seen |= 1 << channel;
-    }
-    true
 }
 
 fn valid_header(header: PcmHeader, frames: usize) -> bool {

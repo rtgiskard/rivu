@@ -11,8 +11,8 @@ use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDema
 use rivu_format::config::Config;
 use rivu_protocol::model::Track;
 use rivu_protocol::pcm::{
-    ControlReader, DEADLINE, MAGIC, PcmPosition, PcmState, STATUS_SIZE, address, decode_status,
-    request,
+    ControlReader, ControlRequest, DEADLINE, PcmPosition, PcmState, STATUS_SIZE, WELCOME_SIZE,
+    Welcome, address, decode_status,
 };
 use rivu_shm::{PCM_QUEUE_BLOCKS, SharedPcmWindow};
 use rivu_visuals::{WaveformFrame, WaveformSummary};
@@ -119,17 +119,20 @@ impl VisualClient {
         rivu_protocol::wire::verify_peer(&stream)?;
         stream.set_read_timeout(Some(DEADLINE))?;
         stream.set_write_timeout(Some(DEADLINE))?;
-        stream.write_all(&request(0, 0, u64::from(expected_instance)))?;
-        let mut welcome = [0; 16];
+        stream.write_all(
+            &ControlRequest::Hello {
+                instance: expected_instance,
+            }
+            .encode(),
+        )?;
+        let mut welcome = [0; WELCOME_SIZE];
         stream.read_exact(&mut welcome)?;
+        let welcome = Welcome::decode(&welcome)?;
         ensure!(
-            &welcome[..8] == MAGIC
-                && u32::from_le_bytes(welcome[8..12].try_into().unwrap()) == expected_instance,
+            welcome.instance == expected_instance,
             "Analysis service identity mismatch"
         );
-        let length = u32::from_le_bytes(welcome[12..].try_into().unwrap()) as usize;
-        ensure!(length <= 4096, "Shared PCM path exceeds control bound");
-        let mut root = vec![0; length];
+        let mut root = vec![0; welcome.path_length];
         stream.read_exact(&mut root)?;
         use std::os::unix::ffi::OsStringExt;
         let root = std::path::PathBuf::from(std::ffi::OsString::from_vec(root));
@@ -470,7 +473,13 @@ async fn run_client(
             // display identity stay local; revision fences subscription changes.
             rivu_protocol::transport::timeout(
                 DEADLINE,
-                writer.write_all(&request(1, u8::from(pcm_enabled), revision)),
+                writer.write_all(
+                    &ControlRequest::Subscribe {
+                        enabled: pcm_enabled,
+                        revision,
+                    }
+                    .encode(),
+                ),
             )
             .await??;
             sent_revision = revision;

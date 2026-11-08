@@ -67,7 +67,7 @@ pub(crate) async fn read_stream(
                         "PCM source changed before capture"
                     );
                     ensure!(
-                        *sample_rate != 0 && !layout.is_empty(),
+                        *sample_rate != 0 && rivu_protocol::pcm::valid_layout(layout),
                         "Invalid PCM stream format"
                     );
                     ensure!(
@@ -264,5 +264,63 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(callbacks, 0);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_native_layout_is_rejected_before_start_callback() {
+        if rivu::test_support::run_in_subprocess(
+            "transport::audio::tests::invalid_native_layout_is_rejected_before_start_callback",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        for layout in [vec![], vec![0, 0], vec![18], vec![0; 19]] {
+            let directory = rivu::test_support::ipc::socket_test_directory();
+            let listener =
+                UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                hello(&mut stream);
+                send(
+                    &mut stream,
+                    Response::Start {
+                        source: None,
+                        identity: audio::SourceIdentity::Pcm {
+                            storage: 1,
+                            start: 0,
+                            frames: 1,
+                        },
+                        sample_rate: 48_000,
+                        layout,
+                        duration: Some(1.0),
+                    },
+                );
+            });
+            let expected =
+                ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+            let (_cancel, cancelled) = oneshot::channel();
+            let mut callbacks = 0;
+            let result = async_io::block_on(read_stream(
+                directory.path().to_owned(),
+                7,
+                expected,
+                None,
+                VisualizationSignal::Before,
+                None,
+                cancelled,
+                |_| {
+                    callbacks += 1;
+                    Ok(())
+                },
+            ));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Invalid PCM stream format")
+            );
+            assert_eq!(callbacks, 0);
+            server.join().unwrap();
+        }
     }
 }
