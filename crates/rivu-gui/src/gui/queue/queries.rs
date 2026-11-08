@@ -34,11 +34,12 @@ impl Queue {
             return;
         };
         self.model.locate_filtered = None;
-        let filter = self.model.query.clone();
-        let request = self
-            .model
-            .locate
-            .begin(id, filter.clone(), self.state.query_revisions(None));
+        let filtered = self.model.query.is_some();
+        let request = self.model.locate.begin(
+            id,
+            self.model.query.clone(),
+            self.state.query_revisions(None),
+        );
         let position = self
             .model
             .rows
@@ -46,13 +47,14 @@ impl Queue {
             .find(|row| row.id == id)
             .map(|row| row.offset)
             .or_else(|| {
-                filter
-                    .is_none()
+                (!filtered)
                     .then_some(self.state.queue.current_position)
                     .flatten()
             });
         if let Some(position) = position {
-            self.model.locate.resolve(request, position);
+            self.model
+                .locate
+                .resolve(request, self.state.query_revisions(None), position);
             self.ensure_queue_range(position..position.saturating_add(1), cx);
         } else {
             self.dispatch_queue_locate(cx);
@@ -69,21 +71,17 @@ impl Queue {
     }
 
     fn dispatch_queue_locate(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.model.locate.take_job() else {
+        let Some(job) = self.model.locate.take_job() else {
             return;
         };
+        let request = job.request;
         if !self.queue_locate_current(request) {
             self.model.locate.release_worker(request);
             return;
         }
         let handle = self.context.handle().clone();
         let ticket = self.model.locate.projection.ticket();
-        let query = self
-            .model
-            .locate
-            .query
-            .clone()
-            .expect("active locate query");
+        let query = job.query;
         cx.spawn(async move |this, cx| {
             let mut timed_out = false;
             let response = crate::gui::query::run(
@@ -125,7 +123,9 @@ impl Queue {
                     match response.result {
                         Ok(ViewResponse::QueueEntries(rows)) => {
                             if let Some(row) = rows.into_iter().find(|row| row.id == request.id) {
-                                this.model.locate.resolve(request, row.offset);
+                                this.model
+                                    .locate
+                                    .resolve(request, response.revisions, row.offset);
                                 this.ensure_queue_range(
                                     row.offset..row.offset.saturating_add(1),
                                     cx,

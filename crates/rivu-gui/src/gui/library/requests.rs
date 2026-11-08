@@ -5,6 +5,7 @@ use crate::gui::library;
 use crate::test_support::ConfigFixture;
 use rivu_protocol::{
     model::Query,
+    query_tracking::QuerySubmission,
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -58,8 +59,7 @@ pub(in crate::gui) struct DirectoryRead {
     pub(in crate::gui) generation: u64,
     pub(in crate::gui) query: Query,
     pub(in crate::gui) ticket: rivu_protocol::query_tracking::QueryTicket,
-    owner_query: Query,
-    owner_generation: u64,
+    submission: QuerySubmission,
 }
 
 pub(in crate::gui) struct RootCountRead {
@@ -160,14 +160,15 @@ impl Library {
         self.requests
             .directory_workers
             .insert(branch.clone(), (offset, generation));
+        let owner_query = self.library.projection_query();
+        let submission = self.library.projection.submit(&owner_query, revisions);
         DirectoryRequest {
             published: false,
             read: Some(DirectoryRead {
                 branch,
                 generation,
                 query,
-                owner_query: self.library.projection_query(),
-                owner_generation: self.library.projection.generation(),
+                submission,
                 ticket: self.library.projection.ticket(),
             }),
         }
@@ -181,11 +182,10 @@ impl Library {
         self.library
             .tree()
             .request_pending(&read.branch, read.generation)
-            && self.library.projection_query() == read.owner_query
             && self
                 .library
                 .projection
-                .accepts(&read.owner_query, read.owner_generation, revisions)
+                .accepts_submission(read.submission, revisions)
     }
 
     pub(in crate::gui) fn abandon_directory_read(&mut self, read: &DirectoryRead) {
@@ -219,11 +219,11 @@ impl Library {
         ) || (matches!(
             &response.result,
             Ok(ViewResponse::DirectoryPage(_) | ViewResponse::LibraryPage(_))
-        ) && !self.library.projection.accepts(
-            &read.owner_query,
-            read.owner_generation,
-            response.revisions,
-        )) {
+        ) && !self
+            .library
+            .projection
+            .accepts_submission(read.submission, response.revisions))
+        {
             self.library.retire_directory(&read.branch, read.generation);
             return None;
         }
@@ -873,6 +873,83 @@ mod tests {
             assert!(browser.library.tree().cached_row(&branch, 0).is_none());
             assert!(browser.requests.directory_workers.is_empty());
             assert!(browser.next_directory_demand(true).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn identity_changes_retire_directory_receipts_before_another_page_is_demanded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            for change in 0..6 {
+                browser.library = Default::default();
+                browser.requests = Default::default();
+                let roots = vec!["/music".into()];
+                let branch = root_branches(browser, &roots).remove(0);
+                browser.library.prepare_query("seed".into());
+                browser.library.expand_directory(&branch, true);
+                let revisions = QueryRevisions::default();
+                let old = browser
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                    .read
+                    .unwrap();
+                match change {
+                    0 => browser.library.refresh_search("replacement".into()),
+                    1 => browser.library.toggle_favorites(),
+                    2 => {
+                        browser.library.toggle_missing();
+                        browser.library.refresh_filter();
+                    }
+                    3 => browser.library.toggle_view(),
+                    4 => browser.library.clear_locate_filters(),
+                    _ => browser.library.prepare_query("replacement".into()),
+                }
+                assert!(!old.ticket.is_current());
+                assert!(
+                    !browser
+                        .library
+                        .projection
+                        .accepts_submission(old.submission, revisions)
+                );
+                assert!(!browser.directory_read_current(&old, revisions));
+                // Returning to the original identity cannot revive its old receipt.
+                match change {
+                    1 => browser.library.toggle_favorites(),
+                    2 => {
+                        browser.library.toggle_missing();
+                        browser.library.refresh_filter();
+                    }
+                    3 => browser.library.toggle_view(),
+                    _ => browser.library.prepare_query("seed".into()),
+                }
+                browser.library.sync_projection(revisions);
+                assert!(
+                    !browser
+                        .library
+                        .projection
+                        .accepts_submission(old.submission, revisions)
+                );
+                assert!(
+                    browser
+                        .publish_directory_read(
+                            &old,
+                            revisions,
+                            QueryResponse {
+                                revisions,
+                                result: Err(QueryError::Message("late timeout".into())),
+                            },
+                        )
+                        .is_none()
+                );
+                assert!(browser.requests.directory_workers.contains_key(&branch));
+                assert!(
+                    browser
+                        .complete_directory_read(&old, revisions, track_response(revisions, false),)
+                        .is_none()
+                );
+                assert!(browser.library.tree().cached_row(&branch, 0).is_none());
+                assert!(browser.requests.directory_workers.is_empty());
+            }
         });
     }
 

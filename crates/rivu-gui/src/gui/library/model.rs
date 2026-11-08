@@ -651,6 +651,12 @@ impl LibraryBrowser {
     }
 
     pub(super) fn clear_locate_filters(&mut self) {
+        if self.buffer.query.is_some()
+            || self.buffer.favorite.is_some()
+            || self.buffer.missing.is_some()
+        {
+            self.projection.cancel();
+        }
         self.favorites_only = false;
         self.missing_only = false;
         self.buffer.query = None;
@@ -794,12 +800,14 @@ impl LibraryBrowser {
     }
 
     pub(super) fn toggle_view(&mut self) {
+        self.projection.cancel();
         self.invalidate_projection();
         self.tree_active = !self.tree_active;
         self.tree.set_grouped(!self.tree_active);
     }
 
     pub(super) fn toggle_favorites(&mut self) {
+        self.projection.cancel();
         self.favorites_only = !self.favorites_only;
         self.invalidate_projection();
         self.tree.invalidate();
@@ -815,6 +823,9 @@ impl LibraryBrowser {
     }
 
     pub(super) fn refresh_filter(&mut self) {
+        if self.buffer.missing != self.missing_only.then_some(true) {
+            self.projection.cancel();
+        }
         self.invalidate_projection();
         self.buffer.missing = self.missing_only.then_some(true);
         self.tree.invalidate();
@@ -834,6 +845,12 @@ impl LibraryBrowser {
     pub(super) fn prepare_query(&mut self, query: String) {
         self.invalidate_projection();
         let query = (!query.is_empty()).then_some(query);
+        if self.buffer.query != query
+            || self.buffer.favorite != self.favorites_only.then_some(true)
+            || self.buffer.missing != self.missing_only.then_some(true)
+        {
+            self.projection.cancel();
+        }
         if self.buffer.query != query {
             self.tree.invalidate();
         }

@@ -1,5 +1,5 @@
 use crate::gui::{coordination::manual_actions::ManualIntentId, paged};
-use rivu_protocol::query_tracking::QueryTracker;
+use rivu_protocol::query_tracking::{QuerySubmission, QueryTracker};
 use rivu_protocol::{
     model::{Query, QueryStamp, QueueRow},
     response::{QueryError, QueryRevisions, ViewResponse},
@@ -57,9 +57,13 @@ impl From<&QueueRow> for QueueIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct QueueLocateRequest {
-    pub(super) generation: u64,
-    pub(super) stamp: QueryStamp,
+    submission: QuerySubmission,
     pub(super) id: u64,
+}
+
+pub(super) struct QueueLocateJob {
+    pub(super) request: QueueLocateRequest,
+    pub(super) query: Query,
 }
 
 #[derive(Clone, Copy)]
@@ -72,8 +76,7 @@ pub(super) struct QueueLocateReveal {
 #[derive(Default)]
 pub(super) struct QueueLocate {
     pub(super) projection: QueryTracker,
-    pub(super) query: Option<Query>,
-    pub(super) pending: Option<QueueLocateRequest>,
+    pending: Option<QueueLocateJob>,
     pub(super) worker: Option<QueueLocateRequest>,
     pub(super) reveal: Option<QueueLocateReveal>,
     pub(super) emphasized: Option<QueueLocateRequest>,
@@ -83,7 +86,6 @@ pub(super) struct QueueLocate {
 impl QueueLocate {
     pub(super) fn invalidate(&mut self) {
         self.projection.cancel();
-        self.query = None;
         self.pending = None;
         self.reveal = None;
         self.emphasized = None;
@@ -102,14 +104,11 @@ impl QueueLocate {
             query: filter,
             queue_ids: vec![id],
         };
-        self.projection.sync(&query, revisions);
         let request = QueueLocateRequest {
-            generation: self.projection.generation(),
-            stamp: query.stamp(revisions),
+            submission: self.projection.submit(&query, revisions),
             id,
         };
-        self.query = Some(query);
-        self.pending = Some(request);
+        self.pending = Some(QueueLocateJob { request, query });
         request
     }
 
@@ -120,20 +119,18 @@ impl QueueLocate {
         current_id: Option<u64>,
     ) -> bool {
         current_id == Some(request.id)
-            && self.query.as_ref().is_some_and(|query| {
-                self.projection
-                    .accepts(query, request.generation, revisions)
-                    && query.stamp(revisions) == request.stamp
-            })
+            && self
+                .projection
+                .accepts_submission(request.submission, revisions)
     }
 
-    pub(super) fn take_job(&mut self) -> Option<QueueLocateRequest> {
+    pub(super) fn take_job(&mut self) -> Option<QueueLocateJob> {
         if self.worker.is_some() {
             return None;
         }
-        let request = self.pending.take()?;
-        self.worker = Some(request);
-        Some(request)
+        let job = self.pending.take()?;
+        self.worker = Some(job.request);
+        Some(job)
     }
 
     pub(super) fn release_worker(&mut self, request: QueueLocateRequest) {
@@ -142,8 +139,13 @@ impl QueueLocate {
         }
     }
 
-    pub(super) fn resolve(&mut self, request: QueueLocateRequest, position: usize) {
-        if !self.current(request, request.stamp.revisions(), Some(request.id)) {
+    pub(super) fn resolve(
+        &mut self,
+        request: QueueLocateRequest,
+        revisions: QueryRevisions,
+        position: usize,
+    ) {
+        if !self.current(request, revisions, Some(request.id)) {
             return;
         }
         self.pending = None;
@@ -296,6 +298,7 @@ impl QueueBrowser {
     }
     pub(super) fn change_search(&mut self, query: Option<String>) {
         self.clear();
+        self.locate.invalidate();
         self.query = query;
         self.locate_filtered = None;
         self.rows.clear();
@@ -1090,7 +1093,7 @@ mod tests {
         let generation = queue.projection.generation();
         let request = queue.locate.begin(11, None, revisions(7));
         assert!(queue.locate.current(request, revisions(7), Some(11)));
-        queue.locate.resolve(request, 199_999);
+        queue.locate.resolve(request, revisions(7), 199_999);
         let reveal = queue.locate.reveal.unwrap();
         assert_eq!(reveal.request.id, 11);
         assert_eq!(reveal.position, 199_999);
@@ -1106,23 +1109,86 @@ mod tests {
     fn playing_locate_rejects_replaced_targets_and_revisions_with_one_worker() {
         let mut queue = queue(7);
         let old = queue.locate.begin(10, None, revisions(7));
-        assert_eq!(queue.locate.take_job(), Some(old));
+        assert_eq!(queue.locate.take_job().map(|job| job.request), Some(old));
         let latest = queue.locate.begin(11, None, revisions(7));
         assert!(queue.locate.take_job().is_none());
         assert!(!queue.locate.current(old, revisions(7), Some(10)));
         assert!(!queue.locate.current(latest, revisions(7), Some(10)));
         assert!(!queue.locate.current(latest, revisions(7), None));
         assert!(!queue.locate.current(latest, revisions(8), Some(11)));
-        queue.locate.resolve(old, 3);
+        queue.locate.resolve(old, revisions(7), 3);
         assert!(queue.locate.reveal.is_none());
         queue.locate.release_worker(old);
-        assert_eq!(queue.locate.take_job(), Some(latest));
+        assert_eq!(queue.locate.take_job().map(|job| job.request), Some(latest));
         assert!(queue.locate.take_job().is_none());
         queue.locate.invalidate();
         assert!(!queue.locate.current(latest, revisions(7), Some(11)));
         assert_eq!(queue.locate.worker, Some(latest));
         queue.locate.release_worker(latest);
         assert!(queue.locate.take_job().is_none());
+    }
+
+    #[test]
+    fn playing_locate_receipts_reject_same_occurrence_retries_and_late_workers() {
+        let mut queue = queue(7);
+        let old = queue.locate.begin(11, Some("needle".into()), revisions(7));
+        let job = queue.locate.take_job().unwrap();
+        assert_eq!(job.request, old);
+        assert!(matches!(
+            job.query,
+            Query::QueueEntries { query: Some(query), queue_ids }
+                if query == "needle" && queue_ids == [11]
+        ));
+        let ticket = queue.locate.projection.ticket();
+        let retry = queue.locate.begin(11, Some("needle".into()), revisions(7));
+        assert!(!ticket.is_current());
+        assert!(!queue.locate.current(old, revisions(7), Some(11)));
+        assert!(queue.locate.current(retry, revisions(7), Some(11)));
+        queue.locate.resolve(old, revisions(7), 3);
+        assert!(queue.locate.reveal.is_none());
+        assert!(queue.locate.take_job().is_none());
+        // Logical timeout cancels demand, not the still-running old worker.
+        queue.locate.invalidate();
+        assert_eq!(queue.locate.worker, Some(old));
+        assert!(!queue.locate.current(retry, revisions(7), Some(11)));
+        let latest = queue.locate.begin(11, Some("needle".into()), revisions(7));
+        assert!(queue.locate.take_job().is_none());
+        queue.locate.release_worker(old);
+        assert_eq!(queue.locate.take_job().unwrap().request, latest);
+        queue.locate.release_worker(old);
+        assert_eq!(queue.locate.worker, Some(latest));
+        queue.locate.resolve(retry, revisions(7), 4);
+        assert!(queue.locate.reveal.is_none());
+        queue.locate.resolve(latest, revisions(7), 5);
+        assert_eq!(queue.locate.reveal.unwrap().position, 5);
+    }
+
+    #[test]
+    fn playing_locate_filter_change_cancels_before_sync_and_rejects_old_revisions() {
+        let mut queue = queue(7);
+        let old = queue.locate.begin(11, None, revisions(7));
+        queue.locate.take_job().unwrap();
+        let ticket = queue.locate.projection.ticket();
+        queue.change_search(Some("needle".into()));
+        assert!(!ticket.is_current());
+        assert!(!queue.locate.current(old, revisions(7), Some(11)));
+        assert_eq!(queue.locate.worker, Some(old));
+        let filtered = queue.locate.begin(11, queue.query.clone(), revisions(7));
+        let changed_library = QueryRevisions {
+            library: 1,
+            ..revisions(7)
+        };
+        assert!(!queue.locate.current(filtered, changed_library, Some(11)));
+        queue.locate.resolve(filtered, changed_library, 3);
+        assert!(queue.locate.reveal.is_none());
+        queue.locate.release_worker(old);
+        let job = queue.locate.take_job().unwrap();
+        assert_eq!(job.request, filtered);
+        assert!(matches!(
+            job.query,
+            Query::QueueEntries { query: Some(query), queue_ids }
+                if query == "needle" && queue_ids == [11]
+        ));
     }
 
     #[test]

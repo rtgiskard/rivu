@@ -798,6 +798,12 @@ Consumer generations independently reject abandoned identity/intent submissions;
 fresh data cannot authorize an obsolete operation. Acknowledgements carry outcome
 and diagnostic information plus publication revision, never replacement state.
 
+GUI directory reads and playing-occurrence lookups retain tracker-issued receipts
+for query identity and freshness rather than a second owner query and stamp.
+Identity changes invalidate the tracker immediately, before another read is
+planned. Branch/page demand, occurrence selection and physical worker retirement
+remain consumer responsibilities; invalidating a receipt does not free a worker.
+
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages
 do not reserve a snapshot across requests. Cursor batches avoid the total-count
