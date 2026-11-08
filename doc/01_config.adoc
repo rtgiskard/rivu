@@ -246,6 +246,10 @@ forces colors even when redirected; `NO_COLOR` takes precedence over it, and
 The timestamp and level letter share the level's color; target and message text
 are outside that prefix styling.
 File logs never include generated ANSI styling.
+Text stderr escapes control characters in event fields at the terminal boundary.
+With `--json`, tracing diagnostics instead use one JSON object per line with
+`timestamp`, `level`, `target` and `error`; file logging retains its text format
+and original field contents independently of the stderr format.
 
 File logging starts after configuration is loaded. Records may be dropped under
 load; forced termination can lose pending records.

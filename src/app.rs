@@ -186,7 +186,7 @@ impl App {
         })
     }
     pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {
-        rivu_utils::logging::init(None)?;
+        rivu_utils::logging::init(None, rivu_utils::logging::StderrFormat::Text)?;
         let socket_owner = startup::acquire_storage(&data_dir, &config_path)?;
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;

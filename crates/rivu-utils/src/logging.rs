@@ -1,7 +1,8 @@
 //! Process-wide diagnostics with weekly rolling file output.
 //!
-//! The permanent subscriber keeps stderr warnings/errors visible. One session owns
-//! the optional bounded, non-blocking file worker and reconfigures its reloadable
+//! The permanent subscriber keeps stderr warnings/errors visible, using text or
+//! JSON diagnostics selected at initialization. One session owns the optional
+//! bounded, non-blocking file worker and reconfigures its reloadable
 //! layer. The appender prunes matching logs to its file-count limit at construction
 //! and rotation; count changes apply on the next enable or session start, without
 //! rebuilding an active appender. Shutting down withdraws output and waits for the
@@ -9,6 +10,7 @@
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
+use serde::ser::SerializeMap;
 use std::{
     fs,
     io::{self, Write},
@@ -32,6 +34,13 @@ use tracing_subscriber::{
     registry::{LookupSpan, Registry},
     reload,
 };
+
+/// Stderr diagnostics are independent of the permanent text file-log contract.
+#[derive(Clone, Copy)]
+pub enum StderrFormat {
+    Text,
+    Json,
+}
 
 // Serialize the entire installation, including set_global_default. A failed
 // installation leaves this empty so the next caller receives a real retry.
@@ -177,6 +186,7 @@ impl Write for ClosingWriter {
 #[derive(Clone, Copy)]
 struct LineFormatter {
     ansi: bool,
+    stderr: Option<StderrFormat>,
 }
 
 impl<S, N> FormatEvent<S, N> for LineFormatter
@@ -190,7 +200,24 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
+        let fields = EventFields { context, event };
         let metadata = event.metadata();
+        if matches!(self.stderr, Some(StderrFormat::Json)) {
+            let result = (|| -> serde_json::Result<()> {
+                let mut serializer = serde_json::Serializer::new(FormatWriter(&mut writer));
+                let mut object = serde::Serializer::serialize_map(&mut serializer, Some(4))?;
+                object.serialize_entry(
+                    "timestamp",
+                    &DisplayValue(Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ")),
+                )?;
+                object.serialize_entry("level", metadata.level().as_str())?;
+                object.serialize_entry("target", metadata.target())?;
+                object.serialize_entry("error", &DisplayValue(fields))?;
+                object.end()
+            })();
+            result.map_err(|_| std::fmt::Error)?;
+            return writeln!(writer);
+        }
         if self.ansi {
             write!(writer, "\x1b[{}m", level_color(metadata.level()))?;
         }
@@ -202,25 +229,72 @@ where
             write!(writer, "\x1b[0m")?;
         }
         write!(writer, " {}: ", metadata.target())?;
-        context.format_fields(writer.by_ref(), event)?;
+        if matches!(self.stderr, Some(StderrFormat::Text)) {
+            write!(writer, "{}", crate::terminal::TerminalEscaped(fields))?;
+        } else {
+            write!(writer, "{fields}")?;
+        }
         writeln!(writer)
     }
 }
 
-/// Install logging with an optional process-lifetime override for both outputs.
-/// The first initialization wins; configuration changes cannot replace the override.
-pub fn init(level_override: Option<LogLevel>) -> Result<()> {
-    install_once(level_override).map(|_| ())
+struct EventFields<'a, 'context, 'event, S, N> {
+    context: &'a FmtContext<'context, S, N>,
+    event: &'a Event<'event>,
 }
 
-fn install_once(level_override: Option<LogLevel>) -> Result<Arc<RoutingState>> {
+impl<S, N> std::fmt::Display for EventFields<'_, '_, '_, S, N>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.context
+            .format_fields(Writer::new(formatter), self.event)
+    }
+}
+
+struct DisplayValue<T>(T);
+
+impl<T: std::fmt::Display> serde::Serialize for DisplayValue<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0)
+    }
+}
+
+// Bridge the existing formatting sink without buffering a second diagnostic.
+struct FormatWriter<'a, 'writer>(&'a mut Writer<'writer>);
+
+impl Write for FormatWriter<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+        std::fmt::Write::write_str(self.0, text).map_err(io::Error::other)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install logging with an optional process-lifetime override for both outputs.
+/// The first initialization wins, including stderr format; configuration changes
+/// cannot replace the override or change the file log's text format.
+pub fn init(level_override: Option<LogLevel>, stderr: StderrFormat) -> Result<()> {
+    install_once(level_override, stderr).map(|_| ())
+}
+
+fn install_once(
+    level_override: Option<LogLevel>,
+    stderr: StderrFormat,
+) -> Result<Arc<RoutingState>> {
     let mut installed = INSTALLATION
         .lock()
         .expect("logging installation mutex poisoned");
     if let Some(routing) = installed.as_ref() {
         return Ok(routing.clone());
     }
-    let (subscriber, routing) = subscriber(level_override);
+    let (subscriber, routing) = subscriber(level_override, stderr);
     tracing::subscriber::set_global_default(subscriber)
         .context("installing Rivu logging subscriber")?;
     *installed = Some(routing.clone());
@@ -229,16 +303,23 @@ fn install_once(level_override: Option<LogLevel>) -> Result<Arc<RoutingState>> {
 
 fn subscriber(
     level_override: Option<LogLevel>,
+    stderr: StderrFormat,
 ) -> (impl Subscriber + Send + Sync, Arc<RoutingState>) {
     let level_override = level_override.map(level_filter);
-    let stderr_ansi = stderr_ansi();
+    let stderr_ansi = matches!(stderr, StderrFormat::Text) && stderr_ansi();
     let stderr_layer = fmt::layer()
-        .event_format(LineFormatter { ansi: stderr_ansi })
-        .with_ansi(stderr_ansi)
+        .event_format(LineFormatter {
+            ansi: stderr_ansi,
+            stderr: Some(stderr),
+        })
+        .with_ansi(false)
         .with_writer(io::stderr)
         .with_filter(level_override.unwrap_or(LevelFilter::WARN));
     let file_layer = fmt::layer()
-        .event_format(LineFormatter { ansi: false })
+        .event_format(LineFormatter {
+            ansi: false,
+            stderr: None,
+        })
         .with_ansi(false)
         .with_writer(LogSink::Disabled)
         .with_filter(LevelFilter::OFF);
@@ -258,7 +339,7 @@ impl Session {
     /// Start the process's only active session, even when file output is disabled.
     /// A new session may start after the previous one finishes shutting down.
     pub fn start(data_dir: &Path, options: &Options) -> Result<Self> {
-        let routing = install_once(None)?;
+        let routing = install_once(None, StderrFormat::Text)?;
         Self::start_with_routing(data_dir, options, routing)
     }
 
@@ -459,11 +540,81 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn diagnostic(stderr: Option<StderrFormat>) -> String {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .event_format(LineFormatter {
+                    ansi: false,
+                    stderr,
+                })
+                .with_ansi(false)
+                .with_writer(captured.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(
+                target: "logging_test",
+                path = %"音楽/\x1b[2J\nfile\t\u{009b}",
+                "failed {}", "\r\0detail"
+            );
+        });
+        let bytes = captured.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn stderr_text_escapes_untrusted_fields_but_file_logs_remain_unchanged() {
+        let text = diagnostic(Some(StderrFormat::Text));
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("failed \\r\\0detail"), "{text}");
+        assert!(text.contains("音楽/\\x1b[2J\\nfile\\t\\u{009b}"), "{text}");
+        assert!(!text.trim_end_matches('\n').chars().any(char::is_control));
+
+        let file = diagnostic(None);
+        assert!(file.contains("failed \r\0detail"));
+        assert!(file.contains("音楽/\x1b[2J\nfile\t\u{009b}"));
+    }
+
+    #[test]
+    fn stderr_json_retains_diagnostics_and_control_characters_as_json_data() {
+        let json = diagnostic(Some(StderrFormat::Json));
+        assert_eq!(json.lines().count(), 1);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["level"], "ERROR");
+        assert_eq!(value["target"], "logging_test");
+        assert!(value["timestamp"].as_str().unwrap().ends_with('Z'));
+        let error = value["error"].as_str().unwrap();
+        assert!(error.contains("failed \r\0detail"));
+        assert!(error.contains("音楽/\x1b[2J\nfile\t\u{009b}"));
+    }
+
     // Keep each session's dispatch as the thread default through reconfiguration
     // and shutdown: tracing's single-dispatch fast path rebuilds callsite interests
     // against the current default, not merely every live Dispatch.
     fn harness() -> (Arc<RoutingState>, tracing::Dispatch) {
-        let (subscriber, routing) = subscriber(None);
+        let (subscriber, routing) = subscriber(None, StderrFormat::Text);
         let dispatch = tracing::Dispatch::new(subscriber);
         (routing, dispatch)
     }
@@ -501,7 +652,7 @@ mod tests {
     #[test]
     fn process_override_survives_session_start_reconfiguration_and_file_toggle() {
         for override_level in [LogLevel::Debug, LogLevel::Error] {
-            let (subscriber, routing) = subscriber(Some(override_level));
+            let (subscriber, routing) = subscriber(Some(override_level), StderrFormat::Text);
             let dispatch = tracing::Dispatch::new(subscriber);
             let _default = tracing::dispatcher::set_default(&dispatch);
             let directory = tempfile::tempdir().unwrap();

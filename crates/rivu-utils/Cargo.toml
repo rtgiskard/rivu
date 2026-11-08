@@ -6,7 +6,7 @@ description = "General-purpose filesystem and optional diagnostic utilities for 
 
 [features]
 default = []
-logging = ["dep:anyhow", "dep:chrono", "dep:tracing", "dep:tracing-appender", "dep:tracing-subscriber"]
+logging = ["dep:anyhow", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-appender", "dep:tracing-subscriber"]
 terminal = ["dep:clap"]
 
 [dependencies]
@@ -14,6 +14,8 @@ libc = "0.2"
 anyhow = { version = "1", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 clap = { version = "4", optional = true }
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-appender = { version = "0.2", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

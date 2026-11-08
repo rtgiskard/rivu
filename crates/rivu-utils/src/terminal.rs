@@ -46,6 +46,7 @@ pub fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+#[cfg(feature = "terminal")]
 pub fn cli_error(mut error: clap::Error) -> clap::Error {
     use clap::error::{ContextKind, ContextValue};
 

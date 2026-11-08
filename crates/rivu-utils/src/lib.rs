@@ -6,5 +6,5 @@
 #[cfg(feature = "logging")]
 pub mod logging;
 pub mod regular_file;
-#[cfg(feature = "terminal")]
+#[cfg(any(feature = "terminal", feature = "logging"))]
 pub mod terminal;
