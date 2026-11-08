@@ -1,3 +1,46 @@
+// Only fields whose domain and wire representations differ need a policy.
+// Both complete and sparse adapters use these same directional conversions.
+macro_rules! config_wire_convert {
+    (to_wire, library_columns, $value:expr) => {{
+        let columns = $value;
+        [
+            columns.artist,
+            columns.album,
+            columns.duration,
+            columns.codec,
+            columns.bitrate,
+        ]
+    }};
+    (from_wire, library_columns, $value:expr) => {{
+        let [artist, album, duration, codec, bitrate] = $value;
+        rivu_format::config::LibraryColumns {
+            artist,
+            album,
+            duration,
+            codec,
+            bitrate,
+        }
+    }};
+    ($direction:ident, spectrum_bar_layout, $value:expr) => {
+        $value.into()
+    };
+    ($direction:ident, $field:ident, $value:expr) => {
+        $value
+    };
+}
+
+macro_rules! config_wire_patch_convert {
+    ($direction:ident, library_columns, $value:expr) => {
+        $value.map(|value| config_wire_convert!($direction, library_columns, value))
+    };
+    ($direction:ident, spectrum_bar_layout, $value:expr) => {
+        $value.map(|value| config_wire_convert!($direction, spectrum_bar_layout, value))
+    };
+    ($direction:ident, $field:ident, $value:expr) => {
+        $value
+    };
+}
+
 // Positional binary field order shared by complete and sparse Config messages.
 // Keep concrete wire types here, not the human-readable Config serde schema.
 macro_rules! config_wire_fields {
