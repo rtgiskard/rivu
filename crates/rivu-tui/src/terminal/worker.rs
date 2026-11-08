@@ -658,6 +658,9 @@ pub(super) struct QueryWorker {
     pending: Arc<Mutex<Option<QueryJob>>>,
     pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
     cancellation: rivu_protocol::query_tracking::QueryEpoch,
+    // Logical ownership only: withdrawing demand does not retire the worker's
+    // retained physical exchange, which still drains before the next job.
+    demanded: bool,
     shutdown: rivu_client::SessionCancellation,
     worker: Option<JoinHandle<()>>,
 }
@@ -667,14 +670,18 @@ impl QueryWorker {
         self.cancel();
         let ticket = self.cancellation.ticket();
         *self.pending.lock() = Some(QueryJob { request, ticket });
+        self.demanded = true;
         if let Some(sender) = &self.sender {
             let _ = sender.try_send(());
         }
     }
 
     pub(super) fn cancel(&mut self) {
-        self.cancellation.cancel();
-        self.pending.lock().take();
+        if self.demanded {
+            self.demanded = false;
+            self.cancellation.cancel();
+            self.pending.lock().take();
+        }
     }
 }
 
@@ -744,6 +751,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
         pending,
         latest,
         cancellation: rivu_protocol::query_tracking::QueryEpoch::default(),
+        demanded: false,
         shutdown,
         worker: Some(worker),
     }

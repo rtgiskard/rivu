@@ -958,3 +958,66 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
         assert!(!empty.matches(&empty_spec, &next));
     }
 }
+
+#[test]
+fn repeated_withdrawal_discards_pending_but_retains_active_until_reply() {
+    use ipc::{complete_test_handshake, read_test_query, read_test_request, reply_test_query};
+    use rivu_protocol::wire::WireRequest;
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (started, active) = bounded(1);
+    let (cancel_seen, cancelled) = bounded(1);
+    let (release, resume) = bounded(1);
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+            panic!("expected retained query");
+        };
+        started.send(()).unwrap();
+        assert!(matches!(
+            read_test_request(&mut stream),
+            WireRequest::QueryCancel(id) if id == query.id
+        ));
+        cancel_seen.send(()).unwrap();
+        resume.recv_timeout(Duration::from_secs(5)).unwrap();
+        let response = || rivu_protocol::response::QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Ok(ViewResponse::QueuePage(rivu_protocol::model::Page {
+                total: 100,
+                rows: Vec::new(),
+            })),
+        };
+        reply_test_query(&mut stream, response());
+        // Cancelled pending offset 1 never runs; a fresh demand uses the same
+        // physical session only after its cancelled predecessor really retires.
+        assert!(matches!(
+            read_test_query(&mut stream),
+            Query::QueuePage { offset: 2, .. }
+        ));
+        reply_test_query(&mut stream, response());
+    });
+    let mut worker = spawn_query_worker(directory.path(), 1);
+    let mut tracker = QueryTracker::default();
+    // Withdrawing an idle worker must leave its next real demand usable.
+    worker.cancel();
+    worker.cancel();
+    worker.request(queue_request(&mut tracker, 0, QueryRevisions::default()));
+    active.recv_timeout(Duration::from_secs(5)).unwrap();
+    worker.request(queue_request(&mut tracker, 1, QueryRevisions::default()));
+    worker.cancel();
+    worker.cancel();
+    cancelled.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(worker.latest.lock().is_none());
+    worker.request(queue_request(&mut tracker, 2, QueryRevisions::default()));
+    release.send(()).unwrap();
+    worker.sender.take();
+    worker.worker.take().unwrap().join().unwrap();
+    let (request, result) = worker.latest.lock().take().unwrap();
+    assert_eq!(request.demand.offset, 2);
+    assert!(matches!(result.unwrap().view, ViewResponse::QueuePage(page) if page.total == 100));
+    server.join().unwrap();
+}
