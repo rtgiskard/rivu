@@ -388,6 +388,9 @@ pub enum AudioEvent {
     },
     Progress {
         generation: u64,
+        /// Latest seek processed for this source, including rejected attempts;
+        /// zero before any seek. Position belongs only to this source/seek pair.
+        seek_revision: u64,
         position_seconds: f64,
         listened_seconds: f64,
     },

@@ -98,6 +98,11 @@ when rejected after the command was acknowledged; the confirmed position is then
 restored. A real decoder seek or output-restart failure stops playback because the
 decoder may already have moved. Ordinary file seeks are not clamped by estimated
 metadata duration; only an explicit CUE end bounds the target.
+Position updates must match both the loaded source generation and Core's latest
+accepted seek intent. Queued pre-seek progress cannot replace a newer
+accepted target; same-source cumulative heard time is still recorded. A rejected
+seek restores the confirmed position without preventing later progress from that
+seek attempt from advancing it.
 
 Seeking while paused stays paused. If Pause arrives at actual EOF, the next
 occurrence is selected but kept paused; Repeat One instead reloads the current

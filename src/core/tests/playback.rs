@@ -20,6 +20,76 @@ fn published_source_generation_tracks_audio_owner_not_pause_state() {
     assert_ne!(core.shared.read().source_generation, generation);
 }
 
+#[test]
+fn accepted_seek_keeps_position_when_older_progress_arrives_and_counts_heard_time() {
+    let (_directory, mut core) = fixture();
+    let commands = recording_audio(&mut core);
+    playing(&mut core, 1);
+    let old_progress = AudioEvent::Progress {
+        generation: core.transport.generation,
+        seek_revision: 0,
+        position_seconds: 1.0,
+        listened_seconds: 3.0,
+    };
+    core.command(Command::Seek { seconds: 8.0 }).unwrap();
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 8.0, .. }
+    ));
+    core.audio_event(old_progress).unwrap();
+    assert_eq!(core.state.playback.position, 8.0);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 3.0);
+    assert_eq!(play_count(&core, 1), 1);
+    let forward_revision = core.state.playback.seek_revision;
+    progress(&mut core, 8.125, 3.125);
+    assert_eq!(core.state.playback.position, 8.125);
+    core.command(Command::Seek { seconds: 2.0 }).unwrap();
+    let backward_revision = core.state.playback.seek_revision;
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 2.0, revision } if revision == backward_revision
+    ));
+    core.audio_event(AudioEvent::Progress {
+        generation: core.transport.generation,
+        seek_revision: forward_revision,
+        position_seconds: 8.25,
+        listened_seconds: 3.25,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 2.0);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 3.25);
+    progress(&mut core, 2.125, 3.375);
+    assert_eq!(core.state.playback.position, 2.125);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 3.375);
+    assert_eq!(play_count(&core, 1), 1);
+}
+
+#[test]
+fn new_source_resets_progress_seek_identity_and_fences_old_source_accounting() {
+    let (_directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    playing(&mut core, 1);
+    core.command(Command::Seek { seconds: 8.0 }).unwrap();
+    let old_generation = core.transport.generation;
+    core.command(Command::Stop).unwrap();
+    playing(&mut core, 2);
+    assert_ne!(core.transport.generation, old_generation);
+    assert_ne!(core.state.playback.seek_revision, 0);
+    core.audio_event(AudioEvent::Progress {
+        generation: old_generation,
+        seek_revision: 0,
+        position_seconds: 9.0,
+        listened_seconds: 9.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 0.0);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 0.0);
+    assert_eq!(play_count(&core, 2), 0);
+    progress(&mut core, 0.5, 0.5);
+    assert_eq!(core.state.playback.position, 0.5);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 0.5);
+}
+
 fn add_test_album(core: &mut Core) {
     core.command(Command::EditTrack {
         track_id: 1,
@@ -44,6 +114,7 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
         assert!(
             core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
                 generation,
+                seek_revision: 0,
                 position_seconds: heard,
                 listened_seconds: heard,
             }))
@@ -68,6 +139,7 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
     assert!(
         core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
             generation: generation.wrapping_sub(1),
+            seek_revision: 0,
             position_seconds: 9.0,
             listened_seconds: 9.0,
         }))
@@ -90,6 +162,7 @@ fn audio_progress_publishes_committed_statistics_without_rereading_queue_project
         assert!(
             core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
                 generation,
+                seek_revision: 0,
                 position_seconds: heard,
                 listened_seconds: heard,
             }))
@@ -381,6 +454,7 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
         .unwrap();
     let event = AudioEvent::Progress {
         generation: core.transport.generation,
+        seek_revision: 0,
         position_seconds: 3.0,
         listened_seconds: 3.0,
     };
@@ -1155,6 +1229,7 @@ fn failed_load_and_stale_events_neither_count_nor_record_recent() {
     assert_ne!(core.transport.generation, generation);
     core.audio_event(AudioEvent::Progress {
         generation,
+        seek_revision: 0,
         position_seconds: 10.0,
         listened_seconds: 10.0,
     })
@@ -1191,6 +1266,7 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
         );
         core.audio_event(AudioEvent::Progress {
             generation,
+            seek_revision: 0,
             position_seconds: 10.0,
             listened_seconds: 10.0,
         })
@@ -1231,6 +1307,7 @@ fn switching_selection_counts_final_snapshot_without_invalidating_its_position()
     assert_queue_saved(&core);
     core.audio_event(AudioEvent::Progress {
         generation,
+        seek_revision: 0,
         position_seconds: 10.0,
         listened_seconds: 10.0,
     })
@@ -1392,6 +1469,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         sender
             .try_send(AudioEvent::Progress {
                 generation,
+                seek_revision: 0,
                 position_seconds: 9.0,
                 listened_seconds: 2.0,
             })
@@ -1399,6 +1477,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         sender
             .try_send(AudioEvent::Progress {
                 generation: generation - 1,
+                seek_revision: 0,
                 position_seconds: 10.0,
                 listened_seconds: 10.0,
             })
@@ -1456,6 +1535,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     sender
         .try_send(AudioEvent::Progress {
             generation,
+            seek_revision: 0,
             position_seconds: 10.0,
             listened_seconds: 10.0,
         })
@@ -1503,6 +1583,7 @@ fn stale_events_cannot_count_or_stop_new_playback() {
     playing(&mut core, 2);
     core.audio_event(AudioEvent::Progress {
         generation,
+        seek_revision: 0,
         position_seconds: 10.0,
         listened_seconds: 10.0,
     })
@@ -1716,6 +1797,7 @@ fn stopped_decoder_snapshot_counts_once_and_fences_late_events() {
         .unwrap();
     core.audio_event(AudioEvent::Progress {
         generation,
+        seek_revision: 0,
         position_seconds: 10.0,
         listened_seconds: 10.0,
     })
@@ -1992,6 +2074,7 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
         sender
             .try_send(AudioEvent::Progress {
                 generation,
+                seek_revision: 0,
                 position_seconds: heard,
                 listened_seconds: heard,
             })
@@ -2037,6 +2120,7 @@ fn late_stop_snapshot_finishes_accounting_once_without_refencing_or_navigation()
     for deferred in [false, true] {
         let (_directory, mut core) = fixture();
         playing(&mut core, 1);
+        progress(&mut core, 2.0, 2.0);
         let source = core.transport.generation;
         let session = core.transport.session.as_mut().unwrap();
         session.paused_at = Some(17);
@@ -2077,12 +2161,9 @@ fn late_stop_snapshot_finishes_accounting_once_without_refencing_or_navigation()
         }
         if deferred {
             assert_eq!(play_count(&core, 1), 0);
-        }
-    }
-}
-        progress(&mut core, 2.0, 2.0);
             core.database_unavailable = false;
             core.flush_deferred_playback().unwrap();
+        }
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].played_at, 17);
         assert!(core.transport.retired.is_none());
@@ -2100,6 +2181,8 @@ fn late_stop_snapshot_finishes_accounting_once_without_refencing_or_navigation()
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(play_count(&core, 2), 0);
+    }
+}
 
 #[test]
 fn late_started_and_progress_belong_to_the_unsettled_retired_source_only() {
@@ -2114,6 +2197,7 @@ fn late_started_and_progress_belong_to_the_unsettled_retired_source_only() {
     core.audio_event(started).unwrap();
     core.audio_event(AudioEvent::Progress {
         generation: source,
+        seek_revision: 0,
         position_seconds: 2.0,
         listened_seconds: 2.0,
     })

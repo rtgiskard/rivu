@@ -270,6 +270,47 @@ fn backend_seek_rejection_restores_paused_position_without_stopping() {
 }
 
 #[test]
+fn rejected_seek_progress_uses_settled_intent_not_published_clock_revision() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let _commands = recording_audio(&mut core);
+    started(&mut core, Some(20.0)).unwrap();
+    core.command(Command::Seek { seconds: 1e16 }).unwrap();
+    let revision = core.state.playback.seek_revision;
+    core.audio_event(AudioEvent::SeekRejected {
+        revision,
+        snapshot: audio::AudioSnapshot {
+            generation: core.transport.generation,
+            position_seconds: 0.25,
+            listened_seconds: 0.5,
+        },
+        message: "Target exceeds the opened backend timebase".into(),
+    })
+    .unwrap();
+    let correction_revision = core.state.playback.seek_revision;
+    assert_ne!(correction_revision, revision);
+    core.audio_event(AudioEvent::Progress {
+        generation: core.transport.generation,
+        seek_revision: 0,
+        position_seconds: 0.125,
+        listened_seconds: 0.75,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 0.25);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 0.75);
+    core.audio_event(AudioEvent::Progress {
+        generation: core.transport.generation,
+        seek_revision: revision,
+        position_seconds: 0.5,
+        listened_seconds: 1.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 0.5);
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 1.0);
+    assert_eq!(core.state.playback.seek_revision, correction_revision);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+}
+
+#[test]
 fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let commands = recording_audio(&mut core);
@@ -563,6 +604,7 @@ fn ended_missing_next_stops_and_resume_attempts_a_load() {
     assert_ne!(core.transport.generation, generation);
     core.audio_event(AudioEvent::Progress {
         generation,
+        seek_revision: 0,
         position_seconds: 10.0,
         listened_seconds: 10.0,
     })

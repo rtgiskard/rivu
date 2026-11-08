@@ -473,6 +473,7 @@ fn playing(core: &mut Core, queue_id: u64) {
 fn progress(core: &mut Core, position_seconds: f64, listened_seconds: f64) {
     core.audio_event(AudioEvent::Progress {
         generation: core.transport.generation,
+        seek_revision: core.transport.progress_seek_revision,
         position_seconds,
         listened_seconds,
     })

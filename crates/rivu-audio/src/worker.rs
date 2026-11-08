@@ -160,8 +160,9 @@ pub(super) struct Worker {
     pipewire_auto_mix: bool,
     equalizer: Arc<EqualizerConfig>,
     last_snapshot: AudioSnapshot,
+    seek_revision: u64,
     progress: Instant,
-    last_progress: Option<(u64, f64, f64)>,
+    last_progress: Option<(u64, u64, f64, f64)>,
 }
 impl Worker {
     pub(super) fn new(
@@ -192,6 +193,7 @@ impl Worker {
             pipewire_auto_mix: true,
             equalizer: Arc::new(EqualizerConfig::default()),
             last_snapshot: AudioSnapshot::default(),
+            seek_revision: 0,
             progress: Instant::now(),
             last_progress: None,
         }
@@ -231,10 +233,10 @@ impl Worker {
             }
             AudioCommand::StopAndSnapshot(reply) => {
                 let snapshot = self.stop();
-                let _ = reply.send(snapshot);
-            }
                 // Completion belongs to the source, not to the lifetime of its waiter.
                 self.event(AudioEvent::DecoderStopped { snapshot });
+                let _ = reply.send(snapshot);
+            }
             AudioCommand::VisualizationEnabled(enabled) => {
                 self.analyzer.set_visualization_enabled(enabled);
                 self.visualization_enabled = enabled;
@@ -327,6 +329,7 @@ impl Worker {
                 listened_seconds,
             } => {
                 self.stop();
+                self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
                     pcm,
@@ -359,6 +362,7 @@ impl Worker {
                 runner,
             } => {
                 self.stop();
+                self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
                     pcm,
@@ -386,6 +390,7 @@ impl Worker {
                 paused,
             } => {
                 self.stop();
+                self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
                     pcm: None,
@@ -428,6 +433,9 @@ impl Worker {
                 self.refresh_pcm();
             }
             AudioCommand::Seek { seconds, revision } => {
+                // Rejection also settles an intent: subsequent positions belong
+                // to that correction, not to any older queued progress.
+                self.seek_revision = revision;
                 let result = if let Some(opening) = self.opening.as_mut() {
                     super::validate_seek_position(seconds)
                         .and_then(|()| {
@@ -557,6 +565,11 @@ impl Worker {
             Ok(false) => {}
             Ok(true) => {
                 let opening = self.opening.take().unwrap();
+                self.last_snapshot = AudioSnapshot {
+                    generation,
+                    position_seconds: opening.start,
+                    listened_seconds: opening.listened_seconds,
+                };
                 let result = Playback::from_source(
                     opening.source.unwrap(),
                     PlaybackOptions {
@@ -565,11 +578,6 @@ impl Worker {
                         decoder_hint: opening.decoder_hint,
                         generation,
                         metadata: opening.metadata,
-                self.last_snapshot = AudioSnapshot {
-                    generation,
-                    position_seconds: opening.start,
-                    listened_seconds: opening.listened_seconds,
-                };
                         start: opening.start,
                         paused: opening.paused,
                         device: self.device.clone(),
@@ -682,12 +690,18 @@ impl Worker {
             };
             let playback = self.playback.as_ref().unwrap();
             if playback.paused() || self.progress.elapsed() >= Duration::from_millis(100) {
-                let snapshot = (playback.generation(), playback.position(), playback.heard());
+                let snapshot = (
+                    playback.generation(),
+                    self.seek_revision,
+                    playback.position(),
+                    playback.heard(),
+                );
                 if self.last_progress != Some(snapshot) {
                     self.event(AudioEvent::Progress {
                         generation: snapshot.0,
-                        position_seconds: snapshot.1,
-                        listened_seconds: snapshot.2,
+                        seek_revision: snapshot.1,
+                        position_seconds: snapshot.2,
+                        listened_seconds: snapshot.3,
                     });
                     self.last_progress = Some(snapshot);
                 }
@@ -704,6 +718,7 @@ impl Worker {
                 } = self.stop();
                 self.event(AudioEvent::Progress {
                     generation,
+                    seek_revision: self.seek_revision,
                     position_seconds,
                     listened_seconds,
                 });
@@ -1458,6 +1473,43 @@ mod tests {
     }
 
     #[test]
+    fn paused_progress_reports_new_seek_identity_even_when_rejection_keeps_counters() {
+        for rejected in [false, true] {
+            let file = crate::playback::tests::pcm();
+            let (mut playback, _render) =
+                crate::playback::tests::test_playback_selected(file.path(), None);
+            playback.pause(true);
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            worker.playback = Some(playback);
+            if rejected {
+                worker.last_progress = Some((1, 0, 0.0, 0.0));
+                worker.command(AudioCommand::Seek {
+                    seconds: 1e16,
+                    revision: 19,
+                });
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AudioEvent::SeekRejected { revision: 19, .. })
+                ));
+            }
+            // The fixture has a closed command wake channel: run publishes its
+            // paused snapshot, then retires without a timer or platform device.
+            worker.run();
+            let expected_revision = if rejected { 19 } else { 0 };
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::Progress {
+                    generation: 1,
+                    seek_revision,
+                    position_seconds: 0.0,
+                    listened_seconds: 0.0,
+                }) if seek_revision == expected_revision
+            ));
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
     fn decoder_seek_execution_failure_stops_opening_and_playback() {
         for during_opening in [true, false] {
             // The advertised final sample is absent: this target is representable,
@@ -1628,12 +1680,60 @@ mod tests {
                 let expected = AudioSnapshot {
                     generation: 41,
                     ..Default::default()
+                };
+                if expired {
+                    stop.deadline = Instant::now();
+                    assert!(futures::executor::block_on(stop.wait(|_| {})).is_err());
+                    let events = stop.into_events();
+                    assert!(worker.control_round());
+                    assert!(
+                        matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
+                    );
+                    assert!(events.is_empty());
+                } else {
+                    assert!(worker.control_round());
+                    let mut closed = None;
+                    let snapshot = futures::executor::block_on(stop.wait(|event| {
+                        if let AudioEvent::DecoderStopped { snapshot } = event {
+                            closed = Some(snapshot);
+                        }
+                    }))
+                    .unwrap();
+                    assert_eq!(snapshot, expected);
+                    assert_eq!(closed, Some(expected));
                 }
                 assert!(worker.opening.is_none());
                 assert!(worker.playback.is_none());
                 assert!(!worker.commands.has_ready());
             }
         }
+    }
+
+    #[test]
+    fn failed_opening_replaces_the_previous_sources_stop_snapshot() {
+        let valid = crate::source::opening_prefix_file(1024, true);
+        let invalid = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(invalid.path(), b"not an audio stream").unwrap();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, valid.path(), DecoderHint::Native, 40);
+        worker.stop();
+        load_prefix(&mut worker, invalid.path(), DecoderHint::Native, 41);
+        worker.poll_opening();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed { generation: 41, .. })
+        ));
+        let (reply, mut response) = oneshot::channel();
+        worker.command(AudioCommand::StopAndSnapshot(reply));
+        let expected = AudioSnapshot {
+            generation: 41,
+            ..Default::default()
+        };
+        assert_eq!(response.try_recv().unwrap(), Some(expected));
+        assert!(
+            matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
+        );
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1658,27 +1758,6 @@ mod tests {
                 .unwrap();
             assert!(worker.control_round());
             worker.poll_opening();
-                };
-                if expired {
-                    stop.deadline = Instant::now();
-                    assert!(futures::executor::block_on(stop.wait(|_| {})).is_err());
-                    let events = stop.into_events();
-                    assert!(worker.control_round());
-                    assert!(
-                        matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
-                    );
-                    assert!(events.is_empty());
-                } else {
-                    assert!(worker.control_round());
-                    let mut closed = None;
-                    let snapshot = futures::executor::block_on(stop.wait(|event| {
-                        if let AudioEvent::DecoderStopped { snapshot } = event {
-                            closed = Some(snapshot);
-                        }
-                    }))
-                    .unwrap();
-                    assert_eq!(snapshot, expected);
-                    assert_eq!(closed, Some(expected));
             assert!(matches!(
                 events.try_recv(),
                 Ok(AudioEvent::Failed { generation: 42, .. })
@@ -1709,33 +1788,6 @@ mod tests {
                 assert!(worker.opening.is_none());
                 assert!(worker.playback.is_none());
                 assert!(events.is_empty());
-    #[test]
-    fn failed_opening_replaces_the_previous_sources_stop_snapshot() {
-        let valid = crate::source::opening_prefix_file(1024, true);
-        let invalid = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(invalid.path(), b"not an audio stream").unwrap();
-        let (mut worker, _commands, events, _shutdown) = opening_worker();
-        load_prefix(&mut worker, valid.path(), DecoderHint::Native, 40);
-        worker.stop();
-        load_prefix(&mut worker, invalid.path(), DecoderHint::Native, 41);
-        worker.poll_opening();
-        assert!(matches!(
-            events.try_recv(),
-            Ok(AudioEvent::Failed { generation: 41, .. })
-        ));
-        let (reply, mut response) = oneshot::channel();
-        worker.command(AudioCommand::StopAndSnapshot(reply));
-        let expected = AudioSnapshot {
-            generation: 41,
-            ..Default::default()
-        };
-        assert_eq!(response.try_recv().unwrap(), Some(expected));
-        assert!(
-            matches!(events.try_recv(), Ok(AudioEvent::DecoderStopped { snapshot }) if snapshot == expected)
-        );
-        assert!(events.is_empty());
-    }
-
             }
         }
     }
@@ -2383,6 +2435,7 @@ mod tests {
             &shutdown,
             AudioEvent::Progress {
                 generation: 1,
+                seek_revision: 0,
                 position_seconds: 1.0,
                 listened_seconds: 1.0,
             },
