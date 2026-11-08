@@ -30,13 +30,13 @@ import time
 if __package__:
     from .benchmark import metrics, TIMING_BOUNDARIES, timing_summary
     from .runtime.worker import EVENT_VERSION, digest, read_json
-    from ..audio_quality.metric_core import score_difference, score_summary
+    from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
     from runtime.worker import EVENT_VERSION, digest, read_json
-    from audio_quality.metric_core import score_difference, score_summary
+    from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_identified, require_alignment
 
@@ -137,7 +137,7 @@ def main():
             estimated_accompaniment = estimated_pcm.data
             record["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
             record["accompaniment_quality"] = metrics(backing_pcm.data,estimated_accompaniment,rate,core)
-            record["mixture_reconstruction_max_abs"]=float(np.max(np.abs(input_audio.astype("float64")-estimate-estimated_accompaniment)))
+            record["mixture_reconstruction_max_abs"]=reconstruction_metrics(input_audio, estimate, estimated_accompaniment)[1]
         if operation=="speech":
             record["intelligibility"]={}
             for extended in (False,True):

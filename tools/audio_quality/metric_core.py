@@ -18,15 +18,39 @@ def db_ratio(numerator, denominator):
 
 def projection_metrics(reference, estimate):
     import numpy as np
-    ref = reference - reference.mean()
-    est = estimate - estimate.mean()
-    energy = float(np.dot(ref, ref))
+    block_size = 65536
+    ref_mean = float(np.mean(reference, dtype="float64"))
+    est_mean = float(np.mean(estimate, dtype="float64"))
+    energy = product = 0.0
+    for start in range(0, len(reference), block_size):
+        ref = reference[start:start+block_size].astype("float64") - ref_mean
+        est = estimate[start:start+block_size].astype("float64") - est_mean
+        energy += float(np.dot(ref, ref))
+        product += float(np.dot(ref, est))
     if not energy:
         return None, None
-    gain = float(np.dot(ref, est) / energy)
-    target = gain * ref
-    residual = est - target
-    return db_ratio(float(np.dot(target, target)), float(np.dot(residual, residual))), gain
+    gain = product/energy
+    target_energy = residual_energy = 0.0
+    for start in range(0, len(reference), block_size):
+        ref = reference[start:start+block_size].astype("float64") - ref_mean
+        est = estimate[start:start+block_size].astype("float64") - est_mean
+        target = gain*ref
+        residual = est-target
+        target_energy += float(np.dot(target, target))
+        residual_energy += float(np.dot(residual, residual))
+    return db_ratio(target_energy, residual_energy), gain
+
+def reconstruction_metrics(mixture, target, complement):
+    """Accumulate exact mixture-minus-stems residuals with bounded scratch."""
+    import numpy as np
+    energy = peak = 0.0
+    for start in range(0, len(mixture), 65536):
+        residual = (mixture[start:start+65536].astype("float64")
+                    - target[start:start+65536] - complement[start:start+65536])
+        energy += float(np.sum(residual**2))
+        peak = max(peak, float(np.max(np.abs(residual))))
+    return float(np.sqrt(energy/mixture.size)), peak
+
 
 
 def score_difference(output, baseline):

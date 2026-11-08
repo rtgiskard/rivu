@@ -16,11 +16,12 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 if __package__:
     from .evaluate import channel_metrics, identity, load_identified, stereo_metrics
+    from .metric_core import reconstruction_metrics
 else:
     from evaluate import channel_metrics, identity, load_identified, stereo_metrics
+    from metric_core import reconstruction_metrics
 
 
 def compare(args):
@@ -50,7 +51,7 @@ def compare(args):
         backing, backing_rate = backing_pcm.data, backing_pcm.rate
         if vocals.shape != mixture.shape or backing.shape != mixture.shape or vocal_rate != rate or backing_rate != rate:
             raise ValueError("worker outputs violate alignment contract: " + str(path))
-        residual = vocals + backing - mixture
+        residual_rms, residual_peak = reconstruction_metrics(mixture, vocals, backing)
         report["models"].append({
             "model":result["model"],"worker_result":identity(path),
             "request_sha256":result["request_sha256"],"worker_sha256":result["worker_sha256"],
@@ -60,8 +61,7 @@ def compare(args):
             "accompaniment":backing_pcm.identity,
             "vocal_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(reference.T,vocals.T)],
             "vocal_stereo":stereo_metrics(vocals),
-            "reconstruction":{"residual_rms":float(np.sqrt(np.mean(residual**2))),
-                              "residual_peak":float(np.max(np.abs(residual)))},
+            "reconstruction":{"residual_rms":residual_rms,"residual_peak":residual_peak},
         })
     return report
 

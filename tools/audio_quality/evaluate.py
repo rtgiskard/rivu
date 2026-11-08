@@ -16,9 +16,9 @@ import numpy as np
 import soundfile as sf
 
 if __package__:
-    from .metric_core import db_ratio, projection_metrics
+    from .metric_core import db_ratio, projection_metrics, reconstruction_metrics
 else:
-    from metric_core import db_ratio, projection_metrics
+    from metric_core import db_ratio, projection_metrics, reconstruction_metrics
 
 MAX_FRAMES = 12_000_000
 MAX_CHANNELS = 8
@@ -67,31 +67,49 @@ def require_alignment(reference, other, label):
 
 def channel_metrics(reference, estimate):
     si_sdr, alpha = projection_metrics(reference, estimate)
-    error = estimate - reference
+    reference_energy = estimate_energy = error_energy = 0.0
+    peak_abs = peak_error = 0.0
+    overs_count = 0
+    for start in range(0, len(reference), 65536):
+        ref, est = reference[start:start+65536], estimate[start:start+65536]
+        error = est-ref
+        reference_energy += float(np.dot(ref, ref))
+        estimate_energy += float(np.dot(est, est))
+        error_energy += float(np.dot(error, error))
+        peak_abs = max(peak_abs, float(np.max(np.abs(est))))
+        peak_error = max(peak_error, float(np.max(np.abs(error))))
+        overs_count += int(np.count_nonzero(np.abs(est) > 1))
     return {
-        "reference_rms": float(np.sqrt(np.mean(reference ** 2))),
-        "estimate_rms": float(np.sqrt(np.mean(estimate ** 2))),
+        "reference_rms": float(np.sqrt(reference_energy/len(reference))),
+        "estimate_rms": float(np.sqrt(estimate_energy/len(estimate))),
         "reference_dc": float(reference.mean()),
         "estimate_dc": float(estimate.mean()),
-        "peak_abs": float(np.max(np.abs(estimate))),
-        "peak_error_abs": float(np.max(np.abs(error))),
-        "snr_db": db_ratio(float(np.dot(reference, reference)), float(np.dot(error, error))),
+        "peak_abs": peak_abs,
+        "peak_error_abs": peak_error,
+        "snr_db": db_ratio(reference_energy, error_energy),
         "si_sdr_db": si_sdr,
         "least_squares_reference_gain": alpha,
-        "overs_count": int(np.count_nonzero(np.abs(estimate) > 1)),
+        "overs_count": overs_count,
     }
 
 
 def stereo_metrics(data):
     if data.shape[1] != 2:
         return None
-    left, right = data.T
-    mid, side = (left + right) / 2, (left - right) / 2
-    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    left_energy = right_energy = product = mid_energy = side_energy = 0.0
+    for start in range(0, len(data), 65536):
+        left, right = data[start:start+65536].T
+        mid, side = (left+right)/2, (left-right)/2
+        left_energy += float(np.dot(left, left))
+        right_energy += float(np.dot(right, right))
+        product += float(np.dot(left, right))
+        mid_energy += float(np.dot(mid, mid))
+        side_energy += float(np.dot(side, side))
+    denominator = np.sqrt(left_energy)*np.sqrt(right_energy)
     return {
-        "channel_correlation": float(np.dot(left, right) / denominator) if denominator else None,
-        "mid_rms": float(np.sqrt(np.mean(mid ** 2))),
-        "side_rms": float(np.sqrt(np.mean(side ** 2))),
+        "channel_correlation": float(product/denominator) if denominator else None,
+        "mid_rms": float(np.sqrt(mid_energy/len(data))),
+        "side_rms": float(np.sqrt(side_energy/len(data))),
     }
 
 
@@ -146,11 +164,11 @@ class ReferenceEvaluation:
             mixture_audio = load_identified(mixture)
             require_alignment(self.audio, complement_audio, "complement")
             require_alignment(self.audio, mixture_audio, "mixture")
-            residual = estimate.data + complement_audio.data - mixture_audio.data
+            residual_rms, residual_peak = reconstruction_metrics(mixture_audio.data, estimate.data, complement_audio.data)
             report["reconstruction"] = {
                 "mixture": mixture_audio.identity, "complement": complement_audio.identity,
-                "residual_rms": float(np.sqrt(np.mean(residual ** 2))),
-                "residual_peak": float(np.max(np.abs(residual))),
+                "residual_rms": residual_rms,
+                "residual_peak": residual_peak,
                 "warning": "A complement defined as mixture minus target guarantees reconstruction, not target quality.",
             }
         return report

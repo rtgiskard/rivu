@@ -927,6 +927,12 @@ that same loaded noisy-clean pair.
 The processing benchmark and corpus evaluator retain the worker's input-duration
 contract; sharing identity capture does not impose the standalone quality tool's
 12,000,000-frame admission bound.
+Scoring accumulates float64 conversion and residual scratch in bounded blocks.
+Loaded full-track PCM, model workspace and outputs remain separate costs: bounded
+metric scratch does not make the evaluation parent process duration-independent
+or place it under the worker's PCM budget. Both tool families define stereo side
+as `(L-R)/2`; historical processing-benchmark side RMS used `L-R` and is twice the
+current amplitude definition.
 
 Both tool families encode undefined scores/gains as JSON `null`. SNR requires
 nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.

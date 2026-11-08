@@ -13,12 +13,12 @@ import sys
 import time
 if __package__:
     from .runtime.worker import EVENT_VERSION, digest, read_json
-    from ..audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+    from ..audio_quality.metric_core import db_ratio, projection_metrics, reconstruction_metrics, score_difference
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from runtime.worker import EVENT_VERSION, digest, read_json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+    from audio_quality.metric_core import db_ratio, projection_metrics, reconstruction_metrics, score_difference
     from audio_quality.evaluate import load_identified, require_alignment
 
 
@@ -41,48 +41,73 @@ def metrics(reference, estimate, rate, core_seconds=24):
     import numpy as np
     if reference.shape != estimate.shape:
         raise ValueError("reference/output channel or frame mismatch")
-    ref = reference.astype("float64")
-    est = estimate.astype("float64")
-    error = est-ref
-    results = {"absolute_snr_db":db_ratio(float(np.sum(ref**2)), float(np.sum(error**2))),
-               "rms_error":float(np.sqrt(np.mean(error**2))),
-               "peak_error":float(np.max(np.abs(error))),
-               "reference_rms":float(np.sqrt(np.mean(ref**2))),
-               "output_rms":float(np.sqrt(np.mean(est**2))),
-               "output_peak":float(np.max(np.abs(est))), "si_sdr_db":[], "reference_gain":[]}
-    for channel in range(ref.shape[1]):
-        score, gain = projection_metrics(ref[:,channel], est[:,channel])
+    # Float64 arithmetic is local to bounded blocks, never whole-track copies.
+    block_size = max(rate // 50, 65536 // max(1, reference.shape[1]))
+    ref_energy = est_energy = error_energy = side_ref = side_est = 0.0
+    peak_error = output_peak = 0.0
+    for start in range(0, len(reference), block_size):
+        ref = reference[start:start+block_size].astype("float64")
+        est = estimate[start:start+block_size].astype("float64")
+        error = est - ref
+        ref_energy += float(np.sum(ref**2))
+        est_energy += float(np.sum(est**2))
+        error_energy += float(np.sum(error**2))
+        peak_error = max(peak_error, float(np.max(np.abs(error))))
+        output_peak = max(output_peak, float(np.max(np.abs(est))))
+        if reference.shape[1] == 2:
+            side_ref += float(np.sum(((ref[:,0]-ref[:,1])/2)**2))
+            side_est += float(np.sum(((est[:,0]-est[:,1])/2)**2))
+    results = {"absolute_snr_db":db_ratio(ref_energy, error_energy),
+               "rms_error":float(np.sqrt(error_energy/reference.size)),
+               "peak_error":peak_error, "reference_rms":float(np.sqrt(ref_energy/reference.size)),
+               "output_rms":float(np.sqrt(est_energy/reference.size)), "output_peak":output_peak,
+               "si_sdr_db":[], "reference_gain":[]}
+    for channel in range(reference.shape[1]):
+        score, gain = projection_metrics(reference[:,channel], estimate[:,channel])
         results["reference_gain"].append(gain)
         results["si_sdr_db"].append(score)
-    if ref.shape[1] == 2:
+    if reference.shape[1] == 2:
         def coherence(audio):
-            left, right = audio[:,0], audio[:,1]
-            denominator = np.linalg.norm(left)*np.linalg.norm(right)
-            return float(np.dot(left,right)/denominator) if denominator else None
-        results["reference_lr_coherence"] = coherence(ref)
-        results["output_lr_coherence"] = coherence(est)
-        results["reference_side_rms"] = float(np.sqrt(np.mean((ref[:,0]-ref[:,1])**2)))
-        results["output_side_rms"] = float(np.sqrt(np.mean((est[:,0]-est[:,1])**2)))
-    boundaries = range(core_seconds*rate, len(ref), core_seconds*rate)
-    results["outer_boundary_error_jumps"] = [float(np.max(np.abs(error[i]-error[i-1]))) for i in boundaries]
-    # The lowest-energy active 20ms reference frames are an objective weak-detail
-    # proxy, not a consonant transcript or a substitute for actual listening.
-    width = max(1,rate//50)
-    frames = len(ref)//width
+            energy_left = energy_right = product = 0.0
+            for start in range(0, len(audio), block_size):
+                left, right = audio[start:start+block_size].astype("float64").T
+                energy_left += float(np.dot(left, left))
+                energy_right += float(np.dot(right, right))
+                product += float(np.dot(left, right))
+            denominator = np.sqrt(energy_left)*np.sqrt(energy_right)
+            return float(product/denominator) if denominator else None
+        results["reference_lr_coherence"] = coherence(reference)
+        results["output_lr_coherence"] = coherence(estimate)
+        results["reference_side_rms"] = float(np.sqrt(side_ref/len(reference)))
+        results["output_side_rms"] = float(np.sqrt(side_est/len(reference)))
+    boundaries = range(core_seconds*rate, len(reference), core_seconds*rate)
+    results["outer_boundary_error_jumps"] = [float(np.max(np.abs(
+        (estimate[i].astype("float64")-reference[i]) -
+        (estimate[i-1].astype("float64")-reference[i-1])))) for i in boundaries]
+    # Keep only per-20ms-frame energies; weak-frame sample arrays stay bounded.
+    width = max(1, rate//50)
+    frames = len(reference)//width
+    energies = np.empty(frames, dtype="float64")
+    for index in range(frames):
+        ref = reference[index*width:(index+1)*width].astype("float64")
+        energies[index] = np.mean(ref**2)
     if frames:
-        ref_blocks = ref[:frames*width].reshape(frames,width,ref.shape[1])
-        err_blocks = error[:frames*width].reshape(ref_blocks.shape)
-        energies = np.mean(ref_blocks**2,axis=(1,2))
-        active = energies > max(float(energies.max())*1e-3,1e-14)
+        active = energies > max(float(energies.max())*1e-3, 1e-14)
         if active.any():
-            weak = active & (energies <= np.quantile(energies[active],0.2))
-            target, residual = ref_blocks[weak],err_blocks[weak]
-            results["weak_active_frame_snr_db"] = db_ratio(float(np.sum(target**2)), float(np.sum(residual**2)))
-            results["weak_active_frame_reference_gain"] = float(np.sum((target+residual)*target)/np.sum(target**2))
-    # Absolute alignment check on error cross-correlation, bounded to +/- 50 ms.
+            weak = active & (energies <= np.quantile(energies[active], 0.2))
+            target_energy = residual_energy = product = 0.0
+            for index in np.flatnonzero(weak):
+                target = reference[index*width:(index+1)*width].astype("float64")
+                output = estimate[index*width:(index+1)*width].astype("float64")
+                residual = output-target
+                target_energy += float(np.sum(target**2))
+                residual_energy += float(np.sum(residual**2))
+                product += float(np.sum((target+residual)*target))
+            results["weak_active_frame_snr_db"] = db_ratio(target_energy, residual_energy)
+            results["weak_active_frame_reference_gain"] = product/target_energy
     from scipy.signal import correlate, correlation_lags
-    count = min(len(ref), rate*60)
-    correlation = correlate(est[:count,0], ref[:count,0], mode="full", method="fft")
+    count = min(len(reference), rate*60)
+    correlation = correlate(estimate[:count,0].astype("float64"), reference[:count,0].astype("float64"), mode="full", method="fft")
     lags = correlation_lags(count, count)
     keep = np.abs(lags) <= rate//20
     results["estimated_lag_samples"] = int(lags[keep][np.argmax(correlation[keep])])
@@ -156,7 +181,7 @@ def main():
             accompaniment_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
             require_alignment(reference_pcm, accompaniment_pcm, "accompaniment output")
             accompaniment = accompaniment_pcm.data
-            result["mixture_reconstruction_peak_residual"] = float(np.max(np.abs(noisy.astype("float64")-output-accompaniment)))
+            result["mixture_reconstruction_peak_residual"] = reconstruction_metrics(noisy, output, accompaniment)[1]
             if backing is not None:
                 result["accompaniment_quality"] = metrics(backing, accompaniment, rate, result["processing"]["core_seconds"])
         result["evaluation_wall_seconds"] = time.perf_counter()-evaluation_start

@@ -68,6 +68,51 @@ class MetricSemanticsTests(unittest.TestCase):
         self.assertEqual(scores["least_squares_reference_gain"], 1)
         self.assertEqual(quality.db_ratio(1e300, 1e-300), 6000)
 
+    def test_stereo_side_rms_uses_normalized_mid_side_convention(self):
+        reference = np.tile([[0.75, -0.25], [-0.75, 0.25]], (80, 1))
+        estimate = reference*0.5
+        measured = benchmark.metrics(reference, estimate, 8000)
+        self.assertEqual(measured["reference_side_rms"], 0.5)
+        self.assertEqual(measured["output_side_rms"], 0.25)
+        self.assertEqual(measured["reference_side_rms"], quality.stereo_metrics(reference)["side_rms"])
+        self.assertEqual(measured["output_side_rms"], quality.stereo_metrics(estimate)["side_rms"])
+
+    def test_blocked_metrics_match_dense_formulas_across_block_boundaries(self):
+        count = 2*65536+37
+        time = np.arange(count, dtype="float64")
+        reference = np.column_stack((np.sin(time/17), np.cos(time/31)))
+        estimate = reference*0.8 + np.column_stack((np.sin(time/7), np.cos(time/11)))*0.03
+        measured = benchmark.metrics(reference, estimate, 8000, core_seconds=1)
+        error = estimate-reference
+        self.assertAlmostEqual(measured["absolute_snr_db"], 10*np.log10(np.sum(reference**2)/np.sum(error**2)), places=11)
+        self.assertAlmostEqual(measured["rms_error"], np.sqrt(np.mean(error**2)), places=14)
+        for channel in range(2):
+            ref = reference[:,channel]-reference[:,channel].mean()
+            est = estimate[:,channel]-estimate[:,channel].mean()
+            gain = np.dot(ref, est)/np.dot(ref, ref)
+            target = gain*ref
+            expected = 10*np.log10(np.dot(target, target)/np.dot(est-target, est-target))
+            self.assertAlmostEqual(measured["si_sdr_db"][channel], expected, places=11)
+            self.assertAlmostEqual(measured["reference_gain"][channel], gain, places=14)
+        rms, peak = benchmark.reconstruction_metrics(reference, estimate, reference-estimate)
+        residual = reference-estimate-(reference-estimate)
+        self.assertEqual(rms, np.sqrt(np.mean(residual**2)))
+        self.assertEqual(peak, np.max(np.abs(residual)))
+
+    def test_projection_and_reconstruction_never_cast_whole_track(self):
+        class BoundedCast(np.ndarray):
+            def astype(self, *args, **kwargs):
+                if len(self) > 65536:
+                    raise AssertionError("whole-track float64 conversion")
+                return super().astype(*args, **kwargs)
+        reference = np.arange(2*65536+37, dtype="float32").view(BoundedCast)
+        estimate = reference*0.5
+        score, gain = benchmark.projection_metrics(reference, estimate)
+        self.assertEqual(score, "infinity")
+        self.assertEqual(gain, 0.5)
+        self.assertEqual(benchmark.reconstruction_metrics(reference, estimate, estimate), (0.0, 0.0))
+
+
     def test_extended_scores_and_aggregation_stay_json_safe(self):
         for output, baseline, expected in (
             (4, 1, 3), (None, 1, None), (1, None, None),
