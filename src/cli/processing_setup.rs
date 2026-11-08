@@ -62,15 +62,8 @@ fn resources() -> Result<PathBuf> {
             return Ok(installed);
         }
     }
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let target = Path::new(option_env!("CARGO_TARGET_DIR").unwrap_or(".cache/target"));
-    let target = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        checkout.join(target)
-    };
-    if executable.starts_with(&target) || executable.starts_with(checkout.join("target")) {
-        let source = checkout.join("tools/audio_processing");
+    if let Some(directory) = executable.parent() {
+        let source = directory.join(env!("RIVU_DEVELOPMENT_RESOURCES"));
         if source.join("prepare.py").is_file() {
             return Ok(source);
         }
