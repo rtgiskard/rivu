@@ -68,99 +68,18 @@ impl From<WireConfigMutation> for ConfigMutation {
     }
 }
 
-/// Positional optional fields, without human-readable Config serde attributes.
-/// Nested options distinguish leaving a field unchanged from explicitly clearing it.
-#[derive(Serialize, Deserialize)]
-pub struct WireConfigPatch {
-    library_roots: Option<Vec<PathBuf>>,
-    scan_max_depth: Option<u32>,
-    scan_min_duration_seconds: Option<u32>,
-    output_device: Option<Option<String>>,
-    volume: Option<f32>,
-    shuffle: Option<bool>,
-    repeat: Option<crate::model::RepeatMode>,
-    play_count_threshold_percent: Option<f64>,
-    tray_enabled: Option<bool>,
-    confirm_queue_replace: Option<bool>,
-    mpris_enabled: Option<bool>,
-    log_level: Option<rivu_format::config::LogLevel>,
-    log_to_file: Option<bool>,
-    log_max_files: Option<u32>,
-    query_batch_size: Option<u32>,
-    library_columns: Option<[bool; 5]>,
-    ui_font: Option<String>,
-    ui_font_size_pt: Option<u32>,
-    ui_language: Option<String>,
-    ui_theme: Option<rivu_format::config::Theme>,
-    material: Option<rivu_format::config::MaterialPreferences>,
-    ui_scale: Option<f32>,
-    layout_snap_enabled: Option<bool>,
-    layout_snap_grid_px: Option<u32>,
-    visualization_enabled: Option<bool>,
-    visualization_signal: Option<rivu_format::config::VisualizationSignal>,
-    analysis_rate_hz: Option<u32>,
-    visualization_fps: Option<u16>,
-    visualization_background: Option<rivu_format::config::RgbColor>,
-    visualization_palette: Option<rivu_format::config::VisualizationPalette>,
-    spectrum_style: Option<rivu_format::config::SpectrumStyle>,
-    analysis_fft_size: Option<u32>,
-    analysis_window: Option<rivu_format::config::AnalysisWindow>,
-    spectrum_interpolate: Option<bool>,
-    spectrum_bar_layout: Option<WireSpectrumBarLayout>,
-    spectrum_gap: Option<f32>,
-    spectrum_peaks: Option<bool>,
-    spectrum_peak_hold_ms: Option<u32>,
-    spectrum_peak_gravity: Option<f32>,
-    spectrum_bar_hold_ms: Option<u32>,
-    spectrum_bar_gravity: Option<f32>,
-    spectrum_smoothing_ms: Option<u32>,
-    default_visualizer_style: Option<rivu_format::config::AudioVisualizerStyle>,
-    default_visualizer_reference_lines: Option<bool>,
-    default_visualizer_labels: Option<bool>,
-    reactive_sensitivity: Option<f32>,
-    radial_rotation_speed: Option<f32>,
-    radial_bar_width: Option<f32>,
-    radial_ring_opacity: Option<f32>,
-    reactive_bloom_intensity: Option<f32>,
-    radial_inner_diameter: Option<f32>,
-    radial_fade_when_idle: Option<bool>,
-    effect_primary_color: Option<rivu_format::config::RgbColor>,
-    effect_secondary_color: Option<rivu_format::config::RgbColor>,
-    artwork_style: Option<rivu_format::config::ArtworkStyle>,
-    artwork_mode: Option<rivu_format::config::ArtworkMode>,
-    artwork_period_seconds: Option<f32>,
-    artwork_direction: Option<rivu_format::config::ArtworkDirection>,
-    artwork_fps: Option<u16>,
-    artwork_file_limit_mib: Option<u32>,
-    artwork_decode_budget_mib: Option<u32>,
-    gpu_material_budget_mib: Option<u32>,
-    gpu_filter_budget_mib: Option<u32>,
-    gpu_filter_max_depth: Option<u32>,
-    spectrogram_interpolate: Option<bool>,
-    waveform_seek_enabled: Option<bool>,
-    visualization_db_range: Option<f32>,
-    spectrum_db_range: Option<Option<f32>>,
-    spectrogram_db_range: Option<Option<f32>>,
-    reactive_db_range: Option<Option<f32>>,
-    spectrogram_history_seconds: Option<u32>,
-    waveform_cursor_color: Option<rivu_format::config::RgbColor>,
-    waveform_glow: Option<f32>,
-    waveform_rms_gain: Option<f32>,
-    waveform_peak_gain: Option<f32>,
-    waveform_peak_gamma: Option<f32>,
-    oscilloscope_time_span_ms: Option<f32>,
-    oscilloscope_gain: Option<f32>,
-    oscilloscope_overlay_channels: Option<bool>,
-    media_read_buffer_mib: Option<u32>,
-    ffmpeg_enabled: Option<bool>,
-    pipewire_auto_mix: Option<bool>,
-    equalizer: Option<rivu_dsp::equalizer::config::EqualizerConfig>,
-    denoise: Option<rivu_dsp::denoise::DenoiseConfig>,
-    neural: Option<rivu_format::config::NeuralConfig>,
-    equalizer_presets: Option<Vec<rivu_format::config::EqualizerPreset>>,
-    equalizer_ab: Option<Option<rivu_dsp::equalizer::config::EqualizerConfig>>,
-    processing_graph: Option<crate::model::ProcessingGraph>,
+macro_rules! declare_config_patch {
+    ($( $(#[$attr:meta])* $field:ident: $ty:ty, )*) => {
+        /// Positional optional fields, without human-readable Config serde attributes.
+        /// Nested options distinguish unchanged fields from explicitly clearing them.
+        #[derive(Serialize, Deserialize)]
+        pub struct WireConfigPatch {
+            $( $(#[$attr])* $field: Option<$ty>, )*
+        }
+    };
 }
+
+config_wire_fields!(declare_config_patch);
 
 impl From<ConfigPatch> for WireConfigPatch {
     fn from(value: ConfigPatch) -> Self {

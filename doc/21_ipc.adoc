@@ -443,6 +443,9 @@ Library information-column selection is encoded in WireConfig as five booleans
 in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns.
 The per-window filter texture budget and maximum nesting depth are included in
 `WireConfig`; clients and the host must use matching positional layouts.
+Full configuration and sparse patch wire adapters share one positional field
+declaration. Their field order and encoding remain explicit protocol contracts;
+sharing that declaration does not negotiate or change the wire schema.
 
 Configuration mutations use the positional `WireConfigMutation` adapter. Settings
 carry only edited fields; Core merges them into its current configuration and

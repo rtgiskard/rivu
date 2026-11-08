@@ -1,5 +1,7 @@
 mod endpoint;
 pub use endpoint::{address, connect, verify_peer};
+#[macro_use]
+mod config_fields;
 mod config_patch;
 pub use config_patch::WireConfigMutation;
 
@@ -1794,102 +1796,17 @@ impl From<WireSpectrumBarLayout> for rivu_format::config::SpectrumBarLayout {
     }
 }
 
-/// Complete positional IPC schema for `Config`.
-///
-/// Keep this explicit instead of serializing `Config` directly: its human-readable
-/// serde attributes are not a stable binary wire contract.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WireConfig {
-    library_roots: Vec<PathBuf>,
-    scan_max_depth: u32,
-    scan_min_duration_seconds: u32,
-    output_device: Option<String>,
-    volume: f32,
-    shuffle: bool,
-    repeat: crate::model::RepeatMode,
-    play_count_threshold_percent: f64,
-    tray_enabled: bool,
-    confirm_queue_replace: bool,
-    mpris_enabled: bool,
-    log_level: rivu_format::config::LogLevel,
-    log_to_file: bool,
-    log_max_files: u32,
-    query_batch_size: u32,
-    /// Artist, album, duration, codec, bitrate in fixed wire order.
-    library_columns: [bool; 5],
-    ui_font: String,
-    ui_font_size_pt: u32,
-    ui_language: String,
-    ui_theme: rivu_format::config::Theme,
-    material: rivu_format::config::MaterialPreferences,
-    ui_scale: f32,
-    layout_snap_enabled: bool,
-    layout_snap_grid_px: u32,
-    visualization_enabled: bool,
-    visualization_signal: rivu_format::config::VisualizationSignal,
-    analysis_rate_hz: u32,
-    visualization_fps: u16,
-    visualization_background: rivu_format::config::RgbColor,
-    visualization_palette: rivu_format::config::VisualizationPalette,
-    spectrum_style: rivu_format::config::SpectrumStyle,
-    analysis_fft_size: u32,
-    analysis_window: rivu_format::config::AnalysisWindow,
-    spectrum_interpolate: bool,
-    spectrum_bar_layout: WireSpectrumBarLayout,
-    spectrum_gap: f32,
-    spectrum_peaks: bool,
-    spectrum_peak_hold_ms: u32,
-    spectrum_peak_gravity: f32,
-    spectrum_bar_hold_ms: u32,
-    spectrum_bar_gravity: f32,
-    spectrum_smoothing_ms: u32,
-    default_visualizer_style: rivu_format::config::AudioVisualizerStyle,
-    default_visualizer_reference_lines: bool,
-    default_visualizer_labels: bool,
-    reactive_sensitivity: f32,
-    radial_rotation_speed: f32,
-    radial_bar_width: f32,
-    radial_ring_opacity: f32,
-    reactive_bloom_intensity: f32,
-    radial_inner_diameter: f32,
-    radial_fade_when_idle: bool,
-    effect_primary_color: rivu_format::config::RgbColor,
-    effect_secondary_color: rivu_format::config::RgbColor,
-    artwork_style: rivu_format::config::ArtworkStyle,
-    artwork_mode: rivu_format::config::ArtworkMode,
-    artwork_period_seconds: f32,
-    artwork_direction: rivu_format::config::ArtworkDirection,
-    artwork_fps: u16,
-    artwork_file_limit_mib: u32,
-    artwork_decode_budget_mib: u32,
-    gpu_material_budget_mib: u32,
-    gpu_filter_budget_mib: u32,
-    gpu_filter_max_depth: u32,
-    spectrogram_interpolate: bool,
-    waveform_seek_enabled: bool,
-    visualization_db_range: f32,
-    spectrum_db_range: Option<f32>,
-    spectrogram_db_range: Option<f32>,
-    reactive_db_range: Option<f32>,
-    spectrogram_history_seconds: u32,
-    waveform_cursor_color: rivu_format::config::RgbColor,
-    waveform_glow: f32,
-    waveform_rms_gain: f32,
-    waveform_peak_gain: f32,
-    waveform_peak_gamma: f32,
-    oscilloscope_time_span_ms: f32,
-    oscilloscope_gain: f32,
-    oscilloscope_overlay_channels: bool,
-    media_read_buffer_mib: u32,
-    ffmpeg_enabled: bool,
-    pipewire_auto_mix: bool,
-    equalizer: rivu_dsp::equalizer::config::EqualizerConfig,
-    denoise: rivu_dsp::denoise::DenoiseConfig,
-    neural: rivu_format::config::NeuralConfig,
-    equalizer_presets: Vec<rivu_format::config::EqualizerPreset>,
-    equalizer_ab: Option<rivu_dsp::equalizer::config::EqualizerConfig>,
-    processing_graph: crate::model::ProcessingGraph,
+macro_rules! declare_config {
+    ($( $(#[$attr:meta])* $field:ident: $ty:ty, )*) => {
+        /// Complete positional IPC schema, independent of human-readable Config serde attributes.
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        pub struct WireConfig {
+            $( $(#[$attr])* $field: $ty, )*
+        }
+    };
 }
+
+config_wire_fields!(declare_config);
 
 impl From<&rivu_format::config::Config> for WireConfig {
     fn from(value: &rivu_format::config::Config) -> Self {
