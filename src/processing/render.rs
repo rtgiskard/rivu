@@ -115,9 +115,10 @@ pub(super) fn run(
     config: Arc<Config>,
     budget: Arc<audio::PcmBudget>,
     mut status: ProcessingTaskStatus,
-    cancel: &AtomicBool,
+    cancellation: &super::Cancellation,
     tx: &Sender<Event>,
 ) -> Result<ProcessingResult> {
+    let cancel = cancellation.flag();
     let open_source = || -> Result<audio::SourceRenderer> {
         let renderer = audio::SourceRenderer::open(
             &track.path,
@@ -274,7 +275,7 @@ pub(super) fn run(
                 input,
                 Arc::clone(&budget),
                 &mut status,
-                cancel,
+                cancellation,
                 &mut progress,
                 models,
             )?;
@@ -287,7 +288,7 @@ pub(super) fn run(
                     input: &input,
                     config: &config.neural,
                     budget: Arc::clone(&budget),
-                    cancel,
+                    cancel: cancellation,
                 },
                 model.context("Missing admitted model")?,
                 &mut progress,

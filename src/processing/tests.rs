@@ -248,7 +248,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
             .ok()
             .unwrap();
     }
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(Cancellation::new().unwrap());
     let observed = Arc::clone(&cancelled);
     let sender = service.sender.clone();
     let (sent, delivery) = std::sync::mpsc::channel();
@@ -279,7 +279,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     });
     let rejected = delivery.recv_timeout(Duration::from_secs(5)).unwrap();
     let waiting_for_retirement = completion.try_recv().is_err();
-    let cancelled = observed.load(Ordering::Acquire);
+    let cancelled = observed.flag().load(Ordering::Acquire);
     release.send(()).unwrap();
     let service = shutdown.join().unwrap();
     completion.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -760,7 +760,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
             input.clone(),
             Arc::clone(&budget),
             &mut status,
-            &AtomicBool::new(false),
+            &Cancellation::new().unwrap(),
             &mut progress,
             BTreeMap::new(),
         )
@@ -1662,7 +1662,7 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
                 input,
                 Arc::clone(&service.budget),
                 &mut result.status.clone(),
-                &AtomicBool::new(false),
+                &Cancellation::new().unwrap(),
                 &mut progress,
                 BTreeMap::new(),
             )

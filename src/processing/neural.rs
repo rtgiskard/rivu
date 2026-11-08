@@ -3,7 +3,7 @@
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
 use super::render::{ProgressReporter, check_cancel};
 use super::{
-    AudioOutputs, ModelOutcome, ModelProvenance, ModelRequest, WORKER_EVENT_VERSION,
+    AudioOutputs, Cancellation, ModelOutcome, ModelProvenance, ModelRequest, WORKER_EVENT_VERSION,
     WORKER_REQUEST_VERSION,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -11,10 +11,9 @@ use rivu_audio as audio;
 use rivu_protocol::model::{ProcessingOperation, ProcessingPhase};
 use std::{
     io::{Read, Write},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     process::{Child, Command, Stdio},
     sync::Arc,
-    thread,
-    time::Duration,
 };
 
 const MAX_FRAME: usize = 65536;
@@ -27,10 +26,31 @@ const ACCOMPANIMENT: u8 = 19;
 
 struct NeuralChild {
     process: Child,
+    exit_ready: OwnedFd,
     reaped: bool,
 }
 
 impl NeuralChild {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let mut process = command
+            .spawn()
+            .context("Starting local neural interpreter")?;
+        // SAFETY: pidfd_open takes a child PID and flags, retaining no pointers.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.id(), 0u32) };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error).context("Opening neural interpreter exit notification");
+        }
+        Ok(Self {
+            process,
+            // SAFETY: pidfd_open returned a fresh descriptor with no other owner.
+            exit_ready: unsafe { OwnedFd::from_raw_fd(fd as i32) },
+            reaped: false,
+        })
+    }
+
     fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         let exit = self.process.try_wait()?;
         self.reaped = exit.is_some();
@@ -55,6 +75,32 @@ fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+fn wait_ready(readiness: &mut [libc::pollfd], cancel: &Cancellation) -> Result<()> {
+    loop {
+        check_cancel(cancel.flag())?;
+        // SAFETY: the slice contains live borrowed descriptors or -1 (ignored).
+        // poll does not retain the slice. Cancellation has its own sticky wake FD.
+        let ready =
+            unsafe { libc::poll(readiness.as_mut_ptr(), readiness.len() as libc::nfds_t, -1) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("Waiting for neural interpreter readiness");
+        }
+        check_cancel(cancel.flag())?;
+        if readiness
+            .iter()
+            .any(|entry| entry.revents & libc::POLLNVAL != 0)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF))
+                .context("Invalid neural interpreter readiness descriptor");
+        }
+        return Ok(());
+    }
 }
 
 fn frame(buffer: &mut Vec<u8>, kind: u8, payload: &[u8]) -> Result<()> {
@@ -265,6 +311,8 @@ fn run_model(
         budget,
         cancel,
     } = request;
+    let cancellation = cancel;
+    let cancel = cancellation.flag();
     check_cancel(cancel)?;
     let speech = operation == ProcessingOperation::Speech;
     if model.native {
@@ -295,8 +343,8 @@ fn run_model(
     } else {
         &config.separation_interpreter
     };
-    let mut child = NeuralChild {
-        process: Command::new(interpreter)
+    let mut child = NeuralChild::spawn(
+        Command::new(interpreter)
             .arg(&config.worker)
             .arg("--stream")
             .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -304,11 +352,8 @@ fn run_model(
             .env("TRANSFORMERS_OFFLINE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Starting local neural interpreter")?,
-        reaped: false,
-    };
+            .stderr(Stdio::piped()),
+    )?;
     let mut diagnostics = Vec::with_capacity(MAX_FRAME);
     let result = (|| -> Result<AudioOutputs> {
         let mut stdin = Some(child.process.stdin.take().context("Missing worker stdin")?);
@@ -339,9 +384,53 @@ fn run_model(
         let mut stdout_eof = false;
         let mut stderr_eof = false;
         let mut block = [0u8; 8192];
+        let mut readiness = [
+            libc::pollfd {
+                fd: -1,
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: stdout.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: stderr.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: child.exit_ready.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: cancellation.wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         loop {
-            check_cancel(cancel)?;
-            let mut active = false;
+            readiness[0].fd = stdin.as_ref().map_or(-1, AsRawFd::as_raw_fd);
+            if stdout_eof {
+                readiness[1].fd = -1;
+            }
+            if stderr_eof {
+                readiness[2].fd = -1;
+            }
+            if exit.is_some() {
+                readiness[3].fd = -1;
+            }
+            wait_ready(&mut readiness, cancellation)?;
+            ensure!(
+                readiness[3].revents & libc::POLLERR == 0,
+                "Neural interpreter exit notification failed"
+            );
+            ensure!(
+                readiness[4].revents & (libc::POLLERR | libc::POLLHUP) == 0,
+                "Processing cancellation notification failed"
+            );
             if stdin.is_some() {
                 for _ in 0..8 {
                     if sent == outgoing.len() {
@@ -370,7 +459,6 @@ fn run_model(
                         Ok(0) => bail!("Neural input pipe closed"),
                         Ok(n) => {
                             sent += n;
-                            active = true;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -460,7 +548,7 @@ fn run_model(
                             stdout_eof = true;
                             break;
                         }
-                        Some(true) => active = true,
+                        Some(true) => {}
                         None => break,
                     }
                 }
@@ -475,7 +563,6 @@ fn run_model(
                         Ok(n) => {
                             let keep = n.min(MAX_FRAME.saturating_sub(diagnostics.len()));
                             diagnostics.extend_from_slice(&block[..keep]);
-                            active = true;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -483,8 +570,12 @@ fn run_model(
                     }
                 }
             }
-            if exit.is_none() {
+            if readiness[3].revents != 0 {
                 exit = child.try_wait()?;
+                ensure!(
+                    exit.is_some(),
+                    "Neural exit notification without process exit"
+                );
             }
             // stdout EOF is not process exit: continue checking cancellation until reaped.
             if stdout_eof
@@ -493,9 +584,6 @@ fn run_model(
             {
                 ensure!(exit.success(), "Neural interpreter failed: {exit}");
                 break;
-            }
-            if !active {
-                thread::sleep(Duration::from_millis(2));
             }
         }
         check_cancel(cancel)?;
@@ -556,7 +644,143 @@ fn run_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Cursor, sync::atomic::AtomicBool};
+    use std::io::Cursor;
+
+    #[test]
+    fn readiness_cancellation_is_sticky_before_and_during_wait() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        let cancel = Arc::new(Cancellation::new().unwrap());
+        let worker_cancel = Arc::clone(&cancel);
+        let (started, start) = mpsc::channel();
+        let (finished, finish) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut readiness = [libc::pollfd {
+                fd: worker_cancel.wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            started.send(()).unwrap();
+            let error = wait_ready(&mut readiness, &worker_cancel).unwrap_err();
+            finished.send(error.to_string()).unwrap();
+        });
+        start.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancel.cancel();
+        assert_eq!(
+            finish.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "Processing cancelled"
+        );
+        worker.join().unwrap();
+
+        // Repeated cancellation neither consumes nor needs another wake. This
+        // also covers cancellation between the flag check and entering poll.
+        cancel.cancel();
+        let mut readiness = [libc::pollfd {
+            fd: cancel.wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: readiness borrows the still-live eventfd for this call only.
+        assert_eq!(unsafe { libc::poll(readiness.as_mut_ptr(), 1, 0) }, 1);
+        assert_ne!(readiness[0].revents & libc::POLLIN, 0);
+        assert_eq!(
+            wait_ready(&mut readiness, &cancel).unwrap_err().to_string(),
+            "Processing cancelled"
+        );
+    }
+
+    #[test]
+    fn readiness_pidfd_waits_for_exit_after_both_output_eofs() {
+        if crate::test_support::run_in_subprocess(
+            "processing::neural::tests::readiness_pidfd_waits_for_exit_after_both_output_eofs",
+            std::time::Duration::from_secs(20),
+        ) {
+            return;
+        }
+        let cancel = Cancellation::new().unwrap();
+        let mut child = NeuralChild::spawn(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("exec 1>&- 2>&-; IFS= read -r release")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let mut byte = [0u8];
+        assert_eq!(
+            child
+                .process
+                .stdout
+                .as_mut()
+                .unwrap()
+                .read(&mut byte)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            child
+                .process
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read(&mut byte)
+                .unwrap(),
+            0
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        let mut readiness = [libc::pollfd {
+            fd: child.exit_ready.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        child
+            .process
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"exit\n")
+            .unwrap();
+        wait_ready(&mut readiness, &cancel).unwrap();
+        assert_ne!(readiness[0].revents & libc::POLLIN, 0);
+        assert!(child.try_wait().unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn readiness_failure_reports_errno_and_reaps_the_child() {
+        let cancel = Cancellation::new().unwrap();
+        let child = NeuralChild::spawn(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("IFS= read -r release")
+                .stdin(Stdio::piped()),
+        )
+        .unwrap();
+        let pid = child.process.id();
+        let mut readiness = [libc::pollfd {
+            fd: i32::MAX,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let error = wait_ready(&mut readiness, &cancel).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EBADF)
+        );
+        drop(child);
+        // SAFETY: WNOHANG queries only this child PID and retains no pointers.
+        assert_eq!(
+            unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 
     #[test]
     fn runtime_preflight_binds_worker_manifest_and_lexical_interpreter_identity() {
@@ -838,7 +1062,7 @@ if outcome == 'complete-then-nonzero':
                     input: &input,
                     config: &config,
                     budget: Arc::clone(&budget),
-                    cancel: &AtomicBool::new(false),
+                    cancel: &Cancellation::new().unwrap(),
                 },
                 model,
                 &mut progress,

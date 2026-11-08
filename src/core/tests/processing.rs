@@ -1503,6 +1503,53 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     ) {
         return;
     }
+    neural_cancellation_fixture("exec 1>&-", "IFS= read -r lifeline", "stdout EOF");
+}
+
+#[test]
+fn neural_cancellation_wakes_silent_interpreter_without_pipe_events() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::processing::neural_cancellation_wakes_silent_interpreter_without_pipe_events",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    neural_cancellation_fixture("", "IFS= read -r lifeline", "silent interpreter");
+}
+
+#[test]
+fn neural_cancellation_wakes_after_both_output_pipes_close() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::processing::neural_cancellation_wakes_after_both_output_pipes_close",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    neural_cancellation_fixture(
+        "exec 1>&- 2>&-",
+        "IFS= read -r lifeline",
+        "both output EOFs",
+    );
+}
+
+#[test]
+fn neural_cancellation_remains_bounded_under_stderr_backpressure() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::processing::neural_cancellation_remains_bounded_under_stderr_backpressure",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    // More than Linux's maximum default pipe capacity before the ready marker:
+    // cancellation cannot pass this fixture without exercising the stderr drain.
+    neural_cancellation_fixture(
+        "i=0; while [ \"$i\" -lt 256 ]; do printf '%8192s' x >&2; i=$((i + 1)); done",
+        "while :; do printf '%8192s' x >&2; done",
+        "continuous stderr backpressure",
+    );
+}
+
+fn neural_cancellation_fixture(close_outputs: &str, wait: &str, description: &str) {
     use std::os::fd::AsRawFd;
 
     let (directory, mut core) = fixture();
@@ -1514,7 +1561,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
     std::fs::write(
         &worker,
         format!(
-            ": <&{inherited_fd} || exit 1\nexec 1>&-\nprintf ready > \"${{0%/*}}/worker.ready\"\nIFS= read -r lifeline <&{inherited_fd}\n"
+            ": <&{inherited_fd} || exit 1\n{close_outputs}\nprintf ready > \"${{0%/*}}/worker.ready\"\n{wait} <&{inherited_fd}\n"
         ),
     )
     .unwrap();
@@ -1539,7 +1586,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
         }
         assert!(
             Instant::now() < deadline,
-            "Interpreter did not reach the closed-stdout fixture"
+            "Interpreter did not reach the {description} fixture"
         );
         thread::yield_now();
     }
@@ -1556,10 +1603,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
             Err(_) => break None,
         }
     };
-    assert!(
-        event.is_some(),
-        "Cancellation stalled after interpreter stdout EOF"
-    );
+    assert!(event.is_some(), "Cancellation stalled with {description}");
     // Observe before applying Finished or retiring Core, without reaping a
     // zombie or releasing the lifeline that keeps a live interpreter blocked.
     assert_no_neural_interpreter_children();

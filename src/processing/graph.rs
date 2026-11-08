@@ -677,10 +677,11 @@ pub(super) fn execute(
     input: audio::PcmAudio,
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
-    cancel: &AtomicBool,
+    cancellation: &Cancellation,
     progress: &mut ProgressReporter<'_>,
     mut models: BTreeMap<u64, neural::PreparedModel>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+    let cancel = cancellation.flag();
     let tx = progress.sender;
     let graph = status
         .settings
@@ -792,7 +793,7 @@ pub(super) fn execute(
                             input: &upstream.pcm,
                             config,
                             budget: Arc::clone(&budget),
-                            cancel,
+                            cancel: cancellation,
                         },
                         models.remove(&id).context("Missing admitted model")?,
                         progress,

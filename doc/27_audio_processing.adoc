@@ -441,8 +441,14 @@ process handles one task: request, declared PCM, empty input-end marker, then
 immediate stdin EOF. The producer must close stdin without waiting for completion;
 trailing bytes fail the task. Diagnostics go to stderr. Completion identifies
 model, format, frames and stems; Rust validates framing, finite/aligned PCM,
-completion and successful exit before publication. Cancellation terminates/reaps
-the child, including after early stdout EOF.
+completion and successful exit before publication. Linux `poll` waits without a
+timeout on nonblocking pipe readiness, pidfd child-exit notification and sticky
+eventfd cancellation; there are no periodic wakeups. Bounded drain rounds preserve
+duplex backpressure. Pipe EOF is distinct from process exit; cancellation or
+failure terminates/reaps the child, including after early stdout EOF. This path
+requires Linux `pidfd_open` support and permission, not generic Unix support.
+Readiness/setup syscall failures report the OS error and retire the child rather
+than falling back to timed polling.
 Application streams collect no export-only PCM hashes, timing/energy statistics
 or detailed report; completion still requires validated input-end and EOF.
 

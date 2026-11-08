@@ -8,6 +8,7 @@ use rivu_protocol::model::*;
 use std::{
     collections::BTreeMap,
     fs,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -34,6 +35,53 @@ pub(crate) const WORKER_EVENT_VERSION: u64 = 2;
 #[cfg(test)]
 thread_local! {
     static PANIC_ON_NEURAL_PROGRESS: std::cell::Cell<Option<Arc<AtomicBool>>> = const { std::cell::Cell::new(None) };
+}
+
+pub(super) struct Cancellation {
+    requested: AtomicBool,
+    wake: OwnedFd,
+}
+
+impl Cancellation {
+    fn new() -> Result<Self> {
+        // SAFETY: eventfd creates a fresh descriptor and retains no pointers.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Creating processing cancellation wake");
+        }
+        Ok(Self {
+            requested: AtomicBool::new(false),
+            // SAFETY: this fresh descriptor has no other owner.
+            wake: unsafe { OwnedFd::from_raw_fd(fd) },
+        })
+    }
+
+    fn flag(&self) -> &AtomicBool {
+        &self.requested
+    }
+
+    fn cancel(&self) {
+        if self.requested.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // One write, never drained: readiness is sticky even if cancellation
+        // races entry into poll. The initial counter is zero and only this swap
+        // winner writes eight bytes once, so EAGAIN (counter overflow) is impossible.
+        let value = 1u64;
+        loop {
+            // SAFETY: wake is live and value supplies exactly eight readable bytes.
+            let written =
+                unsafe { libc::write(self.wake.as_raw_fd(), std::ptr::from_ref(&value).cast(), 8) };
+            if written == 8 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                panic!("Writing processing cancellation wake: {error}");
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +134,7 @@ pub(super) struct ModelRequest<'a> {
     pub input: &'a audio::PcmAudio,
     pub config: &'a rivu_format::config::NeuralConfig,
     pub budget: Arc<audio::PcmBudget>,
-    pub cancel: &'a AtomicBool,
+    pub cancel: &'a Cancellation,
 }
 
 #[derive(Default, Debug)]
@@ -160,7 +208,7 @@ pub(crate) enum Event {
 }
 struct ActiveTask {
     id: u64,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<Cancellation>,
     worker: JoinHandle<()>,
 }
 pub(crate) struct Service {
@@ -221,7 +269,7 @@ impl Service {
         self.active
             .as_ref()
             .filter(|task| task.id == id)
-            .map(|task| task.cancelled.load(Ordering::Acquire))
+            .map(|task| task.cancelled.flag().load(Ordering::Acquire))
     }
 
     /// Retire the worker only after its reliable terminal event has been received.
@@ -230,7 +278,7 @@ impl Service {
             return None;
         }
         let task = self.active.take().unwrap();
-        let cancelled = task.cancelled.load(Ordering::Acquire);
+        let cancelled = task.cancelled.flag().load(Ordering::Acquire);
         let _ = task.worker.join();
         Some(cancelled)
     }
@@ -712,7 +760,7 @@ impl Service {
             graph_plan: None,
         };
         let initial = status.clone();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(Cancellation::new()?);
         let flag = cancelled.clone();
         let tx = self.sender.clone();
         if self.reclaimer.is_none() {
@@ -733,7 +781,7 @@ impl Service {
                     PANIC_ON_NEURAL_PROGRESS.set(panic_on_neural_progress);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         retired?;
-                        render::check_cancel(&flag)?;
+                        render::check_cancel(flag.flag())?;
                         if matches!(
                             operation,
                             ProcessingOperation::Speech | ProcessingOperation::Separate
@@ -750,7 +798,7 @@ impl Service {
                                 "Select an absolute local prepared model manifest first"
                             );
                         }
-                        render::check_cancel(&flag)?;
+                        render::check_cancel(flag.flag())?;
                         let result = if let Some(cached_output) = cached_output {
                             render::run_cached_export(
                                 track,
@@ -758,7 +806,7 @@ impl Service {
                                 budget,
                                 initial,
                                 cached_output,
-                                &flag,
+                                flag.flag(),
                                 &tx,
                             )
                         } else {
@@ -797,13 +845,13 @@ impl Service {
             .as_ref()
             .filter(|t| t.id == id)
             .context("No matching active processing task")?;
-        task.cancelled.store(true, Ordering::Release);
+        task.cancelled.cancel();
         Ok(())
     }
     pub fn shutdown(&mut self) {
         let task = self.active.take();
         if let Some(task) = &task {
-            task.cancelled.store(true, Ordering::Release);
+            task.cancelled.cancel();
         }
         // Closing admission wakes every reliable sender, including a worker
         // blocked behind buffered progress. Joining establishes retirement;
@@ -921,8 +969,8 @@ impl Service {
             .context("No accompaniment stem")?;
         let mut status = result.status.clone();
         let budget = Arc::clone(&self.budget);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::clone(&cancelled);
+        let cancelled = Arc::new(Cancellation::new()?);
+        let cancellation = Arc::clone(&cancelled);
         let tx = self.sender.clone();
         #[cfg(test)]
         let panic_after_mix = std::mem::take(&mut self.panic_after_mix);
@@ -934,12 +982,13 @@ impl Service {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                     || -> Result<audio::PcmAudio> {
                         retired?;
+                        let cancel = cancellation.flag();
                         render::validate_output(
                             &accompaniment,
                             vocals.sample_rate(),
                             vocals.layout(),
                             vocals.frames(),
-                            &cancel,
+                            cancel,
                         )?;
                         let mut builder = audio::PcmBuilder::new(
                             vocals.sample_rate(),
@@ -952,7 +1001,7 @@ impl Service {
                         let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
                         let mut position = 0;
                         while position < vocals.frames() {
-                            render::check_cancel(&cancel)?;
+                            render::check_cancel(cancel)?;
                             let frames = vocals.read_frames(position, &mut v);
                             let accompaniment_frames = accompaniment.read_frames(position, &mut a);
                             debug_assert_eq!(accompaniment_frames, frames);
@@ -963,7 +1012,7 @@ impl Service {
                             builder.push(&v[..count])?;
                             position += frames as u64;
                         }
-                        render::check_cancel(&cancel)?;
+                        render::check_cancel(cancel)?;
                         #[cfg(test)]
                         if panic_after_mix {
                             panic!("injected stem mix worker panic");
