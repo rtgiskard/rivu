@@ -3,7 +3,7 @@ use crate::store::scan::PROBE_VERSION;
 use crate::store::{CatalogChanges, Store};
 use rivu_audio::MediaInfo;
 use rivu_protocol::model::CueSegment;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn record() -> ScanRecord {
     ScanRecord {
@@ -981,6 +981,40 @@ fn source_lookup_prefers_ordinary_then_lowest_cue_id_even_when_missing() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn batch_source_lookup_preserves_order_and_identity_preference() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,missing) VALUES
+             (20,'/music/shared.wav','/music/a.cue',1,0,0),
+             (5,'/music/shared.wav','/music/z.cue',2,75,1),
+             (30,'/music/shared.wav',NULL,NULL,NULL,0);",
+        )
+        .unwrap();
+    let paths = vec![
+        PathBuf::from("/missing.wav"),
+        PathBuf::from("/music/shared.wav"),
+        PathBuf::from("/music/shared.wav"),
+    ];
+    let sources = store.known_sources(&paths).unwrap();
+    assert_eq!(sources.len(), paths.len());
+    assert!(sources[0].is_none());
+    assert!(sources[1].as_ref().unwrap().cue.is_none());
+    assert!(sources[2].as_ref().unwrap().cue.is_none());
+
+    store
+        .conn
+        .execute("DELETE FROM tracks WHERE id=30", [])
+        .unwrap();
+    let sources = store.known_sources(&paths).unwrap();
+    assert!(sources[0].is_none());
+    for source in &sources[1..] {
+        assert_eq!(source.as_ref().unwrap().cue.as_ref().unwrap().number, 2);
+    }
 }
 
 #[test]

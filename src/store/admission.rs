@@ -1,7 +1,7 @@
 use super::positions::insert_staged_tracks;
 use super::scan::{
-    PROBE_VERSION, effective_source_from_row, effective_source_select, staged_insert_sql,
-    staged_library_column, staged_update_sql,
+    PROBE_VERSION, effective_source_from_row, effective_source_select, staged_bitrate_update_sql,
+    staged_insert_sql, staged_library_column, staged_table_schema, staged_update_sql,
 };
 use super::{CatalogChanges, Store};
 use crate::library::ExternalAdmission;
@@ -33,13 +33,10 @@ impl Store {
             .optional()
         };
         let current_before = observed()?;
-        tx.execute_batch("CREATE TEMP TABLE external_sources(
-            ordinal INTEGER PRIMARY KEY,resolved_id INTEGER,path TEXT NOT NULL,fingerprint BLOB,
-            file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,raw_title TEXT NOT NULL,
-            raw_artist TEXT NOT NULL,raw_album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,
-            channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,
-            bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,
-            bits_per_sample INTEGER,release_date TEXT);")?;
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE external_sources({})",
+            staged_table_schema("ordinal INTEGER PRIMARY KEY,resolved_id INTEGER", false),
+        ))?;
         {
             let mut existing = tx.prepare_cached("SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1")?;
             let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
@@ -89,12 +86,10 @@ impl Store {
         }
         // Preserve playback's more precise bitrate only for unchanged content,
         // exactly as ordinary scans do; fresh encoded content replaces old facts.
-        tx.execute("UPDATE external_sources AS s SET bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact
-            FROM tracks AS t WHERE t.id=s.resolved_id AND s.bitrate_exact=0
-            AND (s.bitrate_bps IS NULL OR t.bitrate_exact=1) AND t.bitrate_bps IS NOT NULL
-            AND ((s.fingerprint IS NOT NULL AND t.fingerprint=s.fingerprint)
-                OR (t.path=s.path AND t.file_size=s.file_size AND t.modified_ns=s.modified_ns
-                    AND s.modified_ns<>?1 AND t.fingerprint IS s.fingerprint))", [i64::MIN])?;
+        tx.execute(
+            &staged_bitrate_update_sql("external_sources", false),
+            [i64::MIN],
+        )?;
         let mut impacts = tx.query_row(&format!("SELECT
             {},
             COALESCE(MAX(t.id IS NULL),0),

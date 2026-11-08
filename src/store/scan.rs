@@ -55,6 +55,36 @@ pub(super) fn write_source_assignments(sql: &mut String, cue: bool) {
     }
 }
 
+pub(super) fn staged_table_schema(prefix: &str, cue: bool) -> String {
+    let cue = if cue {
+        ",cue_sheet TEXT,cue_number INTEGER,cue_start_frame INTEGER,cue_end_frame INTEGER"
+    } else {
+        ""
+    };
+    format!(
+        "{prefix},path TEXT NOT NULL,fingerprint BLOB,file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,raw_title TEXT NOT NULL,raw_artist TEXT NOT NULL,raw_album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,bits_per_sample INTEGER,release_date TEXT{cue}"
+    )
+}
+
+pub(super) fn staged_bitrate_update_sql(table: &str, cue: bool) -> String {
+    let cue = if cue {
+        "AND t.cue_sheet IS s.cue_sheet AND t.cue_number IS s.cue_number
+             AND t.cue_start_frame IS s.cue_start_frame AND t.cue_end_frame IS s.cue_end_frame"
+    } else {
+        ""
+    };
+    format!(
+        "UPDATE {table} AS s SET bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact
+         FROM tracks AS t WHERE t.id=s.resolved_id AND s.bitrate_exact=0
+         AND (s.bitrate_bps IS NULL OR t.bitrate_exact=1)
+         AND t.bitrate_bps IS NOT NULL {cue}
+         AND ((s.fingerprint IS NOT NULL AND t.fingerprint=s.fingerprint)
+             OR (t.path=s.path AND t.file_size=s.file_size
+                 AND t.modified_ns=s.modified_ns AND s.modified_ns<>?1
+                 AND t.fingerprint IS s.fingerprint))"
+    )
+}
+
 /// Scans and external admission persist the same source facts. Only scans own
 /// CUE identity/ranges, absence policy and relocation decisions.
 pub(super) fn staged_update_sql(table: &str, cue: bool) -> String {
@@ -458,18 +488,63 @@ impl Store {
     pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
         let path = path.to_str().context("Scan source path is not UTF-8")?;
         let mut q = self.conn.prepare_cached(
-            "SELECT file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
-                    duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
-                    cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-                    bits_per_sample,release_date,bitrate_exact
-             FROM tracks WHERE id=COALESCE(
-                (SELECT id FROM tracks INDEXED BY tracks_path
-                 WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1),
-                (SELECT id FROM tracks INDEXED BY tracks_path
-                 WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END IS NULL ORDER BY id LIMIT 1)
-             )",
-        )?;
+        "SELECT file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+                duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
+                cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
+                bits_per_sample,release_date,bitrate_exact
+         FROM tracks WHERE id=COALESCE(
+            (SELECT id FROM tracks INDEXED BY tracks_path
+             WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1),
+            (SELECT id FROM tracks INDEXED BY tracks_path
+             WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END IS NULL ORDER BY id LIMIT 1)
+         )",
+    )?;
         Ok(q.query_row([path], known_file_from_row).optional()?)
+    }
+
+    /// Read reusable source snapshots in input order with one indexed query.
+    /// Ordinary identities win over CUE identities; missing paths remain `None`.
+    pub fn known_sources(&self, paths: &[PathBuf]) -> Result<Vec<Option<KnownFile>>> {
+        if paths.len() == 1 {
+            return Ok(vec![self.known_source(&paths[0])?]);
+        }
+        let paths = paths
+            .iter()
+            .map(|path| path.to_str().context("Scan source path is not UTF-8"))
+            .collect::<Result<Vec<_>>>()?;
+        let encoded = serde_json::to_string(&paths)?;
+        let mut query = self.conn.prepare_cached(
+            "WITH requested AS (
+                 SELECT CAST(key AS INTEGER) AS ordinal, value AS path
+                 FROM json_each(?1)
+             )
+             SELECT t.file_size,t.modified_ns,t.fingerprint,t.raw_title,t.raw_artist,t.raw_album,
+                    t.duration,t.codec,t.channels,t.sample_rate,t.cue_sheet,t.cue_number,
+                    t.cue_start_frame,t.cue_end_frame,t.probe_version,t.bitrate_bps,t.track_number,
+                    t.disc_number,t.bits_per_sample,t.release_date,t.bitrate_exact,r.ordinal
+             FROM requested AS r
+             CROSS JOIN tracks AS t
+             WHERE t.id=COALESCE(
+                 (SELECT id FROM tracks INDEXED BY tracks_path
+                  WHERE path=r.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0
+                  ORDER BY id LIMIT 1),
+                 (SELECT id FROM tracks INDEXED BY tracks_path
+                  WHERE path=r.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END IS NULL
+                  ORDER BY id LIMIT 1)
+             )
+             ORDER BY r.ordinal",
+        )?;
+        let mut result = (0..paths.len()).map(|_| None).collect::<Vec<_>>();
+        let mut rows = query.query([encoded])?;
+        while let Some(row) = rows.next()? {
+            let ordinal = usize::try_from(row.get::<_, i64>(21)?)
+                .context("Known source lookup returned an invalid ordinal")?;
+            let slot = result
+                .get_mut(ordinal)
+                .context("Known source lookup returned an out-of-range ordinal")?;
+            *slot = Some(known_file_from_row(row)?);
+        }
+        Ok(result)
     }
 
     /// Inspect stored raw metadata for test fixtures, including every CUE identity.
@@ -511,52 +586,76 @@ impl Store {
             .into_iter()
             .collect();
         result.roots.retain(|path| current.contains(path));
-        result
-            .records
-            .retain(|record| current.contains(&record.path));
         let mut records = Vec::new();
-        result.segments.clear();
-        let mut query = self.conn.prepare_cached(
-            "SELECT cue_sheet,cue_number,cue_start_frame,cue_end_frame,
-                    raw_title,raw_artist,raw_album,track_number,disc_number,release_date
-             FROM tracks INDEXED BY tracks_path WHERE path=?1 ORDER BY id",
-        )?;
+        let mut source_paths = Vec::new();
         for source in result.records.drain(..) {
-            let mut rows =
-                query.query([source.path.to_str().context("Source path is not UTF-8")?])?;
-            let mut ordinary = false;
+            if current.contains(&source.path) {
+                source_paths.push(source.path.clone());
+                records.push(source);
+            }
+        }
+        result.segments.clear();
+        let mut ordinary = vec![false; records.len()];
+        if !records.is_empty() {
+            let paths = source_paths
+                .iter()
+                .map(|path| path.to_str().context("Source path is not UTF-8"))
+                .collect::<Result<Vec<_>>>()?;
+            let encoded = serde_json::to_string(&paths)?;
+            let source_indices: HashMap<&Path, usize> = records
+                .iter()
+                .enumerate()
+                .map(|(index, source)| (source.path.as_path(), index))
+                .collect();
+            let mut query = self.conn.prepare_cached(
+                "WITH requested AS MATERIALIZED (
+                     SELECT value AS path FROM json_each(?1)
+                 )
+                 SELECT t.path,t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
+                        t.raw_title,t.raw_artist,t.raw_album,t.track_number,t.disc_number,
+                        t.release_date
+                 FROM requested AS r
+                 CROSS JOIN tracks AS t INDEXED BY tracks_path
+                 WHERE t.path=r.path
+                 ORDER BY t.path,t.id",
+            )?;
+            let mut rows = query.query([encoded])?;
             while let Some(row) = rows.next()? {
-                let Some(cue) = cue_from_row(row, 0)? else {
-                    ordinary = true;
+                let path: String = row.get(0)?;
+                let Some(&index) = source_indices.get(Path::new(&path)) else {
+                    continue;
+                };
+                let Some(cue) = cue_from_row(row, 1)? else {
+                    ordinary[index] = true;
                     continue;
                 };
                 let metadata = RegisteredCueMetadata {
-                    title: row.get(4)?,
-                    artist: row.get(5)?,
-                    album: row.get(6)?,
-                    track_number: row.get(7)?,
-                    disc_number: row.get(8)?,
-                    release_date: row.get(9)?,
+                    title: row.get(5)?,
+                    artist: row.get(6)?,
+                    album: row.get(7)?,
+                    track_number: row.get(8)?,
+                    disc_number: row.get(9)?,
+                    release_date: row.get(10)?,
                 };
                 let start = cue.start_frame as f64 / 75.0;
-                let duration = source.media.duration.and_then(|duration| {
+                let duration = records[index].media.duration.and_then(|duration| {
                     let end = cue.end_frame.map_or(duration, |frame| frame as f64 / 75.0);
                     (duration.is_finite() && start < duration && end > start)
                         .then_some(end.min(duration) - start)
                 });
                 result.segments.push(CueRecord::registered(
-                    Arc::clone(&source),
+                    Arc::clone(&records[index]),
                     cue,
                     metadata,
                     duration,
                 ));
             }
-            drop(rows);
-            if ordinary {
-                records.push(source);
-            }
         }
-        result.records = records;
+        result.records = records
+            .into_iter()
+            .zip(ordinary)
+            .filter_map(|(source, ordinary)| ordinary.then_some(source))
+            .collect();
         result.min_duration_secs = 0;
         self.apply_scan_scoped(result, true, current_track)
     }
@@ -863,39 +962,16 @@ impl Store {
             }
         }
         let mut seen = HashSet::new();
-        tx.execute_batch(
-            "CREATE TEMP TABLE scan_stage(
-                resolved_id INTEGER,
-                path TEXT NOT NULL,
-                fingerprint BLOB,
-                file_size INTEGER NOT NULL,
-                modified_ns INTEGER NOT NULL,
-                raw_title TEXT NOT NULL,
-                raw_artist TEXT NOT NULL,
-                raw_album TEXT NOT NULL,
-                duration REAL,
-                codec TEXT NOT NULL,
-                channels INTEGER NOT NULL,
-                sample_rate INTEGER NOT NULL,
-                cue_sheet TEXT,
-                cue_number INTEGER,
-                cue_start_frame INTEGER,
-                cue_end_frame INTEGER,
-                probe_version INTEGER NOT NULL,
-                bitrate_bps INTEGER,
-                bitrate_exact INTEGER NOT NULL,
-                track_number INTEGER,
-                disc_number INTEGER,
-                bits_per_sample INTEGER,
-                release_date TEXT
-            )",
-        )?;
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE scan_stage({})",
+            staged_table_schema("resolved_id INTEGER", true),
+        ))?;
         let mut stage = tx.prepare(
             "INSERT INTO temp.scan_stage(
                 resolved_id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
-                duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
-                cue_end_frame,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,
-                release_date
+                duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,
+                track_number,disc_number,bits_per_sample,release_date,cue_sheet,cue_number,
+                cue_start_frame,cue_end_frame
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )?;
         let mut skipped_short_tracks = 0;
@@ -961,10 +1037,6 @@ impl Store {
                 m.source.codec,
                 m.source.channels as i64,
                 m.source.sample_rate as i64,
-                sheet,
-                number,
-                start,
-                end,
                 PROBE_VERSION,
                 bitrate,
                 m.source.bitrate_exact && bitrate.is_some(),
@@ -972,6 +1044,10 @@ impl Store {
                 m.disc_number,
                 m.source.bits_per_sample,
                 m.release_date,
+                sheet,
+                number,
+                start,
+                end,
             ])?;
             // Missing detection visits only pre-scan IDs. New inserts cannot
             // belong to that set; resolved old IDs are already accounted for.
@@ -983,18 +1059,7 @@ impl Store {
         // A queued scan may predate playback enrichment. Preserve precision only
         // for unchanged encoded content and the same CUE source restriction.
         tx.execute(
-            "UPDATE temp.scan_stage AS s SET bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact
-             FROM tracks AS t WHERE t.id=s.resolved_id AND s.bitrate_exact=0
-             AND (s.bitrate_bps IS NULL OR t.bitrate_exact=1)
-             AND t.bitrate_bps IS NOT NULL
-             AND t.cue_sheet IS s.cue_sheet AND t.cue_number IS s.cue_number
-             AND t.cue_start_frame IS s.cue_start_frame AND t.cue_end_frame IS s.cue_end_frame
-             AND (
-                (s.fingerprint IS NOT NULL AND t.fingerprint=s.fingerprint)
-                OR (t.path=s.path AND t.file_size=s.file_size
-                    AND t.modified_ns=s.modified_ns AND s.modified_ns<>?1
-                    AND t.fingerprint IS s.fingerprint)
-             )",
+            &staged_bitrate_update_sql("temp.scan_stage", true),
             [i64::MIN],
         )?;
         // Compare against the final staged values, including playback enrichment,
@@ -1039,10 +1104,8 @@ impl Store {
         let mut changed_tracks = tx.execute(&staged_update_sql("temp.scan_stage", true), [])?;
         changed_tracks += tx.execute(&staged_insert_sql("temp.scan_stage", true, ""), [])?;
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
-        let mut mark_missing = tx.prepare(&format!(
-            "UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0 RETURNING EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),{}",
-            super::albums::eligible_member("tracks"),
-        ))?;
+        let mut missing_ids = Vec::new();
+        let mut duplicate_missing = HashSet::new();
         for o in &old {
             let owner = if exact_sources {
                 o.path.as_path()
@@ -1060,20 +1123,42 @@ impl Store {
                         .any(|ancestor| requested_roots.contains(ancestor))
                 }) || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
-                && let Some((queue, albums)) = mark_missing
-                    .query_row([o.id], |row| {
-                        Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))
-                    })
-                    .optional()?
             {
-                changed_tracks += 1;
-                impacts.library = true;
-                impacts.queue |= queue;
-                impacts.albums |= albums;
-                impacts.duplicate_groups |= o.cue.is_none() && o.hash.is_some();
+                missing_ids.push(o.id);
+                if o.cue.is_none() && o.hash.is_some() {
+                    duplicate_missing.insert(o.id);
+                }
             }
         }
-        drop(mark_missing);
+        if !missing_ids.is_empty() {
+            tx.execute_batch("CREATE TEMP TABLE scan_missing(id INTEGER PRIMARY KEY)")?;
+            let encoded = serde_json::to_string(&missing_ids)?;
+            tx.execute(
+                "INSERT INTO temp.scan_missing(id)
+                 SELECT CAST(value AS INTEGER) FROM json_each(?1)",
+                [encoded],
+            )?;
+            let mut mark_missing = tx.prepare(&format!(
+                "UPDATE tracks SET missing=1
+                 WHERE id IN (SELECT id FROM temp.scan_missing) AND missing=0
+                 RETURNING id,
+                    EXISTS(SELECT 1 FROM playlist_entries
+                        WHERE playlist_id=0 AND track_id=tracks.id),{}",
+                super::albums::eligible_member("tracks"),
+            ))?;
+            let mut rows = mark_missing.query([])?;
+            while let Some(row) = rows.next()? {
+                let id = row.get::<_, i64>(0)?;
+                changed_tracks += 1;
+                impacts.library = true;
+                impacts.queue |= row.get::<_, bool>(1)?;
+                impacts.albums |= row.get::<_, bool>(2)?;
+                impacts.duplicate_groups |= duplicate_missing.contains(&id);
+            }
+            drop(rows);
+            drop(mark_missing);
+            tx.execute_batch("DROP TABLE temp.scan_missing")?;
+        }
         impacts.current_track = current_track
             .map(|id| observed(id).map(|after| Some(after) != current_before))
             .transpose()?;
