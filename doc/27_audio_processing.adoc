@@ -358,6 +358,14 @@ Short inputs and partial final frames retain the original length. Numerical
 comparisons must use the same padding; see <<timeline-and-source-identity,Timeline
 and source identity>>.
 
+Native preparation validates the manifest contract and all pinned bundle hashes
+before materializing source PCM. Execution consumes the prepared model bytes and
+controls rather than reopening the manifest; changing bundle files affects a
+later preparation, not an admitted run. Reads remain cancellable: the manifest
+is bounded to 256 KiB and bundle artifacts to 16 MiB in total, independently of
+the retained-PCM budget.
+Dry runs still validate the bundle but do not load ONNX Runtime.
+
 For Python models, install `uv` first (Arch Linux:
 `sudo pacman -S --needed python uv`). Setup installs a CPU environment beneath
 `BUNDLE.environment`: `.venv` for MossFormer2/Kim or `df3-venv` for DeepFilterNet3.
@@ -602,8 +610,9 @@ and destination WAV, not another audition slot. Their `id` identifies the receip
 `graph_run_id` identifies the frozen run for further actions. See
 link:22_cache.adoc#processing-output-retention[Processing output retention].
 
-Native denoise/native-only graphs decode blocks and retain only final PCM plus
-bounded DSP/delay state. Uncached, entirely native exports instead stream to an
+Standalone restoration and native-only graphs share the native execution engine:
+they decode blocks and retain only final PCM plus bounded DSP/delay state.
+Uncached, entirely native exports instead stream to an
 unpublished WAV without whole-output PCM; cached exports share existing PCM.
 Model ancestors and Hybrid boundaries retain their PCM requirements. Export
 checks the cached render's source stamp against the current source, never

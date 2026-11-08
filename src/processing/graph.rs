@@ -421,6 +421,10 @@ impl Engine {
             self.streaming,
             "Decoder engine cannot contain a retained source"
         );
+        ensure!(
+            renderer.format().sample_rate == self.rate && renderer.format().layout == self.layout,
+            "Source format changed during graph decoding"
+        );
         let mut position = 0_u64;
         loop {
             if prefix_end.is_some_and(|end| position >= end) {
@@ -631,7 +635,14 @@ pub(super) fn prepare_models(
                 GraphNodeKind::Separate { config } => (ProcessingOperation::Separate, config),
                 _ => continue,
             };
-            neural::prepare(operation, config, sample_rate, layout, &mut provenance)
+            neural::prepare(
+                operation,
+                config,
+                sample_rate,
+                layout,
+                &mut provenance,
+                cancel,
+            )
         };
         let entry = status
             .graph_nodes
@@ -923,6 +934,7 @@ pub(super) fn native_only(status: &ProcessingTaskStatus) -> Result<bool> {
 
 pub(super) struct NativeGraphOutput {
     pub(super) outputs: BTreeMap<GraphPort, GraphAudioOutput>,
+    pub(super) denoised: Option<audio::PcmAudio>,
     pub(super) pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
 }
 
@@ -960,32 +972,67 @@ pub(super) fn execute_native(
     progress: &mut ProgressReporter<'_>,
 ) -> Result<NativeGraphOutput> {
     let tx = progress.sender;
-    let graph = status
-        .settings
-        .graph
-        .clone()
-        .context("Missing immutable graph snapshot")?;
-    let target = status
-        .settings
-        .graph_boundary
-        .or(status.settings.graph_target)
-        .context("Missing graph target")?;
+    let standalone = status.operation == ProcessingOperation::Denoise;
+    let (graph, target) = if standalone {
+        let source = GraphPort { node: 1, port: 0 };
+        let target = GraphPort { node: 3, port: 0 };
+        let graph = ProcessingGraph {
+            revision: 0,
+            next_id: 4,
+            nodes: vec![
+                GraphNode {
+                    id: source.node,
+                    kind: GraphNodeKind::Source,
+                    position: [0.0; 2],
+                },
+                GraphNode {
+                    id: target.node,
+                    kind: GraphNodeKind::Denoise {
+                        config: status.settings.denoise.clone(),
+                        profile: status.settings.profile,
+                    },
+                    position: [0.0; 2],
+                },
+            ],
+            edges: vec![GraphEdge {
+                from: source,
+                to: target,
+            }],
+        };
+        (graph, target)
+    } else {
+        (
+            status
+                .settings
+                .graph
+                .clone()
+                .context("Missing immutable graph snapshot")?,
+            status
+                .settings
+                .graph_boundary
+                .or(status.settings.graph_target)
+                .context("Missing graph target")?,
+        )
+    };
     let order = graph.ancestors(target)?;
     let mut active_node = None;
     let outcome = (|| {
         let rate = renderer.format().sample_rate;
         let layout = Arc::clone(&renderer.format().layout);
         let channels = renderer.format().channels();
+        let estimated_frames = renderer.format().estimated_frames();
         let mut profiles = BTreeMap::new();
         for (index, &id) in order.iter().enumerate() {
             active_node = None;
             check_cancel(cancel)?;
-            progress.report(
-                ProcessingPhase::Processing,
-                index as u64,
-                Some(order.len() as u64),
-            );
-            node_event(status, id, ProcessingPhase::Processing, None, tx);
+            if !standalone {
+                progress.report(
+                    ProcessingPhase::Processing,
+                    index as u64,
+                    Some(order.len() as u64),
+                );
+                node_event(status, id, ProcessingPhase::Processing, None, tx);
+            }
             active_node = Some(id);
             if let GraphNodeKind::Denoise { config, profile } = &graph.node(id)?.kind
                 && config.mode == DenoiseMode::Profile
@@ -1099,11 +1146,37 @@ pub(super) fn execute_native(
                 Some(pending),
             )
         } else {
-            let start_frame = -i64::try_from(latency)?;
+            let start_frame = if standalone {
+                0
+            } else {
+                -i64::try_from(latency)?
+            };
             let mut builder = audio::PcmBuilder::new(rate, layout, budget)?;
-            let frames = engine.decode(index, renderer, None, cancel, |_, block, _| {
-                builder.push(block)
-            })?;
+            let frames =
+                engine.decode(index, renderer, None, cancel, |position, block, frames| {
+                    if standalone {
+                        let source_position = frames.unwrap_or_else(|| {
+                            position + (block.len() / usize::from(channels)) as u64
+                        });
+                        progress.report(
+                            ProcessingPhase::Processing,
+                            source_position,
+                            frames.or(estimated_frames),
+                        );
+                    }
+                    let block = if standalone {
+                        causal_export_block(
+                            position,
+                            block,
+                            usize::from(channels),
+                            latency,
+                            frames,
+                        )?
+                    } else {
+                        block
+                    };
+                    builder.push(block)
+                })?;
             let output = GraphPcm {
                 pcm: builder.finish()?,
                 start_frame,
@@ -1126,7 +1199,16 @@ pub(super) fn execute_native(
         }
         active_node = Some(target.node);
         status.frames = Some(frames);
-        let outputs = if let Some(output) = output {
+        let mut denoised = None;
+        let outputs = if standalone {
+            let output = output.context("Missing standalone denoise output")?;
+            ensure!(
+                output.pcm.frames() == frames,
+                "Denoise output length mismatch"
+            );
+            denoised = Some(output.pcm);
+            BTreeMap::new()
+        } else if let Some(output) = output {
             publish(output, frames, target, order, status, tx)?
         } else {
             status.graph_outputs.clear();
@@ -1137,10 +1219,12 @@ pub(super) fn execute_native(
         };
         Ok(NativeGraphOutput {
             outputs,
+            denoised,
             pending_export,
         })
     })();
     if let Err(error) = &outcome
+        && !standalone
         && let Some(id) = active_node
     {
         node_failure(status, id, error, cancel, tx);

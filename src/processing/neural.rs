@@ -14,7 +14,7 @@ use std::{
     io::{Read, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 const MAX_FRAME: usize = 65536;
@@ -167,9 +167,16 @@ impl Decoder {
 }
 
 pub(super) struct PreparedModel {
-    native: bool,
-    id: Option<String>,
-    manifest: std::path::PathBuf,
+    backend: PreparedBackend,
+    provenance: ModelProvenance,
+}
+
+enum PreparedBackend {
+    Python {
+        manifest: std::path::PathBuf,
+    },
+    #[cfg(feature = "onnx")]
+    Native(super::native_speech::PreparedModel),
 }
 
 pub(super) fn prepare(
@@ -178,7 +185,9 @@ pub(super) fn prepare(
     sample_rate: u32,
     layout: &[audio::Channel],
     provenance: &mut ModelProvenance,
+    cancel: &AtomicBool,
 ) -> Result<PreparedModel> {
+    check_cancel(cancel)?;
     ensure!(
         matches!(
             operation,
@@ -217,7 +226,7 @@ pub(super) fn prepare(
             "Model manifest operation does not match the requested operation"
         );
     }
-    if metadata["backend"] == "onnx" {
+    let backend = if metadata["backend"] == "onnx" {
         ensure!(speech, "Native ONNX models support speech only");
         ensure!(
             config.device == rivu_format::config::NeuralDevice::Cpu,
@@ -232,8 +241,10 @@ pub(super) fn prepare(
             "Native speech supports 8000..384000 Hz source rates"
         );
         #[cfg(feature = "onnx")]
-        if let Some(id) = metadata["id"].as_str() {
-            super::native_speech::Kind::from_id(id)?;
+        {
+            PreparedBackend::Native(super::native_speech::prepare(
+                manifest, &contents, config, cancel, provenance,
+            )?)
         }
         #[cfg(not(feature = "onnx"))]
         bail!("Native ONNX inference requires a build with the onnx feature enabled");
@@ -274,25 +285,31 @@ pub(super) fn prepare(
                 "Configured neural runtime differs from the provisioned model runtime"
             );
         }
-    }
+        PreparedBackend::Python {
+            manifest: manifest.clone(),
+        }
+    };
+    check_cancel(cancel)?;
     Ok(PreparedModel {
-        native: metadata["backend"] == "onnx",
-        id: provenance.id.clone(),
-        manifest: manifest.clone(),
+        backend,
+        provenance: ModelProvenance {
+            id: provenance.id.clone(),
+            sha256: provenance.sha256.clone(),
+        },
     })
 }
 
 pub(super) fn run(
     request: ModelRequest<'_>,
-    mut model: PreparedModel,
+    model: PreparedModel,
     progress: &mut ProgressReporter<'_>,
 ) -> ModelOutcome {
-    let mut provenance = ModelProvenance {
-        id: model.id.take(),
-        sha256: None,
-    };
+    let PreparedModel {
+        backend,
+        mut provenance,
+    } = model;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_model(request, model, progress, &mut provenance)
+        run_model(request, backend, progress, &mut provenance)
     }))
     .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
     ModelOutcome { provenance, result }
@@ -300,7 +317,7 @@ pub(super) fn run(
 
 fn run_model(
     request: ModelRequest<'_>,
-    model: PreparedModel,
+    backend: PreparedBackend,
     progress: &mut ProgressReporter<'_>,
     provenance: &mut ModelProvenance,
 ) -> Result<AudioOutputs> {
@@ -316,12 +333,15 @@ fn run_model(
     let cancel = cancellation.flag();
     check_cancel(cancel)?;
     let speech = operation == ProcessingOperation::Speech;
-    if model.native {
-        #[cfg(feature = "onnx")]
-        return super::native_speech::run(input, config, budget, cancel, progress, provenance);
-        #[cfg(not(feature = "onnx"))]
-        bail!("Native ONNX inference requires a build with the onnx feature enabled");
-    }
+    #[cfg(feature = "onnx")]
+    let manifest = match backend {
+        PreparedBackend::Native(prepared) => {
+            return super::native_speech::run(input, prepared, budget, cancel, progress);
+        }
+        PreparedBackend::Python { manifest } => manifest,
+    };
+    #[cfg(not(feature = "onnx"))]
+    let PreparedBackend::Python { manifest } = backend;
     let dry = speech && config.speech_wet_mix == 0.0;
     let mut parameters = if speech {
         serde_json::json!({"wet_mix":config.speech_wet_mix,"attenuation_limit_db":config.speech_attenuation_limit_db})
@@ -335,7 +355,7 @@ fn run_model(
     let request = serde_json::to_vec(&serde_json::json!({
         "version":WORKER_REQUEST_VERSION,"task_id":task_id,"operation":if speech {"speech"} else {"separate"},
         "sample_rate":input.sample_rate(),"channels":input.channels(),"frames":input.frames(),
-        "model_manifest":model.manifest,"parameters":parameters,"threads":config.threads,
+        "model_manifest":manifest,"parameters":parameters,"threads":config.threads,
         "device":if config.device == rivu_format::config::NeuralDevice::Cpu {"cpu"} else {"cuda"}
     }))?;
     let mut outgoing = Vec::with_capacity(if dry {
@@ -838,6 +858,7 @@ mod tests {
                 48_000,
                 &[audio::Channel::FrontCenter],
                 &mut ModelProvenance::default(),
+                &AtomicBool::new(false),
             )
         };
         assert!(prepare_model(&config).is_ok());
@@ -927,6 +948,98 @@ mod tests {
     #[test]
     fn enabled_onnx_rejects_invalid_native_manifest_without_python_fallback() {
         subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-invalid", None);
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn native_prepare_rejects_invalid_contracts_before_pcm_or_worker_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("manifest.json");
+        let base = serde_json::json!({
+            "version":1, "operation":"speech", "id":"GTCRN", "backend":"onnx",
+            "model":"model.onnx", "license_evidence":"weight-license.txt",
+            "files":{"model.onnx":"b4718df6228e7bdf1a8a435cf98f838636eb2fd331acabf86ba87c5192ebcb87",
+                     "weight-license.txt":"0".repeat(64)},
+        });
+        let budget = audio::PcmBudget::new(1);
+        let config = rivu_format::config::NeuralConfig {
+            speech_manifest: Some(path.clone()),
+            worker: directory.path().join("must-not-start.py"),
+            speech_wet_mix: 0.0,
+            ..Default::default()
+        };
+        for (field, value, expected) in [
+            ("version", serde_json::json!(2), "manifest contract"),
+            (
+                "version",
+                serde_json::json!("1"),
+                "Reading native speech manifest",
+            ),
+            (
+                "id",
+                serde_json::json!("unknown"),
+                "Unsupported native speech model",
+            ),
+            (
+                "model",
+                serde_json::json!(false),
+                "Reading native speech manifest",
+            ),
+            (
+                "files",
+                serde_json::json!([]),
+                "Reading native speech manifest",
+            ),
+            ("files", serde_json::json!({}), "1..64 entries"),
+            (
+                "license_evidence",
+                serde_json::json!("missing.txt"),
+                "hashed bundle entries",
+            ),
+            (
+                "files",
+                serde_json::json!({"model.onnx":"0".repeat(64), "weight-license.txt":"0".repeat(64)}),
+                "pinned official model",
+            ),
+        ] {
+            let mut manifest = base.clone();
+            manifest[field] = value;
+            std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let mut provenance = ModelProvenance::default();
+            let error = prepare(
+                ProcessingOperation::Speech,
+                &config,
+                48_000,
+                &[audio::Channel::FrontCenter],
+                &mut provenance,
+                &AtomicBool::new(false),
+            )
+            .err()
+            .expect("invalid native manifest must fail during preparation");
+            assert!(error.to_string().contains(expected), "{field}: {error:#}");
+            assert_eq!(budget.used_bytes(), 0);
+            assert!(provenance.sha256.is_none());
+            assert_eq!(
+                provenance.id.as_deref(),
+                Some(if field == "id" { "unknown" } else { "GTCRN" })
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_preparation_does_not_open_the_manifest() {
+        let config = rivu_format::config::NeuralConfig::default();
+        let error = prepare(
+            ProcessingOperation::Speech,
+            &config,
+            48_000,
+            &[audio::Channel::FrontCenter],
+            &mut ModelProvenance::default(),
+            &AtomicBool::new(true),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("cancelled"));
     }
 
     #[test]
@@ -1121,6 +1234,7 @@ if outcome == 'complete-then-nonzero':
             input.sample_rate(),
             input.layout(),
             &mut prepared_provenance,
+            &AtomicBool::new(false),
         ) {
             Ok(model) => run(
                 ModelRequest {

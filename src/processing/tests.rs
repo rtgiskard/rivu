@@ -332,6 +332,120 @@ fn standalone_profile_rejects_empty_frame_and_out_of_source_selections() {
     }
 }
 
+#[test]
+fn standalone_native_tail_preserves_operation_outputs_and_single_pcm_budget() {
+    for frames in [1, 63, 256, 257, 4093] {
+        let (_directory, old, track, _) = fixture();
+        // fixture intentionally retains selected audition stems; this regression
+        // measures only the new standalone result, not that independent old PCM.
+        drop(old);
+        let mut service = Service::with_memory_limit(100_000);
+        let data: Vec<f32> = (0..frames)
+            .map(|frame| (frame as f32 * 0.07).sin() * 0.2)
+            .collect();
+        let mut writer = hound::WavWriter::create(
+            &track.path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for &sample in &data {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut config = Config::default();
+        config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Stationary;
+        config.denoise.fft_size = 256;
+        let mut reference =
+            rivu_dsp::denoise::Denoiser::new(8_000, 1, config.denoise.clone(), None).unwrap();
+        let mut expected = Vec::new();
+        reference
+            .process_block(&data, &mut expected, &mut || false)
+            .unwrap();
+        reference.finish(&mut expected, &mut || false).unwrap();
+        service
+            .start(
+                track.clone(),
+                Arc::new(config),
+                ProcessingOperation::Denoise,
+                None,
+            )
+            .unwrap();
+        let mut source_progress = false;
+        let result = loop {
+            match next_event(&mut service) {
+                Event::Progress {
+                    phase: ProcessingPhase::Processing,
+                    completed,
+                    total,
+                    ..
+                } => {
+                    assert!(completed >= (frames as u64).min(256));
+                    assert!(completed <= frames as u64);
+                    assert_eq!(total, Some(frames as u64));
+                    source_progress = true;
+                }
+                Event::Progress { .. } => {}
+                Event::Finished { result, .. } => {
+                    service.finish_task(service.active_id().unwrap()).unwrap();
+                    break result.unwrap();
+                }
+                _ => panic!("standalone denoise leaked graph events"),
+            }
+        };
+        assert!(source_progress);
+        assert_eq!(result.status.operation, ProcessingOperation::Denoise);
+        assert!(result.status.graph_nodes.is_empty());
+        assert!(result.status.graph_outputs.is_empty());
+        assert!(result.graph_outputs.is_empty());
+        assert!(result.status.outputs.as_ref().unwrap().denoised);
+        let pcm = result.outputs.denoised.as_ref().unwrap();
+        assert_eq!(pcm.frames(), frames as u64);
+        assert_eq!(service.memory_bytes(), pcm.retained_bytes());
+        for (actual, expected) in samples(pcm).into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+}
+
+#[test]
+fn standalone_wet_zero_still_validates_profile_source_frames() {
+    let (_directory, mut service, track, _) = fixture();
+    let mut config = Config::default();
+    config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
+    config.denoise.fft_size = 256;
+    config.denoise.wet = 0.0;
+    let config = Arc::new(config);
+    for end in [0.5, 5.0] {
+        service
+            .start(
+                track.clone(),
+                Arc::clone(&config),
+                ProcessingOperation::Denoise,
+                Some(NoiseSelection {
+                    start_seconds: 0.0,
+                    end_seconds: end / 8_000.0,
+                }),
+            )
+            .unwrap();
+        loop {
+            match next_event(&mut service) {
+                Event::Progress { .. } => {}
+                Event::Finished { result, .. } => {
+                    service.finish_task(service.active_id().unwrap()).unwrap();
+                    assert!(result.is_err());
+                    break;
+                }
+                _ => panic!("standalone denoise leaked graph events"),
+            }
+        }
+    }
+}
+
 fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
     let mut config = Config::default();
     let graph = &mut config.processing_graph;
@@ -814,7 +928,18 @@ fn model_capability_rejections_precede_source_pcm_allocation() {
                 "post_filter",
             ),
             (
-                serde_json::json!({"backend":"onnx", "id":"unsupported"}),
+                serde_json::json!({
+                    "version": 1,
+                    "operation": "speech",
+                    "backend": "onnx",
+                    "id": "unsupported",
+                    "model": "model.onnx",
+                    "license_evidence": "weight-license.txt",
+                    "files": {
+                        "model.onnx": "0".repeat(64),
+                        "weight-license.txt": "0".repeat(64),
+                    },
+                }),
                 8000,
                 false,
                 rivu_format::config::NeuralDevice::Cpu,

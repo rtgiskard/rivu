@@ -211,6 +211,7 @@ pub(super) fn run(
             native.sample_rate,
             &native.layout,
             &mut provenance,
+            cancel,
         );
         if model.is_err() {
             let _ = tx.send_blocking(Event::Model {
@@ -233,22 +234,15 @@ pub(super) fn run(
     let mut graph_outputs = BTreeMap::new();
     let mut pending_export = None;
     let outputs = if status.operation == ProcessingOperation::Denoise {
-        let pcm = classical_native(
+        let native_output = graph::execute_native(
             renderer,
-            open_source,
-            &config.denoise,
-            status.settings.profile,
+            &open_source,
             Arc::clone(&budget),
+            &mut status,
             cancel,
-            |frames| {
-                progress.report(
-                    ProcessingPhase::Processing,
-                    frames,
-                    native.estimated_frames(),
-                );
-            },
+            &mut progress,
         )?;
-        status.frames = Some(pcm.frames());
+        let pcm = native_output.denoised.context("Missing denoise output")?;
         AudioOutputs {
             denoised: Some(pcm),
             ..Default::default()
@@ -372,110 +366,4 @@ pub(super) fn validate_output(
         "Processing output format or alignment differs from source"
     );
     Ok(())
-}
-
-fn classical_native(
-    mut renderer: audio::SourceRenderer,
-    reopen: impl FnOnce() -> Result<audio::SourceRenderer>,
-    config: &rivu_dsp::denoise::DenoiseConfig,
-    selection: Option<NoiseSelection>,
-    budget: Arc<audio::PcmBudget>,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(u64),
-) -> Result<audio::PcmAudio> {
-    use rivu_dsp::denoise::{DenoiseMode, Denoiser, ProfileCollector};
-    let rate = renderer.format().sample_rate;
-    let layout = Arc::clone(&renderer.format().layout);
-    let channels = renderer.format().channels();
-    config.validate_for_format(rate, usize::from(channels))?;
-    let profile = if config.mode == DenoiseMode::Profile {
-        let selection =
-            selection.context("Profile mode requires an explicit selected noise-only range")?;
-        selection.validate()?;
-        let start = (selection.start_seconds * f64::from(rate)).floor() as u64;
-        let end = (selection.end_seconds * f64::from(rate)).floor() as u64;
-        ensure!(
-            start < end,
-            "Noise profile selection contains no source frames"
-        );
-        let mut capture = reopen()?;
-        ensure!(
-            capture.format().sample_rate == rate && capture.format().layout == layout,
-            "Source format changed during profile capture"
-        );
-        let mut collector =
-            ProfileCollector::new(rate, usize::from(channels), config.fft_size, end - start)?;
-        let mut position = 0_u64;
-        while position < end {
-            let Some(block) = capture.next_block(cancel)? else {
-                break;
-            };
-            ensure!(
-                block.len().is_multiple_of(usize::from(channels)),
-                "Incomplete profile source frame"
-            );
-            let next = position
-                .checked_add((block.len() / usize::from(channels)) as u64)
-                .context("Profile source length overflow")?;
-            let from = position.max(start);
-            let to = next.min(end);
-            if from < to {
-                collector.push_block(
-                    &block[(from - position) as usize * usize::from(channels)
-                        ..(to - position) as usize * usize::from(channels)],
-                    &mut || cancel.load(Ordering::Acquire),
-                )?;
-            }
-            position = next;
-        }
-        ensure!(
-            end <= position,
-            "Noise profile selection lies outside the source"
-        );
-        capture.finish(cancel)?;
-        Some(collector.finish()?)
-    } else {
-        None
-    };
-    let mut denoiser = if config.is_bypassed() {
-        None
-    } else {
-        Some(Denoiser::new(
-            rate,
-            usize::from(channels),
-            config.clone(),
-            profile,
-        )?)
-    };
-    let mut builder = audio::PcmBuilder::new(rate, Arc::clone(&layout), budget)?;
-    let mut processed = Vec::new();
-    let mut frames = 0_u64;
-    while let Some(block) = renderer.next_block(cancel)? {
-        ensure!(
-            block.len().is_multiple_of(usize::from(channels)),
-            "Incomplete denoise source frame"
-        );
-        frames = frames
-            .checked_add((block.len() / usize::from(channels)) as u64)
-            .context("Denoise source length overflow")?;
-        if let Some(denoiser) = &mut denoiser {
-            processed.clear();
-            denoiser.process_block(block, &mut processed, &mut || {
-                cancel.load(Ordering::Acquire)
-            })?;
-            builder.push(&processed)?;
-        } else {
-            builder.push(block)?;
-        }
-        progress(frames);
-    }
-    if let Some(denoiser) = &mut denoiser {
-        processed.clear();
-        denoiser.finish(&mut processed, &mut || cancel.load(Ordering::Acquire))?;
-        builder.push(&processed)?;
-    }
-    renderer.finish(cancel)?;
-    let pcm = builder.finish()?;
-    validate_output(&pcm, rate, &layout, frames, cancel)?;
-    Ok(pcm)
 }

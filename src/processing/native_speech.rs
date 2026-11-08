@@ -78,6 +78,13 @@ struct Manifest {
     license_evidence: String,
 }
 
+pub(super) struct PreparedModel {
+    kind: Kind,
+    model: Vec<u8>,
+    wet: f32,
+    threads: u8,
+}
+
 fn relative_path(root: &Path, name: &str) -> Result<PathBuf> {
     ensure!(
         !name.is_empty() && name.len() <= 4096 && !name.contains('\\'),
@@ -104,30 +111,63 @@ fn relative_path(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn read_bounded(path: &Path, bound: u64) -> Result<Vec<u8>> {
-    let file = File::open(path).with_context(|| format!("Opening {}", path.display()))?;
-    ensure!(
-        file.metadata()?.len() <= bound,
-        "Native model file exceeds size bound"
-    );
-    let mut bytes = Vec::new();
-    file.take(bound + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= bound,
-        "Native model file grew beyond size bound"
-    );
+fn read_bounded(path: &Path, bound: u64, cancel: &AtomicBool) -> Result<Vec<u8>> {
+    check_cancel(cancel)?;
+    let mut file = File::open(path).with_context(|| format!("Opening {}", path.display()))?;
+    let length = file.metadata()?.len();
+    ensure!(length <= bound, "Native model file exceeds size bound");
+    let mut bytes = Vec::with_capacity(length as usize);
+    loop {
+        check_cancel(cancel)?;
+        let remaining = (bound + 1).saturating_sub(bytes.len() as u64);
+        let count = file
+            .by_ref()
+            .take(remaining.min(65536))
+            .read_to_end(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        ensure!(
+            bytes.len() as u64 <= bound,
+            "Native model file grew beyond size bound"
+        );
+    }
     Ok(bytes)
 }
 
-fn load_bundle(path: &Path, cancel: &AtomicBool) -> Result<(Manifest, Kind, Vec<u8>, String)> {
-    let manifest_bytes = read_bounded(path, MAX_MANIFEST)?;
+pub(super) fn prepare(
+    path: &Path,
+    manifest_bytes: &[u8],
+    config: &NeuralConfig,
+    cancel: &AtomicBool,
+    provenance: &mut ModelProvenance,
+) -> Result<PreparedModel> {
+    check_cancel(cancel)?;
+    ensure!(
+        config.device == NeuralDevice::Cpu,
+        "Native GTCRN/UL-UNAS support CPU only; no device fallback"
+    );
+    ensure!(
+        (1..=8).contains(&config.threads),
+        "Native ONNX threads must be 1..8"
+    );
+    ensure!(
+        !config.speech_post_filter,
+        "post_filter is supported only by DeepFilterNet3, not native GTCRN/UL-UNAS"
+    );
+    let wet = wet_weight(config.speech_wet_mix, config.speech_attenuation_limit_db)?;
+    ensure!(
+        manifest_bytes.len() as u64 <= MAX_MANIFEST,
+        "Native model manifest exceeds size bound"
+    );
     let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).context("Reading native speech manifest")?;
+        serde_json::from_slice(manifest_bytes).context("Reading native speech manifest")?;
+    provenance.id = Some(manifest.id);
     ensure!(
         manifest.version == 1 && manifest.operation == "speech" && manifest.backend == "onnx",
         "Invalid native speech manifest contract"
     );
-    let kind = Kind::from_id(&manifest.id)?;
+    let kind = Kind::from_id(provenance.id.as_deref().expect("manifest has an id"))?;
     ensure!(
         !manifest.files.is_empty() && manifest.files.len() <= 64,
         "Native model files must contain 1..64 entries"
@@ -158,9 +198,14 @@ fn load_bundle(path: &Path, cancel: &AtomicBool) -> Result<(Manifest, Kind, Vec<
             "Invalid native bundle SHA256"
         );
         let file = relative_path(&root, name)?;
-        let bytes = read_bounded(&file, MAX_BUNDLE.saturating_sub(total))?;
+        let bytes = read_bounded(&file, MAX_BUNDLE - total, cancel)?;
         total += bytes.len() as u64;
-        let actual = format!("{:x}", Sha256::digest(&bytes));
+        let mut digest = Sha256::new();
+        for block in bytes.chunks(65536) {
+            check_cancel(cancel)?;
+            digest.update(block);
+        }
+        let actual = format!("{:x}", digest.finalize());
         ensure!(
             actual == *expected,
             "Native model bundle SHA256 mismatch: {name}"
@@ -169,13 +214,14 @@ fn load_bundle(path: &Path, cancel: &AtomicBool) -> Result<(Manifest, Kind, Vec<
             model = Some(bytes);
         }
     }
-    let digest = format!("{:x}", Sha256::digest(&manifest_bytes));
-    Ok((
-        manifest,
+    check_cancel(cancel)?;
+    provenance.sha256 = Some(format!("{:x}", Sha256::digest(manifest_bytes)));
+    Ok(PreparedModel {
         kind,
-        model.context("Missing native ONNX model")?,
-        digest,
-    ))
+        model: model.context("Missing native ONNX model")?,
+        wet,
+        threads: config.threads,
+    })
 }
 
 // Borrowing tensor views avoids copying recurrent state into each request.
@@ -686,43 +732,19 @@ fn wet_weight(wet: f32, attenuation: f32) -> Result<f32> {
 
 pub(super) fn run(
     input: &audio::PcmAudio,
-    config: &NeuralConfig,
+    prepared: PreparedModel,
     budget: Arc<audio::PcmBudget>,
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
-    provenance: &mut ModelProvenance,
 ) -> Result<AudioOutputs> {
     check_cancel(cancel)?;
-    ensure!(
-        config.device == NeuralDevice::Cpu,
-        "Native GTCRN/UL-UNAS support CPU only; no device fallback"
-    );
-    ensure!(
-        (1..=8).contains(&config.threads),
-        "Native ONNX threads must be 1..8"
-    );
-    ensure!(
-        !config.speech_post_filter,
-        "post_filter is supported only by DeepFilterNet3, not native GTCRN/UL-UNAS"
-    );
-    ensure!(
-        input.layout().as_ref() == [audio::Channel::FrontCenter]
-            || input.layout().as_ref() == [audio::Channel::FrontLeft, audio::Channel::FrontRight],
-        "Native speech supports mono center or stereo left/right layouts only"
-    );
-    ensure!(
-        (8_000..=384_000).contains(&input.sample_rate()),
-        "Native speech supports 8000..384000 Hz source rates"
-    );
+    let PreparedModel {
+        kind,
+        model,
+        wet,
+        threads,
+    } = prepared;
     let length = converted_frames(input.frames(), input.sample_rate(), RATE)?;
-    let wet = wet_weight(config.speech_wet_mix, config.speech_attenuation_limit_db)?;
-    let path = config
-        .speech_manifest
-        .as_ref()
-        .context("Missing native speech manifest")?;
-    let (manifest, kind, model, hash) = load_bundle(path, cancel)?;
-    provenance.id = Some(manifest.id);
-    provenance.sha256 = Some(hash);
     progress.report(ProcessingPhase::Processing, 0, Some(input.frames()));
     check_cancel(cancel)?;
     if wet == 0.0 {
@@ -744,7 +766,7 @@ pub(super) fn run(
     ort::init_from(&runtime).context("Loading native ONNX Runtime; install ONNX Runtime >=1.23 or set ORT_DYLIB_PATH (no Python/network fallback)")?.with_telemetry(false).commit();
     let mut session = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(usize::from(config.threads))?
+        .with_intra_threads(usize::from(threads))?
         .with_inter_threads(1)?
         .commit_from_memory(&model)
         .context("Loading pinned native speech ONNX graph")?;
@@ -1130,10 +1152,105 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let error = load_bundle(&path, &AtomicBool::new(false)).err().unwrap();
-        assert!(error.to_string().contains("SHA256 mismatch"));
-        let error = load_bundle(&path, &AtomicBool::new(true)).err().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // Preparation consumes this snapshot even if the manifest path changes.
+        std::fs::write(&path, b"not a manifest anymore").unwrap();
+        for wet in [0.0, 1.0] {
+            let config = NeuralConfig {
+                speech_wet_mix: wet,
+                ..Default::default()
+            };
+            let mut provenance = ModelProvenance::default();
+            let error = prepare(
+                &path,
+                &bytes,
+                &config,
+                &AtomicBool::new(false),
+                &mut provenance,
+            )
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("SHA256 mismatch"));
+            assert_eq!(provenance.id.as_deref(), Some("GTCRN"));
+            assert!(provenance.sha256.is_none());
+        }
+        let error = prepare(
+            &path,
+            &bytes,
+            &NeuralConfig::default(),
+            &AtomicBool::new(true),
+            &mut ModelProvenance::default(),
+        )
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn native_bundle_has_an_independent_cumulative_size_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a-license"), b"x").unwrap();
+        File::create(directory.path().join("b-extra"))
+            .unwrap()
+            .set_len(MAX_BUNDLE)
+            .unwrap();
+        let path = directory.path().join("manifest.json");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version":1, "operation":"speech", "id":"GTCRN", "backend":"onnx",
+            "model":"model.onnx", "license_evidence":"a-license",
+            "files":{"model.onnx":Kind::Gtcrn.model_hash(),
+                     "a-license":format!("{:x}", Sha256::digest(b"x")),
+                     "b-extra":"0".repeat(64)}
+        }))
+        .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut provenance = ModelProvenance::default();
+        let error = prepare(
+            &path,
+            &bytes,
+            &NeuralConfig {
+                speech_wet_mix: 0.0,
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+            &mut provenance,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("size bound"));
+        assert_eq!(provenance.id.as_deref(), Some("GTCRN"));
+        assert!(provenance.sha256.is_none());
+    }
+
+    #[test]
+    fn prepared_dry_execution_needs_no_bundle_paths_or_onnx_runtime() {
+        let budget = audio::PcmBudget::new(64 * 1024);
+        let input = pcm(48_000, &[0.25, -0.25, -0.0, 0.0], Arc::clone(&budget));
+        let retained = budget.used_bytes();
+        let prepared = PreparedModel {
+            kind: Kind::Gtcrn,
+            model: Vec::new(),
+            wet: 0.0,
+            threads: 1,
+        };
+        let (tx, _rx) = async_channel::bounded(8);
+        let mut progress = ProgressReporter::new(&tx, 7);
+        let result = run(
+            &input,
+            prepared,
+            Arc::clone(&budget),
+            &AtomicBool::new(false),
+            &mut progress,
+        )
+        .unwrap();
+        let output = result.denoised.unwrap();
+        assert_eq!(budget.used_bytes(), retained);
+        let mut samples = [0.0; 4];
+        assert_eq!(output.read_frames(0, &mut samples), 2);
+        assert_eq!(
+            samples.map(f32::to_bits),
+            [0.25f32, -0.25, -0.0, 0.0].map(f32::to_bits)
+        );
     }
     #[test]
     fn downsampling_rejects_above_nyquist_instead_of_aliasing() {
