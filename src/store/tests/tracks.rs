@@ -1,6 +1,105 @@
 use super::*;
 
 #[test]
+fn track_edit_history_impact_uses_effective_title_and_persisted_membership() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one','Title'),(2,'two','Title');
+         UPDATE tracks SET last_played=123 WHERE id=1;",
+        )
+        .unwrap();
+    for (title, artist, album, hint) in [
+        (Some("Title"), None, None, None),
+        (Some("Title"), Some("Artist"), None, None),
+        (None, None, Some("Album"), None),
+        (None, None, None, Some(DecoderHint::Native)),
+    ] {
+        assert!(
+            !store
+                .edit_track(1, title, artist, album, hint)
+                .unwrap()
+                .history
+        );
+    }
+    assert!(
+        store
+            .edit_track(1, Some("Changed"), None, None, None)
+            .unwrap()
+            .history
+    );
+    assert!(
+        !store
+            .edit_track(1, Some("Changed"), None, None, None)
+            .unwrap()
+            .history
+    );
+    assert!(
+        !store
+            .edit_track(2, Some("Changed"), None, None, None)
+            .unwrap()
+            .history
+    );
+}
+
+#[test]
+fn both_deletion_selections_report_only_real_history_membership() {
+    for missing in [false, true] {
+        for played in [false, true] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO tracks(id,path,missing,last_played) VALUES(1,'one',1,?1)",
+                    [played.then_some(123)],
+                )
+                .unwrap();
+            let impact = if missing {
+                store.remove_missing_tracks().unwrap()
+            } else {
+                store
+                    .remove_prepared_tracks(store.prepare_track_removal(&[1]).unwrap())
+                    .unwrap()
+            };
+            assert_eq!(impact.history, played);
+            assert_eq!(impact.tracks, Some(vec![1]));
+            assert_eq!(impact.removed, 1);
+        }
+    }
+}
+
+#[test]
+fn deletion_metadata_track_scopes_are_bounded_without_losing_deletions() {
+    let bound = rivu_protocol::model::MAX_METADATA_SCOPES;
+    for missing in [false, true] {
+        for count in [bound, bound + 1] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            store.conn.execute(
+                "WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<?1)
+                 INSERT INTO tracks(id,path,missing) SELECT id,CAST(id AS TEXT),1 FROM ids",
+                [count as i64],
+            ).unwrap();
+            let ids = (1..=count as i64).collect::<Vec<_>>();
+            let impact = if missing {
+                store.remove_missing_tracks().unwrap()
+            } else {
+                store
+                    .remove_prepared_tracks(store.prepare_track_removal(&ids).unwrap())
+                    .unwrap()
+            };
+            assert_eq!(impact.removed, count);
+            if count == bound {
+                assert_eq!(impact.tracks, Some(ids));
+            } else {
+                assert!(impact.tracks.is_none());
+            }
+            assert_eq!(store.track_count().unwrap(), 0);
+        }
+    }
+}
+
+#[test]
 fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("precision.db");

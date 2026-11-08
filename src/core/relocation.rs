@@ -284,9 +284,23 @@ impl Core {
                 )?;
                 require_source_absent(&task.prepared.source.path)?;
                 verified.revalidate(&task.prepared.target.path)?;
+                // Resolve the same selection used by refresh_current_track, not
+                // a possibly stale display Track. Read before committing so a
+                // failure cannot obscure successful mutation evidence.
+                let selected = self
+                    .state
+                    .queue
+                    .current_id
+                    .map(|id| self.store.queue_track_id(id))
+                    .transpose()?;
                 // Store rereads both identities, eligibility and all target conflicts
                 // inside the transaction; current source user state is retained.
-                self.store.commit_relocation(&task.prepared)
+                let mut impacts = self.store.commit_relocation(&task.prepared)?;
+                impacts.current_track =
+                    Some(selected.is_some_and(|id| {
+                        id == task.status.source_id || id == task.status.target_id
+                    }));
+                Ok(impacts)
             });
             match outcome {
                 Ok(impacts) => {

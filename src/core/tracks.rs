@@ -183,14 +183,7 @@ impl Core {
             queue: impact.queue,
             albums: impact.albums,
             duplicate_members: impact.member_facts,
-            history: impact.library
-                && title.is_some()
-                && self
-                    .state
-                    .library
-                    .history
-                    .iter()
-                    .any(|entry| entry.track_id == track_id),
+            history: impact.history,
             ..Default::default()
         };
         self.accept_catalog_facts(impacts, Some(&[track_id]), impact.playlists.as_deref());
@@ -233,12 +226,7 @@ impl Core {
         }
         // Keep the selection on failure; only a committed cascade clears it.
         let impact = self.store.remove_prepared_tracks(removal)?;
-        self.finish_track_removal(
-            &impact.playlists,
-            impact.duplicate_groups,
-            impact.queue,
-            impact.albums,
-        )
+        self.finish_track_removal(impact)
     }
 
     pub(in crate::core) fn remove_history(&mut self, mut track_ids: Vec<i64>) -> Result<()> {
@@ -360,39 +348,37 @@ impl Core {
         // A stopped decoder does not imply the database deletion succeeded.
         let impact = self.store.remove_missing_tracks()?;
         if impact.removed != 0 {
-            self.finish_track_removal(
-                &impact.playlists,
-                impact.duplicate_groups,
-                impact.queue,
-                impact.albums,
-            )?;
+            self.finish_track_removal(impact)?;
         }
         Ok(())
     }
 
-    fn finish_track_removal(
-        &mut self,
-        affected_playlists: &[i64],
-        duplicate_groups_changed: bool,
-        queue_changed: bool,
-        albums_changed: bool,
-    ) -> Result<()> {
+    fn finish_track_removal(&mut self, impact: crate::store::TrackRemovalImpact) -> Result<()> {
         let impacts = crate::store::CatalogChanges {
             changed: true,
             library: true,
             structure: true,
-            history: true,
-            duplicate_groups: duplicate_groups_changed,
-            queue: queue_changed,
-            albums: albums_changed,
+            history: impact.history,
+            duplicate_groups: impact.duplicate_groups,
+            queue: impact.queue,
+            albums: impact.albums,
             ..crate::store::CatalogChanges::default()
         };
-        self.announce_catalog_changes(impacts);
-        let playlists = self.invalidate_playlist_members(affected_playlists);
+        // Metadata scopes are bounded independently of playlist entry tokens:
+        // every affected playlist still receives its structural invalidation.
+        let tracks = impact.tracks.as_deref();
+        let playlists = (tracks.is_some_and(|ids| {
+            ids.len().saturating_add(impact.playlists.len())
+                <= rivu_protocol::model::MAX_METADATA_SCOPES
+        }))
+        .then_some(impact.playlists.as_slice());
+        self.transport.history_pending |= impact.history;
+        self.accept_catalog_facts(impacts, tracks, playlists);
+        let playlists = self.invalidate_playlist_members(&impact.playlists);
         let catalog = self.refresh_catalog_projections();
         // Recover the committed scalar projection and selected track; a failed
         // refresh keeps dependent queue controls gated until recovery succeeds.
-        let queue = if queue_changed {
+        let queue = if impact.queue {
             self.reload_queue()
         } else {
             Ok(())

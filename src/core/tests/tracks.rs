@@ -1,6 +1,123 @@
 use super::*;
 
 #[test]
+fn metadata_history_refresh_uses_committed_facts_not_cached_entries_or_title_intent() {
+    let (directory, mut core) = fixture_with_database(Some(10.0));
+    core.store.mark_played(1, 123).unwrap();
+    assert!(core.state.library.history.is_empty());
+    core.edit_track(1, Some("Changed".into()), None, None, None)
+        .unwrap();
+    assert_eq!(core.state.library.history[0].title, "Changed");
+    let history = Arc::clone(&core.state.library.history);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute("UPDATE tracks SET last_played='unreadable' WHERE id=3", [])
+        .unwrap();
+    // Title intent alone is not an effective history change, even when another
+    // display value changes. A never-played title edit is likewise irrelevant.
+    core.edit_track(1, Some("Changed".into()), Some("Artist".into()), None, None)
+        .unwrap();
+    core.edit_track(2, Some("Never played".into()), None, None, None)
+        .unwrap();
+    assert!(!core.transport.history_pending);
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+}
+
+#[test]
+fn never_played_deletions_do_not_dirty_history_but_preserve_pending_recovery() {
+    for missing in [false, true] {
+        for pending in [false, true] {
+            let (directory, mut core) = fixture_with_database(Some(10.0));
+            let history = Arc::clone(&core.state.library.history);
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            connection
+                .execute_batch(
+                    "UPDATE tracks SET last_played='unreadable' WHERE id=3;
+                 UPDATE tracks SET missing=1 WHERE id=2;",
+                )
+                .unwrap();
+            core.transport.history_pending = pending;
+            let result = if missing {
+                core.remove_missing_tracks()
+            } else {
+                core.remove_tracks(vec![2])
+            };
+            assert_eq!(result.is_err(), pending);
+            assert!(core.store.track(2).unwrap().is_none());
+            assert_eq!(core.transport.history_pending, pending);
+            assert!(Arc::ptr_eq(&history, &core.state.library.history));
+            if pending {
+                connection
+                    .execute("UPDATE tracks SET last_played=123 WHERE id=3", [])
+                    .unwrap();
+                core.refresh_catalog_projections().unwrap();
+                assert!(!core.transport.history_pending);
+                assert_eq!(core.state.library.history[0].track_id, 3);
+            }
+        }
+    }
+}
+
+#[test]
+fn deletion_metadata_scope_overflow_keeps_every_playlist_entry_invalidation() {
+    let bound = rivu_protocol::model::MAX_METADATA_SCOPES;
+    for missing in [false, true] {
+        for affected_count in [bound - 1, bound] {
+            let (directory, mut core) = fixture_with_database(Some(10.0));
+            core.command(Command::CreatePlaylistWithTracks {
+                name: "Unrelated".into(),
+                track_ids: vec![3],
+            })
+            .unwrap();
+            for index in 0..affected_count {
+                core.command(Command::CreatePlaylistWithTracks {
+                    name: format!("Affected {index}"),
+                    track_ids: vec![2, 4],
+                })
+                .unwrap();
+            }
+            if missing {
+                let connection =
+                    rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+                connection
+                    .execute("UPDATE tracks SET missing=1 WHERE id=2", [])
+                    .unwrap();
+            }
+            let track = Query::Track { track_id: 3 };
+            let before_track = track.stamp(core.query_response(&track).revisions);
+            let unrelated = Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 1,
+            };
+            let before_unrelated = unrelated.stamp(core.query_response(&unrelated).revisions);
+            let entries = Arc::clone(&core.state.library.playlist_entry_revisions);
+            if missing {
+                core.remove_missing_tracks().unwrap();
+            } else {
+                core.remove_tracks(vec![2]).unwrap();
+            }
+            let exact = affected_count < bound;
+            assert_eq!(
+                track.stamp(core.query_response(&track).revisions) == before_track,
+                exact
+            );
+            assert_eq!(
+                unrelated.stamp(core.query_response(&unrelated).revisions) == before_unrelated,
+                exact
+            );
+            assert_eq!(core.state.library.playlist_entry_revisions[&1], entries[&1]);
+            for (&id, &revision) in entries.iter().filter(|(id, _)| **id != 1) {
+                assert_ne!(core.state.library.playlist_entry_revisions[&id], revision);
+                assert_eq!(core.store.playlist_track_ids(id, 10).unwrap(), [4]);
+            }
+        }
+    }
+}
+
+#[test]
 fn committed_history_removal_retains_session_suppression_when_refresh_fails() {
     let (directory, mut core) = fixture();
     pending(&mut core, 1);
@@ -1597,6 +1714,7 @@ fn committed_deletion_invalidates_all_affected_playlists_before_projection_failu
         })
         .unwrap();
     }
+    core.store.mark_played(2, 123).unwrap();
     let before = core.state.query_revisions();
     let second = core.state.library.playlist_entry_revisions[&2];
     let first = core.state.library.playlist_entry_revisions[&1];

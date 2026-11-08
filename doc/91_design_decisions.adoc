@@ -436,6 +436,13 @@ possibly stale display Track.
 External admission follows the same rule: current-track, count and history
 refreshes retain independent recovery responsibility after the write commits.
 
+Manual edits and removals report History effects from transaction facts, not
+request fields or cached History membership. Removals publish exact Track and
+playlist metadata scopes while within the shared scope bound; overflow resets
+metadata scopes conservatively. This bound does not truncate playlist-entry
+structure invalidation. Relocation refreshes the current Track only when the
+selected identity is affected, including a stopped selection.
+
 Retain the publication fence, pinned SQL snapshots and consumer generations:
 they respectively pair database visibility with Core versions, isolate a read,
 and reject results for superseded demand. Moving all views into write transactions

@@ -84,6 +84,9 @@ pub struct TrackRemovalImpact {
     pub removed: usize,
     pub queue: bool,
     pub albums: bool,
+    pub history: bool,
+    /// Exact removed identities, or None when the metadata scope bound overflowed.
+    pub tracks: Option<Vec<i64>>,
     pub playlists: Vec<i64>,
     pub duplicate_groups: bool,
 }
@@ -93,6 +96,7 @@ pub struct TrackEditImpact {
     pub library: bool,
     pub queue: bool,
     pub albums: bool,
+    pub history: bool,
     pub member_facts: bool,
     /// None means the changed playlist scopes exceeded the publication bound.
     pub playlists: Option<Vec<i64>>,
@@ -954,13 +958,15 @@ impl Store {
                   OR album_override IS NOT NULL OR decoder_hint<>0)
                  IS NOT
                  (COALESCE(?1,title_override) IS NOT NULL OR COALESCE(?2,artist_override) IS NOT NULL
-                  OR COALESCE(?3,album_override) IS NOT NULL OR COALESCE(?4,decoder_hint)<>0))
+                  OR COALESCE(?3,album_override) IS NOT NULL OR COALESCE(?4,decoder_hint)<>0)),
+                (last_played IS NOT NULL AND ?1 IS NOT NULL
+                 AND ?1 IS NOT COALESCE(title_override,raw_title))
              FROM tracks WHERE id=?5",
             params![title, artist, album, decoder_hint, id],
             |row| {
                 let display: bool = row.get(0)?;
                 let decoder: bool = row.get(1)?;
-                Ok((TrackEditImpact { library: display || decoder, member_facts: row.get(2)?, ..Default::default() }, display))
+                Ok((TrackEditImpact { library: display || decoder, member_facts: row.get(2)?, history: row.get(3)?, ..Default::default() }, display))
             },
         ).optional()?.with_context(|| format!("track {id} does not exist"))?;
         impact.queue = playlist_values_changed
@@ -1031,6 +1037,12 @@ impl Store {
     ) -> Result<TrackRemovalImpact> {
         let tx = self.conn.unchecked_transaction()?;
         let removed = removal.ids.len();
+        let tracks =
+            (removed <= rivu_protocol::model::MAX_METADATA_SCOPES).then(|| removal.ids.to_vec());
+        let history = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND last_played IS NOT NULL)",
+            [&removal.encoded], |row| row.get(0),
+        )?;
         let duplicate_groups = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
             [&removal.encoded], |row| row.get(0),
@@ -1042,6 +1054,8 @@ impl Store {
             removed,
             queue,
             albums,
+            history,
+            tracks,
             playlists,
             duplicate_groups,
         })
@@ -1069,6 +1083,12 @@ impl Store {
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
         self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
+        let tracks = bounded_metadata_ids(&tx, "SELECT id FROM tracks WHERE missing=1", [])?;
+        let history = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND last_played IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )?;
         let duplicate_groups = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
             [], |row| row.get(0),
@@ -1087,6 +1107,8 @@ impl Store {
             removed,
             queue,
             albums,
+            history,
+            tracks,
             playlists,
             duplicate_groups,
         })

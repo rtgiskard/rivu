@@ -28,7 +28,7 @@ pub(crate) use duplicates::PreparedRelocation;
 pub(crate) use duplicates::RelocationIdentity;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scan::TrackIdentity;
-pub(crate) use tracks::PlaybackSource;
+pub(crate) use tracks::{PlaybackSource, TrackRemovalImpact};
 
 pub(crate) struct Store {
     conn: Connection,

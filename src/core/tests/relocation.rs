@@ -84,6 +84,82 @@ fn settle_relocation(core: &mut Core) -> RelocationTaskStatus {
 }
 
 #[test]
+fn relocation_refreshes_the_stopped_source_selected_after_verification_started() {
+    for missing_display in [false, true] {
+        let (_directory, mut core, source, target) = relocation_fixture();
+        let target_path = core.track(target).unwrap().path;
+        core.enqueue(&[source]).unwrap();
+        let source_entry = *core.store.queue_ids().unwrap().last().unwrap();
+        core.relocate_track(source, target).unwrap();
+        let event = receive_relocation(&mut core);
+        core.store.set_queue_current(Some(source_entry)).unwrap();
+        core.refresh_queue_tracks().unwrap();
+        assert!(core.state.current_track().unwrap().missing);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        if missing_display {
+            // Selection, not an optional/stale Track projection, owns identity.
+            core.state.current_track = None;
+        }
+        core.relocation_event(event);
+        let status = core.state.system.relocation_task.as_ref().unwrap();
+        assert_eq!(status.phase, RelocationPhase::Completed);
+        assert!(status.error.is_none());
+        let current = core.state.current_track().unwrap();
+        assert_eq!(current.id, source);
+        assert_eq!(current.path, target_path);
+        assert!(!current.missing);
+        assert!(!core.projections.current_track);
+    }
+}
+
+#[test]
+fn relocation_preserves_unrelated_current_projection_after_selection_changes() {
+    for stale_display in [false, true] {
+        let (directory, mut core, source, target) = relocation_fixture();
+        core.enqueue(&[source]).unwrap();
+        let source_entry = *core.store.queue_ids().unwrap().last().unwrap();
+        core.store.set_queue_current(Some(source_entry)).unwrap();
+        core.refresh_queue_tracks().unwrap();
+        let source_display = Arc::clone(core.state.current_track.as_ref().unwrap());
+        core.relocate_track(source, target).unwrap();
+        let event = receive_relocation(&mut core);
+        // Durable queue projections cannot override a surviving runtime
+        // selection. Accept the new intent before preparing its display Track.
+        core.state.queue.current_id = Some(1);
+        core.save_queue().unwrap();
+        core.refresh_current_track().unwrap();
+        assert_eq!(core.state.queue.current_id, Some(1));
+        assert_eq!(core.state.current_track().unwrap().id, 1);
+        if stale_display {
+            core.state.current_track = Some(source_display);
+        }
+        core.publish();
+        let playback_revision = core.state.revisions.playback;
+        let before = Arc::clone(core.state.current_track.as_ref().unwrap());
+        core.store.set_track_cache_query_batch_size(0);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])
+            .unwrap();
+        core.relocation_event(event);
+        let status = core.state.system.relocation_task.as_ref().unwrap();
+        assert_eq!(status.phase, RelocationPhase::Completed);
+        assert!(status.error.is_none());
+        assert!(!core.projections.current_track);
+        assert!(Arc::ptr_eq(
+            &before,
+            core.state.current_track.as_ref().unwrap()
+        ));
+        assert_eq!(core.state.revisions.playback, playback_revision);
+        assert!(Arc::ptr_eq(
+            &before,
+            core.shared.read().current_track.as_ref().unwrap()
+        ));
+        assert!(core.store.track(target).unwrap().is_none());
+    }
+}
+
+#[test]
 fn manual_relocation_preserves_source_identity_state_and_references() {
     let (_directory, mut core, source, target) = relocation_fixture();
     let target_path = core.track(target).unwrap().path;
