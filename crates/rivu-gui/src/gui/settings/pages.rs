@@ -1,8 +1,8 @@
 //! Settings page composition; session transitions and control text remain with the owner.
 use super::{
     Field, Measured, SettingChoice, Settings, SettingsEvent, SettingsPage, SpectrumLayoutMode,
-    VisualPage, dropdown_button, ffmpeg_hint, model::Target, settings_card, settings_group,
-    spectrum_style_label, visual_switch, visualization_palette_label,
+    VisualPage, ffmpeg_hint, model::Target, settings_card, settings_group, spectrum_style_label,
+    visual_switch, visualization_palette_label,
 };
 use crate::gui::artwork_panel::ARTWORK_STYLES;
 use crate::gui::visualization::AUDIO_VISUALIZER_STYLES;
@@ -366,11 +366,11 @@ impl Settings {
             .gap_1()
             .child(caption(palette(cx), self.tr("settings-output-device")))
             .child(
-                dropdown_button(
+                self.dropdown_button(
                     "output-device-selector",
                     self.tr("settings-output-device"),
                     chosen_device.clone(),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::Device,
+                    Measured::Device,
                     cx,
                     |this, _, _| {
                         let open = this.dropdown.is_open();
@@ -421,7 +421,7 @@ impl Settings {
                         self.tr("settings-confirm-queue-replace"),
                         self.model.draft.confirm_queue_replace,
                         cx,
-                        |draft| draft.confirm_queue_replace = !draft.confirm_queue_replace,
+                        |config| config.confirm_queue_replace = !config.confirm_queue_replace,
                     )
                     .self_start(),
                 ),
@@ -493,7 +493,7 @@ impl Settings {
                             self.tr("settings-pipewire-channel-remix"),
                             remix,
                             cx,
-                            |draft| draft.pipewire_auto_mix = !draft.pipewire_auto_mix,
+                            |config| config.pipewire_auto_mix = !config.pipewire_auto_mix,
                         )),
                 ),
         );
@@ -502,62 +502,63 @@ impl Settings {
 
     pub(super) fn basic_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
-        let draft = &self.model.draft;
-        let language = dropdown_button(
-            "settings-language",
-            self.tr("settings-language"),
-            match draft.ui_language.as_str() {
-                "en-US" => SharedString::from("English"),
-                "zh-CN" => SharedString::from("简体中文"),
-                _ => self.tr("settings-language-auto"),
-            },
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::Language,
-            cx,
-            |this, _, _| {
-                let values = ["auto", "en-US", "zh-CN"];
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.ui_language)
-                    .unwrap_or(0);
-                let labels = [
-                    this.i18n.text("settings-language-auto"),
-                    "English",
-                    "简体中文",
-                ];
-                let items = labels
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, label)| {
-                        ChoiceItem::new(SettingChoice::Language(index), label.to_owned())
-                    })
-                    .collect();
-                this.open_setting_dropdown(items, selected);
-            },
-        )
-        .tooltip(text_tooltip(self.tr("settings-language-restart")))
-        .relative()
-        .child(self.measurement(Measured::Language, cx));
-        let theme = dropdown_button(
-            "settings-theme",
-            self.tr("settings-theme"),
-            draft.ui_theme.label(),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::Theme,
-            cx,
-            |this, _, _| {
-                let selected = Theme::ALL
-                    .iter()
-                    .position(|value| *value == this.model.draft.ui_theme)
-                    .unwrap_or(0);
-                let items = Theme::ALL
-                    .into_iter()
-                    .map(|value| ChoiceItem::new(SettingChoice::Theme(value), value.label()))
-                    .collect();
-                this.open_setting_dropdown(items, selected);
-            },
-        )
-        .tooltip(text_tooltip(self.tr("settings-theme-hint")))
-        .relative()
-        .child(self.measurement(Measured::Theme, cx));
+        let language = self
+            .dropdown_button(
+                "settings-language",
+                self.tr("settings-language"),
+                match self.model.draft.ui_language.as_str() {
+                    "en-US" => SharedString::from("English"),
+                    "zh-CN" => SharedString::from("简体中文"),
+                    _ => self.tr("settings-language-auto"),
+                },
+                Measured::Language,
+                cx,
+                |this, _, _| {
+                    let values = ["auto", "en-US", "zh-CN"];
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.ui_language)
+                        .unwrap_or(0);
+                    let labels = [
+                        this.i18n.text("settings-language-auto"),
+                        "English",
+                        "简体中文",
+                    ];
+                    let items = labels
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, label)| {
+                            ChoiceItem::new(SettingChoice::Language(index), label.to_owned())
+                        })
+                        .collect();
+                    this.open_setting_dropdown(items, selected);
+                },
+            )
+            .tooltip(text_tooltip(self.tr("settings-language-restart")))
+            .relative()
+            .child(self.measurement(Measured::Language, cx));
+        let theme = self
+            .dropdown_button(
+                "settings-theme",
+                self.tr("settings-theme"),
+                self.model.draft.ui_theme.label(),
+                Measured::Theme,
+                cx,
+                |this, _, _| {
+                    let selected = Theme::ALL
+                        .iter()
+                        .position(|value| *value == this.model.draft.ui_theme)
+                        .unwrap_or(0);
+                    let items = Theme::ALL
+                        .into_iter()
+                        .map(|value| ChoiceItem::new(SettingChoice::Theme(value), value.label()))
+                        .collect();
+                    this.open_setting_dropdown(items, selected);
+                },
+            )
+            .tooltip(text_tooltip(self.tr("settings-theme-hint")))
+            .relative()
+            .child(self.measurement(Measured::Theme, cx));
         settings_card(
             colors,
             self.tr("settings-appearance-layout"),
@@ -616,7 +617,7 @@ impl Settings {
                         self.tr("settings-layout-snapping"),
                         self.model.draft.layout_snap_enabled,
                         cx,
-                        |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
+                        |config| config.layout_snap_enabled = !config.layout_snap_enabled,
                     )),
             ),
         )
@@ -665,46 +666,46 @@ impl Settings {
                     self.tr("settings-system-tray"),
                     tray,
                     cx,
-                    |draft| draft.tray_enabled = !draft.tray_enabled,
+                    |config| config.tray_enabled = !config.tray_enabled,
                 )),
         )
     }
 
     pub(super) fn logging_settings(&mut self, cx: &mut Context<Self>) -> Div {
-        let draft = &self.model.draft;
-        let log_level_dropdown = dropdown_button(
-            "settings-log-level",
-            self.tr("settings-log-level"),
-            SettingChoice::LogLevel(draft.log_level).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsLogLevel,
-            cx,
-            |this, _, _| {
-                let values = [
-                    LogLevel::Debug,
-                    LogLevel::Info,
-                    LogLevel::Warning,
-                    LogLevel::Error,
-                ];
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.log_level)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            ChoiceItem::new(
-                                SettingChoice::LogLevel(value),
-                                SettingChoice::LogLevel(value).label(&this.i18n),
-                            )
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::SettingsLogLevel, cx));
+        let log_level_dropdown = self
+            .dropdown_button(
+                "settings-log-level",
+                self.tr("settings-log-level"),
+                SettingChoice::LogLevel(self.model.draft.log_level).label(&self.i18n),
+                Measured::SettingsLogLevel,
+                cx,
+                |this, _, _| {
+                    let values = [
+                        LogLevel::Debug,
+                        LogLevel::Info,
+                        LogLevel::Warning,
+                        LogLevel::Error,
+                    ];
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.log_level)
+                        .unwrap_or(0);
+                    this.open_setting_dropdown(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                ChoiceItem::new(
+                                    SettingChoice::LogLevel(value),
+                                    SettingChoice::LogLevel(value).label(&this.i18n),
+                                )
+                            })
+                            .collect(),
+                        selected,
+                    );
+                },
+            )
+            .relative()
+            .child(self.measurement(Measured::SettingsLogLevel, cx));
         settings_card(
             palette(cx),
             self.tr("settings-logging"),
@@ -734,9 +735,9 @@ impl Settings {
                     "settings-log-file",
                     "",
                     self.tr("settings-write-logs-to-disk"),
-                    draft.log_to_file,
+                    self.model.draft.log_to_file,
                     cx,
-                    |draft| draft.log_to_file = !draft.log_to_file,
+                    |config| config.log_to_file = !config.log_to_file,
                 )))
                 .id("settings-logging-scope-help")
                 .tooltip(text_tooltip(self.tr("settings-logging-scope"))),
@@ -797,101 +798,103 @@ impl Settings {
 
     pub(super) fn artwork_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
-        let settings = &*self;
-        let draft = &settings.model.draft;
-        let style = dropdown_button(
-            "artwork-style",
-            self.tr("settings-style"),
-            SettingChoice::ArtworkStyle(draft.artwork_style).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkStyle,
-            cx,
-            |this, _, _| {
-                let values = ARTWORK_STYLES;
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.artwork_style)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            let choice = SettingChoice::ArtworkStyle(value);
-                            ChoiceItem::new(choice, choice.label(&this.i18n))
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::ArtworkStyle, cx));
-        let mode = dropdown_button(
-            "artwork-mode",
-            self.tr("settings-mode"),
-            SettingChoice::ArtworkMode(draft.artwork_mode).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkMode,
-            cx,
-            |this, _, _| {
-                let values = [ArtworkMode::Static, ArtworkMode::Rotating];
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.artwork_mode)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            let choice = SettingChoice::ArtworkMode(value);
-                            ChoiceItem::new(choice, choice.label(&this.i18n))
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::ArtworkMode, cx));
-        let direction = dropdown_button(
-            "artwork-direction",
-            self.tr("settings-direction"),
-            SettingChoice::ArtworkDirection(draft.artwork_direction).label(&self.i18n),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::ArtworkDirection,
-            cx,
-            |this, _, _| {
-                let values = [
-                    ArtworkDirection::Clockwise,
-                    ArtworkDirection::Counterclockwise,
-                ];
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.artwork_direction)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            let choice = SettingChoice::ArtworkDirection(value);
-                            ChoiceItem::new(choice, choice.label(&this.i18n))
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::ArtworkDirection, cx));
-        let rotating = draft.artwork_mode == ArtworkMode::Rotating;
+        let style = self
+            .dropdown_button(
+                "artwork-style",
+                self.tr("settings-style"),
+                SettingChoice::ArtworkStyle(self.model.draft.artwork_style).label(&self.i18n),
+                Measured::ArtworkStyle,
+                cx,
+                |this, _, _| {
+                    let values = ARTWORK_STYLES;
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.artwork_style)
+                        .unwrap_or(0);
+                    this.open_setting_dropdown(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                let choice = SettingChoice::ArtworkStyle(value);
+                                ChoiceItem::new(choice, choice.label(&this.i18n))
+                            })
+                            .collect(),
+                        selected,
+                    );
+                },
+            )
+            .relative()
+            .child(self.measurement(Measured::ArtworkStyle, cx));
+        let mode = self
+            .dropdown_button(
+                "artwork-mode",
+                self.tr("settings-mode"),
+                SettingChoice::ArtworkMode(self.model.draft.artwork_mode).label(&self.i18n),
+                Measured::ArtworkMode,
+                cx,
+                |this, _, _| {
+                    let values = [ArtworkMode::Static, ArtworkMode::Rotating];
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.artwork_mode)
+                        .unwrap_or(0);
+                    this.open_setting_dropdown(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                let choice = SettingChoice::ArtworkMode(value);
+                                ChoiceItem::new(choice, choice.label(&this.i18n))
+                            })
+                            .collect(),
+                        selected,
+                    );
+                },
+            )
+            .relative()
+            .child(self.measurement(Measured::ArtworkMode, cx));
+        let direction = self
+            .dropdown_button(
+                "artwork-direction",
+                self.tr("settings-direction"),
+                SettingChoice::ArtworkDirection(self.model.draft.artwork_direction)
+                    .label(&self.i18n),
+                Measured::ArtworkDirection,
+                cx,
+                |this, _, _| {
+                    let values = [
+                        ArtworkDirection::Clockwise,
+                        ArtworkDirection::Counterclockwise,
+                    ];
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.artwork_direction)
+                        .unwrap_or(0);
+                    this.open_setting_dropdown(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                let choice = SettingChoice::ArtworkDirection(value);
+                                ChoiceItem::new(choice, choice.label(&this.i18n))
+                            })
+                            .collect(),
+                        selected,
+                    );
+                },
+            )
+            .relative()
+            .child(self.measurement(Measured::ArtworkDirection, cx));
+        let rotating = self.model.draft.artwork_mode == ArtworkMode::Rotating;
         column()
             .gap_3()
             .child(settings_group(
                 colors,
-                settings.tr(if matches!(settings.model.target(), Target::Artwork(_)) {
+                self.tr(if matches!(self.model.target(), Target::Artwork(_)) {
                     "settings-this-panel"
                 } else {
                     "settings-new-panel-defaults"
                 }),
                 row().child(
-                    FormField::new(colors, settings.tr("settings-style"), style)
+                    FormField::new(colors, self.tr("settings-style"), style)
                         .into_div()
                         .w(gpui::relative(0.5))
                         .min_w(rems(180. / 16.))
@@ -900,17 +903,17 @@ impl Settings {
             ))
             .child(settings_group(
                 colors,
-                settings.tr("settings-animation"),
+                self.tr("settings-animation"),
                 column()
                     .gap_2()
                     .child(two_column(
-                        FormField::new(colors, settings.tr("settings-mode"), mode)
+                        FormField::new(colors, self.tr("settings-mode"), mode)
                             .into_div()
                             .min_w(rems(180. / 16.)),
                         div().min_w(rems(180. / 16.)).child(
                             FormField::new(
                                 colors,
-                                settings.tr("settings-direction"),
+                                self.tr("settings-direction"),
                                 disabled_control(colors, direction, !rotating),
                             )
                             .into_div()
@@ -918,48 +921,50 @@ impl Settings {
                         ),
                     ))
                     .child(two_column(
-                        settings.field_state(Field::ArtworkPeriodSeconds, cx),
+                        self.field_state(Field::ArtworkPeriodSeconds, cx),
                         column().when(
-                            !matches!(settings.model.target(), Target::Artwork(_)),
+                            !matches!(self.model.target(), Target::Artwork(_)),
                             |column| {
                                 column
                                     .min_w(rems(180. / 16.))
                                     .gap_2()
-                                    .child(settings.field_state(Field::ArtworkFps, cx))
+                                    .child(self.field_state(Field::ArtworkFps, cx))
                             },
                         ),
                     )),
             ))
     }
 
-    fn visualizer_display_settings(&self, cx: &mut Context<Self>) -> Div {
-        let draft = &self.model.draft;
-        let style = dropdown_button(
-            "default-visualizer-style",
-            self.tr("settings-style"),
-            visualization_style_label(&self.i18n, draft.default_visualizer_style),
-            self.dropdown.is_open() && self.dropdown_anchor == Measured::DefaultVisualizerStyle,
-            cx,
-            |this, _, _| {
-                let values = AUDIO_VISUALIZER_STYLES;
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.model.draft.default_visualizer_style)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            let choice = SettingChoice::DefaultVisualizerStyle(value);
-                            ChoiceItem::new(choice, choice.label(&this.i18n))
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::DefaultVisualizerStyle, cx));
+    fn visualizer_display_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let style_label: SharedString =
+            visualization_style_label(&self.i18n, self.model.draft.default_visualizer_style).into();
+        let style = self
+            .dropdown_button(
+                "default-visualizer-style",
+                self.tr("settings-style"),
+                style_label,
+                Measured::DefaultVisualizerStyle,
+                cx,
+                |this, _, _| {
+                    let values = AUDIO_VISUALIZER_STYLES;
+                    let selected = values
+                        .iter()
+                        .position(|value| *value == this.model.draft.default_visualizer_style)
+                        .unwrap_or(0);
+                    this.open_setting_dropdown(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                let choice = SettingChoice::DefaultVisualizerStyle(value);
+                                ChoiceItem::new(choice, choice.label(&this.i18n))
+                            })
+                            .collect(),
+                        selected,
+                    );
+                },
+            )
+            .relative()
+            .child(self.measurement(Measured::DefaultVisualizerStyle, cx));
         settings_card(
             palette(cx),
             self.info_label(
@@ -984,7 +989,7 @@ impl Settings {
                         .gap_2()
                         .when(
                             !matches!(
-                                draft.default_visualizer_style,
+                                self.model.draft.default_visualizer_style,
                                 AudioVisualizerStyle::Waveform | AudioVisualizerStyle::Spectrogram
                             ),
                             |controls| {
@@ -993,11 +998,11 @@ impl Settings {
                                     "default-visualizer-reference-lines",
                                     "",
                                     self.tr("shell-reference-lines"),
-                                    draft.default_visualizer_reference_lines,
+                                    self.model.draft.default_visualizer_reference_lines,
                                     cx,
-                                    |draft| {
-                                        draft.default_visualizer_reference_lines =
-                                            !draft.default_visualizer_reference_lines
+                                    |config| {
+                                        config.default_visualizer_reference_lines =
+                                            !config.default_visualizer_reference_lines
                                     },
                                 ))
                             },
@@ -1007,10 +1012,10 @@ impl Settings {
                             "default-visualizer-labels",
                             "",
                             self.tr("shell-labels"),
-                            draft.default_visualizer_labels,
+                            self.model.draft.default_visualizer_labels,
                             cx,
-                            |draft| {
-                                draft.default_visualizer_labels = !draft.default_visualizer_labels
+                            |config| {
+                                config.default_visualizer_labels = !config.default_visualizer_labels
                             },
                         )),
                 ),
@@ -1055,154 +1060,162 @@ impl Settings {
     }
 
     pub(super) fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
-        let settings = &*self;
-        let draft = &settings.model.draft;
-        let title = settings.tr(settings.visual_page.label_id());
+        let title = self.tr(self.visual_page.label_id());
         let scope = div().text_sm().child(title);
-        let content = match settings.visual_page {
+        let content = match self.visual_page {
             VisualPage::General => {
-                let palette_control = dropdown_button(
-                    "visual-palette",
-                    self.tr("settings-color-scheme"),
-                    visualization_palette_label(&self.i18n, draft.visualization_palette),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
-                    cx,
-                    |this, _, _| {
-                        let values = [
-                            VisualizationPalette::Inferno,
-                            VisualizationPalette::Magma,
-                            VisualizationPalette::Viridis,
-                            VisualizationPalette::Cividis,
-                            VisualizationPalette::Grayscale,
-                            VisualizationPalette::Deadbeef,
-                        ];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.model.draft.visualization_palette)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(
-                                        SettingChoice::Palette(value),
-                                        visualization_palette_label(&this.i18n, value),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsStyle, cx));
-                let fft = dropdown_button(
-                    "analysis-fft",
-                    self.tr("settings-fft-size-samples"),
-                    draft.analysis_fft_size.to_string(),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsFft,
-                    cx,
-                    |this, _, _| {
-                        let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.model.draft.analysis_fft_size)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(SettingChoice::Fft(value), value.to_string())
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsFft, cx));
-                let window = dropdown_button(
-                    "analysis-window",
-                    self.tr("settings-fft-window"),
-                    SettingChoice::Window(draft.analysis_window).label(&self.i18n),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsWindow,
-                    cx,
-                    |this, _, _| {
-                        let values = [
-                            AnalysisWindow::Hann,
-                            AnalysisWindow::BlackmanHarris,
-                            AnalysisWindow::None,
-                        ];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.model.draft.analysis_window)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(
-                                        SettingChoice::Window(value),
-                                        SettingChoice::Window(value).label(&this.i18n),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsWindow, cx));
-                let signal = dropdown_button(
-                    "visualization-signal",
-                    self.tr("settings-visualization-signal"),
-                    SettingChoice::Signal(draft.visualization_signal).label(&self.i18n),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsSignal,
-                    cx,
-                    |this, _, _| {
-                        let values = [VisualizationSignal::Before, VisualizationSignal::After];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.model.draft.visualization_signal)
-                            .unwrap_or(1);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(
-                                        SettingChoice::Signal(value),
-                                        SettingChoice::Signal(value).label(&this.i18n),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsSignal, cx));
+                let palette_control = self
+                    .dropdown_button(
+                        "visual-palette",
+                        self.tr("settings-color-scheme"),
+                        visualization_palette_label(
+                            &self.i18n,
+                            self.model.draft.visualization_palette,
+                        ),
+                        Measured::SettingsStyle,
+                        cx,
+                        |this, _, _| {
+                            let values = [
+                                VisualizationPalette::Inferno,
+                                VisualizationPalette::Magma,
+                                VisualizationPalette::Viridis,
+                                VisualizationPalette::Cividis,
+                                VisualizationPalette::Grayscale,
+                                VisualizationPalette::Deadbeef,
+                            ];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.model.draft.visualization_palette)
+                                .unwrap_or(0);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::Palette(value),
+                                            visualization_palette_label(&this.i18n, value),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SettingsStyle, cx));
+                let fft = self
+                    .dropdown_button(
+                        "analysis-fft",
+                        self.tr("settings-fft-size-samples"),
+                        self.model.draft.analysis_fft_size.to_string(),
+                        Measured::SettingsFft,
+                        cx,
+                        |this, _, _| {
+                            let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.model.draft.analysis_fft_size)
+                                .unwrap_or(0);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::Fft(value),
+                                            value.to_string(),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SettingsFft, cx));
+                let window = self
+                    .dropdown_button(
+                        "analysis-window",
+                        self.tr("settings-fft-window"),
+                        SettingChoice::Window(self.model.draft.analysis_window).label(&self.i18n),
+                        Measured::SettingsWindow,
+                        cx,
+                        |this, _, _| {
+                            let values = [
+                                AnalysisWindow::Hann,
+                                AnalysisWindow::BlackmanHarris,
+                                AnalysisWindow::None,
+                            ];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.model.draft.analysis_window)
+                                .unwrap_or(0);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::Window(value),
+                                            SettingChoice::Window(value).label(&this.i18n),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SettingsWindow, cx));
+                let signal = self
+                    .dropdown_button(
+                        "visualization-signal",
+                        self.tr("settings-visualization-signal"),
+                        SettingChoice::Signal(self.model.draft.visualization_signal)
+                            .label(&self.i18n),
+                        Measured::SettingsSignal,
+                        cx,
+                        |this, _, _| {
+                            let values = [VisualizationSignal::Before, VisualizationSignal::After];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.model.draft.visualization_signal)
+                                .unwrap_or(1);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::Signal(value),
+                                            SettingChoice::Signal(value).label(&this.i18n),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SettingsSignal, cx));
                 column()
                     .gap_3()
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-appearance"),
+                        self.tr("settings-appearance"),
                         column()
                             .gap_2()
                             .child(two_column(
-                                settings
-                                    .field(Field::VisualizationBackground, cx)
+                                self.field(Field::VisualizationBackground, cx)
                                     .min_w(rems(180. / 16.)),
                                 FormField::new(
                                     palette(cx),
-                                    settings.tr("settings-color-scheme"),
+                                    self.tr("settings-color-scheme"),
                                     palette_control,
                                 )
                                 .into_div()
                                 .min_w(rems(180. / 16.)),
                             ))
                             .id("settings-appearance-help")
-                            .tooltip(text_tooltip(settings.tr("settings-appearance-help")))
-                            .child(settings.pair(
+                            .tooltip(text_tooltip(self.tr("settings-appearance-help")))
+                            .child(self.pair(
                                 Field::VisualizationDbRange,
                                 Field::VisualizationAnimationFps,
                                 cx,
@@ -1211,19 +1224,19 @@ impl Settings {
                                 div().child(
                                     FormField::new(
                                         palette(cx),
-                                        settings.tr("settings-visualization-signal"),
+                                        self.tr("settings-visualization-signal"),
                                         signal,
                                     )
                                     .into_div()
                                     .min_w(rems(180. / 16.))
                                     .id("settings-visualization-signal-help")
                                     .tooltip(text_tooltip(
-                                        settings.tr("settings-visualization-signal-hint"),
+                                        self.tr("settings-visualization-signal-hint"),
                                     )),
                                 ),
-                                settings.field(Field::GpuMaterialBudgetMib, cx),
+                                self.field(Field::GpuMaterialBudgetMib, cx),
                             ))
-                            .child(settings.pair(
+                            .child(self.pair(
                                 Field::GpuFilterBudgetMib,
                                 Field::GpuFilterMaxDepth,
                                 cx,
@@ -1232,277 +1245,266 @@ impl Settings {
                                 &self.i18n,
                                 "settings-visualization-disabled",
                                 "",
-                                settings.tr("settings-visualization-disabled"),
-                                !draft.visualization_enabled,
+                                self.tr("settings-visualization-disabled"),
+                                !self.model.draft.visualization_enabled,
                                 cx,
-                                |draft| draft.visualization_enabled = !draft.visualization_enabled,
+                                |config| {
+                                    config.visualization_enabled = !config.visualization_enabled
+                                },
                             ))),
                     ))
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-frequency-analysis"),
+                        self.tr("settings-frequency-analysis"),
                         column()
                             .gap_2()
                             .child(two_column(
                                 FormField::new(
                                     palette(cx),
-                                    settings.tr("settings-fft-size-samples"),
+                                    self.tr("settings-fft-size-samples"),
                                     fft,
                                 )
                                 .into_div()
                                 .min_w(rems(180. / 16.)),
-                                FormField::new(
-                                    palette(cx),
-                                    settings.tr("settings-fft-window"),
-                                    window,
-                                )
-                                .into_div()
-                                .min_w(rems(180. / 16.)),
+                                FormField::new(palette(cx), self.tr("settings-fft-window"), window)
+                                    .into_div()
+                                    .min_w(rems(180. / 16.)),
                             ))
-                            .child(settings.single(Field::AnalysisRateHz, cx))
+                            .child(self.single(Field::AnalysisRateHz, cx))
                             .id("settings-analysis-help")
-                            .tooltip(text_tooltip(settings.tr("settings-analysis-help"))),
+                            .tooltip(text_tooltip(self.tr("settings-analysis-help"))),
                     ))
-                    .child(settings.visualizer_color_settings(cx))
-                    .child(settings.shared_response_settings(cx))
-                    .child(settings.visualizer_display_settings(cx))
+                    .child(self.visualizer_color_settings(cx))
+                    .child(self.shared_response_settings(cx))
+                    .child(self.visualizer_display_settings(cx))
             }
             VisualPage::Spectrum => {
-                let style = dropdown_button(
-                    "spectrum-style",
-                    self.tr("settings-style"),
-                    spectrum_style_label(&self.i18n, draft.spectrum_style),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
-                    cx,
-                    |this, _, _| {
-                        let values = [
-                            SpectrumStyle::Bars,
-                            SpectrumStyle::Outline,
-                            SpectrumStyle::Led,
-                            SpectrumStyle::Line,
-                            SpectrumStyle::Solid,
-                        ];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.model.draft.spectrum_style)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(
-                                        SettingChoice::SpectrumStyle(value),
-                                        spectrum_style_label(&this.i18n, value),
-                                    )
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SettingsStyle, cx));
-                let mode = SpectrumLayoutMode::from_layout(draft.spectrum_bar_layout);
-                let layout = dropdown_button(
-                    "spectrum-bar-layout",
-                    self.tr("settings-spectrum-bar-layout"),
-                    self.tr(mode.label_id()),
-                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SpectrumLayout,
-                    cx,
-                    |this, _, _| {
-                        let values = [SpectrumLayoutMode::Automatic, SpectrumLayoutMode::Fixed];
-                        let mode =
-                            SpectrumLayoutMode::from_layout(this.model.draft.spectrum_bar_layout);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    ChoiceItem::new(
-                                        SettingChoice::SpectrumLayout(value),
-                                        this.tr(value.label_id()),
-                                    )
-                                })
-                                .collect(),
-                            usize::from(mode == SpectrumLayoutMode::Fixed),
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::SpectrumLayout, cx));
+                let style = self
+                    .dropdown_button(
+                        "spectrum-style",
+                        self.tr("settings-style"),
+                        spectrum_style_label(&self.i18n, self.model.draft.spectrum_style),
+                        Measured::SettingsStyle,
+                        cx,
+                        |this, _, _| {
+                            let values = [
+                                SpectrumStyle::Bars,
+                                SpectrumStyle::Outline,
+                                SpectrumStyle::Led,
+                                SpectrumStyle::Line,
+                                SpectrumStyle::Solid,
+                            ];
+                            let selected = values
+                                .iter()
+                                .position(|value| *value == this.model.draft.spectrum_style)
+                                .unwrap_or(0);
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::SpectrumStyle(value),
+                                            spectrum_style_label(&this.i18n, value),
+                                        )
+                                    })
+                                    .collect(),
+                                selected,
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SettingsStyle, cx));
+                let mode = SpectrumLayoutMode::from_layout(self.model.draft.spectrum_bar_layout);
+                let layout = self
+                    .dropdown_button(
+                        "spectrum-bar-layout",
+                        self.tr("settings-spectrum-bar-layout"),
+                        self.tr(mode.label_id()),
+                        Measured::SpectrumLayout,
+                        cx,
+                        |this, _, _| {
+                            let values = [SpectrumLayoutMode::Automatic, SpectrumLayoutMode::Fixed];
+                            let mode = SpectrumLayoutMode::from_layout(
+                                this.model.draft.spectrum_bar_layout,
+                            );
+                            this.open_setting_dropdown(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ChoiceItem::new(
+                                            SettingChoice::SpectrumLayout(value),
+                                            this.tr(value.label_id()),
+                                        )
+                                    })
+                                    .collect(),
+                                usize::from(mode == SpectrumLayoutMode::Fixed),
+                            );
+                        },
+                    )
+                    .relative()
+                    .child(self.measurement(Measured::SpectrumLayout, cx));
                 let layout = disabled_control(
                     palette(cx),
                     layout,
-                    draft.spectrum_style == SpectrumStyle::Solid,
+                    self.model.draft.spectrum_style == SpectrumStyle::Solid,
                 );
                 column()
                     .gap_3()
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-appearance"),
+                        self.tr("settings-appearance"),
                         column()
                             .gap_2()
                             .child(two_column(
-                                FormField::new(palette(cx), settings.tr("settings-style"), style)
+                                FormField::new(palette(cx), self.tr("settings-style"), style)
                                     .into_div()
                                     .min_w(rems(180. / 16.)),
                                 FormField::new(
                                     palette(cx),
-                                    settings.tr("settings-spectrum-bar-layout"),
+                                    self.tr("settings-spectrum-bar-layout"),
                                     layout,
                                 )
                                 .into_div()
                                 .min_w(rems(180. / 16.)),
                             ))
                             .child(two_column(
-                                settings.spectrum_layout_field_state(cx),
-                                settings.field_state(Field::SpectrumGap, cx),
+                                self.spectrum_layout_field_state(cx),
+                                self.field_state(Field::SpectrumGap, cx),
                             ))
-                            .child(settings.single(Field::SpectrumDbRange, cx))
+                            .child(self.single(Field::SpectrumDbRange, cx))
                             .child(row().flex_wrap().child(visual_switch(
                                 &self.i18n,
                                 "spectrum-interpolate",
                                 "",
-                                settings.tr("settings-frequency-interpolation"),
-                                draft.spectrum_interpolate,
+                                self.tr("settings-frequency-interpolation"),
+                                self.model.draft.spectrum_interpolate,
                                 cx,
-                                |draft| draft.spectrum_interpolate = !draft.spectrum_interpolate,
+                                |config| config.spectrum_interpolate = !config.spectrum_interpolate,
                             ))),
                     ))
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-bar-motion"),
+                        self.tr("settings-bar-motion"),
                         column()
                             .gap_2()
-                            .child(settings.pair(
-                                Field::SpectrumBarHold,
-                                Field::SpectrumBarGravity,
-                                cx,
-                            ))
-                            .child(settings.single(Field::SpectrumSmoothing, cx)),
+                            .child(self.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity, cx))
+                            .child(self.single(Field::SpectrumSmoothing, cx)),
                     ))
                     .child(settings_card(
                         palette(cx),
-                        settings.tr("settings-peak-markers"),
+                        self.tr("settings-peak-markers"),
                         column()
                             .gap_2()
                             .child(row().child(visual_switch(
                                 &self.i18n,
                                 "spectrum-peaks",
                                 "",
-                                settings.tr("settings-peak-markers"),
-                                draft.spectrum_peaks,
+                                self.tr("settings-peak-markers"),
+                                self.model.draft.spectrum_peaks,
                                 cx,
-                                |draft| draft.spectrum_peaks = !draft.spectrum_peaks,
+                                |config| config.spectrum_peaks = !config.spectrum_peaks,
                             )))
                             .child(two_column(
-                                settings.field_state(Field::SpectrumHold, cx),
-                                settings.field_state(Field::SpectrumGravity, cx),
+                                self.field_state(Field::SpectrumHold, cx),
+                                self.field_state(Field::SpectrumGravity, cx),
                             )),
                     ))
             }
             VisualPage::Spectrogram => column().gap_3().child(settings_card(
                 palette(cx),
-                settings.tr("settings-display"),
+                self.tr("settings-display"),
                 column()
                     .gap_2()
-                    .child(settings.pair(Field::SpectrogramDbRange, Field::SpectrogramHistory, cx))
+                    .child(self.pair(Field::SpectrogramDbRange, Field::SpectrogramHistory, cx))
                     .child(row().child(visual_switch(
                         &self.i18n,
                         "spectrogram-interpolate",
                         "",
-                        settings.tr("settings-frequency-interpolation"),
-                        draft.spectrogram_interpolate,
+                        self.tr("settings-frequency-interpolation"),
+                        self.model.draft.spectrogram_interpolate,
                         cx,
-                        |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
+                        |config| config.spectrogram_interpolate = !config.spectrogram_interpolate,
                     ))),
             )),
             VisualPage::BarsRings => column().gap_3().child(settings_card(
                 palette(cx),
-                settings.tr("settings-bars-rings-section"),
+                self.tr("settings-bars-rings-section"),
                 column()
                     .gap_2()
-                    .child(settings.pair(
-                        Field::RadialInnerDiameter,
-                        Field::RadialRotationSpeed,
-                        cx,
-                    ))
-                    .child(settings.pair(Field::RadialBarWidth, Field::RadialRingOpacity, cx))
+                    .child(self.pair(Field::RadialInnerDiameter, Field::RadialRotationSpeed, cx))
+                    .child(self.pair(Field::RadialBarWidth, Field::RadialRingOpacity, cx))
                     .child(row().child(visual_switch(
                         &self.i18n,
                         "audio-visualizer-fade-idle",
                         "",
-                        settings.tr("settings-fade-when-idle"),
-                        draft.radial_fade_when_idle,
+                        self.tr("settings-fade-when-idle"),
+                        self.model.draft.radial_fade_when_idle,
                         cx,
-                        |draft| draft.radial_fade_when_idle = !draft.radial_fade_when_idle,
+                        |config| config.radial_fade_when_idle = !config.radial_fade_when_idle,
                     )))
                     .id("settings-bars-rings-help")
-                    .tooltip(text_tooltip(
-                        settings.tr("settings-visualizer-bars-rings-help"),
-                    )),
+                    .tooltip(text_tooltip(self.tr("settings-visualizer-bars-rings-help"))),
             )),
             VisualPage::Oscilloscope => column()
                 .gap_3()
                 .child(settings_card(
                     palette(cx),
-                    settings.info_label(
+                    self.info_label(
                         palette(cx),
-                        settings.tr("settings-new-panel-defaults"),
+                        self.tr("settings-new-panel-defaults"),
                         "settings-oscilloscope-defaults-help",
                     ),
                     row()
                         .child(visual_switch(
-                            &settings.i18n,
+                            &self.i18n,
                             "oscilloscope-overlay-channels",
                             "",
-                            settings.tr("shell-oscilloscope-shared-axes"),
-                            draft.oscilloscope_overlay_channels,
+                            self.tr("shell-oscilloscope-shared-axes"),
+                            self.model.draft.oscilloscope_overlay_channels,
                             cx,
-                            |draft| {
-                                draft.oscilloscope_overlay_channels =
-                                    !draft.oscilloscope_overlay_channels
+                            |config| {
+                                config.oscilloscope_overlay_channels =
+                                    !config.oscilloscope_overlay_channels
                             },
                         ))
                         .child(
                             div()
                                 .text_sm()
-                                .child(settings.tr("shell-oscilloscope-shared-axes")),
+                                .child(self.tr("shell-oscilloscope-shared-axes")),
                         ),
                 ))
                 .child(settings_card(
                     palette(cx),
-                    settings.tr("settings-display"),
-                    settings.pair(Field::OscilloscopeTimeSpanMs, Field::OscilloscopeGain, cx),
+                    self.tr("settings-display"),
+                    self.pair(Field::OscilloscopeTimeSpanMs, Field::OscilloscopeGain, cx),
                 )),
             VisualPage::Waveform => column()
                 .gap_3()
                 .child(settings_card(
                     palette(cx),
-                    settings.tr("settings-appearance-interaction"),
+                    self.tr("settings-appearance-interaction"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::WaveformCursorColor, Field::WaveformGlow, cx))
+                        .child(self.pair(Field::WaveformCursorColor, Field::WaveformGlow, cx))
                         .child(row().flex_wrap().gap_2().child(visual_switch(
                             &self.i18n,
                             "waveform-seek",
                             "",
-                            settings.tr("shell-waveform-seek"),
-                            draft.waveform_seek_enabled,
+                            self.tr("shell-waveform-seek"),
+                            self.model.draft.waveform_seek_enabled,
                             cx,
-                            |draft| draft.waveform_seek_enabled = !draft.waveform_seek_enabled,
+                            |config| config.waveform_seek_enabled = !config.waveform_seek_enabled,
                         ))),
                 ))
                 .child(settings_card(
                     palette(cx),
-                    settings.tr("settings-amplitude-display"),
+                    self.tr("settings-amplitude-display"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain, cx))
-                        .child(settings.single(Field::WaveformPeakGamma, cx))
+                        .child(self.pair(Field::WaveformRmsGain, Field::WaveformPeakGain, cx))
+                        .child(self.single(Field::WaveformPeakGamma, cx))
                         .id("settings-amplitude-help")
-                        .tooltip(text_tooltip(
-                            settings.tr("settings-waveform-amplitude-help"),
-                        )),
+                        .tooltip(text_tooltip(self.tr("settings-waveform-amplitude-help"))),
                 )),
         };
         column().gap_3().child(scope).child(content)

@@ -28,9 +28,9 @@ use rivu_presentation::i18n::Localizer;
 use rivu_presentation::theme::Theme;
 use rivu_protocol::model::ConfigPatch;
 use rivu_ui::{
-    ButtonTooltip, ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceState, Dialog,
-    FocusScope, FormField, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle,
-    StatusKind, activate_control, active_control, column, copyable_message, dropdown_trigger,
+    ButtonTooltip, ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceSelect, ChoiceState,
+    Dialog, FocusScope, FormField, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle,
+    StatusKind, activate_control, active_control, column, copyable_message,
     input::{Input, InputEvent},
     input_aligned_control, row, section_group, status_message,
     theme::palette,
@@ -439,27 +439,38 @@ impl Field {
     }
 }
 
-fn dropdown_button(
-    id: &'static str,
-    name: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    expanded: bool,
-    cx: &mut Context<Settings>,
-    action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
-) -> Stateful<Div> {
-    input_aligned_control(
-        activate_control(
-            dropdown_trigger(palette(cx), id, label, expanded, cx)
-                .role(Role::ComboBox)
-                .aria_label(name),
-            cx,
-            move |this, window, cx| {
-                action(this, window, cx);
-                cx.notify();
-            },
-        ),
-        cx,
-    )
+impl Settings {
+    fn dropdown_button(
+        &mut self,
+        id: &'static str,
+        name: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        anchor: Measured,
+        cx: &mut Context<Self>,
+        open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Stateful<Div> {
+        let trigger = ChoiceSelect::new(id, label)
+            .build(
+                self,
+                move |this| (this.dropdown_anchor == anchor).then_some(&mut this.dropdown),
+                cx,
+                move |this, window, cx| {
+                    let close = this.dropdown.is_open() && this.dropdown_anchor == anchor;
+                    this.dropdown.close();
+                    if !close {
+                        open(this, window, cx);
+                    }
+                    cx.notify();
+                },
+                |this, index, _, cx| this.choose_setting(index, cx),
+                |this, _, cx| {
+                    this.dropdown.close();
+                    cx.notify();
+                },
+            )
+            .aria_label(name);
+        input_aligned_control(trigger, cx)
+    }
 }
 fn visual_switch(
     i18n: &Localizer,
@@ -2562,13 +2573,12 @@ impl Render for Settings {
         self.scope.surface(
             Dialog::backdrop("settings-modal")
                 .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if !this.dropdown.is_open() {
-                        return;
+                    if this.dropdown.is_open()
+                        && this.dropdown_anchor == Measured::SettingsFont
+                        && !this.settings_font_input_focused(window, cx)
+                    {
+                        this.choice_key(event, ChoiceMode::Select, false, window, cx);
                     }
-                    if this.settings_font_input_focused(window, cx) {
-                        return;
-                    }
-                    this.choice_key(event, ChoiceMode::Select, false, window, cx);
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     let key = event.keystroke.key.as_str();
@@ -2750,19 +2760,30 @@ mod tests {
         let handle = window.into();
         cx.update_window(handle, |_, window, cx| {
             settings.update(cx, |this, cx| {
-                this.scope.handle().focus(window, cx);
-                this.model.draft.artwork_mode = ArtworkMode::Static;
-                this.open_setting_dropdown(
-                    [ArtworkMode::Static, ArtworkMode::Rotating]
-                        .into_iter()
-                        .map(|value| {
-                            let choice = SettingChoice::ArtworkMode(value);
-                            ChoiceItem::new(choice, choice.label(&this.i18n))
-                        })
-                        .collect(),
-                    0,
-                );
+                this.page = SettingsPage::Interface;
+                this.model.draft.ui_language = "auto".into();
+                cx.notify();
             });
+            window.draw(cx).clear(cx);
+            let position = settings.read(cx).measured.borrow()[&Measured::Language].center();
+            window.dispatch_event(
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
             window.draw(cx).clear(cx);
         })
         .unwrap();
@@ -2792,7 +2813,7 @@ mod tests {
         settings.update(cx, |this, _| {
             assert!(this.dropdown.is_open());
             assert_eq!(this.dropdown.selected_index(), Some(0));
-            assert_eq!(this.model.draft.artwork_mode, ArtworkMode::Static);
+            assert_eq!(this.model.draft.ui_language, "auto");
             assert!(this.active);
         });
         cx.update_window(handle, |_, window, cx| {
