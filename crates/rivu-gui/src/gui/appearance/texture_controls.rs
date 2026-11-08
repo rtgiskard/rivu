@@ -1,9 +1,11 @@
 //! Live, automatically persisted material inspector. The shell owns attachment,
 //! focus and preset choice state; intents reconcile through window coordination.
 use super::material::{
-    Material, MaterialGroup, MaterialIntent, MaterialSession, Parameter, TextureSettings,
+    MaterialAppearance, MaterialGroup, MaterialIntent, MaterialParameterAppearance,
+    MaterialParametersAppearance, MaterialSession,
 };
 use gpui::{prelude::*, *};
+use rivu_format::config::{MaterialParameters, MaterialPreset, material::MaterialParameter};
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, Dialog, FocusScope, IconButton, IconButtonDensity,
     IconButtonStyle, caption, column,
@@ -12,8 +14,8 @@ use rivu_ui::{
 };
 
 pub(in crate::gui) struct MaterialEdit {
-    material: Material,
-    parameter: Parameter,
+    material: MaterialPreset,
+    parameter: MaterialParameter,
     serial: u64,
     input: Entity<Input>,
     error: Option<String>,
@@ -31,8 +33,8 @@ impl crate::gui::WindowView {
 
     fn begin_material_edit(
         &mut self,
-        material: Material,
-        parameter: Parameter,
+        material: MaterialPreset,
+        parameter: MaterialParameter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -119,16 +121,12 @@ impl crate::gui::WindowView {
         let scale = parameter.edit_scale(material);
         let (min, max, _) = parameter.limits();
         let parsed = edit.input.read(cx).text().trim().parse::<f32>();
-        let value = parsed.ok().map(|value| value / scale).filter(|value| {
-            value.is_finite()
-                && *value >= min
-                && *value <= max
-                && (!matches!(parameter, Parameter::Steps)
-                    || *value == 0.
-                    || (*value >= 2. && value.fract() == 0.))
-        });
+        let value = parsed
+            .ok()
+            .map(|value| value / scale)
+            .filter(|value| parameter.accepts(*value));
         let Some(value) = value else {
-            let error = if matches!(parameter, Parameter::Steps) {
+            let error = if matches!(parameter, MaterialParameter::Steps) {
                 self.tr("material-steps-invalid").to_string()
             } else {
                 format!(
@@ -156,8 +154,19 @@ impl crate::gui::WindowView {
     }
 }
 
-impl Parameter {
-    fn edit_scale(self, material: Material) -> f32 {
+trait MaterialParameterEdit {
+    fn edit_scale(self, material: MaterialPreset) -> f32;
+    fn edit_unit(self, material: MaterialPreset) -> &'static str;
+    fn display(
+        self,
+        material: MaterialPreset,
+        settings: MaterialParameters,
+        tr: &impl Fn(&str) -> SharedString,
+    ) -> String;
+}
+
+impl MaterialParameterEdit for MaterialParameter {
+    fn edit_scale(self, material: MaterialPreset) -> f32 {
         match self {
             Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => 100.,
             Self::Wave if material.is_procedural_water() => 100. / 16.,
@@ -165,7 +174,7 @@ impl Parameter {
         }
     }
 
-    fn edit_unit(self, material: Material) -> &'static str {
+    fn edit_unit(self, material: MaterialPreset) -> &'static str {
         match self {
             Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => "%",
             Self::Wave if material.is_procedural_water() => "%",
@@ -178,8 +187,8 @@ impl Parameter {
 
     fn display(
         self,
-        material: Material,
-        settings: TextureSettings,
+        material: MaterialPreset,
+        settings: MaterialParameters,
         tr: &impl Fn(&str) -> SharedString,
     ) -> String {
         let value = self.value(settings);
@@ -208,7 +217,7 @@ impl Parameter {
     }
 }
 
-fn preset_label(material: Material, tr: &impl Fn(&str) -> SharedString) -> SharedString {
+fn preset_label(material: MaterialPreset, tr: &impl Fn(&str) -> SharedString) -> SharedString {
     match material.group() {
         Some(group) => format!("{} · {}", tr(group.label()), tr(material.label())).into(),
         None => tr(material.label()),
@@ -219,7 +228,7 @@ fn preset_label(material: Material, tr: &impl Fn(&str) -> SharedString) -> Share
 #[allow(clippy::too_many_arguments)]
 pub(in crate::gui) fn render(
     view: &mut crate::gui::WindowView,
-    material: Material,
+    material: MaterialPreset,
     experimental_expanded: bool,
     scope: Option<&FocusScope>,
     tr: impl Fn(&str) -> SharedString,
@@ -271,7 +280,7 @@ pub(in crate::gui) fn render(
                         {
                             continue;
                         }
-                        for candidate in Material::ALL {
+                        for candidate in MaterialPreset::ALL {
                             if candidate.group() == Some(group)
                                 && (group != MaterialGroup::Experimental
                                     || experimental_expanded

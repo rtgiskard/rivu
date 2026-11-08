@@ -6,7 +6,8 @@ use std::{f32::consts::TAU, time::Duration};
 use gpui::{prelude::*, *};
 use rivu_format::palette::Palette;
 
-use super::material::{Material, TextureSettings};
+use super::material::{MaterialAppearance, MaterialParametersAppearance};
+use rivu_format::config::{MaterialParameters, MaterialPreset};
 
 /// One accepted artwork transition, consumed as a coherent set of source views.
 pub(in crate::gui) struct ArtworkBlend {
@@ -53,8 +54,8 @@ fn layer() -> Div {
 
 /// The root is a bounded scene, never an offscreen image or a second artwork cache.
 pub(in crate::gui) fn backdrop(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     theme: &'static Palette,
     images: ArtworkBlend,
     motion: bool,
@@ -69,25 +70,25 @@ pub(in crate::gui) fn backdrop(
         linear_color_stop(rgb(theme.control), 1.),
     ));
     let opacity = match material {
-        Material::Gradient => 0.16,
-        Material::Feather => 0.72,
-        Material::Sheen | Material::EdgeFade => 0.25,
-        Material::Aura => {
+        MaterialPreset::Gradient => 0.16,
+        MaterialPreset::Feather => 0.72,
+        MaterialPreset::Sheen | MaterialPreset::EdgeFade => 0.25,
+        MaterialPreset::Aura => {
             if light {
                 0.46
             } else {
                 0.56
             }
         }
-        Material::Water => 0.72,
-        Material::Grain => 0.12,
-        Material::Dissolve => 0.56,
-        Material::Frost => 0.42,
-        Material::Storybook => 0.12,
+        MaterialPreset::Water => 0.72,
+        MaterialPreset::Grain => 0.12,
+        MaterialPreset::Dissolve => 0.56,
+        MaterialPreset::Frost => 0.42,
+        MaterialPreset::Storybook => 0.12,
         _ => 0.,
     };
     let art = artwork(material, settings, images, opacity, motion, false);
-    root = if material == Material::Water {
+    root = if material == MaterialPreset::Water {
         root.child(
             div()
                 .absolute()
@@ -101,7 +102,7 @@ pub(in crate::gui) fn backdrop(
     } else {
         root.child(art)
     };
-    if matches!(material, Material::Frost | Material::Storybook) {
+    if matches!(material, MaterialPreset::Frost | MaterialPreset::Storybook) {
         root = root.child(scene(material, settings, theme, motion, false));
     }
     if settings.grain > 0. {
@@ -114,8 +115,8 @@ pub(in crate::gui) fn backdrop(
 /// Apply the backend backdrop blur to the panel BEFORE calling this helper for R.
 /// Apply M's group_edge_fade to the actual list content, never this decoration.
 pub(in crate::gui) fn panel(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     panel: Stateful<Div>,
     kind: &str,
     theme: &'static Palette,
@@ -136,12 +137,12 @@ pub(in crate::gui) fn panel(
         return panel.child(layer().bg(rgb(theme.panel).alpha(alpha)));
     }
     // R must sample the arbitrary root scene, not an image painted inside its panel.
-    if material != Material::Frost && playback {
+    if material != MaterialPreset::Frost && playback {
         panel = panel.child(artwork(
             material,
             settings,
             images,
-            if material == Material::Grain {
+            if material == MaterialPreset::Grain {
                 0.20
             } else {
                 0.58
@@ -150,7 +151,7 @@ pub(in crate::gui) fn panel(
             true,
         ));
     }
-    let tint_angle = if material == Material::Gradient {
+    let tint_angle = if material == MaterialPreset::Gradient {
         120.
     } else {
         155.
@@ -160,7 +161,7 @@ pub(in crate::gui) fn panel(
         linear_color_stop(rgb(theme.control).alpha(alpha * 0.72), 0.),
         linear_color_stop(rgb(theme.panel).alpha(alpha), 1.),
     )));
-    if material == Material::Storybook {
+    if material == MaterialPreset::Storybook {
         panel = panel.child(scene(material, settings, theme, motion && playback, true));
     }
     if settings.grain > 0. {
@@ -190,8 +191,8 @@ pub(in crate::gui) fn panel(
 }
 
 fn cg_water(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     theme: &'static Palette,
     motion: bool,
 ) -> Div {
@@ -207,8 +208,8 @@ fn cg_water(
 }
 
 fn cg_water_canvas(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     theme: &'static Palette,
     phase: f32,
 ) -> impl IntoElement {
@@ -232,7 +233,7 @@ fn cycle(seconds: f32, speed: f32) -> Duration {
 }
 
 /// All fields compose on one source sample; material selection never selects a shader mode.
-fn effects(settings: TextureSettings, phase: f32) -> ImageEffects {
+fn effects(settings: MaterialParameters, phase: f32) -> ImageEffects {
     let feather = settings.feather.clamp(0., 1.);
     ImageEffects {
         linear_fade_start: if feather > 0. {
@@ -264,8 +265,8 @@ fn effects(settings: TextureSettings, phase: f32) -> ImageEffects {
 
 fn image_layer(
     image: Img,
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     motion: bool,
     animation_id: &'static str,
 ) -> Div {
@@ -276,7 +277,7 @@ fn image_layer(
         .size_full()
         .object_fit(ObjectFit::Cover)
         .with_effects(effects(settings, 0.));
-    if material == Material::Water {
+    if material == MaterialPreset::Water {
         image = image.with_transformation(Transformation::scale(size(1., -1.)));
     }
     if motion && settings.speed > 0. && settings.wave > 0. {
@@ -291,8 +292,8 @@ fn image_layer(
 }
 
 fn artwork(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     images: ArtworkBlend,
     opacity: f32,
     motion: bool,
@@ -408,8 +409,8 @@ fn hash(index: u32) -> f32 {
 }
 
 fn scene(
-    material: Material,
-    settings: TextureSettings,
+    material: MaterialPreset,
+    settings: MaterialParameters,
     theme: &'static Palette,
     motion: bool,
     panel: bool,
@@ -430,7 +431,7 @@ fn scene(
 }
 
 fn scene_canvas(
-    material: Material,
+    material: MaterialPreset,
     theme: &'static Palette,
     phase: f32,
     panel: bool,
@@ -438,7 +439,7 @@ fn scene_canvas(
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            if material == Material::Frost {
+            if material == MaterialPreset::Frost {
                 frost_scene(bounds, window, theme, phase);
             } else {
                 storybook_scene(bounds, window, theme, phase, panel);
@@ -641,8 +642,8 @@ fn storybook_scene(
 
 /// Fade the composed scroll viewport, not the header, tabs or toolbar.
 pub(in crate::gui) fn list_fade(content: impl IntoElement, cx: &App) -> Div {
-    let material = Material::current(cx);
-    let settings = TextureSettings::current(cx);
+    let material = MaterialPreset::current(cx);
+    let settings = MaterialParameters::current(cx);
     div()
         .relative()
         .flex()

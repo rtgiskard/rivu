@@ -59,8 +59,7 @@ pub(super) struct WindowShell {
     help: Option<rivu_presentation::keyboard::Context>,
     help_scroll: std::rc::Rc<ScrollHandle>,
     experimental_materials_expanded: bool,
-    pub(in crate::gui) material_choices:
-        rivu_ui::ChoiceState<crate::gui::appearance::material::Material>,
+    pub(in crate::gui) material_choices: rivu_ui::ChoiceState<rivu_format::config::MaterialPreset>,
     pub(in crate::gui) material_choice_anchor: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     pub(in crate::gui) footer_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     pub(in crate::gui) material_edit:

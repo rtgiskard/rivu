@@ -4,6 +4,7 @@ pub(super) mod content_menu;
 pub(super) mod manual_actions;
 pub(super) mod queue_replace;
 
+use crate::gui::appearance::material::{MaterialAppearance, MaterialParametersAppearance};
 use crate::gui::window::*;
 use manual_actions::ManualAction;
 
@@ -548,9 +549,9 @@ impl WindowView {
     }
 
     pub(super) fn reconcile_material_demand(&self, cx: &mut Context<Self>) {
-        let material = appearance::material::Material::current(cx);
+        let material = rivu_format::config::MaterialPreset::current(cx);
         let transition_seconds =
-            appearance::material::TextureSettings::current(cx).transition_seconds;
+            rivu_format::config::MaterialParameters::current(cx).transition_seconds;
         self.atmosphere.update(cx, |atmosphere, cx| {
             atmosphere.sync(
                 self.state.current_track(),

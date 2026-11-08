@@ -396,6 +396,10 @@ Material edits preview immediately and submit narrow configuration mutations.
 Core validates and writes them before accepting the new preferences; the GUI
 reconciles its preview with authoritative configuration and reports save failures.
 Unrelated configuration updates must not overwrite pending material edits.
+Preset identity, parameter storage and legal value ranges belong to the shared
+format domain. GUI extensions supply labels, grouping, editing steps and GPU
+derivations without maintaining a second preset or parameter model.
+
 This replaces session-only preference storage without moving artwork ownership
 or changing decode admission; those boundaries remain under <<DEC-008>>.
 

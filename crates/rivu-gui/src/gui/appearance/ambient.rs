@@ -1,7 +1,8 @@
 //! One atmosphere consumer, independent of whether an artwork panel is present.
-use super::material::Material;
+use super::material::MaterialAppearance;
 use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkSource, ArtworkView};
 use gpui::{App, Context, RenderImage, Window};
+use rivu_format::config::MaterialPreset;
 use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
 use rivu_protocol::model::Track;
 use std::{
@@ -14,7 +15,7 @@ pub(in crate::gui) struct Atmosphere {
     loader: ArtworkLoader,
     view: ArtworkView,
     previous: ArtworkView,
-    material: Option<Material>,
+    material: Option<MaterialPreset>,
     transition_enabled: bool,
     transition_started: Option<Instant>,
     generation: u64,
@@ -43,7 +44,7 @@ impl Atmosphere {
     pub(in crate::gui) fn sync(
         &mut self,
         track: Option<&Track>,
-        material: Material,
+        material: MaterialPreset,
         transition_seconds: f32,
         visible: bool,
         playback_visible: bool,
@@ -273,14 +274,14 @@ mod tests {
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
         atmosphere.update(cx, |this, cx| {
             for (material, visible, playback_visible, expected) in [
-                (Material::Glass, true, false, true),
-                (Material::Atmosphere, true, false, false),
-                (Material::Atmosphere, true, true, true),
-                (Material::Atmosphere, false, true, false),
-                (Material::Dissolve, true, false, true),
-                (Material::Dissolve, false, false, false),
-                (Material::Mirror, true, false, true),
-                (Material::Original, true, true, false),
+                (MaterialPreset::Glass, true, false, true),
+                (MaterialPreset::Atmosphere, true, false, false),
+                (MaterialPreset::Atmosphere, true, true, true),
+                (MaterialPreset::Atmosphere, false, true, false),
+                (MaterialPreset::Dissolve, true, false, true),
+                (MaterialPreset::Dissolve, false, false, false),
+                (MaterialPreset::Mirror, true, false, true),
+                (MaterialPreset::Original, true, true, false),
             ] {
                 this.sync(
                     Some(&tracks[0]),
@@ -311,7 +312,7 @@ mod tests {
             let atmosphere =
                 cx.new(|_| Atmosphere::new(manager.clone(), ArtworkImageRegistry::default()));
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(selected), Material::Glass, 0., true, false, cx);
+                this.sync(Some(selected), MaterialPreset::Glass, 0., true, false, cx);
             });
             cx.run_until_parked();
             for id in 100..170 {
@@ -327,7 +328,7 @@ mod tests {
             );
             rivu_metadata::artwork::test_support::tagged_wav(&selected.path);
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(selected), Material::Glass, 0., true, false, cx);
+                this.sync(Some(selected), MaterialPreset::Glass, 0., true, false, cx);
             });
             cx.run_until_parked();
             atmosphere.update(cx, |this, cx| {
@@ -337,8 +338,8 @@ mod tests {
                         .cached_result(crate::artwork_source(selected))
                         .is_none()
                 );
-                this.sync(Some(selected), Material::Glass, 0., false, false, cx);
-                this.sync(Some(selected), Material::Glass, 0., true, false, cx);
+                this.sync(Some(selected), MaterialPreset::Glass, 0., false, false, cx);
+                this.sync(Some(selected), MaterialPreset::Glass, 0., true, false, cx);
             });
             cx.run_until_parked();
             atmosphere.update(cx, |this, _| {
@@ -352,15 +353,43 @@ mod tests {
         let (_directory, manager, tracks) = sources();
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
         atmosphere.update(cx, |this, cx| {
-            this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
-            this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[0]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_some());
             assert!(this.view.source().is_some());
-            this.sync(Some(&tracks[2]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[2]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_some());
             assert!(this.view.source().is_none());
             // A second pending switch cannot carry the original source forward.
-            this.sync(Some(&tracks[3]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[3]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_none());
             assert!(this.view.source().is_none());
         });
@@ -369,24 +398,94 @@ mod tests {
             assert_eq!(this.track.as_ref().unwrap().id, tracks[3].id);
             assert!(this.previous.source().is_none());
             assert!(this.view.source().is_none());
-            this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[0]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             // Missing/error lookup completion clears a single retained source.
-            this.sync(Some(&tracks[2]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[2]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_none());
             assert!(this.view.source().is_none());
-            this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
-            this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
-            this.sync(Some(&tracks[1]), Material::Dissolve, 0., true, true, cx);
+            this.sync(
+                Some(&tracks[0]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                0.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_none());
-            this.sync(Some(&tracks[0]), Material::Dissolve, 0., true, true, cx);
+            this.sync(
+                Some(&tracks[0]),
+                MaterialPreset::Dissolve,
+                0.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_none());
-            this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
-            this.sync(Some(&tracks[1]), Material::Dissolve, 1., false, true, cx);
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                1.,
+                false,
+                true,
+                cx,
+            );
             assert!(this.previous.source().is_none());
             assert!(this.view.source().is_none());
-            this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
-            this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
-            this.sync(None, Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[0]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(
+                Some(&tracks[1]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
+            this.sync(None, MaterialPreset::Dissolve, 1., true, true, cx);
             assert!(this.previous.source().is_none());
             assert!(this.view.source().is_none());
         });
@@ -402,10 +501,24 @@ mod tests {
         let mut repaired = tracks[2].clone();
         repaired.path = tracks[0].path.clone();
         atmosphere.update(cx, |this, cx| {
-            this.sync(Some(&tracks[2]), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&tracks[2]),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert!(this.view.source().is_none());
             let generation = this.generation;
-            this.sync(Some(&repaired), Material::Dissolve, 1., true, true, cx);
+            this.sync(
+                Some(&repaired),
+                MaterialPreset::Dissolve,
+                1.,
+                true,
+                true,
+                cx,
+            );
             assert_ne!(this.generation, generation);
             assert_eq!(this.track.as_ref().unwrap().path, repaired.path);
             assert!(this.previous.source().is_none());
@@ -470,14 +583,28 @@ mod tests {
         let window = cx.add_empty_window();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
             });
         });
         draw_sources(window, &atmosphere, Duration::from_secs(1), true);
         window.run_until_parked();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx)
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                )
             });
         });
         assert_eq!(
@@ -488,7 +615,14 @@ mod tests {
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
                 let started = this.transition_started;
-                this.sync(Some(&tracks[1]), Material::Dissolve, 2., true, true, cx);
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    2.,
+                    true,
+                    true,
+                    cx,
+                );
                 assert_eq!(this.transition_started, started);
             });
         });
@@ -499,7 +633,14 @@ mod tests {
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
                 let generation = this.generation;
-                this.sync(Some(&tracks[1]), Material::Storybook, 2., true, true, cx);
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Storybook,
+                    2.,
+                    true,
+                    true,
+                    cx,
+                );
                 assert!(this.previous.source().is_none());
                 assert!(this.transition_started.is_none());
                 assert_eq!(this.generation, generation);
@@ -526,14 +667,28 @@ mod tests {
         let window = cx.add_empty_window();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
             });
         });
         draw_sources(window, &atmosphere, Duration::from_secs(1), true);
         window.run_until_parked();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
                 this.apply_target(Some(target), true, cx);
             });
         });
@@ -554,11 +709,25 @@ mod tests {
         );
         window.update(|window, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., false, true, cx);
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    false,
+                    true,
+                    cx,
+                );
                 assert!(this.previous.source().is_none());
                 assert!(this.view.source().is_none());
                 this.release(window, cx);
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
                 assert!(this.previous.source().is_none());
                 assert!(this.view.source().is_some());
             });
@@ -572,14 +741,28 @@ mod tests {
         let window = cx.add_empty_window();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
             });
         });
         draw_sources(window, &atmosphere, Duration::from_secs(1), true);
         window.run_until_parked();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx)
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                )
             });
         });
         assert_eq!(
@@ -599,7 +782,14 @@ mod tests {
         for (duration, motion) in [(Duration::ZERO, true), (Duration::from_secs(1), false)] {
             window.update(|_, cx| {
                 atmosphere.update(cx, |this, cx| {
-                    this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx)
+                    this.sync(
+                        Some(&tracks[0]),
+                        MaterialPreset::Dissolve,
+                        1.,
+                        true,
+                        true,
+                        cx,
+                    )
                 });
             });
             assert_eq!(
@@ -608,7 +798,14 @@ mod tests {
             );
             window.update(|_, cx| {
                 atmosphere.update(cx, |this, cx| {
-                    this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx)
+                    this.sync(
+                        Some(&tracks[1]),
+                        MaterialPreset::Dissolve,
+                        1.,
+                        true,
+                        true,
+                        cx,
+                    )
                 });
             });
         }
@@ -634,14 +831,28 @@ mod tests {
         let window = cx.add_empty_window();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
             });
         });
         draw_sources(window, &atmosphere, Duration::from_secs(1), true);
         window.run_until_parked();
         window.update(|_, cx| {
             atmosphere.update(cx, |this, cx| {
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
                 this.apply_target(Some(corrupt), true, cx);
             });
         });
@@ -659,8 +870,22 @@ mod tests {
                 assert!(this.previous.source().is_none());
                 // The failed lease remains terminal; it is not reacquired each frame.
                 assert!(this.view.source().is_some());
-                this.sync(Some(&tracks[0]), Material::Dissolve, 1., true, true, cx);
-                this.sync(Some(&tracks[1]), Material::Dissolve, 1., true, true, cx);
+                this.sync(
+                    Some(&tracks[0]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
+                this.sync(
+                    Some(&tracks[1]),
+                    MaterialPreset::Dissolve,
+                    1.,
+                    true,
+                    true,
+                    cx,
+                );
             });
             cx.set_reduce_motion(true);
         });
@@ -677,12 +902,13 @@ mod tests {
         use crate::{
             gui::{
                 WindowView,
-                appearance::material::{MaterialIntent, MaterialSession, Parameter},
+                appearance::material::{MaterialIntent, MaterialSession},
                 layout::persistence::{LayoutPersistence, LoadedLayouts},
             },
             test_support::CoreRuntime,
         };
         use rivu_format::config::Config;
+        use rivu_format::config::material::MaterialParameter;
         use rivu_presentation::i18n::Localizer;
         use rivu_protocol::model::PlaybackStatus;
         let (directory, manager, tracks) = sources();
@@ -733,10 +959,10 @@ mod tests {
                 .update(cx, |library, cx| library.set_visible(true, cx));
             // T -> Q -> T acquires and retires without render or business facts.
             for (material, enabled) in [
-                (Material::CgWater, false),
-                (Material::Dissolve, true),
-                (Material::CgWater, false),
-                (Material::Mirror, true),
+                (MaterialPreset::CgWater, false),
+                (MaterialPreset::Dissolve, true),
+                (MaterialPreset::CgWater, false),
+                (MaterialPreset::Mirror, true),
             ] {
                 app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 assert_eq!(app.state.revisions, revisions);
@@ -755,18 +981,18 @@ mod tests {
             app.workspace
                 .panels
                 .reconcile(app.workspace.layouts.current());
-            for material in [Material::Atmosphere, Material::Stage] {
+            for material in [MaterialPreset::Atmosphere, MaterialPreset::Stage] {
                 app.material_intent_fenced(MaterialIntent::Select(material), cx);
                 assert!(!app.panel_demand("transport"));
                 assert!(app.panel_demand(crate::gui::shell::panels::PanelKind::Artwork.key()));
                 assert!(app.atmosphere.read(cx).enabled);
                 assert!(app.atmosphere.read(cx).source().is_some());
             }
-            app.material_intent_fenced(MaterialIntent::Select(Material::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::Select(MaterialPreset::Dissolve), cx);
             app.material_intent_fenced(
                 MaterialIntent::Set {
-                    material: Material::Dissolve,
-                    parameter: Parameter::Alpha,
+                    material: MaterialPreset::Dissolve,
+                    parameter: MaterialParameter::Alpha,
                     value: 0.5,
                 },
                 cx,
@@ -779,14 +1005,14 @@ mod tests {
                 app.material_intent_fenced(MaterialIntent::SetEnabled(enabled), cx);
                 let session = MaterialSession::current(cx);
                 assert_eq!(session.enabled, enabled);
-                assert_eq!(session.material, Material::Dissolve);
+                assert_eq!(session.material, MaterialPreset::Dissolve);
                 assert_eq!(session.settings, adjusted);
                 assert_eq!(
-                    Material::current(cx),
+                    MaterialPreset::current(cx),
                     if enabled {
-                        Material::Dissolve
+                        MaterialPreset::Dissolve
                     } else {
-                        Material::Original
+                        MaterialPreset::Original
                     }
                 );
                 assert_eq!(app.state.revisions, revisions);
@@ -805,10 +1031,13 @@ mod tests {
             app.atmosphere.update(cx, |atmosphere, _| {
                 atmosphere.transition_started = Some(started);
             });
-            for (parameter, value) in [(Parameter::Alpha, 0.6), (Parameter::Transition, 1.2)] {
+            for (parameter, value) in [
+                (MaterialParameter::Alpha, 0.6),
+                (MaterialParameter::Transition, 1.2),
+            ] {
                 app.material_intent_fenced(
                     MaterialIntent::Set {
-                        material: Material::Dissolve,
+                        material: MaterialPreset::Dissolve,
                         parameter,
                         value,
                     },
@@ -821,8 +1050,8 @@ mod tests {
             for value in [0.75, 0.4, 0., 0.] {
                 app.material_intent_fenced(
                     MaterialIntent::Set {
-                        material: Material::Dissolve,
-                        parameter: Parameter::Transition,
+                        material: MaterialPreset::Dissolve,
+                        parameter: MaterialParameter::Transition,
                         value,
                     },
                     cx,
@@ -837,8 +1066,8 @@ mod tests {
             for value in [0.1, 0.] {
                 app.material_intent_fenced(
                     MaterialIntent::Set {
-                        material: Material::Dissolve,
-                        parameter: Parameter::Transition,
+                        material: MaterialPreset::Dissolve,
+                        parameter: MaterialParameter::Transition,
                         value,
                     },
                     cx,
@@ -848,7 +1077,7 @@ mod tests {
             }
             // Reset must restore predecessor policy before the next track sync,
             // without relying on render or a playback revision to reconcile it.
-            app.material_intent_fenced(MaterialIntent::Reset(Material::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::Reset(MaterialPreset::Dissolve), cx);
             assert!(app.atmosphere.read(cx).transition_enabled);
             Rc::make_mut(&mut app.state).current_track = Some(Arc::new(tracks[1].clone()));
             app.reconcile_feature_demand(cx);
@@ -857,11 +1086,11 @@ mod tests {
             app.material_intent_fenced(MaterialIntent::SetEnabled(false), cx);
             let disabled = MaterialSession::current(cx);
             for intent in [
-                MaterialIntent::Select(Material::Mirror),
-                MaterialIntent::Reset(Material::Dissolve),
+                MaterialIntent::Select(MaterialPreset::Mirror),
+                MaterialIntent::Reset(MaterialPreset::Dissolve),
                 MaterialIntent::Set {
-                    material: Material::Dissolve,
-                    parameter: Parameter::Alpha,
+                    material: MaterialPreset::Dissolve,
+                    parameter: MaterialParameter::Alpha,
                     value: 0.2,
                 },
             ] {
@@ -873,11 +1102,14 @@ mod tests {
             }
             assert!(app.atmosphere.read(cx).source().is_none());
             app.material_intent_fenced(MaterialIntent::SetEnabled(true), cx);
-            app.material_intent_fenced(MaterialIntent::Select(Material::Mirror), cx);
-            assert_eq!(MaterialSession::current(cx).material, Material::Mirror);
+            app.material_intent_fenced(MaterialIntent::Select(MaterialPreset::Mirror), cx);
+            assert_eq!(
+                MaterialSession::current(cx).material,
+                MaterialPreset::Mirror
+            );
             assert!(app.atmosphere.read(cx).source().is_some());
             app.workspace.layouts.current_mut().root = None;
-            for material in Material::ALL
+            for material in MaterialPreset::ALL
                 .into_iter()
                 .filter(|material| material.is_texture())
             {
@@ -886,7 +1118,7 @@ mod tests {
                 app.material_intent_fenced(
                     MaterialIntent::Set {
                         material,
-                        parameter: Parameter::Alpha,
+                        parameter: MaterialParameter::Alpha,
                         value: 0.2,
                     },
                     cx,
@@ -902,7 +1134,7 @@ mod tests {
                 app.material_intent_fenced(
                     MaterialIntent::Set {
                         material,
-                        parameter: Parameter::Alpha,
+                        parameter: MaterialParameter::Alpha,
                         value: 0.2,
                     },
                     cx,
@@ -912,19 +1144,19 @@ mod tests {
                 app.material_intent_fenced(MaterialIntent::Reset(material), cx);
                 assert_eq!(MaterialSession::current(cx).settings, baseline);
             }
-            app.material_intent_fenced(MaterialIntent::Select(Material::StillWater), cx);
+            app.material_intent_fenced(MaterialIntent::Select(MaterialPreset::StillWater), cx);
             let fresh = MaterialSession::current(cx).settings;
             app.material_intent_fenced(
                 MaterialIntent::Set {
-                    material: Material::Dissolve,
-                    parameter: Parameter::Alpha,
+                    material: MaterialPreset::Dissolve,
+                    parameter: MaterialParameter::Alpha,
                     value: 0.6,
                 },
                 cx,
             );
-            app.material_intent_fenced(MaterialIntent::Reset(Material::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::Reset(MaterialPreset::Dissolve), cx);
             assert_eq!(MaterialSession::current(cx).settings, fresh);
-            assert_eq!(Material::current(cx), Material::StillWater);
+            assert_eq!(MaterialPreset::current(cx), MaterialPreset::StillWater);
         });
     }
 }

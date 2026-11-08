@@ -151,28 +151,21 @@ impl MaterialParameters {
     }
 
     pub fn validate(&self) -> Result<()> {
-        for (name, value, max) in [
-            ("panel_alpha", self.panel_alpha, 1.),
-            ("feather", self.feather, 1.),
-            ("highlight", self.highlight, 1.),
-            ("grain", self.grain, 1.),
-            ("color_steps", self.color_steps, 16.),
-            ("wave", self.wave, 16.),
-            ("cover_blur", self.cover_blur, 24.),
-            ("backdrop_blur", self.backdrop_blur, 32.),
-            ("edge_fade", self.edge_fade, 1.),
-            ("transition_seconds", self.transition_seconds, 3.),
-            ("speed", self.speed, 3.),
-        ] {
+        for parameter in MaterialParameter::ALL {
+            let value = parameter.value(*self);
+            if parameter.accepts(value) {
+                continue;
+            }
+            let (min, max) = parameter.bounds();
+            let name = parameter.field_name();
             ensure!(
-                value.is_finite() && (0.0..=max).contains(&value),
-                "interface.material parameter {name} must be finite and between 0 and {max}"
+                value.is_finite() && (min..=max).contains(&value),
+                "interface.material parameter {name} must be finite and between {min} and {max}"
+            );
+            anyhow::bail!(
+                "interface.material color_steps must be 0 or an integer between 2 and 16"
             );
         }
-        ensure!(
-            self.color_steps == 0. || (self.color_steps >= 2. && self.color_steps.fract() == 0.),
-            "interface.material color_steps must be 0 or an integer between 2 and 16"
-        );
         Ok(())
     }
 }
@@ -196,12 +189,17 @@ impl Default for MaterialPreferences {
 }
 
 impl MaterialPreferences {
-    /// Preserve legacy no-effect selections while preparing a visible preset to enable.
-    pub(super) fn normalize(&mut self) {
-        if self.selected == MaterialPreset::Original {
-            self.enabled = false;
-            self.selected = MaterialPreset::Satin;
+    /// Read legacy no-effect selections as disabled, with Satin ready to enable.
+    pub fn normalized_selection(&self) -> (bool, MaterialPreset) {
+        match self.selected {
+            MaterialPreset::Original => (false, MaterialPreset::Satin),
+            selected => (self.enabled, selected),
         }
+    }
+
+    /// Persist the same selection semantics exposed to preference consumers.
+    pub(super) fn normalize(&mut self) {
+        (self.enabled, self.selected) = self.normalized_selection();
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -228,7 +226,72 @@ pub enum MaterialParameter {
 }
 
 impl MaterialParameter {
-    fn set(self, parameters: &mut MaterialParameters, value: f32) {
+    pub const ALL: [Self; 11] = [
+        Self::Alpha,
+        Self::Feather,
+        Self::Highlight,
+        Self::Grain,
+        Self::Steps,
+        Self::Wave,
+        Self::CoverBlur,
+        Self::BackdropBlur,
+        Self::EdgeFade,
+        Self::Transition,
+        Self::Speed,
+    ];
+
+    fn field_name(self) -> &'static str {
+        match self {
+            Self::Alpha => "panel_alpha",
+            Self::Feather => "feather",
+            Self::Highlight => "highlight",
+            Self::Grain => "grain",
+            Self::Steps => "color_steps",
+            Self::Wave => "wave",
+            Self::CoverBlur => "cover_blur",
+            Self::BackdropBlur => "backdrop_blur",
+            Self::EdgeFade => "edge_fade",
+            Self::Transition => "transition_seconds",
+            Self::Speed => "speed",
+        }
+    }
+
+    pub fn value(self, parameters: MaterialParameters) -> f32 {
+        match self {
+            Self::Alpha => parameters.panel_alpha,
+            Self::Feather => parameters.feather,
+            Self::Highlight => parameters.highlight,
+            Self::Grain => parameters.grain,
+            Self::Steps => parameters.color_steps,
+            Self::Wave => parameters.wave,
+            Self::CoverBlur => parameters.cover_blur,
+            Self::BackdropBlur => parameters.backdrop_blur,
+            Self::EdgeFade => parameters.edge_fade,
+            Self::Transition => parameters.transition_seconds,
+            Self::Speed => parameters.speed,
+        }
+    }
+
+    pub const fn bounds(self) -> (f32, f32) {
+        let max = match self {
+            Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => 1.,
+            Self::Steps | Self::Wave => 16.,
+            Self::CoverBlur => 24.,
+            Self::BackdropBlur => 32.,
+            Self::Transition | Self::Speed => 3.,
+        };
+        (0., max)
+    }
+
+    pub fn accepts(self, value: f32) -> bool {
+        let (min, max) = self.bounds();
+        value.is_finite()
+            && (min..=max).contains(&value)
+            && (!matches!(self, Self::Steps) || value == 0. || (value >= 2. && value.fract() == 0.))
+    }
+
+    /// Assign a raw edit; the owning configuration validates before accepting it.
+    pub fn set(self, parameters: &mut MaterialParameters, value: f32) {
         match self {
             Self::Alpha => parameters.panel_alpha = value,
             Self::Feather => parameters.feather = value,
@@ -280,5 +343,73 @@ impl MaterialChange {
             }
         }
         preferences.normalize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameter_edits_enforce_boundaries_without_changing_other_preferences() {
+        for (parameter, maximum) in [
+            (MaterialParameter::Alpha, 1.),
+            (MaterialParameter::Feather, 1.),
+            (MaterialParameter::Highlight, 1.),
+            (MaterialParameter::Grain, 1.),
+            (MaterialParameter::Steps, 16.),
+            (MaterialParameter::Wave, 16.),
+            (MaterialParameter::CoverBlur, 24.),
+            (MaterialParameter::BackdropBlur, 32.),
+            (MaterialParameter::EdgeFade, 1.),
+            (MaterialParameter::Transition, 3.),
+            (MaterialParameter::Speed, 3.),
+        ] {
+            for (value, valid) in [
+                (f32::NAN, false),
+                (f32::NEG_INFINITY, false),
+                (f32::INFINITY, false),
+                (-1., false),
+                (0., true),
+                (maximum, true),
+                (maximum + 1., false),
+                (1., parameter != MaterialParameter::Steps),
+                (2.5, maximum >= 2.5 && parameter != MaterialParameter::Steps),
+            ] {
+                let mut preferences = MaterialPreferences::default();
+                let untouched = MaterialParameters::preset(MaterialPreset::Dissolve);
+                preferences
+                    .presets
+                    .insert(MaterialPreset::Dissolve, untouched);
+                MaterialChange::SetParameter {
+                    preset: MaterialPreset::StillWater,
+                    parameter,
+                    value,
+                }
+                .apply_to(&mut preferences);
+                let parameters = preferences.presets[&MaterialPreset::StillWater];
+                let observed = parameter.value(parameters);
+                assert!(observed == value || observed.is_nan() && value.is_nan());
+                assert_eq!(
+                    parameters.validate().is_ok(),
+                    valid,
+                    "{parameter:?}: {value}"
+                );
+                assert_eq!(
+                    preferences.validate().is_ok(),
+                    valid,
+                    "{parameter:?}: {value}"
+                );
+                assert_eq!(preferences.presets[&MaterialPreset::Dissolve], untouched);
+                for other in MaterialParameter::ALL {
+                    if other != parameter {
+                        assert_eq!(
+                            other.value(parameters),
+                            other.value(MaterialParameters::preset(MaterialPreset::StillWater))
+                        );
+                    }
+                }
+            }
+        }
     }
 }

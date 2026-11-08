@@ -1,4 +1,5 @@
 use super::*;
+use crate::gui::appearance::material::MaterialAppearance;
 use rivu_ui::{
     Dialog, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Popover, caption,
     column, menu_item, row,
@@ -13,7 +14,7 @@ impl Render for WindowView {
             )
             .expect("validated scene filter limits");
         let theme = rivu_ui::theme::palette(cx);
-        let material = appearance::material::Material::current(cx);
+        let material = rivu_format::config::MaterialPreset::current(cx);
         let material_session = appearance::material::MaterialSession::current(cx);
         let selected_material = material_session.material;
         self.presentation.update(cx, |presentation, cx| {
