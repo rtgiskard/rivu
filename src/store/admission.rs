@@ -99,7 +99,7 @@ impl Store {
                 AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
             {}
             FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_library_column(false), super::scan::staged_projection_columns(false)), [], |row| {
-            Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, ..CatalogChanges::default() })
+            Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, history: row.get(6)?, ..CatalogChanges::default() })
         })?;
         let changed = tx.execute(&staged_update_sql("external_sources", false), [])?;
         let added = tx.execute(
@@ -265,6 +265,77 @@ mod tests {
         let stats = store.library_root_stats(&["/outside".into()]).unwrap();
         assert_eq!(stats[0].total, 1);
         assert_eq!(stats[0].file_size, 1234);
+    }
+
+    #[test]
+    fn source_refresh_reports_only_effective_history_changes_for_played_members() {
+        for scan in [false, true] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            let apply = |source: ScanRecord| {
+                if scan {
+                    store
+                        .apply_scan(&ScanResult {
+                            records: vec![std::sync::Arc::new(source)],
+                            ..Default::default()
+                        })
+                        .unwrap()
+                } else {
+                    store
+                        .admit_external_queue(
+                            &ExternalAdmission::from_test_records(vec![source], vec![0]),
+                            None,
+                            None,
+                        )
+                        .unwrap()
+                        .1
+                }
+            };
+            let history_values = || {
+                store
+                    .history(10)
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.track_id,
+                            entry.title,
+                            entry.play_count,
+                            entry.played_at,
+                            entry.favorite,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut source = record("/history.wav");
+            assert!(!apply(source.clone()).history);
+            let id = store
+                .track_id_for_identity(super::super::TrackIdentity::File(&source.path))
+                .unwrap()
+                .unwrap();
+            source.media.title = "Unplayed title".into();
+            assert!(!apply(source.clone()).history);
+            assert!(store.history(10).unwrap().is_empty());
+            store.mark_played(id, 42).unwrap();
+            let history = history_values();
+            source.size += 1;
+            source.modified_ns += 1;
+            source.media.codec = "flac".into();
+            source.media.bitrate_bps = Some(512_000);
+            let technical = apply(source.clone());
+            assert!(technical.library);
+            assert!(!technical.history);
+            assert_eq!(history_values(), history);
+            source.media.title = "Played title".into();
+            assert!(apply(source.clone()).history);
+            assert_eq!(store.history(10).unwrap()[0].title, "Played title");
+            store
+                .edit_track(id, Some("Personal title"), None, None, None)
+                .unwrap();
+            let overridden = history_values();
+            source.media.title = "Hidden title".into();
+            assert!(!apply(source).history);
+            assert_eq!(history_values(), overridden);
+        }
     }
 
     #[test]

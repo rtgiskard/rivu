@@ -8,6 +8,8 @@ pub struct CatalogChanges {
     pub library: bool,
     /// Effective queue-row values changed for an already queued identity.
     pub queue: bool,
+    /// History membership or effective entry values changed.
+    pub history: bool,
     /// Album membership, ordering, member rows, or representative values changed.
     pub albums: bool,
     /// Track insertion or a changed path/CUE identity; missing is not removal.
@@ -53,7 +55,7 @@ impl CatalogChanges {
             album_revision: self.albums,
             duplicate_group_revision: self.duplicate_groups,
             duplicate_member_revision: self.duplicate_members,
-            refresh_history: self.library,
+            refresh_history: self.history,
             refresh_track_total: self.structure,
             clear_track_cache: self.library,
             clear_filtered_track_count: self.library,

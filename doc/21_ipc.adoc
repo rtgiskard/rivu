@@ -713,6 +713,11 @@ completion is accepted only for the corresponding data versions. State reads and
 Watch remain cache-only, and recovery completion never schedules another attempt
 by itself. Unrelated catalog changes need not reload queue structure or decode
 the current Track; control decisions retain their own authoritative identity.
+Scan and external-admission transactions report recent-entry impact separately
+from full Track changes. Effective title changes on previously played identities
+refresh recent entries; probe, codec, bitrate and other unrelated changes do not
+schedule that read or create new history-recovery work. Existing pending recovery
+remains pending until a matching projection succeeds.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
@@ -1124,9 +1129,11 @@ This reduces query inputs without changing missing or uncertainty protection.
 
 `CheckOtherTracks {force}` checks only registered sources outside current roots,
 or all registered sources with no roots. It does not discover, relocate, or delete
-tracks; commit rechecks current scope. `force` bypasses metadata reuse. File checks
-and external queue admission share the scan task slot, saving boundary, cancellation,
-and shutdown joining contract.
+tracks. Commit revalidates current registration and root scope only for prepared
+sources and confirmed-missing paths, rather than materializing the complete Other
+set again. `force` bypasses metadata reuse. File checks and external queue admission
+share the scan task slot, saving boundary, cancellation, and shutdown joining
+contract.
 External-file preparation normalizes paths and records occurrence order once.
 Saving still validates queue insertion positions and database identities against
 the transaction.

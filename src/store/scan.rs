@@ -166,7 +166,9 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
         "COALESCE(MAX(({visible} {cue_number}) AND EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id)),0),
         COALESCE(MAX(((t.id IS NULL OR {visible} {cue_number}
             OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number)
-            AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0)"
+            AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0),
+        COALESCE(MAX(t.last_played IS NOT NULL
+            AND COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)),0)"
     )
 }
 
@@ -581,28 +583,21 @@ impl Store {
         library_roots: &[PathBuf],
         current_track: Option<i64>,
     ) -> Result<CatalogChanges> {
-        let current: HashSet<_> = self
-            .other_tracks_sources(library_roots)?
-            .into_iter()
-            .collect();
-        result.roots.retain(|path| current.contains(path));
-        let mut records = Vec::new();
-        let mut source_paths = Vec::new();
-        for source in result.records.drain(..) {
-            if current.contains(&source.path) {
-                source_paths.push(source.path.clone());
-                records.push(source);
-            }
-        }
+        let requested: HashSet<_> = result
+            .records
+            .iter()
+            .map(|source| source.path.as_path())
+            .chain(result.roots.iter().map(PathBuf::as_path))
+            .map(|path| path.to_str().context("Source path is not UTF-8"))
+            .collect::<Result<_>>()?;
+        let mut current = HashSet::new();
         result.segments.clear();
-        let mut ordinary = vec![false; records.len()];
-        if !records.is_empty() {
-            let paths = source_paths
-                .iter()
-                .map(|path| path.to_str().context("Source path is not UTF-8"))
-                .collect::<Result<Vec<_>>>()?;
-            let encoded = serde_json::to_string(&paths)?;
-            let source_indices: HashMap<&Path, usize> = records
+        let mut ordinary = vec![false; result.records.len()];
+        if !requested.is_empty() {
+            let encoded = serde_json::to_string(&requested)?;
+            let roots = serde_json::to_string(&super::tracks::other_root_prefixes(library_roots)?)?;
+            let source_indices: HashMap<&Path, usize> = result
+                .records
                 .iter()
                 .enumerate()
                 .map(|(index, source)| (source.path.as_path(), index))
@@ -617,12 +612,16 @@ impl Store {
                  FROM requested AS r
                  CROSS JOIN tracks AS t INDEXED BY tracks_path
                  WHERE t.path=r.path
+                   AND NOT EXISTS(SELECT 1 FROM json_each(?2) AS root
+                       WHERE t.path>=root.value AND t.path<(rtrim(root.value,'/')||'0'))
                  ORDER BY t.path,t.id",
             )?;
-            let mut rows = query.query([encoded])?;
+            let mut rows = query.query(params![encoded, roots])?;
             while let Some(row) = rows.next()? {
-                let path: String = row.get(0)?;
-                let Some(&index) = source_indices.get(Path::new(&path)) else {
+                let path = PathBuf::from(row.get::<_, String>(0)?);
+                let index = source_indices.get(path.as_path()).copied();
+                current.insert(path);
+                let Some(index) = index else {
                     continue;
                 };
                 let Some(cue) = cue_from_row(row, 1)? else {
@@ -638,20 +637,21 @@ impl Store {
                     release_date: row.get(10)?,
                 };
                 let start = cue.start_frame as f64 / 75.0;
-                let duration = records[index].media.duration.and_then(|duration| {
+                let duration = result.records[index].media.duration.and_then(|duration| {
                     let end = cue.end_frame.map_or(duration, |frame| frame as f64 / 75.0);
                     (duration.is_finite() && start < duration && end > start)
                         .then_some(end.min(duration) - start)
                 });
                 result.segments.push(CueRecord::registered(
-                    Arc::clone(&records[index]),
+                    Arc::clone(&result.records[index]),
                     cue,
                     metadata,
                     duration,
                 ));
             }
         }
-        result.records = records
+        result.roots.retain(|path| current.contains(path));
+        result.records = std::mem::take(&mut result.records)
             .into_iter()
             .zip(ordinary)
             .filter_map(|(source, ordinary)| ordinary.then_some(source))
@@ -1096,6 +1096,7 @@ impl Store {
                     duplicate_members: row.get(3)?,
                     queue: row.get(4)?,
                     albums: row.get(5)?,
+                    history: row.get(6)?,
                     skipped_short_tracks,
                     ..CatalogChanges::default()
                 })

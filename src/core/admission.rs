@@ -774,30 +774,33 @@ mod tests {
             let before_queue = core.store.queue_ids().unwrap();
             let before_total = core.state.library.track_total;
             let database_path = directory.path().join("library.db");
-            let prepared = library::ExternalAdmission::from_test_records(
-                vec![library::ScanRecord {
-                    path: directory.path().join("projection-panic.wav"),
-                    size: 1,
-                    modified_ns: 1,
-                    fingerprint: Some(blake3::hash(b"admission-panic").to_hex().to_string()),
-                    media: MediaInfo {
-                        title: "Admission panic".into(),
-                        artist: String::new(),
-                        album: "Admission".into(),
-                        duration: Some(1.0),
-                        codec: "pcm".into(),
-                        channels: 1,
-                        sample_rate: 8_000,
-                        bitrate_bps: None,
-                        bitrate_exact: false,
-                        track_number: None,
-                        disc_number: None,
-                        bits_per_sample: Some(16),
-                        release_date: None,
-                    },
-                }],
-                vec![0, 0],
-            );
+            let record = library::ScanRecord {
+                path: directory.path().join("projection-panic.wav"),
+                size: 1,
+                modified_ns: 1,
+                fingerprint: Some(blake3::hash(b"admission-panic").to_hex().to_string()),
+                media: MediaInfo {
+                    title: "Admission panic".into(),
+                    artist: String::new(),
+                    album: "Admission".into(),
+                    duration: Some(1.0),
+                    codec: "pcm".into(),
+                    channels: 1,
+                    sample_rate: 8_000,
+                    bitrate_bps: None,
+                    bitrate_exact: false,
+                    track_number: None,
+                    disc_number: None,
+                    bits_per_sample: Some(16),
+                    release_date: None,
+                },
+            };
+            let mut recent = record.clone();
+            recent.path = core.store.track(1).unwrap().unwrap().path;
+            recent.media.title = "Updated recent".into();
+            core.store.mark_played(1, 7).unwrap();
+            let prepared =
+                library::ExternalAdmission::from_test_records(vec![record, recent], vec![0, 1]);
             install_panicking_saving(&mut core, move |saved| {
                 let store = Store::open(&database_path).unwrap();
                 saved
@@ -840,6 +843,15 @@ mod tests {
             assert_eq!(core.state.library.track_total, before_total + 1);
             assert_eq!(core.store.queue_ids().unwrap(), committed_queue);
             assert_eq!(core.store.track_count().unwrap(), before_total + 1);
+            let recent = core
+                .state
+                .library
+                .history
+                .iter()
+                .find(|entry| entry.track_id == 1)
+                .unwrap();
+            assert_eq!(recent.title, "Updated recent");
+            assert_eq!(recent.played_at, 7);
         }
     }
 

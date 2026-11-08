@@ -243,16 +243,79 @@ fn short_track_relocation_keeps_the_existing_resolution_contract() {
         .track_id_for_identity(crate::store::TrackIdentity::File(&scan.records[0].path))
         .unwrap()
         .unwrap();
+    store.mark_played(id, 42).unwrap();
     scan.min_duration_secs = 120;
     std::sync::Arc::make_mut(&mut scan.records[0]).path = directory.path().join("new.wav");
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Moved short track".into();
     let impacts = store.apply_scan(&scan).unwrap();
+    assert!(impacts.history);
+    assert_eq!(store.history(10).unwrap()[0].title, "Moved short track");
     assert_eq!(impacts.skipped_short_tracks, 0);
     assert_eq!(store.track_count().unwrap(), 1);
     let track = store.track(id).unwrap().unwrap();
     assert_eq!(track.path, scan.records[0].path);
     assert_eq!(track.title, "Moved short track");
     assert!(!track.missing);
+}
+
+#[test]
+fn cue_refresh_reports_played_title_changes_without_technical_history_churn() {
+    let cue = CueSegment {
+        sheet: "/music/album.cue".into(),
+        number: 1,
+        start_frame: 0,
+        end_frame: Some(4500),
+    };
+    let source = std::sync::Arc::new(record());
+    let (store, mut scan, id) = queued_scan(ScanResult {
+        roots: vec!["/music".into()],
+        segments: vec![CueRecord::registered(
+            source.clone(),
+            cue.clone(),
+            cue_metadata(),
+            Some(60.0),
+        )],
+        ..Default::default()
+    });
+    let history_values = || {
+        store
+            .history(10)
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.track_id,
+                    entry.title,
+                    entry.play_count,
+                    entry.played_at,
+                    entry.favorite,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    store.mark_played(id, 42).unwrap();
+    let history = history_values();
+    std::sync::Arc::make_mut(&mut scan.segments[0].source)
+        .media
+        .codec = "flac".into();
+    let technical = store.apply_scan(&scan).unwrap();
+    assert!(technical.library);
+    assert!(!technical.history);
+    assert_eq!(history_values(), history);
+    let mut metadata = cue_metadata();
+    metadata.title = "New segment title".into();
+    scan.segments[0] =
+        CueRecord::registered(source.clone(), cue.clone(), metadata.clone(), Some(60.0));
+    assert!(store.apply_scan(&scan).unwrap().history);
+    assert_eq!(store.history(10).unwrap()[0].title, "New segment title");
+    store
+        .edit_track(id, Some("Personal segment"), None, None, None)
+        .unwrap();
+    let overridden = history_values();
+    metadata.title = "Hidden segment title".into();
+    scan.segments[0] = CueRecord::registered(source, cue, metadata, Some(60.0));
+    assert!(!store.apply_scan(&scan).unwrap().history);
+    assert_eq!(history_values(), overridden);
 }
 
 #[test]

@@ -177,26 +177,25 @@ impl Core {
             album.as_deref(),
             decoder_hint,
         )?;
-        self.accept_catalog_facts(
-            crate::store::CatalogChanges {
-                changed: impact.changed,
-                library: impact.library,
-                queue: impact.queue,
-                albums: impact.albums,
-                duplicate_members: impact.member_facts,
-                ..Default::default()
-            },
-            Some(&[track_id]),
-            impact.playlists.as_deref(),
-        );
-        if impact.library {
-            self.transport.history_pending |= title.is_some()
+        let impacts = crate::store::CatalogChanges {
+            changed: impact.changed,
+            library: impact.library,
+            queue: impact.queue,
+            albums: impact.albums,
+            duplicate_members: impact.member_facts,
+            history: impact.library
+                && title.is_some()
                 && self
                     .state
                     .library
                     .history
                     .iter()
-                    .any(|entry| entry.track_id == track_id);
+                    .any(|entry| entry.track_id == track_id),
+            ..Default::default()
+        };
+        self.accept_catalog_facts(impacts, Some(&[track_id]), impact.playlists.as_deref());
+        if impact.library {
+            self.transport.history_pending |= impacts.history;
             let current = self.refresh_affected_queue_tracks(&[track_id]);
             let catalog = self.refresh_catalog_projections();
             let errors: Vec<_> = [current, catalog]
@@ -382,6 +381,7 @@ impl Core {
             changed: true,
             library: true,
             structure: true,
+            history: true,
             duplicate_groups: duplicate_groups_changed,
             queue: queue_changed,
             albums: albums_changed,

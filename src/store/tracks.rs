@@ -52,7 +52,7 @@ fn directory_prefix(path: &Path) -> Result<String> {
     Ok(format!("{}/", path.trim_end_matches('/')))
 }
 
-fn other_root_prefixes(roots: &[PathBuf]) -> Result<Vec<String>> {
+pub(super) fn other_root_prefixes(roots: &[PathBuf]) -> Result<Vec<String>> {
     crate::library::normalize_roots(roots)?
         .iter()
         .map(|root| {

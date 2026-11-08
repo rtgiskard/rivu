@@ -300,9 +300,19 @@ impl Store {
             [source.identity.id],
             |row| row.get(0),
         )?;
-        let albums = tx.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (?1,?2) AND {}) OR EXISTS(SELECT 1 FROM tracks AS s CROSS JOIN temp.relocation_target AS t WHERE s.id=?1 AND {})", super::albums::eligible_member("t"), rivu_format::database::eligible_title("COALESCE(s.album_override,t.raw_album)")),
-            params![source.identity.id, target.identity.id], |row| row.get(0),
+        let (albums, history) = tx.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (?1,?2) AND {})
+                     OR EXISTS(SELECT 1 FROM tracks AS s CROSS JOIN temp.relocation_target AS t
+                         WHERE s.id=?1 AND {}),
+                     (SELECT s.last_played IS NOT NULL
+                         AND COALESCE(s.title_override,s.raw_title) IS NOT COALESCE(s.title_override,t.raw_title)
+                      FROM tracks AS s CROSS JOIN temp.relocation_target AS t WHERE s.id=?1)",
+                super::albums::eligible_member("t"),
+                rivu_format::database::eligible_title("COALESCE(s.album_override,t.raw_album)")
+            ),
+            params![source.identity.id, target.identity.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         tx.execute("DELETE FROM tracks WHERE id=?1", [target.identity.id])?;
         let mut update_sql = String::with_capacity(768);
@@ -323,6 +333,7 @@ impl Store {
             duplicate_groups: true,
             queue,
             albums,
+            history,
             ..Default::default()
         })
     }
@@ -348,6 +359,27 @@ mod tests {
             params![hash.as_bytes().as_slice(), super::super::scan::PROBE_VERSION],
         )?;
         Ok(store)
+    }
+
+    #[test]
+    fn relocation_reports_history_only_when_a_played_title_changes() -> Result<()> {
+        for played in [false, true] {
+            let store = fixture()?;
+            if played {
+                store.mark_played(1, 42)?;
+            }
+            let prepared = store.prepare_relocation(1, 2)?;
+            let impacts = store.commit_relocation(&prepared)?;
+            assert_eq!(impacts.history, played);
+            let history = store.history(10)?;
+            if played {
+                assert_eq!(history[0].track_id, 1);
+                assert_eq!(history[0].title, "Target");
+            } else {
+                assert!(history.is_empty());
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -492,7 +524,8 @@ mod tests {
         let queue = store.queue_state()?;
         let before = store.track(1)?.unwrap();
         let target = store.track(2)?.unwrap();
-        store.commit_relocation(&prepared)?;
+        let impacts = store.commit_relocation(&prepared)?;
+        assert!(!impacts.history);
         let retained = store.track(1)?.unwrap();
         assert_eq!(retained.id, before.id);
         assert_eq!(retained.path, target.path);

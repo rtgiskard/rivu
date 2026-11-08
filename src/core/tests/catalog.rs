@@ -452,10 +452,12 @@ fn playlist_refresh_failure_preserves_both_committed_results() {
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
+    write_pcm(&directory.path().join("1.wav"));
+    core.store.mark_played(1, 7).unwrap();
     let source = directory.path().join("imported.wav");
     write_pcm(&source);
     let path = directory.path().join("mix.m3u8");
-    std::fs::write(&path, "imported.wav\n").unwrap();
+    std::fs::write(&path, "1.wav\nimported.wav\n").unwrap();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
@@ -478,7 +480,7 @@ fn playlist_refresh_failure_preserves_both_committed_results() {
             .playlist_track_ids(playlist_id, 10)
             .unwrap()
             .len(),
-        1
+        2
     );
     assert!(core.transport.history_pending);
     assert!(
@@ -1827,6 +1829,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
     core.apply_catalog_changes(crate::store::CatalogChanges {
         changed: true,
         library: true,
+        history: true,
         ..Default::default()
     })
     .unwrap();
@@ -2540,6 +2543,11 @@ fn projection_read_failure_recovers_on_query_without_replaying_committed_writes(
     core.invalidate_playlist_creation(true);
     core.advance_playlist_entry_revision(playlist);
     core.store.mark_played(1, 7).unwrap();
+    // The direct activity write has its own History impact.
+    let impacts = crate::store::CatalogChanges {
+        history: true,
+        ..impacts
+    };
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection.execute_batch("ALTER TABLE tracks RENAME TO hidden_tracks; ALTER TABLE playlists RENAME TO hidden_playlists;").unwrap();
     let error = core.apply_catalog_changes(impacts).unwrap_err();
