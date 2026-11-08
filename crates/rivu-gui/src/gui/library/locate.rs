@@ -25,6 +25,7 @@ impl LibraryLocateState {
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection.cancel();
         self.loading = false;
+        self.queued = false;
         self.notice = None;
         self.reveal = None;
         self.reveal_scrolled = false;
@@ -270,15 +271,19 @@ impl Library {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                this.library.locate.pending = false;
-                this.library.locate.loading = false;
-                if std::mem::take(&mut this.library.locate.queued) {
-                    this.begin_library_locate(cx);
-                }
-                cx.notify();
+                this.complete_library_locate(cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn complete_library_locate(&mut self, cx: &mut Context<Self>) {
+        self.library.locate.pending = false;
+        self.library.locate.loading = false;
+        if std::mem::take(&mut self.library.locate.queued) {
+            self.begin_library_locate(cx);
+        }
         cx.notify();
     }
 
@@ -373,7 +378,147 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext;
     use rivu_protocol::model::LibrarySort;
+
+    fn with_library(
+        cx: &mut gpui::TestAppContext,
+        run: impl FnOnce(&mut Library, &mut Context<Library>),
+    ) {
+        use crate::test_support::ConfigFixture;
+        use std::{rc::Rc, sync::Arc};
+
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config_path)
+        .unwrap();
+        let runtime =
+            crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let i18n = Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
+        let context = crate::gui::feature::FeatureContext {
+            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), gpui::SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let owner = cx.new(|cx| Library::new(context, cx));
+        owner.update(cx, |owner, cx| {
+            Rc::make_mut(&mut owner.state).current_track =
+                Some(Arc::new(rivu_protocol::model::Track {
+                    id: 7,
+                    path: "/music/album/track.flac".into(),
+                    title: "Track".into(),
+                    artist: String::new(),
+                    album: String::new(),
+                    fingerprint: None,
+                    cue: None,
+                    duration: None,
+                    codec: String::new(),
+                    channels: 2,
+                    sample_rate: 44_100,
+                    bitrate_bps: None,
+                    bitrate_exact: false,
+                    track_number: None,
+                    disc_number: None,
+                    bits_per_sample: None,
+                    release_date: None,
+                    favorite: false,
+                    decoder_hint: rivu_format::decoder_hint::DecoderHint::Auto,
+                    missing: false,
+                    play_count: 0,
+                    last_played: None,
+                }));
+            owner.set_available(true);
+            owner.set_visible(true, cx);
+            run(owner, cx);
+        });
+    }
+
+    // Reserve a consumer request without dispatching native I/O, choosing the
+    // completion time deterministically rather than racing the executor.
+    fn pending_request(owner: &mut Library) -> Request {
+        let query = query();
+        owner
+            .library
+            .locate
+            .sync(&query, owner.state.query_revisions(None));
+        owner.library.locate.pending = true;
+        owner.library.locate.loading = true;
+        Request {
+            generation: owner.library.locate.projection.generation(),
+            query,
+            track_id: 7,
+        }
+    }
+
+    #[gpui::test]
+    fn navigation_cancels_a_locate_queued_behind_a_cancelled_worker(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |owner, cx| {
+            let request = pending_request(owner);
+            owner.library.cancel_navigation();
+            assert!(owner.library.locate.pending);
+            assert!(!owner.library.locate.loading);
+            // Logical cancellation enables the button, but the old worker
+            // still owns the physical slot; the second click must queue.
+            owner.begin_library_locate(cx);
+            assert!(owner.library.locate.queued);
+            assert!(owner.library.locate.pending);
+            owner.library.cancel_navigation();
+            assert!(!owner.library.locate.queued);
+            assert!(!request.current(owner));
+            owner.complete_library_locate(cx);
+            assert!(!owner.library.locate.pending);
+            assert!(!owner.library.locate.loading);
+            assert!(!owner.library.locate.queued);
+            assert!(owner.library.locate.reveal.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_and_window_cancellation_retire_locate_without_releasing_its_worker(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |owner, cx| {
+            for hide in [true, false] {
+                owner.set_visible(true, cx);
+                let request = pending_request(owner);
+                let ticket = owner.library.locate.projection.ticket();
+                owner.library.locate.notice = Some((7, LibraryLocateResult::OutsideRoot));
+                owner.library.locate.reveal = Some((7, TreeBranch::default(), 2));
+                owner.library.locate.queued = true;
+                if hide {
+                    owner.set_visible(false, cx);
+                } else {
+                    owner.cancel_reads();
+                }
+                assert!(!ticket.is_current());
+                // Ancestor continuation and final reveal publication both use
+                // these guards, including responses predating cancellation.
+                assert!(!request.accepts(owner, owner.state.query_revisions(None)));
+                assert!(!request.current(owner));
+                assert!(owner.library.locate.pending);
+                assert!(!owner.library.locate.loading);
+                assert!(!owner.library.locate.queued);
+                assert!(owner.library.locate.notice.is_none());
+                assert!(owner.library.locate.reveal.is_none());
+                owner.complete_library_locate(cx);
+                assert!(!owner.library.locate.pending);
+                assert!(!owner.library.locate.loading);
+            }
+        });
+    }
 
     fn query() -> Query {
         Query::LibraryLocate {

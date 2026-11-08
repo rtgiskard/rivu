@@ -204,6 +204,7 @@ impl Library {
     }
 
     pub(in crate::gui) fn cancel_reads(&mut self) {
+        self.library.locate.invalidate();
         self.requests.cancel_directory_demand();
         if self.requests.reads_pending() || self.library.search_counts_pending() {
             self.library.cancel_pending_reads();

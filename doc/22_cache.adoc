@@ -121,6 +121,10 @@ hiding, cancellation, and logical timeout revoke publication but do not free tha
 slot. Physical retirement re-drives the latest eligible demand; old completions
 cannot publish or clear replacement requests. Core skips obsolete queued reads
 and cooperatively interrupts executing SQL, releasing its snapshot before the lease.
+Library navigation, panel hiding and window cancellation discard both active
+logical locate demand and any queued locate intent. A cancelled locate retains
+its physical slot until completion, but that completion cannot reveal ancestors
+or restart a discarded request.
 
 GUI admission allows two seconds and response presentation twelve seconds.
 Timeout shows an error, cancels the read, and rejects late payloads; explicit retry
