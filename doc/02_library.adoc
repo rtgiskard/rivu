@@ -418,8 +418,8 @@ source and reported original backup before retrying or rescanning; failure does
 not authorize replay. With `--json`, structured failures go to stderr and retain
 the outcome, source path and backup evidence.
 
-For both tag inspection and edit results (including failures), JSON `path` and
-`backup_path` values are strings when the path is valid UTF-8. Other Unix paths
+For tag inspection, edit results (including failures), and offline `library probe`,
+JSON `path` and `backup_path` values are strings when the path is valid UTF-8. Other Unix paths
 use `{"unix_bytes":[...]}` containing the complete original path bytes as integers
 from 0 to 255; consumers can reconstruct the path without character replacement.
 An absent optional backup remains `null`. This representation applies to the

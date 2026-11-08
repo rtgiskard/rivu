@@ -141,7 +141,7 @@ pub(super) fn run(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "path": path, "title": info.title, "artist": info.artist, "album": info.album,
+                        "path": rivu_metadata::JsonPath(&path), "title": info.title, "artist": info.artist, "album": info.album,
                         "codec": info.codec, "channels": info.channels, "sample_rate": info.sample_rate,
                         "duration": info.duration, "ffmpeg_enabled": ffmpeg_enabled,
                         "bitrate_bps": info.bitrate_bps, "bits_per_sample": info.bits_per_sample,
@@ -555,6 +555,37 @@ mod tests {
         bytes.extend_from_slice(&2_u32.to_le_bytes());
         bytes.extend_from_slice(&0_i16.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn probe_json_accepts_non_utf8_source_names_without_mutating_the_file() -> Result<()> {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = tempfile::tempdir()?;
+        let i18n = Localizer::for_cli("en-US");
+        for (parent, filename) in [
+            (b"parent".to_vec(), b"source\xff.wav".to_vec()),
+            (b"parent\xff".to_vec(), b"source.wav".to_vec()),
+        ] {
+            let parent = directory.path().join(OsString::from_vec(parent));
+            fs::create_dir(&parent)?;
+            let path = parent.join(OsString::from_vec(filename));
+            let original = wav();
+            fs::write(&path, &original)?;
+            run(
+                &i18n,
+                &directory.path().join("no-server"),
+                &directory.path().join("absent.toml"),
+                LibraryAction::Probe {
+                    path: path.clone(),
+                    enhanced: false,
+                },
+                true,
+            )?;
+            assert_eq!(fs::read(path)?, original);
+        }
+        assert!(!directory.path().join("no-server").exists());
+        Ok(())
     }
 
     #[test]
