@@ -441,7 +441,7 @@ macro_rules! config_fields {
         pub visualization_signal: VisualizationSignal,
         pub analysis_rate_hz: u32,
         /// Animation request cap (0 follows display callbacks), at most 240 FPS.
-        pub visualization_fps: u16,
+        pub animation_fps: u16,
         pub visualization_background: RgbColor,
         pub visualization_palette: VisualizationPalette,
         pub spectrum_style: SpectrumStyle,
@@ -496,8 +496,6 @@ macro_rules! config_fields {
         /// Positive finite seconds per full rotation, used for new artwork panels.
         pub artwork_period_seconds: f32,
         pub artwork_direction: ArtworkDirection,
-        /// Animation request cap (0 follows display callbacks), at most 240 FPS.
-        pub artwork_fps: u16,
         pub media_read_buffer_mib: u32,
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
@@ -557,7 +555,7 @@ impl Default for Config {
             visualization_enabled: true,
             visualization_signal: VisualizationSignal::After,
             analysis_rate_hz: 28,
-            visualization_fps: 0,
+            animation_fps: 0,
             visualization_background: RgbColor(0x08090c),
             visualization_palette: VisualizationPalette::Deadbeef,
             spectrum_style: SpectrumStyle::Solid,
@@ -604,7 +602,6 @@ impl Default for Config {
             artwork_mode: ArtworkMode::Rotating,
             artwork_period_seconds: 20.0,
             artwork_direction: ArtworkDirection::Clockwise,
-            artwork_fps: 0,
             media_read_buffer_mib: 2,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
@@ -762,8 +759,8 @@ impl Config {
             self.analysis_rate_hz
         );
         ensure!(
-            self.visualization_fps <= 240,
-            "visualizations.general.animation_fps must be between 0 and 240"
+            self.animation_fps <= 240,
+            "interface.animation_fps must be between 0 and 240"
         );
         for (name, range) in [
             (
@@ -916,10 +913,6 @@ impl Config {
         ensure!(
             self.artwork_period_seconds.is_finite() && self.artwork_period_seconds > 0.0,
             "interface.artwork.period_seconds must be finite and greater than zero"
-        );
-        ensure!(
-            self.artwork_fps <= 240,
-            "interface.artwork.fps must be between 0 and 240"
         );
         Ok(())
     }

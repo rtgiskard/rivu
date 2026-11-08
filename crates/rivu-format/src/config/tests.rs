@@ -119,7 +119,7 @@ fn common_palettes_roundtrip_and_patch() {
 
 #[test]
 fn visualization_groups_round_trip_and_preserve_independent_ranges() {
-    let original = "[visualizations.general]\nenabled = false\nsignal = 'before'\nanalysis_rate_hz = 30\nanimation_fps = 120\nbackground = '#123456'\npalette = 'viridis'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\nsensitivity = 2.0\nbloom_intensity = 1.0\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n[visualizations.defaults]\nstyle = 'oscilloscope'\nreference_lines = true\nlabels = true\n[visualizations.effects]\nprimary_color = '#112233'\nsecondary_color = '#445566'\n";
+    let original = "[interface]\nanimation_fps = 120\n[visualizations.general]\nenabled = false\nsignal = 'before'\nanalysis_rate_hz = 30\nbackground = '#123456'\npalette = 'viridis'\nanalysis_fft_size = 4096\nanalysis_window = 'hann'\ndb_range = 85.0\n[visualizations.radial]\nrotation_speed = 2.0\nbar_width = 1.0\nring_opacity = 0.5\ninner_diameter = 1.0\nfade_when_idle = true\n[visualizations.reactive]\nsensitivity = 2.0\nbloom_intensity = 1.0\ndb_range = 85.0\n[visualizations.spectrum]\ndb_range = 65.0\n[visualizations.spectrogram]\ndb_range = 105.0\n[visualizations.defaults]\nstyle = 'oscilloscope'\nreference_lines = true\nlabels = true\n[visualizations.effects]\nprimary_color = '#112233'\nsecondary_color = '#445566'\n";
     let mut config = from_toml(original).unwrap();
     assert!(!config.visualization_enabled);
     assert!(config.default_visualizer_reference_lines);
@@ -405,33 +405,43 @@ fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
 }
 
 #[test]
-fn visualization_animation_fps_validates_and_persists_boundaries() {
+fn animation_fps_validates_and_persists_boundaries() {
+    assert_eq!(Config::default().animation_fps, 0);
     for fps in [0, 1, 60, 240] {
-        let config = from_toml(&format!(
-            "[visualizations.general]\nanimation_fps = {fps}\n"
-        ))
-        .unwrap();
-        assert_eq!(config.visualization_fps, fps);
+        let config = from_toml(&format!("[interface]\nanimation_fps = {fps}\n")).unwrap();
+        assert_eq!(config.animation_fps, fps);
         let saved = to_toml(&config).unwrap();
+        let document = saved.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            document["interface"]["animation_fps"].as_integer(),
+            Some(i64::from(fps))
+        );
+        assert!(document["interface"]["artwork"].get("fps").is_none());
+        assert!(
+            document["visualizations"]["general"]
+                .get("animation_fps")
+                .is_none()
+        );
         assert_eq!(from_toml(&saved).unwrap(), config);
         let patched = update_toml("", None, &config).unwrap();
         assert_eq!(from_toml(&patched).unwrap(), config);
     }
     for fps in [241, u16::MAX] {
         let config = Config {
-            visualization_fps: fps,
+            animation_fps: fps,
             ..Config::default()
         };
         assert!(config.validate().is_err());
         assert!(to_toml(&config).is_err());
     }
     for value in ["-1", "241", "65536", "1.5", "'60'"] {
-        assert!(
-            from_toml(&format!(
-                "[visualizations.general]\nanimation_fps = {value}\n"
-            ))
-            .is_err()
-        );
+        assert!(from_toml(&format!("[interface]\nanimation_fps = {value}\n")).is_err());
+    }
+    for old_key in [
+        "interface.artwork.fps = 60",
+        "visualizations.general.animation_fps = 60",
+    ] {
+        assert!(from_toml(old_key).is_err());
     }
 }
 

@@ -372,9 +372,9 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     for fps in [0, 1, 60, 240] {
-        write_current_config(&path, format!("interface.artwork.fps = {fps}\n")).unwrap();
+        write_current_config(&path, format!("interface.animation_fps = {fps}\n")).unwrap();
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.artwork_fps, fps);
+        assert_eq!(config.animation_fps, fps);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
     }
@@ -382,7 +382,7 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
     let original = fs::read(&path).unwrap();
     for fps in [241, u16::MAX] {
         let config = Config {
-            artwork_fps: fps,
+            animation_fps: fps,
             ..Config::default()
         };
         assert!(config.validate().is_err());
@@ -394,11 +394,7 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
         "mode = 'spinning'",
         "direction = 'left'",
         "unknown = true",
-        "fps = -1",
-        "fps = 241",
-        "fps = 65536",
-        "fps = 1.5",
-        "fps = '60'",
+        "fps = 60",
     ] {
         write_current_config(&path, format!("[interface.artwork]\n{invalid}\n")).unwrap();
         assert!(Config::load(&path).is_err());
@@ -658,7 +654,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         visualization_enabled: false,
         visualization_signal: crate::config::VisualizationSignal::Before,
         analysis_rate_hz: 30,
-        visualization_fps: 120,
+        animation_fps: 120,
         visualization_db_range: 90.0,
         spectrum_db_range: Some(80.0),
         reactive_db_range: Some(60.0),
@@ -707,7 +703,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         artwork_mode: ArtworkMode::Rotating,
         artwork_period_seconds: 12.5,
         artwork_direction: ArtworkDirection::Counterclockwise,
-        artwork_fps: 120,
         artwork_decode_budget_mib: 128,
         artwork_file_limit_mib: 32,
         gpu_material_budget_mib: 64,
@@ -871,11 +866,13 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.general.analysis_rate_hz = 61",
         "visualizations.general.analysis_rate_hz = -1",
         "visualizations.general.analysis_rate_hz = 5.5",
-        "visualizations.general.animation_fps = -1",
-        "visualizations.general.animation_fps = 241",
-        "visualizations.general.animation_fps = 65536",
-        "visualizations.general.animation_fps = 1.5",
-        "visualizations.general.animation_fps = '60'",
+        "interface.animation_fps = -1",
+        "interface.animation_fps = 241",
+        "interface.animation_fps = 65536",
+        "interface.animation_fps = 1.5",
+        "interface.animation_fps = '60'",
+        "visualizations.general.animation_fps = 60",
+        "interface.artwork.fps = 60",
         "visualizations.general.analysis_fft_size = 256",
         "visualizations.general.analysis_fft_size = 65536",
         "visualizations.general.analysis_fft_size = 1000",

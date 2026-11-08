@@ -3640,7 +3640,7 @@ mod tests {
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |track, rotating, cx: &mut gpui::TestAppContext| {
             let config = Config {
-                artwork_fps: 0,
+                animation_fps: 0,
                 ..Config::default()
             };
             panels.reconcile(&crate::gui::layout::Layout {
@@ -3854,7 +3854,7 @@ mod tests {
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
             let config = Config {
-                artwork_fps: fps,
+                animation_fps: fps,
                 ..Config::default()
             };
             let root = Node::Split {

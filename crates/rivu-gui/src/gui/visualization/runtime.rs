@@ -214,7 +214,7 @@ impl VisualizerRuntime {
         }
         let visualization_changed =
             self.config.visualization_enabled != config.visualization_enabled;
-        let fps_changed = self.config.visualization_fps != config.visualization_fps;
+        let fps_changed = self.config.animation_fps != config.animation_fps;
         let visibility_changed = self.visible != visible || self.shutting_down != shutting_down;
         let status_changed = self.status != status;
         let position_changed = self.position != position || self.duration != duration;
@@ -508,7 +508,7 @@ impl VisualizerRuntime {
             frames.request_presentation(
                 owner,
                 self.frame_generation,
-                self.config.visualization_fps,
+                self.config.animation_fps,
                 window,
                 cx,
             );
@@ -1814,7 +1814,7 @@ mod tests {
                     "native animation continues while analysis waits"
                 );
                 let mut capped = config.as_ref().clone();
-                capped.visualization_fps = 1;
+                capped.animation_fps = 1;
                 owner.sync(
                     VisualizerInputs {
                         stopped_source_generation: None,

@@ -724,7 +724,7 @@ fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validatio
     let before = core.engine.pcm.state();
     let mut config = core.preferences.checkpoint();
     config.ui_scale = 1.25;
-    config.visualization_fps = 30;
+    config.animation_fps = 30;
     config.analysis_rate_hz = 30;
     core.command(Command::Configure {
         config: Arc::new(config.clone()),

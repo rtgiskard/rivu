@@ -212,5 +212,9 @@ link:01_config.adoc#file-access-and-external-editors[Configuration file access]:
 * Replace the removed signal palette `tokyo_night` with a supported
   link:01_config.adoc#visualizations[signal palette]. The Tokyo Night interface
   theme is unchanged.
+* Replace `interface.artwork.fps` and `visualizations.general.animation_fps` with
+  one `interface.animation_fps` value (`0`–`240`, default `0`), then remove both old
+  keys. Choose the shared cap explicitly if the old values differ; the tool does
+  not choose between them. See link:01_config.adoc#animation[Animation].
 
 

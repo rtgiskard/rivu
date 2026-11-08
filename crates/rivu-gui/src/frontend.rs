@@ -899,11 +899,7 @@ mod tests {
         };
         next.volume = 0.0;
         next.waveform_seek_enabled = !previous.waveform_seek_enabled;
-        next.visualization_fps = if previous.visualization_fps == 60 {
-            30
-        } else {
-            60
-        };
+        next.animation_fps = if previous.animation_fps == 60 { 30 } else { 60 };
         assert!(!analysis_invalidated_by_config(&previous, &next));
 
         for change in 0..6 {

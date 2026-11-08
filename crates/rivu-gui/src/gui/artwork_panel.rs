@@ -290,7 +290,7 @@ impl ArtworkRuntime {
                 }
             }
         }
-        changed |= self.visible != visible || self.fps != config.artwork_fps;
+        changed |= self.visible != visible || self.fps != config.animation_fps;
         if source_changed {
             self.track = track.cloned();
         }
@@ -305,7 +305,7 @@ impl ArtworkRuntime {
         if changed {
             self.cancel_frame(cx);
         }
-        self.fps = config.artwork_fps;
+        self.fps = config.animation_fps;
         self.prepare_artwork(cx);
         if changed {
             cx.notify();

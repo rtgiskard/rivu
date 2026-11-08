@@ -355,6 +355,18 @@ Interface → Artwork sets new-panel style, mode, period and direction;
 animation FPS remains shared. Existing panels use their own right-click Artwork
 settings editor. Static mode retains rotation parameters.
 
+=== Animation
+
+Settings → Interface → Animation exposes `interface.animation_fps`, an integer
+from `0` through `240` (default `0`). It caps animation requests for Artwork,
+Spectrum, Spectrogram and Audio Visualizer panels; `0` follows native window
+frames without timer throttling. Lower caps reduce rendering work at the cost
+of less smooth motion. The cap does not force idle panels to refresh, change
+audio analysis or Waveform processing, or throttle input and business updates.
+It is not a hard limit on total window submissions and does not control textures.
+Apply updates both animation consumers without restarting or resetting rotation.
+
+
 === Appearance and library display
 
 `interface.theme` in `config.toml` selects the shared desktop and terminal theme.
@@ -551,7 +563,6 @@ style = "halo"
 mode = "rotating"
 period_seconds = 20.0
 direction = "clockwise"
-fps = 0
 ----
 
 `style` accepts `plain`, `vinyl`, `glass`, `halo` (default), `metal`, `card`, or
@@ -563,17 +574,13 @@ support static and rotating modes; changing style preserves the rotation angle.
 `mode` accepts `static` or `rotating` (default). `period_seconds` is the time
 for one full circle and must be finite and greater than zero; there is no
 additional upper limit. `direction` accepts `clockwise` (default) or
-`counterclockwise`. `fps` is an integer from 0 through 240 (default 0): zero
-follows display callbacks without timer throttling; a positive value caps
-animation requests per second. Lower caps reduce rendering work and resource
-use at the cost of less smooth motion; zero can render more frequently on
-high-refresh displays. Changing the cap preserves the angle. All Artwork
-panels share only frame rate; the analysis rate is independent. Mode, period, and
-direction in this configuration supply defaults for new panels, not live overrides.
+`counterclockwise`. Mode, period, and direction in this configuration supply
+defaults for new panels, not live overrides. All Artwork panels use the shared
+`interface.animation_fps` cap described under <<animation,Animation>>.
 Playback-driven rotation and animated source covers have separate clocks but
 share this FPS cap. Their pause, hiding, track-change, and visualization-enable behavior is
 documented in link:04_playback.adoc#artwork-panel[Artwork panel].
-Track details' full, static preview does not use the Artwork FPS cap.
+Track details' full, static preview does not use the animation cap.
 
 
 == Layout
@@ -733,11 +740,6 @@ or loads an explicitly requested track preview.
 |`analysis_rate_hz`
 |`5`–`60` / `28`
 |Maximum FFT transform and publication rate, not PCM ingestion or animation.
-|`animation_fps`
-|`0`–`240` / `0`
-|Spectrum, Spectrogram, and Audio Visualizer display cadence. `0` follows native
-window frames; positive values cap updates per second. Waveform and artwork
-are independent.
 |===
 
 Set Animation FPS under Settings → Visualizations → General → Appearance;

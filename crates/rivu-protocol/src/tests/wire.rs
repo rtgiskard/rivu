@@ -927,8 +927,7 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
             artwork_mode: rivu_format::config::ArtworkMode::Rotating,
             artwork_period_seconds: 12.5,
             artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
-            artwork_fps: 240,
-            visualization_fps: 240,
+            animation_fps: 240,
             ..Default::default()
         });
         let configuration = rivu_protocol::model::ConfigurationState {
@@ -1082,8 +1081,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             artwork_mode: rivu_format::config::ArtworkMode::Rotating,
             artwork_period_seconds: 12.5,
             artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
-            artwork_fps: 30,
-            visualization_fps: 30,
+            animation_fps: 30,
             ..Default::default()
         };
         let request = WireRequest::Command(WireCommand::from(Command::Configure {

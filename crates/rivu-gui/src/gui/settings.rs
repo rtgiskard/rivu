@@ -145,7 +145,7 @@ enum Field {
     Scale,
     LayoutSnapGrid,
     AnalysisRateHz,
-    VisualizationAnimationFps,
+    AnimationFps,
     VisualizationBackground,
     VisualizationDbRange,
     ReactiveSensitivity,
@@ -176,7 +176,6 @@ enum Field {
     OscilloscopeTimeSpanMs,
     OscilloscopeGain,
     ArtworkPeriodSeconds,
-    ArtworkFps,
 }
 #[derive(Debug)]
 struct FieldIssue {
@@ -211,7 +210,7 @@ impl Field {
             Self::Scale => "interface.scale",
             Self::LayoutSnapGrid => "interface.layout_snap_grid_px",
             Self::AnalysisRateHz => "visualizations.general.analysis_rate_hz",
-            Self::VisualizationAnimationFps => "visualizations.general.animation_fps",
+            Self::AnimationFps => "interface.animation_fps",
             Self::VisualizationBackground => "visualizations.general.background",
             Self::VisualizationDbRange => "visualizations.general.db_range",
             Self::ReactiveSensitivity => "visualizations.reactive.sensitivity",
@@ -242,7 +241,6 @@ impl Field {
             Self::OscilloscopeTimeSpanMs => "visualizations.oscilloscope.time_span_ms",
             Self::OscilloscopeGain => "visualizations.oscilloscope.gain",
             Self::ArtworkPeriodSeconds => "interface.artwork.period_seconds",
-            Self::ArtworkFps => "interface.artwork.fps",
         }
     }
     fn precision(self) -> Option<usize> {
@@ -304,7 +302,7 @@ impl Field {
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
             Self::AnalysisRateHz => "settings-analysis-rate-hz",
-            Self::VisualizationAnimationFps => "settings-animation-rate-fps",
+            Self::AnimationFps => "settings-animation-rate-fps",
             Self::VisualizationBackground => "settings-background-color",
             Self::VisualizationDbRange => "settings-default-display-range-db",
             Self::ReactiveSensitivity => "settings-sensitivity",
@@ -334,7 +332,6 @@ impl Field {
             Self::OscilloscopeTimeSpanMs => "settings-oscilloscope-time-span-ms",
             Self::OscilloscopeGain => "settings-oscilloscope-gain-x",
             Self::ArtworkPeriodSeconds => "settings-seconds-per-circle",
-            Self::ArtworkFps => "settings-animation-rate-fps",
         }
     }
 
@@ -360,12 +357,7 @@ impl Field {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
             Self::ArtworkPeriodSeconds => settings.tr("settings-artwork-period-hint"),
-            Self::ArtworkFps => format!(
-                "{} {}",
-                settings.tr("settings-animation-fps-hint"),
-                settings.tr("settings-artwork-motion-help")
-            )
-            .into(),
+            Self::AnimationFps => settings.tr("settings-animation-fps-hint"),
             Self::ScanMaxDepth => settings.tr("settings-scan-depth-hint"),
             Self::ScanMinDurationSeconds => settings.tr("settings-scan-duration-hint"),
             Self::Volume => "0–100.".into(),
@@ -382,7 +374,6 @@ impl Field {
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
             Self::AnalysisRateHz => settings.tr("settings-analysis-rate-hint"),
-            Self::VisualizationAnimationFps => settings.tr("settings-visualization-fps-hint"),
             Self::VisualizationBackground => settings.tr("settings-background-hint"),
             Self::EffectPrimaryColor | Self::EffectSecondaryColor => {
                 settings.tr("settings-colors-hint")
@@ -912,7 +903,7 @@ impl Settings {
             Field::Scale,
             Field::LayoutSnapGrid,
             Field::AnalysisRateHz,
-            Field::VisualizationAnimationFps,
+            Field::AnimationFps,
             Field::VisualizationBackground,
             Field::VisualizationDbRange,
             Field::ReactiveSensitivity,
@@ -943,7 +934,6 @@ impl Settings {
             Field::OscilloscopeTimeSpanMs,
             Field::OscilloscopeGain,
             Field::ArtworkPeriodSeconds,
-            Field::ArtworkFps,
         ]
         .into_iter()
         .map(|field| {
@@ -958,9 +948,7 @@ impl Settings {
                     | Field::EffectSecondaryColor
                     | Field::WaveformCursorColor => "settings-color-placeholder",
                     Field::MediaReadBufferMib => "settings-buffer-placeholder",
-                    Field::ArtworkFps | Field::VisualizationAnimationFps => {
-                        "settings-display-fps-placeholder"
-                    }
+                    Field::AnimationFps => "settings-display-fps-placeholder",
                     Field::ScanMinDurationSeconds => "settings-duration-placeholder",
                     _ => field.label_id(),
                 });
@@ -1490,8 +1478,8 @@ impl Settings {
             cx,
         );
         self.set_value(
-            Field::VisualizationAnimationFps,
-            self.model.draft.visualization_fps.to_string(),
+            Field::AnimationFps,
+            self.model.draft.animation_fps.to_string(),
             unchanged,
             cx,
         );
@@ -1664,12 +1652,6 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
-            Field::ArtworkFps,
-            self.model.draft.artwork_fps.to_string(),
-            unchanged,
-            cx,
-        );
         self.sync_field_enabled(cx);
     }
 
@@ -1700,7 +1682,7 @@ impl Settings {
         config.ui_scale = self.float(Field::Scale, self.model.draft.ui_scale, cx)?;
         config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
         config.analysis_rate_hz = self.number(Field::AnalysisRateHz, cx)?;
-        config.visualization_fps = self.number(Field::VisualizationAnimationFps, cx)?;
+        config.animation_fps = self.number(Field::AnimationFps, cx)?;
         config.visualization_db_range = self.float(
             Field::VisualizationDbRange,
             self.model.draft.visualization_db_range,
@@ -1800,7 +1782,6 @@ impl Settings {
             self.model.draft.artwork_period_seconds,
             cx,
         )?;
-        config.artwork_fps = self.number(Field::ArtworkFps, cx)?;
         config.validate().map_err(|error| {
             let message = error.to_string();
             self.inputs
@@ -2057,7 +2038,7 @@ impl Settings {
             | Field::LayoutSnapGrid
             | Field::LogMaxFiles
             | Field::ArtworkPeriodSeconds
-            | Field::ArtworkFps => (SettingsPage::Interface, None),
+            | Field::AnimationFps => (SettingsPage::Interface, None),
             Field::EffectPrimaryColor
             | Field::EffectSecondaryColor
             | Field::ReactiveDbRange
@@ -2099,7 +2080,6 @@ impl Settings {
             | Field::GpuFilterBudgetMib
             | Field::GpuFilterMaxDepth
             | Field::AnalysisRateHz
-            | Field::VisualizationAnimationFps
             | Field::VisualizationBackground
             | Field::VisualizationDbRange => {
                 (SettingsPage::Visualizations, Some(VisualPage::General))
@@ -2413,6 +2393,11 @@ impl Settings {
                 column()
                     .gap_3()
                     .child(self.basic_settings(cx))
+                    .child(settings_card(
+                        colors,
+                        self.tr("settings-animation"),
+                        self.single(Field::AnimationFps, cx),
+                    ))
                     .child(settings_card(
                         colors,
                         self.tr("settings-artwork"),
@@ -3602,6 +3587,35 @@ mod tests {
             settings.update(cx, |this, cx| {
                 this.complete_settings_apply(submission, committed, result, cx);
                 assert_eq!(this.parse(cx).unwrap().scan_min_duration_seconds, seconds);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn shared_animation_fps_validates_routes_and_applies(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.page = SettingsPage::Visualizations;
+            this.reveal_field(Field::AnimationFps);
+            assert!(matches!(this.page, SettingsPage::Interface));
+            this.model.draft.artwork_mode = ArtworkMode::Static;
+            assert!(this.field_enabled(Field::AnimationFps, cx));
+            for value in ["-1", "1.5", "241", "65536", ""] {
+                this.set_value(Field::AnimationFps, value, None, cx);
+                assert!(this.parse(cx).is_err(), "accepted {value}");
+            }
+        });
+        for fps in [240, 1, 0] {
+            settings.update(cx, |this, cx| {
+                this.set_value(Field::AnimationFps, fps.to_string(), None, cx);
+            });
+            let (patch, submission) = submit(&settings, cx);
+            let (committed, result) = execute(&runtime, patch);
+            assert!(result.is_ok());
+            assert_eq!(committed.animation_fps, fps);
+            settings.update(cx, |this, cx| {
+                this.complete_settings_apply(submission, committed, result, cx);
+                assert_eq!(this.parse(cx).unwrap().animation_fps, fps);
             });
         }
     }

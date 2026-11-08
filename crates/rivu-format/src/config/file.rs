@@ -131,6 +131,7 @@ file_group!(Interface, InterfaceView {
     font => ui_font: String,
     font_size_pt => ui_font_size_pt: u32,
     scale => ui_scale: f32,
+    animation_fps => animation_fps: u16,
     layout_snap_enabled => layout_snap_enabled: bool,
     layout_snap_grid_px => layout_snap_grid_px: u32,
 }; artwork: Artwork, ArtworkView);
@@ -198,14 +199,12 @@ file_group!(Artwork, ArtworkView {
     mode => artwork_mode: ArtworkMode,
     period_seconds => artwork_period_seconds: f32,
     direction => artwork_direction: ArtworkDirection,
-    fps => artwork_fps: u16,
 });
 
 file_group!(General, GeneralView {
     enabled => visualization_enabled: bool,
     signal => visualization_signal: VisualizationSignal,
     analysis_rate_hz => analysis_rate_hz: u32,
-    animation_fps => visualization_fps: u16,
     background => visualization_background: RgbColor,
     palette => visualization_palette: VisualizationPalette,
     analysis_fft_size => analysis_fft_size: u32,

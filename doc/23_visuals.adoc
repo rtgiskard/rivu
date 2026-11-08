@@ -190,12 +190,12 @@ snapshot with newer metrics.
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
 The background analysis worker owns the `analysis_rate_hz` deadline; accepted
 publication notifications collect history independently of native window animation
-callbacks. `visualizations.general.animation_fps` caps Spectrum, Spectrogram and Audio Visualizer animation:
-`0` follows window frames, and `1`–`240` limits requests per second. It does not
-throttle analysis, Waveform or artwork. Artwork and audio visualization share one
-window-local native-frame gate and one cancellable deadline timer, while retaining
-their own FPS limits. Positive limits use a shared time origin so equal-rate
-updates are delivered together rather than creating interleaved window redraws.
+callbacks. `interface.animation_fps` caps Artwork, Spectrum, Spectrogram and Audio
+Visualizer animation: `0` follows window frames, and `1`–`240` limits requests
+per second. It does not throttle analysis or Waveform processing. Artwork and
+audio visualization share one window-local native-frame gate and one cancellable
+deadline timer. Positive limits use a shared time origin so due updates are
+delivered together rather than creating interleaved window redraws.
 Late deadlines coalesce without catch-up. Scheduling a callback does not dirty
 the window; accepted input or animation changes notify the affected panels.
 Configuration-only refreshes reuse unchanged staging data rather than treating
@@ -610,14 +610,14 @@ link:01_config.adoc#artwork[Artwork].
 
 Artwork uses the shared window frame gate described under
 <<independent-analysis-and-display-clocks,Independent analysis and display clocks>>,
-but retains its own FPS cap. This caps animation requests, not overall window
-submissions from playback or input. Rotation and animated covers share one demand;
+and the same `interface.animation_fps` cap. This caps animation requests, not overall
+window submissions from playback or input. Rotation and animated covers share one demand;
 lower caps drop source frames rather than slowing their timeline. Cursor catch-up
 is bounded by frame count even after a long delay; all-zero-delay sources advance
 one frame per redraw. Each element retains its own cursor over shared decoded data.
 Pausing or static mode stops rotation, but a visible animated source can continue.
 Hiding or reduced motion cancels pending animation work. Focus loss alone does
-not stop rotation; the artwork FPS cap and native frame delivery still limit it.
+not stop rotation; the shared animation cap and native frame delivery still limit it.
 Animated source images retain GPUI's focus-based playback policy; source animation
 alone does not keep the artwork owner ticking while the window is inactive.
 Resuming rotation does not replay suspended time. Visualization enablement does not affect artwork.

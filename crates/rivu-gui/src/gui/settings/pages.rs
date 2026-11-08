@@ -922,15 +922,7 @@ impl Settings {
                     ))
                     .child(two_column(
                         self.field_state(Field::ArtworkPeriodSeconds, cx),
-                        column().when(
-                            !matches!(self.model.target(), Target::Artwork(_)),
-                            |column| {
-                                column
-                                    .min_w(rems(180. / 16.))
-                                    .gap_2()
-                                    .child(self.field_state(Field::ArtworkFps, cx))
-                            },
-                        ),
+                        div(),
                     )),
             ))
     }
@@ -1215,10 +1207,9 @@ impl Settings {
                             ))
                             .id("settings-appearance-help")
                             .tooltip(text_tooltip(self.tr("settings-appearance-help")))
-                            .child(self.pair(
-                                Field::VisualizationDbRange,
-                                Field::VisualizationAnimationFps,
-                                cx,
+                            .child(two_column(
+                                self.field(Field::VisualizationDbRange, cx),
+                                div(),
                             ))
                             .child(two_column(
                                 div().child(

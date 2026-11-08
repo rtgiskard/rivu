@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 19;
+pub const PROTOCOL_VERSION: u8 = 20;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -1844,7 +1844,7 @@ impl From<&rivu_format::config::Config> for WireConfig {
             visualization_enabled: value.visualization_enabled,
             visualization_signal: value.visualization_signal,
             analysis_rate_hz: value.analysis_rate_hz,
-            visualization_fps: value.visualization_fps,
+            animation_fps: value.animation_fps,
             visualization_background: value.visualization_background,
             visualization_palette: value.visualization_palette,
             spectrum_style: value.spectrum_style,
@@ -1875,7 +1875,6 @@ impl From<&rivu_format::config::Config> for WireConfig {
             artwork_mode: value.artwork_mode,
             artwork_period_seconds: value.artwork_period_seconds,
             artwork_direction: value.artwork_direction,
-            artwork_fps: value.artwork_fps,
             artwork_file_limit_mib: value.artwork_file_limit_mib,
             artwork_decode_budget_mib: value.artwork_decode_budget_mib,
             gpu_material_budget_mib: value.gpu_material_budget_mib,
@@ -1944,7 +1943,7 @@ impl From<WireConfig> for rivu_format::config::Config {
             visualization_enabled: value.visualization_enabled,
             visualization_signal: value.visualization_signal,
             analysis_rate_hz: value.analysis_rate_hz,
-            visualization_fps: value.visualization_fps,
+            animation_fps: value.animation_fps,
             visualization_background: value.visualization_background,
             visualization_palette: value.visualization_palette,
             spectrum_style: value.spectrum_style,
@@ -1975,7 +1974,6 @@ impl From<WireConfig> for rivu_format::config::Config {
             artwork_mode: value.artwork_mode,
             artwork_period_seconds: value.artwork_period_seconds,
             artwork_direction: value.artwork_direction,
-            artwork_fps: value.artwork_fps,
             artwork_file_limit_mib: value.artwork_file_limit_mib,
             artwork_decode_budget_mib: value.artwork_decode_budget_mib,
             gpu_material_budget_mib: value.gpu_material_budget_mib,
