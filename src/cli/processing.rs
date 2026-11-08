@@ -184,10 +184,18 @@ pub(super) fn run(
     action: ProcessingAction,
     json: bool,
 ) -> Result<()> {
+    match action {
+        ProcessingAction::Setup(setup) => super::processing_setup::run(data_dir, setup, json),
+        action => run_live(i18n, data_dir, action, json),
+    }
+}
+
+fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir)?;
     let mut wait = false;
     let command = match action {
         ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),
+        ProcessingAction::Setup(_) => unreachable!("setup does not use a Core session"),
         ProcessingAction::Bypass => Command::ProcessingBypass,
         ProcessingAction::Graph(action) => match action {
             ProcessingGraphAction::Show => {

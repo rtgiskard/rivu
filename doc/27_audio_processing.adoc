@@ -311,12 +311,27 @@ its own model configuration. Native speech does not use Python interpreter or
 worker paths. It requires the `onnx` build feature (enabled by default); builds
 without it reject native manifests rather than falling back to Python.
 
-Run preparation from the repository root. It requires a new destination directory
-with an existing parent and 2 GiB free. Choose `--download` or local `--weights`;
-even local weights require network access for pinned source/license evidence.
-Playback, builds and inference never download models.
-MossFormer2 loads its pinned publisher checkpoint as a strict state dictionary
-with exact parameter names.
+Use `rivu processing setup MODEL` to prepare a model without starting Core.
+Installed distributions include the preparation tools; Python 3 is required.
+Choose exactly one of `--download` or local `--weights PATH`; even local weights
+require network access for pinned source/license evidence. Preparation requires
+a new destination directory and 2 GiB free. Playback, builds and inference never
+download models. MossFormer2 loads its pinned publisher checkpoint as a strict
+state dictionary with exact parameter names.
+
+By default, bundles live under `DATA_DIR/neural/MODEL`; `--data-dir` selects the
+application data directory and `--directory PATH` selects a different new bundle.
+Existing bundles are never overwritten. To update a model/runtime, prepare a new
+directory and select its emitted paths. `--json` prints a machine-readable result;
+installer diagnostics go to stderr. Setup does not change the current model unless
+`--activate` is supplied: after successful preparation this submits the model paths
+through the running Core's normal neural-settings interface. Activation does not
+insert graph nodes or start inference. If activation fails, the prepared bundle
+remains available; configuration is not edited directly by setup.
+Standalone speech and separation settings share one worker path. Activation rejects
+replacing that path while another Python backend is selected, rather than silently
+invalidating its bundle; clear that selection explicitly before switching workers.
+Native ONNX speech does not consume the shared worker.
 
 For native speech, install ONNX Runtime 1.23 or newer using the system package
 manager (on Arch Linux: `sudo pacman -S --needed onnxruntime`). If it is not on the
@@ -326,9 +341,8 @@ there is no model-specific Python environment:
 
 [source,shell]
 ----
-mkdir -p .cache/neural
-python3 tools/audio_processing/prepare.py ul_unas --download --directory .cache/neural/ul-unas
-python3 tools/audio_processing/prepare.py gtcrn --download --directory .cache/neural/gtcrn
+rivu processing setup ul-unas --download
+rivu processing setup gtcrn --download --activate
 ----
 
 Configure the emitted `model_manifest` as the speech manifest. The bundle pins
@@ -342,14 +356,18 @@ Short inputs and partial final frames retain the original length. Numerical
 comparisons must use the same padding; see <<timeline-and-source-identity,Timeline
 and source identity>>.
 
-For Python models, with `uv` already installed, run setup from the repository
-root. MossFormer2 and Kim use `.cache/neural/.venv`. The installer resolves
-compatible dependency ranges rather than fixing every package to a historical
-version; `installed.txt` records the resulting environment. Preparation binds each
-model bundle to the exact versions installed in its selected interpreter.
-uv uses its default user cache and managed-Python locations, honoring existing
-environment configuration. Only temporary files are directed to `.cache/tmp`
-to keep large extraction/build files off memory-backed temporary storage.
+For Python models, install `uv` explicitly before running setup (on Arch Linux:
+`sudo pacman -S --needed python uv`). Setup installs an isolated CPU environment
+beside its bundle, under `BUNDLE.environment`, and prepares the bundle using that
+interpreter. Separate bundles do not share a mutable environment. Supply
+`--interpreter /absolute/venv/bin/python` to use an already prepared environment
+without installing packages; keep that environment unchanged while its bundles
+are in use. The installer resolves compatible dependency ranges rather than
+fixing every package to a historical version; `installed.txt` records the resulting
+environment. Preparation binds the bundle to those exact installed identities.
+uv honors its existing cache and managed-Python configuration. Setup directs
+temporary extraction/build files to `DATA_DIR/.cache/neural`, not the system
+temporary directory. Persistent environments and model bundles are not caches.
 
 BS-RoFormer 124-band (https://www.mvsep.com/quality_checker/entry/10197[MVSEP entry 10197], 2026-07-10) is not an installed backend:
 its exact checkpoint and complete inference configuration have not been located
@@ -364,9 +382,8 @@ fallback. Thread settings accept 1–8.
 
 [source,shell]
 ----
-python3 tools/audio_processing/install.py
-python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/.venv/bin/python"
-python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/.venv/bin/python"
+rivu processing setup moss --download
+rivu processing setup separate --download
 ----
 
 DeepFilterNet3 is optional and keeps its own pinned environment because its
@@ -374,17 +391,16 @@ NumPy dependency is below 2, whereas Kim requires NumPy 2 or later:
 
 [source,shell]
 ----
-python3 tools/audio_processing/install.py df3
-python3 tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
+rivu processing setup df3 --download
 ----
 
 Python preparation prints absolute `worker`, `interpreter` and `model_manifest`
-paths. Configure *all three* and preserve the interpreter's venv symlink rather
-than resolving it to base Python. The application does not bundle Python,
-workers, ONNX Runtime or models. An empty manifest clears model selection
-without deleting files. Interpreter and worker settings remain nonempty retained
-configuration values, but native speech never opens or executes these paths.
-Placeholders are examples, not installed resources.
+paths. Without `--activate`, configure *all three* and preserve the interpreter's
+venv symlink rather than resolving it to base Python. The application ships the
+preparation/runtime sources, not Python environments, ONNX Runtime or models.
+An empty manifest clears model selection without deleting files. Interpreter and
+worker settings remain nonempty retained configuration values, but native speech
+never opens or executes these paths. Placeholders are examples, not prepared resources.
 
 In a source checkout, inference code and schemas live in
 `tools/audio_processing/runtime/`; preparation, provisioning, export and evaluation

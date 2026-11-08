@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 ENVIRONMENTS = {
@@ -40,8 +41,12 @@ ENVIRONMENTS = {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", nargs="?", choices=ENVIRONMENTS, default="default")
+    parser.add_argument("--directory", type=Path, default=ROOT / ".cache/neural",
+                        help="writable environment and installed-lock root (default: %(default)s)")
+    parser.add_argument("--temporary-directory", type=Path, default=ROOT / ".cache/tmp",
+                        help="writable temporary-file root (default: %(default)s)")
     args = parser.parse_args()
-    root = ROOT / ".cache/neural"
+    root = Path(os.path.abspath(args.directory))
     root.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(root).free < 10 * 1024**3:
         parser.error("reserve at least 10 GiB free before installing CPU environments")
@@ -49,19 +54,23 @@ def main():
     if not uv:
         parser.error("uv is required; install uv explicitly before this installer")
     env = os.environ.copy()
-    temporary = ROOT / ".cache/tmp"
+    temporary = Path(os.path.abspath(args.temporary_directory))
     temporary.mkdir(parents=True, exist_ok=True)
     env["TMPDIR"] = str(temporary)
     version, torch_requirements, requirements = ENVIRONMENTS[args.operation]
     target = root / (".venv" if args.operation == "default" else args.operation + "-venv")
     if not target.exists():
-        subprocess.run([uv, "venv", "--managed-python", "--python", version, str(target)], env=env, check=True)
+        subprocess.run([uv, "venv", "--managed-python", "--python", version, str(target)],
+                       env=env, stdout=sys.stderr, check=True)
     python = str(target / "bin/python")
     if torch_requirements:
         subprocess.run([uv, "pip", "install", "--python", python, "--index-url",
-                        "https://download.pytorch.org/whl/cpu", *torch_requirements], env=env, check=True)
-    subprocess.run([uv, "pip", "install", "--python", python, *requirements], env=env, check=True)
-    subprocess.run([uv, "pip", "check", "--python", python], env=env, check=True)
+                        "https://download.pytorch.org/whl/cpu", *torch_requirements],
+                       env=env, stdout=sys.stderr, check=True)
+    subprocess.run([uv, "pip", "install", "--python", python, *requirements],
+                   env=env, stdout=sys.stderr, check=True)
+    subprocess.run([uv, "pip", "check", "--python", python],
+                   env=env, stdout=sys.stderr, check=True)
     frozen = subprocess.check_output([uv, "pip", "freeze", "--python", python], env=env, text=True)
     lock = root / ("installed.txt" if args.operation == "default" else args.operation + "-installed.txt")
     lock.write_text(frozen)

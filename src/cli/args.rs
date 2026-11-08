@@ -118,6 +118,8 @@ pub(super) enum ProcessingAction {
     Denoise { patch: String },
     /// Merge local interpreter/manifest settings from a NeuralPatch JSON object.
     Neural { patch: String },
+    /// Prepare a new local model bundle, without Core unless --activate is given.
+    Setup(ProcessingSetup),
     /// Process one library source. Separation requires stereo.
     Start {
         track_id: i64,
@@ -141,6 +143,36 @@ pub(super) enum ProcessingAction {
         #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = parse_gain)]
         accompaniment_gain_db: f32,
     },
+}
+
+#[derive(clap::Args)]
+pub(super) struct ProcessingSetup {
+    #[arg(value_enum)]
+    pub model: SetupModel,
+    /// Explicitly download the pinned model weights.
+    #[arg(long, required_unless_present = "weights", conflicts_with = "weights")]
+    pub download: bool,
+    /// Supply local model weights instead of downloading them.
+    #[arg(long, value_name = "PATH", required_unless_present = "download")]
+    pub weights: Option<PathBuf>,
+    /// New bundle directory; defaults to DATA_DIR/neural/MODEL.
+    #[arg(long)]
+    pub directory: Option<PathBuf>,
+    /// Existing Python environment executable; skips dependency installation.
+    #[arg(long)]
+    pub interpreter: Option<PathBuf>,
+    /// Activate the prepared bundle through the running Core after success.
+    #[arg(long)]
+    pub activate: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum SetupModel {
+    Gtcrn,
+    UlUnas,
+    Moss,
+    Separate,
+    Df3,
 }
 
 #[derive(Subcommand)]

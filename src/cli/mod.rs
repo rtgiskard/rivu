@@ -2,6 +2,7 @@ mod args;
 mod library;
 mod output;
 mod processing;
+mod processing_setup;
 mod tasks;
 
 use self::{

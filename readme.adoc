@@ -266,10 +266,17 @@ before release builds. Tag releases also check the archive checksum and both
 binaries' `--version` and `--help` output before publishing.
 
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
-the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
+the desktop entry, icons, and audio-processing preparation/runtime resources.
+Ensure `~/.local/bin` is on `PATH`. Use
+link:doc/27_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[`rivu processing setup`]
+to prepare optional neural backends; Python environments and models are installed
+only on explicit request.
 Use `make build` to build without installing, or `cargo build --locked --workspace --release`
 directly. Plain `cargo build --locked --release` builds only the application and its dependencies.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
+Package builders can use `make install-only PREFIX=/usr DESTDIR="$pkgdir"` to
+install existing release artifacts and resources without invoking Cargo. It uses
+the same installation rules as `make install`; build the workspace first.
 Local builds retain the compiler's default CPU target.
 
 Default builds enable `gui`, `tui`, `ffmpeg`, and `onnx`. Native UL-UNAS/GTCRN
