@@ -4,10 +4,22 @@ use anyhow::{bail, ensure};
 pub(super) struct ScanFinished {
     pub(super) id: u64,
     pub(super) result: Result<ScanResult>,
-    pub(super) import: Option<(String, Vec<M3uItem>)>,
+    pub(super) mode: ScanMode,
     pub(super) progress: ScanProgress,
-    pub(super) other_tracks_check: bool,
 }
+
+pub(super) enum ScanMode {
+    Library,
+    OtherTracks,
+    PlaylistImport((String, Vec<M3uItem>)),
+}
+
+impl ScanMode {
+    pub(super) fn is_import(&self) -> bool {
+        matches!(self, Self::PlaylistImport(_))
+    }
+}
+
 pub(super) enum ScanEvent {
     Progress {
         id: u64,
@@ -68,8 +80,12 @@ async fn lookup_scan_sources(
     id: u64,
     paths: Vec<PathBuf>,
     cancellation: library::ScanCancellation,
+    force: bool,
 ) -> Result<Vec<Option<library::KnownFile>>> {
     cancellation.check()?;
+    if force {
+        return Ok(vec![None; paths.len()]);
+    }
     let (reply, receive) = futures::channel::oneshot::channel();
     {
         let cancelled = cancellation.cancelled().fuse();
@@ -248,7 +264,7 @@ fn save_scan(
         None => store.apply_scan_observing(&result, saved.observed_track_id),
     };
     let impacts = match applied.with_context(|| {
-        if scan.import.is_some() {
+        if scan.mode.is_import() {
             "Failed to save scan; playlist not created"
         } else {
             "Failed to save scan"
@@ -268,7 +284,7 @@ fn save_scan(
         elapsed_ms = save_started.elapsed().as_millis(),
         "library_scan_saved"
     );
-    if let Some((name, items)) = scan.import {
+    if let ScanMode::PlaylistImport((name, items)) = scan.mode {
         let playlist = (|| -> Result<i64> {
             let ids = store.imported_track_ids(&result, &items)?;
             drop(items);
@@ -490,7 +506,11 @@ impl Core {
                 }
             };
             let preparation_started = Instant::now();
-            let mut import = None;
+            let mut mode = if other_tracks_check {
+                ScanMode::OtherTracks
+            } else {
+                ScanMode::Library
+            };
             let result = async {
                 if let ScanInput::OtherTracks { force } = &input {
                     worker_cancellation.check()?;
@@ -521,11 +541,7 @@ impl Core {
                             let cancellation = worker_cancellation.clone();
                             let force = *force;
                             async move {
-                                if force {
-                                    Ok(vec![None; paths.len()])
-                                } else {
-                                    lookup_scan_sources(sender, id, paths, cancellation).await
-                                }
+                                lookup_scan_sources(sender, id, paths, cancellation, force).await
                             }
                         },
                         ffmpeg_enabled,
@@ -536,7 +552,6 @@ impl Core {
                 }
                 let (paths, sheets, force) = match input {
                     ScanInput::Import { path, name } => {
-                        import = Some((name, Vec::new()));
                         let prepared = library::prepare_playlist_import(
                             &workers,
                             &path,
@@ -547,7 +562,7 @@ impl Core {
                         .context(
                             "Preparing playlist import; scan not saved, playlist not created",
                         )?;
-                        import.as_mut().unwrap().1 = prepared.items;
+                        mode = ScanMode::PlaylistImport((name, prepared.items));
                         (prepared.paths, Some(prepared.sheets), false)
                     }
                     ScanInput::Paths { paths, force } => (paths, None, force),
@@ -560,11 +575,7 @@ impl Core {
                         let sender = sender.clone();
                         let cancellation = worker_cancellation.clone();
                         async move {
-                            if force {
-                                Ok(vec![None; paths.len()])
-                            } else {
-                                lookup_scan_sources(sender, id, paths, cancellation).await
-                            }
+                            lookup_scan_sources(sender, id, paths, cancellation, force).await
                         }
                     },
                     library::ScanSettings {
@@ -598,8 +609,7 @@ impl Core {
             ScanFinished {
                 id,
                 result,
-                import,
-                other_tracks_check,
+                mode,
                 progress: latest,
             }
         });
@@ -643,8 +653,7 @@ impl Core {
                     result: Err(anyhow::anyhow!(
                         "Scan preparation worker panicked; scan has not been saved"
                     )),
-                    import: None,
-                    other_tracks_check: false,
+                    mode: ScanMode::Library,
                     progress: ScanProgress {
                         phase: ScanPhase::Discovering,
                         processed: 0,
@@ -727,13 +736,7 @@ impl Core {
                         paths.len() <= library::SOURCE_BATCH_SIZE,
                         "Scan source lookup batch exceeds limit"
                     );
-                    paths
-                        .iter()
-                        .map(|path| {
-                            task.cancellation.check()?;
-                            self.store.known_source(path)
-                        })
-                        .collect()
+                    self.store.known_sources(&paths)
                 })();
                 // The worker may have cancelled while this indexed read ran.
                 let _ = reply.send(result);
@@ -872,7 +875,7 @@ impl Core {
         };
         // Re-resolve membership only at the Saving boundary, after any wait for
         // relocation. Settings edits are rejected while this accepted save runs.
-        let other_roots = if scan.other_tracks_check {
+        let other_roots = if matches!(scan.mode, ScanMode::OtherTracks) {
             match library::normalize_roots(&self.preferences.settings().library_roots) {
                 Ok(roots) => Some(roots),
                 Err(error) => {
@@ -893,7 +896,7 @@ impl Core {
         task.worker = self.executor.spawn(async move {
             let id = scan.id;
             let progress = scan.progress.clone();
-            let importing = scan.import.is_some();
+            let importing = scan.mode.is_import();
             let (completed, completion) = futures::channel::oneshot::channel();
             let joined = workers.execute(move || {
                 save_scan(&database_path, current_id, scan, other_roots, completed)
@@ -1069,8 +1072,7 @@ mod tests {
             ScanFinished {
                 id: 1,
                 progress: saving_progress(),
-                other_tracks_check: false,
-                import: None,
+                mode: ScanMode::Library,
                 result: Ok(ScanResult {
                     roots: vec![path],
                     ..Default::default()
@@ -1106,8 +1108,7 @@ mod tests {
             ScanFinished {
                 id: 1,
                 progress: saving_progress(),
-                other_tracks_check: false,
-                import: Some(("Empty import".into(), Vec::new())),
+                mode: ScanMode::PlaylistImport(("Empty import".into(), Vec::new())),
                 result: Ok(ScanResult::default()),
             },
             None,

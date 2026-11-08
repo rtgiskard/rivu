@@ -254,7 +254,7 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
         };
         let scan = crate::library::scan_paths(
             &[requested],
-            |paths| paths.iter().map(|path| store.known_source(path)).collect(),
+            |paths| store.known_sources(paths),
             false,
             &[directory.path().to_path_buf()],
             crate::config::Config::default().scan_max_depth,
@@ -637,17 +637,12 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             let result = crate::library::scan_paths(
                 &requested,
                 |paths| {
-                    paths
-                        .iter()
-                        .map(|path| {
-                            assert!(path.starts_with(&good_root));
-                            if force {
-                                Ok(None)
-                            } else {
-                                store.known_source(path)
-                            }
-                        })
-                        .collect()
+                    assert!(paths.iter().all(|path| path.starts_with(&good_root)));
+                    if force {
+                        Ok(vec![None; paths.len()])
+                    } else {
+                        store.known_sources(paths)
+                    }
                 },
                 false,
                 std::slice::from_ref(&root),

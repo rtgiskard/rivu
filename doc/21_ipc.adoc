@@ -1103,11 +1103,15 @@ link:02_library.adoc#minimum-duration-for-new-tracks[Library].
 
 Metadata reuse requires the current probe version, independently of schema or
 protocol versions; mismatch reprobes without invalidating fingerprints. Preparation
-is bounded to 32 sources or CUE sheets per batch. Ordinary identities can reuse
-full-source metadata; CUE identities can reuse fingerprints and preparation across
-shared sources within configured roots. Force bypasses reuse. Cancellation and
-task identity are checked before each batch, so stale tasks cannot commit for a
-replacement. Waiting for Core holds no blocking slot.
+is bounded to 32 sources or CUE sheets per batch. Admitted source descriptors stay
+open across one indexed metadata lookup for the batch; waiting for Core holds no
+blocking slot. Each blocking turn performs at most 32 probe/read steps, hashing
+at most 4 MiB through a reusable 128 KiB buffer before yielding. A probe already
+in progress is not interruptible.
+Ordinary identities can reuse full-source metadata; CUE identities can reuse
+fingerprints and preparation across shared sources within configured roots.
+Force bypasses reuse. Cancellation and task identity are checked around lookup
+and blocking work, so stale tasks cannot commit for a replacement.
 
 Relocation matching uses fingerprint and CUE segment identity. Exact identity wins;
 multiple compatible candidates remain ambiguous, and only a confirmed missing

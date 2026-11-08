@@ -358,11 +358,23 @@ impl PendingSource {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct SourceError {
+    pub(super) message: String,
+    pub(super) not_found: bool,
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 pub(super) async fn prepare_sources<Fut>(
     workers: &BlockingExecutor,
     paths: Vec<PathBuf>,
     known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
-    sources: &mut HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
+    sources: &mut HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, SourceError>>,
     ffmpeg_enabled: bool,
     (cancellation, budget): (
         &ScanCancellation,
@@ -416,8 +428,16 @@ where
                     {
                         return Err(error.context("Import source is not a regular file"));
                     }
-                    let error = format!("{error:#}");
-                    sources.insert(path, Err(error));
+                    let not_found = error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                    sources.insert(
+                        path,
+                        Err(SourceError {
+                            message: format!("{error:#}"),
+                            not_found,
+                        }),
+                    );
                 }
             }
         }
@@ -425,14 +445,21 @@ where
             continue;
         }
         // No blocking slot is held across this Core request. Keep the admitted fds.
-        let known = known_sources(lookup_paths).await;
-        cancellation.check()?;
-        let known = match known {
+        let known = match known_sources(lookup_paths).await {
             Ok(known) => known,
             Err(error) => {
-                let error = format!("{error:#}");
+                let error = SourceError {
+                    message: format!("{error:#}"),
+                    not_found: false,
+                };
                 for (path, _, _) in opened {
-                    sources.insert(path, Err(error.clone()));
+                    sources.insert(
+                        path,
+                        Err(SourceError {
+                            message: error.message.clone(),
+                            not_found: error.not_found,
+                        }),
+                    );
                 }
                 continue;
             }
@@ -493,7 +520,13 @@ where
                                 {
                                     budget.release(media_retained_bytes(media));
                                 }
-                                completed.push((source.path, Err(format!("{error:#}"))));
+                                completed.push((
+                                    source.path,
+                                    Err(SourceError {
+                                        message: format!("{error:#}"),
+                                        not_found: false,
+                                    }),
+                                ));
                             }
                         }
                     }

@@ -587,10 +587,7 @@ impl Core {
                         paths.len() <= library::SOURCE_BATCH_SIZE,
                         "External source lookup exceeds batch bound"
                     );
-                    paths
-                        .iter()
-                        .map(|path| self.store.known_source(path))
-                        .collect()
+                    self.store.known_sources(&paths)
                 })();
                 let _ = reply.send(result);
             }

@@ -1,6 +1,6 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use super::source::{
-    CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack,
+    CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack, SourceError,
     prepare_sources,
 };
 use crate::execution::BlockingExecutor;
@@ -196,6 +196,8 @@ impl ScanResult {
 /// Recheck only the supplied physical sources, without traversing directories or
 /// expanding playlists/CUE sheets. Roots record confirmed absence only; failed
 /// opens, probes and permission checks never authorize missing reconciliation.
+/// Callers supply distinct, normalized catalog paths; reuse that selection rather
+/// than materializing, normalizing and sorting the full catalog again.
 pub(crate) async fn recheck_sources<Fut>(
     workers: &BlockingExecutor,
     paths: &[PathBuf],
@@ -208,52 +210,17 @@ where
     Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
 {
     cancellation.check()?;
-    let mut paths = paths
-        .iter()
-        .map(|path| logical_path(path))
-        .collect::<Result<Vec<_>>>()?;
-    paths.sort();
-    paths.dedup();
     let total = paths.len();
     let mut result = ScanResult::default();
-    let mut scratch = Vec::new();
+    let mut scratch = vec![0; HASH_CHUNK_BYTES];
+    let mut sources = HashMap::new();
     let mut processed = 0;
     progress(ScanPhase::ReadingMetadata, 0, Some(total), 0, None);
     for chunk in paths.chunks(SOURCE_BATCH_SIZE) {
         cancellation.check()?;
-        let batch = chunk.to_vec();
-        let token = cancellation.clone();
-        let inspected = workers
-            .execute(move || {
-                let mut inspected = Vec::with_capacity(batch.len());
-                for path in batch {
-                    token.check()?;
-                    path.to_str().context("Audio source path is not UTF-8")?;
-                    let metadata = fs::metadata(&path);
-                    inspected.push((path, metadata));
-                }
-                Ok::<_, anyhow::Error>(inspected)
-            })
-            .await
-            .context("Registered source inspection worker failed")??;
-        cancellation.check()?;
-        let mut present = Vec::with_capacity(inspected.len());
-        for (path, metadata) in inspected {
-            match metadata {
-                Ok(_) => present.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    result.roots.push(path);
-                }
-                Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
-            }
-        }
-        if !present.is_empty() && scratch.is_empty() {
-            scratch.resize(HASH_CHUNK_BYTES, 0);
-        }
-        let mut sources = HashMap::new();
         prepare_sources(
             workers,
-            present,
+            chunk.to_vec(),
             &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
@@ -263,11 +230,15 @@ where
         .await?;
         for path in chunk {
             cancellation.check()?;
-            if let Some(source) = sources.remove(path) {
-                match source {
-                    Ok(record) => result.records.push(record),
-                    Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
-                }
+            match sources
+                .remove(path)
+                .context("Registered source was not prepared")?
+            {
+                Ok(record) => result.records.push(record),
+                Err(SourceError {
+                    not_found: true, ..
+                }) => result.roots.push(path.clone()),
+                Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
             }
             processed += 1;
             progress(
@@ -920,7 +891,7 @@ async fn read_cue(
 fn cue_records(
     path: &Path,
     mut sheet: super::cue::CueSheet,
-    sources: &HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, String>>,
+    sources: &HashMap<PathBuf, std::result::Result<Arc<ScanRecord>, SourceError>>,
     cancellation: &ScanCancellation,
     budget: Option<&super::import_budget::ImportBudget>,
 ) -> Result<(
@@ -1082,7 +1053,7 @@ mod recheck_tests {
             let known = cached(&path);
             let result = recheck_sources(
                 workers,
-                &[path.clone(), path.clone()],
+                std::slice::from_ref(&path),
                 |paths| std::future::ready(Ok(vec![Some(known.clone()); paths.len()])),
                 false,
                 &ScanCancellation::default(),
@@ -1107,6 +1078,51 @@ mod recheck_tests {
             assert_eq!(forced.errors.len(), 1);
             assert!(forced.roots.is_empty());
         })
+    }
+
+    #[test]
+    fn exact_recheck_hashes_each_sources_actual_bytes() {
+        futures::executor::block_on(async {
+            let workers = BlockingExecutor::new(4);
+            let directory = tempfile::tempdir().unwrap();
+            let mut paths = Vec::new();
+            for value in [123_i16, 456_i16] {
+                let path = directory.path().join(format!("{value}.wav"));
+                let mut writer = hound::WavWriter::create(
+                    &path,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: 8000,
+                        bits_per_sample: 16,
+                        sample_format: hound::SampleFormat::Int,
+                    },
+                )
+                .unwrap();
+                for _ in 0..150_000 {
+                    writer.write_sample(value).unwrap();
+                }
+                writer.finalize().unwrap();
+                paths.push(path);
+            }
+            let result = recheck_sources(
+                &workers,
+                &paths,
+                |paths| std::future::ready(Ok(vec![None; paths.len()])),
+                false,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )
+            .await
+            .unwrap();
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.records.len(), paths.len());
+            for record in result.records {
+                let expected = blake3::hash(&fs::read(&record.path).unwrap())
+                    .to_hex()
+                    .to_string();
+                assert_eq!(record.fingerprint.as_deref(), Some(expected.as_str()));
+            }
+        });
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub(crate) struct PlaybackSource {
 }
 
 impl Store {
+    /// Select each registered physical source once, in stable path order.
     pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
         let mut statement = self.conn.prepare_cached(&format!(

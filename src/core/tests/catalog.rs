@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::catalog::ScanFinished;
+use crate::core::catalog::{ScanFinished, ScanMode};
 
 // Scan commits use another connection; all catalog task tests need a real DB.
 fn fixture() -> (tempfile::TempDir, Core) {
@@ -32,13 +32,12 @@ fn committed_scan_invalidates_before_failed_refresh() {
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
-            other_tracks_check: false,
             id: 1,
             result: Ok(ScanResult {
                 roots: vec![path],
                 ..ScanResult::default()
             }),
-            import: None,
+            mode: ScanMode::Library,
             progress: ScanProgress {
                 phase: ScanPhase::ReadingMetadata,
                 processed: 1,
@@ -252,18 +251,19 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
     let current = core.state.current_track.clone().unwrap();
     for import in [false, true] {
         let scan = ScanFinished {
-            other_tracks_check: false,
             id: 0,
             result: Ok(result.clone()),
-            import: import.then(|| {
-                (
+            mode: if import {
+                ScanMode::PlaylistImport((
                     "unchanged import".into(),
                     vec![M3uItem {
                         path: directory.path().join("1.wav"),
                         cue_track: None,
                     }],
-                )
-            }),
+                ))
+            } else {
+                ScanMode::Library
+            },
             progress: ScanProgress {
                 phase: ScanPhase::Completed,
                 processed: 4,
@@ -531,7 +531,6 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
         .unwrap();
     media.title = "Updated by scan".into();
     let scan = ScanFinished {
-        other_tracks_check: false,
         id: 0,
         result: Ok(ScanResult {
             records: (vec![ScanRecord {
@@ -546,7 +545,7 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
             .collect(),
             ..ScanResult::default()
         }),
-        import: Some(("empty".into(), vec![])),
+        mode: ScanMode::PlaylistImport(("empty".into(), vec![])),
         progress: ScanProgress {
             phase: ScanPhase::Completed,
             processed: 1,
@@ -633,7 +632,6 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             .unwrap();
         let path = directory.path().join("2.wav");
         let scan = ScanFinished {
-            other_tracks_check: false,
             id: 0,
             result: Ok(ScanResult {
                 records: (if readable {
@@ -653,7 +651,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                 errors: vec!["CUE sheet could not be read".into()],
                 ..ScanResult::default()
             }),
-            import: Some((
+            mode: ScanMode::PlaylistImport((
                 "partial".into(),
                 vec![
                     M3uItem {
@@ -814,7 +812,7 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             playlist_id: None,
             error: None,
         },
-        owner: if scan.import.is_some() {
+        owner: if scan.mode.is_import() {
             rivu_protocol::model::MediaTaskOwner::Playlist
         } else {
             rivu_protocol::model::MediaTaskOwner::Library
@@ -1084,10 +1082,13 @@ fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global(
         let status = save_prepared_scan(
             &mut core,
             ScanFinished {
-                other_tracks_check: false,
                 id: 1,
                 result: Err(anyhow::anyhow!("Unreadable scan source")),
-                import: import.then(|| ("Import".into(), Vec::new())),
+                mode: if import {
+                    ScanMode::PlaylistImport(("Import".into(), Vec::new()))
+                } else {
+                    ScanMode::Library
+                },
                 progress: ScanProgress {
                     phase: ScanPhase::Discovering,
                     processed: 0,
@@ -1173,7 +1174,6 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
-            other_tracks_check: false,
             id: 1,
             result: Ok(ScanResult {
                 records: (vec![record])
@@ -1182,7 +1182,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
                     .collect(),
                 ..Default::default()
             }),
-            import: None,
+            mode: ScanMode::Library,
             progress: ScanProgress {
                 phase: ScanPhase::ReadingMetadata,
                 processed: 1,
@@ -1369,10 +1369,9 @@ fn stale_scan_events_cannot_replace_the_active_task() {
         progress: progress.clone(),
     });
     core.scan_event(ScanEvent::Finished(ScanFinished {
-        other_tracks_check: false,
         id: 0,
         result: Ok(ScanResult::default()),
-        import: None,
+        mode: ScanMode::Library,
         progress,
     }));
     let (reply, receive) = oneshot::channel();
@@ -2016,14 +2015,13 @@ fn cue_playlist_import_preserves_repeated_segments_in_order() {
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
-            other_tracks_check: false,
             id: 0,
             result: Ok(ScanResult {
                 roots: vec![sheet],
                 segments,
                 ..ScanResult::default()
             }),
-            import: Some((
+            mode: ScanMode::PlaylistImport((
                 "CUE occurrences".into(),
                 vec![items[1].clone(), items[0].clone(), items[1].clone()],
             )),
@@ -2464,7 +2462,7 @@ fn unrelated_scan_does_not_decode_current_track_or_reread_queue_structure() {
                 roots: vec![path],
                 ..Default::default()
             }),
-            import: None,
+            mode: ScanMode::Library,
             progress: ScanProgress {
                 phase: ScanPhase::ReadingMetadata,
                 processed: 1,
@@ -2472,7 +2470,6 @@ fn unrelated_scan_does_not_decode_current_track_or_reread_queue_structure() {
                 errors: 0,
                 path: None,
             },
-            other_tracks_check: false,
         },
     );
     assert!(status.library_committed);
