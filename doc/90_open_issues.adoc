@@ -140,11 +140,9 @@ A controlled socket-pair fork/exec barrier kept a 2-second read from observing E
 after local peer close; exec then permitted EOF without retry. This proves the
 missing ownership precondition, not a reproduced failure of these Rust cases.
 
-Directory identity pins do not close inherited socket FDs. Explicit write shutdown
-already protects the PCM/waveform pipelining fixtures from this particular EOF
-dependency. Unrelated test binaries without subprocess entry points retain their
-ordinary concurrency. The now-isolated App shutdown cases no longer retain the
-obsolete process-wide logging-session test lock.
+Directory pins do not close inherited socket FDs. PCM/waveform pipelining fixtures
+with explicit write shutdown do not depend on Drop-driven EOF; unrelated test
+binaries without subprocess entry points retain ordinary concurrency.
 See link:91_design_decisions.adoc#DEC-010[DEC-010].
 
 [[socket-directory-pin-gaps]]
@@ -152,14 +150,10 @@ See link:91_design_decisions.adoc#DEC-010[DEC-010].
 
 Status: resolved and verified, 2026-11-06; see DEC-010 for the feature matrix.
 
-The root App duplicate-start and blocking-pool IPC cases, desktop-host activation
-after disconnect, GUI waveform cancellation/resumption, and visual core-instance
-rejection now use the existing pinned directory fixture. The extra full-scan
-mock request/response forwarding test was removed rather than retaining its
-raw-listener fixture; source identity behavior and real server authority checks
-remain covered.
-The duplicate empty-callback gap test was also removed; its full helper scenario
-remains exercised by the actual GUI staging regression.
+App ownership/blocking-pool IPC, desktop activation, GUI waveform retirement and
+visual core-instance rejection fixtures now pin their directory identity.
+Redundant forwarding and duplicate gap checks were removed without reducing
+source-authority or actual GUI staging coverage.
 
 Both root and GUI test binaries contain subprocess launches. Without a pin, a
 child could retain an inherited listener after local fixture deletion and, if the
@@ -220,9 +214,8 @@ PCM reproduced 164,514 retained bytes where only 82,257 were needed before corre
 after correction, independent/aliased inputs with and without bypass branches all
 matched expected ownership. This proves PCM lifetime, not model inference or RSS.
 Permanent graph regressions also cover a surviving separation output on another
-port. Application library suites passed with default features and with no default
-features; the checks use synthetic PCM and do not run neural inference.
-The PCM budget and model behavior remain unchanged. Design:
+port. Synthetic PCM checks with and without default features do not establish
+neural inference or RSS behavior. The PCM budget and model policy are unchanged. Design:
 link:91_design_decisions.adoc#DEC-012[DEC-012].
 
 [[denoise-hum-work-admission]]
@@ -292,13 +285,10 @@ Status: resolved in implementation, 2026-11-06. Follow-up
 link:#socket-eof-fixture-gaps[EOF] and link:#socket-directory-pin-gaps[identity fixture]
 corrections are recorded separately.
 
-The corrected IPC rebind/EOF and desktop singleton reacquisition checks construct
-their fixtures in bounded isolated test processes, excluding listeners inherited
-by unrelated parallel tests. App startup and shutdown share the same guarded
-runner; normal shutdown and final-save failure retain immediate reacquisition
-checks. Actual child directories in ownership tests retain File pins; GUI and App
-shutdown fixtures use the shared pinned directory helper. Ordinary test concurrency
-is unchanged.
+IPC rebind/EOF, desktop singleton reacquisition and App startup/shutdown fixtures
+now use bounded isolated test processes. Immediate reacquisition and final-save
+failure checks remain; owned directories retain identity pins. Production behavior
+and ordinary test concurrency are unchanged.
 
 CI at `481a602d` reported failure at App's final-save-error reacquisition assertion.
 That repair had omitted both App shutdown cases from isolation; the assertion did

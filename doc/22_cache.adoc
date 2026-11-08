@@ -51,12 +51,12 @@ establish a live-object leak.
 
 == Query projection retention
 
-List/tree retention is always enabled. A projection key combines normalized query
-identity and its query-owned stamp, not page offsets,
-limits, cursors, or expected revisions. A matching stamp authorizes query reuse;
-bitrate-bearing payload stamps include the committed bitrate revision. A consumer
-generation decides whether the result still serves current intent. Neither check
-can substitute for physical-worker completion.
+List/tree retention is always enabled. Reuse and publication require both the
+query-owned identity/stamp and the consumer's current intent; the definitions and
+revision domains belong to
+link:21_ipc.adoc#query-results-and-pagination[IPC query results]. Page boundaries
+are demand, not projection identity. Physical-worker occupancy is independent of
+either freshness check.
 
 === Core-owned lookup retention
 
@@ -65,8 +65,9 @@ Core's interactive track-ID LRU holds at most twice `interface.query_batch_size`
 and reducing the batch size trims immediately. Metadata edits invalidate affected
 entries; statistics and committed bitrate updates patch them. Scans and file
 admission invalidate reported data domains, or all entries if the impact is
-uncertain. Background queries and export do not use this LRU. The limit counts
-entries, not string bytes.
+uncertain. Background queries and export do not use this LRU. These are entry,
+not string-byte, limits; scalar and track retention are implemented in
+link:../src/store/cache.rs[Store's lookup caches].
 
 Count retention holds one duplicate-group total and a shared sixteen-entry LRU
 for Library, Other, directory, album, album-member, Queue, and playlist-entry totals.
@@ -119,17 +120,20 @@ corresponding Core request and does not invalidate another consumer's current da
 A submitted read holds its physical slot until reply or disconnection. Replacement,
 hiding, cancellation, and logical timeout revoke publication but do not free that
 slot. Physical retirement re-drives the latest eligible demand; old completions
-cannot publish or clear replacement requests. Core skips obsolete queued reads
-and cooperatively interrupts executing SQL, releasing its snapshot before the lease.
+cannot publish or clear replacement requests. Core cancellation and SQLite snapshot
+retirement are defined in
+link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation].
 Library navigation, panel hiding and window cancellation discard both active
 logical locate demand and any queued locate intent. A cancelled locate retains
 its physical slot until completion, but that completion cannot reveal ancestors
 or restart a discarded request.
 
-GUI admission allows two seconds and response presentation twelve seconds.
-Timeout shows an error, cancels the read, and rejects late payloads; explicit retry
-still waits for physical retirement. Transport errors have no payload stamp and
-do not prove data changed. Command deadlines are independent.
+GUI admission allows two seconds, followed by twelve seconds for response
+presentation. Timeout shows an error, cancels the read, and rejects late payloads;
+explicit retry still waits for physical retirement. Retained IPC exchanges have
+no response-wait deadline. Transport errors have no payload stamp and do not prove
+data changed; command and framing deadlines are independent
+(link:21_ipc.adoc#request-failures-and-completion[IPC waiting limits]).
 
 `RevisionChanged` and owner-scoped `Cancelled` retire the obsolete read without
 displaying a storage failure or immediately repeating identical demand. A changed
@@ -161,12 +165,14 @@ Core's current-track projection. Inline text and field-specific save acceptance
 have a separate owner; reads never overwrite the active input.
 |Collection resolution
 |Opening an album menu retains its identity, not all member IDs. Favorite,
-Unfavorite, and New playlist use one cancellable paged reader only after selection.
-Queue/Playlist copies submit versioned source identity for transactional Core
-resolution and do not depend on the GUI ID-reader gate. The loading page keeps
-menu-scope focus instead of restoring an unmounted submenu trigger. Cancellation
-preserves the physical reader gate until its matching worker completes; retirement
-notifies the window even when its logical result is stale.
+Unfavorite, and New playlist use one cancellable paged reader only after selection;
+that operation accumulates the complete ID selection before publishing it. Bounded
+pages and a single physical reader do not bound the final selection's size.
+Queue/Playlist copies instead use
+link:21_ipc.adoc#ordered-collections-and-transaction-ownership[versioned Core resolution]
+and bypass the GUI ID-reader gate. Loading retains menu-scope focus. Cancellation
+keeps the physical gate until its matching completion, which notifies the window
+even when the logical result is stale.
 |Duplicate review
 |Stable selected identities survive reference refreshes, but commands require
 current facts. A failed or timed-out status read does not release the relocation
@@ -290,11 +296,10 @@ link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing].
 
 === Scope and contract
 
-Reusable visualization data is always cached within its owners' resource bounds.
-Reuse does not change audio analysis, waveform samples, spectrum levels, palette
-mapping, or playback state. Settings and display controls are documented in
-link:01_config.adoc[Configuration and layout]; signal continuity and rendering
-rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
+Visualization reuse is owner-bounded and independent of artwork and font caches.
+Settings belong to link:01_config.adoc[Configuration and layout]; signal meaning,
+continuity and rendering rationale belong to
+link:23_visuals.adoc[Visualization Rendering Design].
 
 The ownership layers have different retirement boundaries:
 
@@ -317,14 +322,12 @@ final drawing; the per-view rules below distinguish those lifetimes.
 view releases it; completion-aware retirement is independent of logical demand.
 |===
 
-Artwork and font caches have separate owners and lifetimes, independently
-of visualization enablement.
 
-Disabling visualizations suspends capture rather than merely changing cache policy: it stops
-visualization demand and discards live-analysis results and derived graphics,
-while retaining bounded waveform summaries. Its analysis, coverage and late-result invariants are authoritative in
-link:23_visuals.adoc#visualization-enablement[Visualization Rendering Design]. Graphics that
-have already been submitted still follow the retirement boundary below.
+Disabling visualizations stops capture demand, discards live-analysis results and
+derived graphics, and retains bounded waveform summaries. The admission and
+late-result contract belongs to
+link:23_visuals.adoc#visualization-enablement[Visualization enablement]; submitted
+graphics still follow renderer retirement.
 
 === Reuse and invalidation
 
@@ -342,11 +345,9 @@ only identity tokens and cannot pin or restore obsolete summaries. Progressive
 and full-load updates, unknown intervals and summary replacement follow
 link:23_visuals.adoc#waveform[Waveform signal and lifetime rules].
 
-Finite PCM sessions use bounded chunks, reusable framing storage and backpressure,
-not whole-track PCM retention. Physical worker admission survives logical
-cancellation until worker exit; see
-link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering]. The renderer separately
-owns GPU upload retirement.
+Preview chunks, backpressure and physical render-worker ownership belong to
+link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering]; GPU uploads retire
+independently.
 
 ==== Spectrum
 
@@ -467,13 +468,16 @@ alignment. The mapping reserves that maximum, but setup prefaults only configure
 metadata and sample pages; previously faulted pages can remain resident after a
 smaller configuration. Before output setup, the fallback is 32 slots of 1024 frames
 and 18 channels (2.25 MiB of samples).
+These capacities follow
+link:../crates/rivu-shm/src/lib.rs[the shared-memory storage and retention contract].
 
-Capture appends contiguous fragments within logical blocks, with no publication
-allocation. Neither IPC nor GUI transport retains another PCM queue; the GUI's
-logical stereo analysis history remains separate. Slots are never pinned by
-readers, so a stalled GUI cannot retain or extend Core storage. These are bounded
-mapping/sample capacities, not process RSS limits. The transport contract belongs
-to link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport].
+Capture appends contiguous fragments within logical blocks without publication
+allocation. Readers cannot pin slots or extend retention. Mapping/sample capacities
+are not RSS limits; direct-observation fences and transport ownership belong to
+link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport]. Each GUI reader
+also reuses stereo scratch for at most 1024 frames (8 KiB of sample storage),
+validating the complete SHM read before analysis and waveform ingestion. GUI
+analysis history and the audio worker's processed Before FIFO are separate allocations.
 
 The processed Before tap's native-channel source-aligned FIFO is separate from the analysis ring
 and waveform retention. Capture-identity changes, inactive analysis or exhaustion
@@ -493,6 +497,8 @@ FFT window. During suspension those prepared pools can remain allocated until
 active demand is reconciled again or the analyzer is replaced or destroyed;
 their accepted samples and GUI staging are not retained as current input. The
 five-slot PCM pool retains at most 160 KiB of stereo sample storage per analyzer.
+The optional pools and demand transitions are implemented by
+link:../crates/rivu-analysis/src/engine.rs[the GUI-side analyzer].
 
 Spectrogram full-bin analysis uses three reusable immutable slots, each holding
 `analysis_fft_size / 2` calibrated dB values. Their sample storage totals 48 KiB
@@ -527,12 +533,11 @@ or audio properties. Unsupported containers have no decoder-based metadata fallb
 Read-only conversion drops format-specific remainders used only for tag writeback;
 explicit source edits retain native tag structures instead.
 
-Lofty's public single-allocation limit is set to 128 MiB to accommodate the
-configured cover sizes and container overhead. Embedded cover selection checks
-the encoded image size after parsing: the default is 16 MiB, following
-`interface.artwork_file_limit_mib` (1–64 MiB, applied after restart). Unusable
-front covers do not hide other usable pictures. These limits do not bound total
-parser memory; upstream readers may buffer a complete tag before selecting images.
+Lofty's public single-allocation limit is 128 MiB to accommodate configured cover
+sizes and container overhead. Embedded cover selection applies the
+<<encoded-files-and-maintenance,encoded-image admission limit>> after parsing;
+an unusable front cover does not hide other usable pictures. Neither limit bounds
+total parser memory: upstream readers may buffer a complete tag before selection.
 
 Native audio decoding has a separate Symphonia metadata allowance and does not
 publish descriptive tags. Playback and PCM rendering do not run
@@ -554,14 +559,21 @@ separate costs. The encoded-image admission limit does not bound decoded pixels.
 
 == Artwork lookup retention
 
-Artwork has three different retention layers: the application lookup identifies
-source results, encoded files persist on disk, and each window owns decoded
-display images. Releasing one layer does not imply reclamation of the others.
-
 The optional `rivu-metadata` artwork service accepts source identity and path,
-independently of track models. Core and desktop processes own separate lookup
-managers and background scheduling over one shared disk cache; windows own decoded
-display images.
+independently of track models. Retention has three distinct owners:
+
+[cols="1,3",options="header"]
+|===
+|Layer |Owner and lifetime
+|Source lookup and URI leases
+|Separate Core and desktop managers, each with process-local lookup state and
+background scheduling; a lease can outlive its manager.
+|Encoded files
+|One shared disk cache; files persist until explicit maintenance.
+|Decoded display images
+|Window consumers and scene retirement; releasing a lookup or disk file does not
+reclaim installed pixels.
+|===
 
 [[artwork-uri-leases]]
 === Process-local lookup and shared URI leases
@@ -667,11 +679,10 @@ state. Publication acquires protection before exposing the original. File descri
 and locks retire with their owners or process exit; cache-only reads neither probe
 the filesystem nor acquire new locks.
 
-Release makes results evictable, and eviction does not delete files. Cleanup is
-age-based, not a capacity guarantee, so disk use can grow until requested. Busy
-originals are skipped rather than waiting for their consumers; unrelated probes
-do not exclude maintenance. Maintenance never touches audio sources and reports
-inspection/deletion failures.
+Release makes lookup results evictable; eviction does not delete files. Cleanup
+skips busy originals rather than waiting, does not exclude unrelated probes, never
+touches audio sources, and reports inspection/deletion failures. Age-based cleanup
+is not a disk-capacity guarantee.
 
 === Cached panel drawing
 
@@ -795,6 +806,10 @@ media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
 
 == Font and rendering resources
 
+The backend policies below describe the GPUI fork pinned by
+link:../Cargo.toml[Cargo.toml], not unmodified upstream GPUI. GPU-material admission
+and renderer API guarantees belong to link:25_gpu_rendering.adoc[GPU rendering].
+
 === Native graphics preparation
 
 Native window creation selects instance, surface and device together. Vulkan
@@ -887,18 +902,13 @@ larger paths work but discard oversized scratch afterward. Checked-out scratch
 cannot affect submitted Paths. GPUI idle reclamation releases its calling thread's
 idle scratch; other threads retain only their bound until exit.
 
-Ordinary Paths and multisampled GPU materials, including rectangles and segments,
-share one renderer-owned resolve/MSAA scratch pair. Current demand is the
-componentwise maximum of clipped raster extents; retained attachment capacity
-may exceed it. Bounded slack absorbs small changes, fitting demand reuses the
-pair, and sustained low demand reclaims capacity rather than replacing it on
-every size change. Capacity stays within the physical viewport/device limit;
-growth or a lower limit replaces it immediately. A frame with no raster demand
-drops renderer ownership. Capacity slack does not enlarge raster or composition
-bounds. Submitted GPU work retains replaced resources until completion;
-reclamation neither destroys in-flight textures nor waits for the GPU. These
-attachment bytes are separate from the GPU-material buffer budget. Exact
-capacity and reclamation policy is authoritative in
+Ordinary Paths and multisampled GPU materials share one renderer-owned
+resolve/MSAA scratch pair. Capacity follows clipped raster demand with bounded
+slack and sustained-low-demand reclamation. A frame with no raster demand drops
+renderer ownership; submitted work retains replaced attachments until completion,
+without CPU waits or destruction of in-flight textures. Attachment bytes are
+separate from the material-buffer budget. Viewport/device limits, exact capacity
+policy and rendering constraints belong to
 link:25_gpu_rendering.adoc#shared-local-multisample-scratch[Shared local multisample scratch].
 Instance storage above its initial capacity shrinks after
 120 successful frames at no more than one-quarter utilization, retaining twice

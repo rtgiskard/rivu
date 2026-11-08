@@ -10,7 +10,7 @@ Ownership follows lifetime rather than the visible panel tree:
 |===
 |Owner |State |Lifetime boundary
 |Playback core
-|Playback, queue, global configuration and audio analysis
+|Playback, queue, global configuration and native PCM capture
 |Independent of desktop panels and layout edits
 |GUI session
 |Latest published layout collection and its single persistence worker
@@ -541,40 +541,29 @@ this image transformation path and uses the water/light composition without the
 photographic reflection. These studies do not implement physical fluid simulation,
 live desktop transparency, or refraction of arbitrary interface content.
 
-The Textures entry opens an undimmed live-preview adjustment card, including
-while effects are disabled. Turning effects off leaves the card open, cancels
-uncommitted parameter editing and disables preset, adjustment and reset controls.
-A compact grouped selector provides Texture and Water;
-Show experimental presets includes the remaining studies. Reset selected preset
-follows that switch and restores only the selected preset. Each selection
-restores its own saved parameters. Edits retain the preset identity; returning
-all values to their baseline clears the modified state. Fixed-appearance presets
-show an explanation instead of parameter controls. Supported controls cover
-surface, cover, optics, motion and list appearance.
-The compact card opens directly above the application footer and grows only to
-fit its content, within the available viewport. Property rows follow Track Details:
-aligned labels and plain-text values, with an edit icon revealed by hover or keyboard
-focus. Compact rows have no added vertical gap and retain their height while
-editing. The icon opens a single-line editor; Enter commits and Escape cancels.
-Units accompany values rather than repeating in labels, and remain visible while
-editing. Invalid numbers stay in the editor with an error indicator and tooltip
-instead of being saved or silently clamped. The parameter body scrolls independently.
-The title bar owns the single enablement switch, with state conveyed by its glyph.
-The experimental-visibility switch and Reset follow it as symbol icon buttons
-with localized tooltips. Clicking outside the card dismisses it; there is no
-separate Close button.
-Compatibility with extremely small windows is outside the material card's accepted scope.
-Parameters save as interface preferences, not theme, playback or layout data.
-Transition duration and motion speed can both be reduced to exactly zero: zero duration disables the
-dissolve, and zero speed leaves coherent static artwork without retaining a
-transition predecessor. This is a fixed parameter surface, not a user shader
-compiler or node editor.
-The card is a mutually exclusive shell surface, sharing the shell's ordered
-composition and keyboard routing. Tab stays within its focus scope. Escape
-cancels an active numeric edit first; otherwise it closes the card. A covering
-metadata confirmation owns focus until dismissed. Closing the last window drops
-the card and transient editors, not saved preferences; reopening does not revive
-a stale modal focus owner.
+The Textures card is an undimmed live preview above the application footer. It
+fits its content within the viewport; its parameter body scrolls independently.
+The title bar owns the enablement switch. The grouped selector, Experimental
+visibility and Reset controls share the next row, with localized tooltips for
+symbol buttons. Fixed-appearance presets show an explanation instead of controls.
+Turning effects off leaves the card open but cancels uncommitted parameter edits;
+the read-only policy above applies. Outside click dismisses it; there is no Close
+button. Extremely small windows are outside this card's accepted scope.
+
+Property rows use aligned labels and plain-text values, with an edit icon revealed
+by hover or keyboard focus. Rows retain their compact single-line height while
+editing. Enter commits and Escape cancels; units remain visible beside the value.
+Invalid numbers remain in the editor with an error indicator and tooltip, never
+saved or silently clamped. Transition duration and speed accept exactly zero:
+zero duration disables dissolving, while zero speed keeps static artwork without
+retaining a transition predecessor. These are predefined compositions, not a user
+shader compiler or node editor.
+
+The card shares the shell's exclusive surfaces, ordered composition and keyboard
+routing. Tab stays within its scope; Escape cancels a numeric edit before closing
+the card. A covering metadata confirmation owns focus until dismissed. Closing
+the last window drops transient editors, not saved preferences; reopening cannot
+revive the old modal focus owner.
 
 The source-image studies from Gradient translucency through Celtic storybook share
 decoded artwork rather than generating per-frame bitmaps. Image masks,
@@ -643,45 +632,35 @@ constant backdrop contribution. Combined feathered masks use ordinary source-ove
 coverage rather than exact dual-texture alpha interpolation. Celtic storybook is an original
 storybook-style experiment, not an imported film asset or character reproduction.
 
-The procedural presets are not Continuous water's cover displacement: each paints one independent
-root canvas through `Window::paint_cg_water` and never samples, reflects or distorts
-the album cover or interface text. None requests an artwork-atmosphere consumer. CG Water's fixed
-procedural shader uses perspective and a horizon, analytic multiscale wave
-normals, Fresnel reflection of a procedural sky, water absorption and glints.
-This is an artistic water surface, not physical fluid simulation, real scene/depth
-reflection, desktop transparency, or an image-effect/plugin framework. Panel
-tints remain local and album artwork and foreground text retain their normal
-rendering and input behavior.
+Procedural water presets paint one independent root canvas through
+`Window::paint_cg_water`, without artwork demand or sampling/distortion of covers,
+interface text or the desktop. Foreground rendering and input geometry are
+unchanged; panel tints remain local. This is artistic water, not physical fluid
+simulation, scene/depth reflection or an image-effect/plugin framework.
 
-The other procedural presets remain independently selectable, not replacements
-or retunings of CG Water. `CgWaterStyle` selects their fixed shader compositions:
-Rain ripples refracts a clear shallow bed with expanding ripples; Shallow stream
-has downstream light filaments rather than rings; the Water group's Mirror lake
-reflects a broad sky through horizontal wind; After rain uses sparse rain packets
-with fading lifetimes; Water garden projects six soft leaf shadows over the water
-bed; Clear crystal bends light through nearly colorless curved sheets.
-All share the root-only canvas and local panel tints,
-leaving foreground content and input geometry unchanged.
+`CgWaterStyle` selects separate fixed compositions: CG Water uses perspective,
+a horizon, multiscale analytic normals, Fresnel sky reflection, absorption and
+glints; Rain ripples refracts a shallow bed with expanding ripples; Shallow stream
+uses downstream light filaments; the Water group's Mirror lake reflects a broad
+sky through horizontal wind; After rain uses sparse fading rain packets; Water
+garden projects six soft leaf shadows; Clear crystal bends light through nearly
+colorless curved sheets. None replaces or retunes another preset, and none is
+Continuous water's cover displacement.
 
-Only panel opacity, wave strength, water highlight and speed are exposed for
-procedural presets. Wave strength maps the session's existing `0..16` wave range to normalized
-`0..1` shader amplitude and is displayed as a percentage, not pixel displacement.
-These presets do not expose feather, grain, cover blur, backdrop blur, edge fade,
-color-level or cover-transition controls. Rain ripples starts at 45% panel opacity,
-25% wave strength, 32% highlight and 0.55× speed; CG Water's baseline remains
-unchanged. Selecting a preset restores its own session values and changes the
-selected identity; stale controls from another preset cannot edit it. Reset
-restores only the selected preset's defaults. Modified-state tracking compares
-that preset's session settings with its own baseline.
-All use a 24-second cycle at speed 1 on GPUI's synchronized repeating clock
-with a seamless periodic phase. Inactive windows, reduced motion and
-exact zero speed or wave strength select a static phase without attaching that
-animation. The caller owns scheduling; the renderer receives only bounds and
-scalar parameters. None adds per-frame bitmap generation, image uploads,
-geometry grids or unbounded caches. Their covered pixels still incur procedural
-shader work; this is not a claim of measured performance improvement.
-Unsupported native rendering backends reject procedural water explicitly rather
-than silently substituting artwork.
+Their only controls are panel opacity, wave strength, water highlight and speed.
+Wave strength maps the stored `0..16` range to normalized `0..1` shader amplitude
+and displays as a percentage, not pixels. Rain ripples defaults to 45% panel
+opacity, 25% wave strength, 32% highlight and 0.55× speed; CG Water retains its own
+baseline. Per-preset restoration, Reset and modified-state tracking follow the
+shared preference contract above; stale controls cannot edit a different preset.
+
+All use GPUI's synchronized, seamless 24-second cycle at speed 1. Inactive windows,
+reduced motion, zero speed or zero wave strength select a static phase without
+attaching animation. The caller schedules motion; the renderer receives bounds
+and scalar parameters only. No per-frame bitmaps, image uploads, geometry grids
+or unbounded caches are added, but covered pixels still incur shader work: no
+measured performance improvement is claimed. Unsupported native backends reject
+procedural water rather than substituting artwork.
 
 
 == GUI composition boundaries

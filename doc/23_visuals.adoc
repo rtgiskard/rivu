@@ -82,9 +82,10 @@ execution failure stops playback rather than resuming uncertain decoder state.
 === Ingestion and publication
 
 PCM arrival and output-cursor progress wake GUI analysis to ingest a finite retained
-prefix independently of display requests. Native samples are read directly from
-the shared window without an intermediate stereo PCM buffer. Readers do not pin
-slots; post-read revision/configuration checks reject overwritten observations.
+prefix independently of display requests. The reader folds native-channel samples
+into one reusable stereo scratch block of at most 1024 frames, then validates the
+complete shared-memory read before either analysis or Waveform can consume it.
+Readers never pin slots or make playback wait; overwritten observations are rejected.
 Each scheduling round processes at most 32 logical blocks and yields between
 continuations. Growing partial tails retain a frame offset so every accepted frame
 is ingested once, including across subscription boundaries. `analysis_rate_hz`
@@ -301,8 +302,8 @@ finite-render requests. Decode loops observe cancellation between packets, but
 cannot interrupt a blocking file/container/codec call; physical admission remains
 held until worker exit. Cancellation is not a load failure. Re-enabling restores
 the retained waveform display but does not restart an interrupted full load.
-The application-menu Visualizations entry opens its Settings page without
-changing enablement. Changes follow the Settings draft's Apply/Discard contract.
+The application-menu Visualizations switch changes enablement immediately through
+Core. The Settings control instead follows its draft's Apply/Discard contract.
 The disabled-state icon and controls are described in
 link:01_config.adoc#visualization-enablement[Visualization enablement].
 
@@ -507,24 +508,23 @@ not settings awaiting a new frame. Calibrated linear bin power preserves
 single-sided DC/Nyquist normalization without a CPU dB-to-power round trip.
 Overflowing power is omitted rather than promoted to a saturated bright cell.
 
-Both styles retain fixed-resolution numerical fields and share one GPU publication
-per style across panels. Enlargement does not multiply source resolution, publish
-another snapshot or advance analysis. Semantic continuity breaks revoke the old
-publication. Hiding retains only its last immutable field publication and releases
-CPU field/history/mapping storage. Color/range changes use accepted active fields
-rather than another FFT. There is no CPU-generated field image or application
-image-retirement queue.
+Both styles share one fixed-resolution numerical GPU publication per style across
+panels. Enlargement neither increases source resolution nor advances analysis.
+Semantic continuity breaks revoke the publication; hiding retains only that final
+field and releases CPU field/history/mapping storage. Active color/range changes
+republish from accepted fields, without another FFT or a CPU-generated image.
+There is no application image-retirement queue.
 
 Color ramps derive from the configured visualizer colors, with increasing
 lightness and pale highlights reserved for the strongest cells. Density has a
 cyanward intermediate hue; Spatial Spectrum retains the primary-to-secondary
-hue progression. A bounded 256-sample straight RGBA palette is rebuilt only when
-configured colors change and uses 8-bit color/alpha quantization.
-The shader maps each of four neighboring scalar values to its quantized palette
-sample before interpolating colors. Opacity lifts faint cells without renormalizing
-the field: occupancy and spectral power retain fixed dB references, and empty cells
-remain transparent. Each changed field still copies/uploads four bytes per cell;
-the benefit is removing CPU coloring, not automatically reducing upload bytes.
+hue progression. The 256-sample straight RGBA palette uses 8-bit quantization
+and rebuilds only on color changes. Opacity lifts faint cells without
+renormalizing their fixed dB references; empty cells remain transparent.
+The GPU maps each neighboring scalar to its quantized color before interpolating,
+as specified in link:25_gpu_rendering.adoc#different-consumers-and-interface-extraction[Field sampling].
+Each changed field still copies/uploads four bytes per cell: CPU coloring is
+removed, not upload bytes.
 
 == Spectrogram
 

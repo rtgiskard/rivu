@@ -2,13 +2,11 @@
 :toc:
 :toclevels: 2
 
-This chapter follows the boundary from application ownership through socket
-sessions and consistency to the business operations behind them. External clients
-need <<transport-and-frame-format,framing>>, <<session-handshake,Hello>>,
-<<revisions-and-watching,revisions>>, and
+External clients need <<transport-and-frame-format,framing>>,
+<<session-handshake,Hello>>, <<revisions-and-watching,revisions>>, and
 <<request-failures-and-completion,completion semantics>> before issuing commands.
-Query and task results belong to the running instance; neither a timeout nor a
-disconnected client rolls back an accepted operation.
+State, query results and task identities belong to one running instance;
+client timeout or disconnection does not roll back an accepted mutation.
 
 == Core and client boundary
 
@@ -70,11 +68,12 @@ Core instance.
 
 High-rate audio uses a separate bounded shared-memory PCM window. Core owns
 capture and audio identity; `rivu-analysis` runs display DSP in the GUI background
-worker. GUI analysis reads native channels directly and uses the observed output
-frame cursor to avoid consuming far-ahead samples. Overwrites discard old realtime
-data without blocking playback. The GUI session owns waveform summaries and folds
-the same admitted PCM as live analysis; Core and audio execution publish no waveform
-statistics. Explicit previews consume the generic finite PCM endpoint below.
+worker. The GUI folds native-channel blocks into reusable stereo scratch and
+validates each complete SHM read before analysis or waveform ingestion. The
+observed output cursor prevents far-ahead consumption; overwrites discard old
+realtime data without blocking playback. The GUI owns waveform summaries of the
+same admitted PCM; Core publishes no waveform statistics. Explicit previews use
+the finite PCM endpoint below.
 `rivu-presentation` supplies localization, keyboard semantics, theme mapping and
 shared images without GPUI, audio execution or database dependencies.
 
@@ -143,8 +142,9 @@ Native-channel stride and active pages are configured and prefaulted outside
 capture publication. Retention is bounded independently of the number of clients
 (at most 16); neither readers nor a stalled GUI can extend it. Resource bounds
 belong to link:22_cache.adoc#visualization-caching[Visualization caching].
-There is no private capture queue, middleware PCM copy or per-client PCM queue.
-Analysis history and the processed Before FIFO are separate allocations.
+There is no private Core capture queue or per-client PCM queue. GUI stereo
+scratch/history and the audio worker's processed Before FIFO are separate
+allocations.
 
 PCM publications and cursor progress wake enabled receivers. Each subscription
 request acknowledges its own revision and current sequence/frame-offset frontier;
@@ -175,6 +175,10 @@ Frames are bounded to 256 KiB. A `Read` request carries expected source identity
 and decoder hint), optional playback source generation, explicit Before/After
 signal and optional selected-source-relative range. Core reloads the authoritative
 Track and checks that expectation; clients do not supply authoritative metadata.
+The endpoint admits at most eight sessions, independently of command and realtime
+PCM limits; excess connections close without a busy response. Each session accepts
+one Read, not a request stream. Disconnect or further client input requests
+retirement; there is no separate finite-render cancellation frame.
 
 The initial Hello frame has a one-second deadline. After the Hello reply, the single
 `Read` request must arrive within five seconds; an idle or incomplete request closes
@@ -207,9 +211,7 @@ outstanding. GUI preview policy and summary ownership are defined in
 link:23_visuals.adoc#waveform[Waveform].
 
 Side-channel accept loops, realtime PCM control sessions and finite PCM forwarding
-yield cooperatively, including when buffered input and output complete without
-waiting. Finite forwarding remains ordered and lossless under queue and socket
-backpressure; cancellation still retains the physical lease until worker exit.
+yield cooperatively, including when buffered I/O completes without waiting.
 
 === Owner execution and retirement
 
@@ -230,24 +232,23 @@ completion or shutdown.
 Core serializes foreground SQLite writes with their revision transitions. Admitted
 background saves retain independent transaction evidence until Core accepts their
 completion; database commit and display-projection refresh are not one atomic
-operation. A separate bounded query owner reuses a read connection and pins a
-SQLite snapshot per request, validating it against captured Core revisions. The
+operation. A separate query owner has a 64-entry work queue, reuses one read
+connection, and pins at most one SQLite snapshot, validated against captured
+Core revisions, per request. Its queue is independent of Core request admission.
+The
 publication fence and save gate prevent reads from pairing committed database
 changes with preceding state. Count reuse follows data-domain revisions;
 maintenance waits for physical snapshot retirement.
 
-IPC disconnection or shutdown drops a pending query's reply receiver. Demand
-replacement and logical failure revoke the corresponding read, including an
-executing SQL statement. A request-scoped SQLite progress handler observes
-cancellation between bounded VM instruction batches; it is detached before
-snapshot cleanup. Cancellation is cooperative, not a hard filesystem/I/O deadline.
-The query owner retains its physical lease through SQL exit and snapshot cleanup
-before replying or executing the next read. This does not cancel accepted commands.
+Reads have owner-scoped cancellation and retain their physical lease through SQL
+exit and snapshot cleanup; see <<retained-read-cancellation,Retained reads and cancellation>>.
+Accepted commands have independent lifetimes.
 
 App explicitly supplies execution capabilities to Core and services, independently
-of the business `CoreHandle`. It retains `TaskRuntime` through Core, service, and
-GUI resource retirement. File, probe, and background transaction stages share at
-most four blocking slots; waiting for Core admission or replies holds none.
+of the business `CoreHandle`. It retains `TaskRuntime` through Core, service and
+IPC retirement; the separate desktop owns its GPUI execution resources. File,
+probe and background transaction stages share at most four blocking slots;
+waiting for Core admission or replies holds none.
 `BlockingExecutor` bounds physical closures, not a private pool of threads. A
 closure keeps its slot after async cancellation. Shutdown joins started work
 before retiring execution: cancelling a waiter is neither worker retirement nor
@@ -330,7 +331,8 @@ receive Error and close that session. Other sessions remain usable.
 Query read-ahead is bounded to one maximum request frame plus its prefix. Complete
 frames wait untimed and in order behind earlier replies; incomplete tails retain
 their deadline even when the buffer is full. A framing failure drops the pending
-reply receiver, without interrupting or replaying SQL.
+reply receiver and revokes the read through
+<<retained-read-cancellation,cooperative cancellation>>, never replaying SQL.
 
 Query waits share a cooperative budget of 32 read-ahead or cancellation steps,
 including runs of already-buffered `QueryCancel` frames. They yield when that
@@ -441,10 +443,15 @@ and field order are part of the binary schema.
 
 === Wire schemas
 
-Configuration state carries the effective `Config` and `config_path`; its Config
-uses the explicit positional `WireConfig` adapter. Runtime `SystemState` contains
-no configuration payload. Both section schemas are versioned positional contracts;
-collection lengths and optional fields are encoded in the message body.
+Configuration state carries the low-frequency settings `Config` and `config_path`
+through the positional `WireConfig` adapter. Its copies of volume, shuffle, repeat
+and output-device preference may lag live controls: current values are
+`playback.volume`, `playback.shuffle`, `playback.repeat` and
+`system.selected_device`. These controls do not advance the Configuration token.
+Apply and persistence merge them with settings at Core's checkpoint boundary;
+clients must not treat `configuration.config` as a live-control snapshot.
+Runtime `SystemState` contains no configuration payload. Both section schemas
+are versioned positional contracts; lengths and optional fields are in the body.
 Processing is an independent selected state section and revision domain. Its
 payload is `processing.task`; requested empty processing explicitly clears the
 task, while an omitted section preserves the client's current task. System wire
@@ -476,12 +483,9 @@ accepted audio source, not the latest processing task or current editor draft.
 Desktop analysis and finite PCM requests use those facts to reject results from a
 retired source; path equality alone does not establish source identity.
 
-The codec and positional payload schema are not negotiated. Changes require
-coordinated client and server updates, preserving configuration semantics such
-as omitted overrides inheriting their common setting. The IPC protocol version
-is independent of on-disk configuration and database schema versions:
-`WireConfig` transports runtime settings, not a versioned TOML document. Disk
-version authority and maintenance belong to
+The IPC protocol version is independent of on-disk configuration and database
+schema versions: `WireConfig` transports runtime settings, not a versioned TOML
+document. Disk version authority belongs to
 link:26_migration.adoc#version-authority[Database and configuration migration].
 
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
@@ -500,6 +504,29 @@ Exact positional schemas and adapters are defined in
 link:../crates/rivu-protocol/src/wire.rs[wire.rs];
 link:../crates/rivu-protocol/src/transport.rs[transport.rs] owns framing and deadlines.
 
+[[retained-read-cancellation]]
+=== Retained reads and cancellation
+
+`QueryRetained {id, query}` keeps the serial reply slot until Core returns a
+result or the connection closes. Unlike ordinary `Query`, it has no server or
+client response-wait deadline after Core admission. A logical UI timeout revokes
+publication rights, not physical ownership.
+
+While that request is pending, `QueryCancel(id)` on the same session cancels only
+the matching retained read. It emits no reply; the original Query response still
+retires the exchange. Unmatched or late cancellation is inert. Clients drain that
+response before sending replacement demand; cancellation does not multiplex queries.
+`rivu_client::ClientSession::query_retained_until` performs this exchange.
+
+Cancellation reaches Core's queued read and executing SQL. A request-scoped SQLite
+progress handler checks cancellation between bounded VM instruction batches and is
+detached before snapshot cleanup. Disconnection or server shutdown drops the reply
+receiver and also revokes the read. The query owner releases its physical lease
+only after SQL exit and snapshot cleanup, before replying or starting the next read.
+Cancellation is cooperative, not a hard filesystem/I/O deadline, and never cancels
+an accepted command. Frontend admission, timeout presentation and retained payloads
+are described in link:22_cache.adoc#demand-cancellation-and-physical-retirement[Query resource lifecycles].
+
 === Request failures and completion
 
 Well-formed requests with invalid values, handshake-order errors, and server-side
@@ -508,27 +535,37 @@ instead appear in the Query result, and core command failures in an unsuccessful
 Ack. Transport failure or an oversized response can end the connection without
 a usable response.
 
-Core request capacity is bounded to 64 queued operations. Requests waiting for
-capacity or a result can fail as unavailable; UI fire-and-forget sends report
-`Rivu is busy or stopped` rather than blocking. Core allows two seconds for queue
-admission and twelve seconds for a reply, or 120 seconds for database optimization.
-The operation interface owns that total waiting budget; IPC adds one second for
-the server bridge rather than classifying commands again. Local ShowWindow and
-Shutdown operations have a twelve-second budget without queue admission.
+Core's command/request queue holds at most 64 operations. Admission allows two
+seconds, followed by twelve seconds for an ordinary reply or 120 seconds for
+database optimization. UI fire-and-forget sends fail with `Rivu is busy or stopped`
+rather than blocking. IPC adds one second to the operation's waiting budget for
+the server bridge; it does not classify commands again. Local ShowWindow and
+Shutdown allow twelve seconds without Core queue admission. State and Hello read
+published state directly. Retained reads use the admission budget but await physical
+completion as described <<retained-read-cancellation,above>>.
 Each server response write, including Hello, Error, busy replies, and shutdown
 acknowledgements, has a five-second completion deadline covering write and flush.
 Client request writes use the same five-second write-and-flush deadline, including
-Hello, Watch, and WaitTask requests. Serialization precedes that deadline; the client response
-read deadline starts only after the request write and flush complete. A stalled
-write discards that connection; server writes cannot block teardown indefinitely.
+Hello, Watch, and WaitTask requests; serialization precedes it. A stalled write
+discards that connection, so server writes cannot block teardown indefinitely.
 Accepted operations still finish their replies during shutdown rather than
 cancelling acknowledgements when shutdown starts.
-Client response reads cover the operation budget, bridge allowance, response-write
-deadline and one additional second for transport: 21 seconds for queries, state
-reads (including Hello) and ordinary commands, 129 seconds for database optimization,
-and 19 seconds for ShowWindow or Shutdown. Persistent and one-shot sessions use
-the same policy. Watch and WaitTask have no response deadline. These are waiting
-limits, not guarantees on operation execution time or system scheduling.
+Client response reads start after write/flush and include the operation budget,
+bridge allowance, server response-write deadline and one additional transport
+second:
+
+[cols="2,1",options="header"]
+|===
+|Request |Client response-wait limit
+|Ordinary Query, State, Hello and ordinary commands |21 seconds
+|Database optimization |129 seconds
+|ShowWindow and Shutdown |19 seconds
+|QueryRetained, Watch and WaitTask |No response-wait deadline
+|===
+
+Persistent and one-shot sessions use the same policy. These are waiting limits,
+not guarantees on execution time or scheduling; retained-read UI timeouts remain
+separate from the exchange lifetime.
 
 `Ack.status` is `Succeeded`, `Failed`, `NotAdmitted`, or `Unknown`. `Succeeded`
 means the owner returned success; scan/import/relocation startup still requires
@@ -570,8 +607,9 @@ connection and its bound instance identity. A later explicit request can reconne
 and perform a fresh Hello, but clients never automatically replay a failed command.
 
 `rivu_client::SessionCancellation` permanently cancels a client session and wakes
-current and future waits. It does not cancel accepted work; replacing a query only
-revokes its result.
+current and future waits, discarding its connection. It does not cancel accepted
+commands. Per-read cancellation instead uses
+<<retained-read-cancellation,QueryCancel>> and retains the original reply wait.
 
 == Consistency
 
@@ -734,25 +772,15 @@ Bitrate-only publication does not advance structure, collection membership, or
 count revisions, and does not query Queue, album, or playlist membership.
 
 Consumers discard old-stamp payloads and reload on demand; hidden views wait for
-reveal. Selection, counts, navigation geometry, and active Details input survive
-bitrate-only invalidation. The global bitrate revision may conservatively invalidate
-unrelated track payloads, but needs no event history. Hover uses retained rows,
-not another Track request. Range anchors ignore bitrate-only changes, while range
-responses still require their full stamp.
+reveal. Hover uses retained rows, not another Track request. Range anchors ignore
+bitrate-only changes, while range responses still require their full stamp.
+Selection, count and display-retention consequences belong to
+link:22_cache.adoc#window-local-query-retention[Window-local query retention].
+Playback statistics use scoped metadata revisions, not bitrate, and publish with
+EOF facts.
 
-Freshness never substitutes for physical completion: rejected reads hold their
-reader slot until retirement. Current transport failures are displayed without
-automatic retry; stale work or revision changes can drive fresh demand. Playback
-statistics use scoped metadata revisions, not bitrate, and publish with EOF facts.
-
-Whole-collection transfers carry an album key plus its `album` revision, or a
-playlist ID plus its content/lifetime revision. Destination playlists carry their
-own content/lifetime token; positional Queue insertion carries its in-memory
-queue revision. Core validates these tokens before Store starts the transaction
-that resolves members and inserts them. Serialized ownership and the save gate
-prevent another runtime writer from changing the validated state. Album lookup
-uses exact parent/title and album order; both Queue and Playlist destinations
-preserve source occurrences and their order, including repeated track IDs.
+Whole-collection copies use versioned source and destination identities rather than
+client-collected pages; see <<ordered-collections-and-transaction-ownership,TransferCollection>>.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
@@ -786,14 +814,13 @@ catalog baseline without an entry token may start an entry traversal
 (`after = None`) with unchanged library content, but cannot continue one. The CLI
 retains its summary baseline while capturing each playlist's entry baseline
 separately. Clients match the error variant, not diagnostic text. Other failures
-return `QueryError::Message`. In-process demand cancellation can instead return
-`QueryError::Cancelled` before dispatch or during execution. A request-scoped
-SQLite progress callback cooperatively interrupts running SQL; cancellation does
-not release the reader until its snapshot is physically retired. It is not an
-IPC cancellation request. Without `expected`, track and summary
-batches do not reserve consistency between requests; occurrence continuations
-still enforce their embedded scope. All use bounded results and explicit restart,
-not a database snapshot retained for an arbitrarily slow client.
+return `QueryError::Message`; owner-scoped cancellation can return
+`QueryError::Cancelled` before dispatch or during execution, including through
+<<retained-read-cancellation,QueryCancel>> for retained IPC reads.
+Without `expected`, track and summary batches do not reserve consistency between
+requests; occurrence continuations still enforce their embedded scope. All use
+bounded results and explicit restart, not a database snapshot retained for an
+arbitrarily slow client.
 
 Playlist-only edits leave library and structure tokens unchanged. Imports can
 still invalidate track queries when their scan changes effective library facts.
@@ -1009,15 +1036,12 @@ order and duplicates without changing existing entries or the playing occurrence
 Gap creation and insertion commit in one transaction. Explicit `Enqueue` and
 `AddPlaylist` additions have the same multiplicity-preserving behavior.
 
-SQLite owns the complete occurrence order. Core retains only its scalar queue
-projection and bounded navigation history; client state frames remain constant-size.
-Normal navigation and Shuffle resolve occurrence positions through the queue-order
-index, without a whole-queue ID cache or random-offset traversal. Shuffle samples
-positions uniformly, so each occurrence remains equally likely, including the
-current one. Whole-queue randomization uses an operation-local ID permutation.
-
-Shuffle navigation retains at most 4096 successful occurrence starts for
-Previous; it does not maintain a nonrepeating shuffle cycle.
+SQLite owns complete occurrence order; Core and client state retain only the
+<<revisions-and-watching,compact Queue projection>>. Normal navigation and Shuffle
+use the queue-order index, not whole-queue IDs or random-offset traversal. Shuffle
+samples positions uniformly, including the current occurrence, rather than
+maintaining a nonrepeating cycle. Navigation-history and mutation working-memory
+bounds belong to link:22_cache.adoc#queue-control-and-mutation-working-memory[Queue resource lifecycles].
 Playlist entry page and batch rows include effective duration, codec, and favorite
 state alongside display metadata. Duration is optional and describes the CUE
 segment for CUE tracks, not the entire source. Favorite changes advance library

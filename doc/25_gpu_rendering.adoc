@@ -11,10 +11,10 @@ The general `Program`, `RenderState<Schema>`, `RenderData<T>`, `Field2D<T>` and
 `ColorRamp` APIs, generated schemas, and general update transactions are proposals,
 not available interfaces. The agreed safety and platform boundaries remain binding.
 
-<<implemented-fixed-schema-slices>> defines shipped behavior;
-<<proposed-general-rendering-model>> describes future interfaces.
-<<verification-and-decision-gates>> defines acceptance requirements, and
-<<recorded-measurements>> retains dated comparisons, not benchmarks of subsequent revisions.
+<<implemented-fixed-schema-slices>> defines shipped behavior and
+<<proposed-general-rendering-model>> future interfaces. Acceptance requirements
+belong to <<verification-and-decision-gates>>; dated comparisons under
+<<recorded-measurements>> do not benchmark subsequent revisions.
 
 Current signal semantics and consumer ownership are authoritative in
 link:23_visuals.adoc[Visualization Rendering Design]; cache invalidation and
@@ -182,6 +182,7 @@ layers and source-over order, not blur or additive overexposure. Waveform cursor
 movement does not upload unchanged columns. Signal semantics belong to
 link:23_visuals.adoc[Visualization Rendering Design].
 
+[[different-consumers-and-interface-extraction]]
 === Different consumers and interface extraction
 
 Fields and Paths have different sampling contracts:
@@ -650,8 +651,9 @@ speedup or a common benchmark series.
 |Evaluate actual migrations: bounded live-CPU reductions, overlapping memory ranges and no isolated GPU-cost or synchronized pixel-parity claim.
 |===
 
-The following subsections are the historical reference: they retain the baseline
-identities, workloads, tables and acceptance limits behind those decisions.
+The following subsections retain historical workloads, tables and acceptance
+limits. Where no source commit is stated, the baseline is identified only by its
+described implementation or compiled libraries, not a reproducible source revision.
 
 [[historical-vendor-measurement-method]]
 === Shared method for the 2026-10-18 vendor comparisons
@@ -721,11 +723,11 @@ range of run medians in brackets, in microseconds per frame.
 |Rectangles only |77.045 [76.726–79.632] |84.606 [80.891–85.417]
 |===
 
-Each warm/reference/measured submission completes before the next submission;
-all 64512 measured frames match nonzero completed-reference attachment/pass
-counters for their viewport. Completion waits are accumulated separately and
-are not GPU execution timestamps. Earlier queued-submission profile results
-were invalid because admission pressure omitted drawings; they are excluded.
+Each warm/reference/measured submission completes before the next submission.
+Measured frames match nonzero completed-reference attachment/pass counters for
+their viewport. Completion waits are accumulated separately and are not GPU
+execution timestamps. Earlier queued-submission profile results were invalid
+because admission pressure omitted drawings; they are excluded.
 Resize samples alternate viewport multipliers 1, 1.5, 0.625 and 1 and use the
 same per-frame admission checks. No universal CPU speedup is claimed.
 
@@ -753,17 +755,17 @@ exercises compositor resize, surface close and CLI reopen; actual captures
 were inspected. These checks do not cover host tray/IME integration or establish
 cross-version pixel parity for unsynchronized live scenes.
 
-The deterministic cross-binary capture matrix compares 3960 images across
-Unorm/sRGB, integer/fractional origins, scales 1/1.5/2, opaque/transparent
-surfaces, mixed/interleaved/overlapping content, replay, resize, hide/show,
-in-flight use and alpha-pipeline rebuild. Every pixel passes the unchanged
-per-channel tolerance of three. Exact native packed-alpha baseline probes also
-establish the expected sprite multiplicity. These results apply to that revision.
+The deterministic cross-binary capture matrix covers Unorm/sRGB,
+integer/fractional origins, scales 1/1.5/2, opaque/transparent surfaces,
+mixed/interleaved/overlapping content, replay, resize, hide/show, in-flight use
+and alpha-pipeline rebuild. Every pixel passes the unchanged per-channel tolerance
+of three. Exact native packed-alpha baseline probes also establish expected
+sprite multiplicity. These results apply to that revision.
 
 === Initial comparative measurements
 
-The measurements in this subsection describe the rectangle-only predecessor and
-its recorded source hashes, not the subsequently unified field/path renderer.
+This subsection describes the historical rectangle-only predecessor, not the
+subsequently unified field/path renderer.
 
 Measured on 2026-10-18 with the <<historical-vendor-measurement-method,shared vendor method>>.
 The baseline was the then-current LED drawing kernel: append each cell to a
@@ -806,7 +808,7 @@ excluded from both. Milliseconds below are median [minimum–maximum]:
 Phase medians need not sum to the directly measured total. Fresh processes prevent
 headless-device reuse, but the driver shader cache was not cleared: these are not
 cold-driver-cache timings. The supplement does not replace the original
-steady-state samples or their recorded source identities.
+steady-state samples.
 
 At the initial single-panel state, the baseline expands 3,308 cells into 19,848
 CPU vertices. Tested record strides imply 2,858,128 bytes of path vertices and
@@ -836,8 +838,6 @@ panels sharing one publication. Resize alternates 768 and 576 pixels. Paths comp
 the same 1,024-point, 2-pixel stroke at 768 by 320 through the existing textured
 path and the new palette material; geometry generation is excluded from both.
 
-Shared signal/geometry generation is excluded from CPU update; static cases
-generate no new input.
 
 [cols="2,2,2,2,2",options="header"]
 |===
@@ -930,6 +930,7 @@ internal resource release. Cross-binary screenshots were not audio-frame
 synchronized, so they do not establish exact pixel equivalence. Broader whole-app
 performance and physical VRAM claims require separate evidence.
 
+[[spectrum-barsled-consumer-measurements]]
 === Spectrum Bars/LED consumer measurements
 
 The final comparison uses four unequal Spectrum panels, LED with 512 slots,

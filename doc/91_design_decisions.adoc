@@ -386,12 +386,10 @@ respectively. Overlapping or touching short-sample ranges and sequential rather
 than randomized measurement do not establish stable percentage speedups, power
 savings or a worst-case bound. The removal of duplicate work is the firm result.
 
-Verification includes workspace all-feature lint, 878 related tests, default and
-GUI-only optimized builds, and actual nested-Wayland collection/scrolling, pause
-freeze, stopped higher-rate reveal, stopped resize and Waveform source/seek checks.
-Independent producer-to-consumer review found no introduced correctness defect.
-The preceding scan remained read-only; its recommendations were authorized and
-implemented at this stage.
+Historical verification covered default and GUI-only optimized builds, regression
+tests, and nested-Wayland collection/scrolling, pause freeze, stopped higher-rate
+reveal, stopped resize and Waveform source/seek behavior. These checks establish
+the covered lifecycle behavior, not broader performance gains.
 
 [[DEC-015]]
 === DEC-015: Keep material preferences under Core configuration authority

@@ -12,9 +12,9 @@ Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
 next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
 seconds; CLI volume is an integer percentage from 0 to 100.
 Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
-50% is -30 dB, and 100% leaves the source gain unchanged. Keyboard `[` and `]`
-change the level by five percentage points (3 dB away from mute). See
-link:01_config.adoc#volume[Volume configuration] for fractional values.
+50% is -30 dB, and 100% leaves the source gain unchanged. See
+link:01_config.adoc#volume[Volume configuration] for fractional values and
+<<keyboard-controls,Keyboard controls>> for relative volume steps.
 
 `playback play` resumes a paused decoder. When stopped, it opens the selected
 queue occurrence from the beginning, or the first occurrence if none is selected;
@@ -98,11 +98,10 @@ when rejected after the command was acknowledged; the confirmed position is then
 restored. A real decoder seek or output-restart failure stops playback because the
 decoder may already have moved. Ordinary file seeks are not clamped by estimated
 metadata duration; only an explicit CUE end bounds the target.
-Position updates must match both the loaded source generation and Core's latest
-accepted seek intent. Queued pre-seek progress cannot replace a newer
-accepted target; same-source cumulative heard time is still recorded. A rejected
-seek restores the confirmed position without preventing later progress from that
-seek attempt from advancing it.
+Progress updates are fenced by the loaded source and latest accepted seek intent,
+so queued pre-seek progress cannot overwrite a newer target. Heard time is still
+recorded for that source. Rejecting a seek restores the confirmed position without
+blocking subsequent progress from the attempt.
 
 Seeking while paused stays paused. If Pause arrives at actual EOF, the next
 occurrence is selected but kept paused; Repeat One instead reloads the current
@@ -174,12 +173,10 @@ operation's completion, including skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
 link:02_library.adoc#other[Other]. Clearing Queue does not remove them from Library.
 
-File additions share one media-task slot with scans, Other checks, and playlist
-imports. Accepted-task feedback belongs to the desktop Queue panel; shared status
-queries, result dismissal, cancellation, and shutdown are documented under
-link:02_library.adoc#cancellation[Library cancellation]. A failed task can still
-have registered files and inserted occurrences, for example when some input files
-were skipped or a refresh failed after commit. Inspect its result and the queue
+File additions share the link:02_library.adoc#cancellation[media-task lifecycle]
+with scans, Other checks and playlist imports; desktop feedback appears in Queue.
+A failed task may still have committed registration and insertion, for example
+after skipped inputs or a post-commit refresh failure. Inspect the result and Queue
 before retrying: replaying a committed addition creates more occurrences.
 
 
@@ -242,7 +239,7 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 |Key |Action
 |Space |Play/pause
 |n / p |Next/previous track
-|[ / ] |Lower/raise volume by five percentage points
+|[ / ] |Lower/raise volume by five percentage points (3 dB except at mute)
 |r / s |Cycle repeat mode / toggle shuffle
 |Ctrl+Left / Ctrl+Right |Seek backward/forward five seconds
 |===
@@ -335,9 +332,8 @@ not during startup or status queries. Opening a track whose
 decoder hint is FFmpeg also loads the extension directly. Decoder status shows
 `not loaded` until a load is attempted; missing or incompatible libraries are
 reported when needed, and the load result is retained until restart.
-Native support is checked through the first packet decode: an unsupported
-format at that point also permits Auto fallback. Corrupt input and cancellation
-do not trigger a decoder fallback.
+Auto fallback covers unsupported native formats detected during opening,
+including initial decoding. Corrupt input and cancellation do not trigger fallback.
 
 Track details provides a *Decoder hint* selection. Choosing an option saves it
 immediately, independently of tag edits:
@@ -420,10 +416,10 @@ error. Messages still share the bottom row rather than adding extra rows.
 |`:help` |Open the scrollable help page, including command descriptions
 |===
 
-`Ctrl+C` closes only the current TUI from every input mode. Bare `q` has no action
-outside editors and remains ordinary text inside them. Escape cancels or returns;
-it never closes the client. Unknown commands and rejected shutdown requests show
-errors without closing it; uncertain shutdown outcomes are not automatically retried.
+Bare `q` has no action outside editors and remains ordinary text inside them.
+Escape cancels or returns; it never closes the client. Unknown commands and
+rejected shutdown requests show errors without closing it; uncertain shutdown
+outcomes are not automatically retried.
 
 Recent shows up to 256 unique tracks in recent-play order, with titles, counts,
 and local timestamps where space permits. The playing or paused track uses its
@@ -540,14 +536,12 @@ The *Artwork* panel follows the current playback track, independently of
 Library selection and Track details. Add it from the panel catalog; it is also
 included in the built-in *Default* layout.
 
-Use the panel's right-click Style or Rotation actions for immediate changes, or
-Artwork settings to edit its options with Apply and Discard. These choices belong
-to the panel instance and survive docking and layout duplication in memory.
-Use layout sync or close the last desktop window normally to persist them across
-restarts. Instance Apply changes only session memory; orderly desktop exit flushes
-the final layout, independently of the still-running Core.
-Settings → Interface → Artwork changes defaults for new panels without
-overwriting existing panels. See
+The panel's right-click Style and Rotation actions apply immediately; Artwork
+settings edits its options with Apply and Discard. These instance choices survive
+docking and layout duplication in session memory. Persist them with layout sync
+or orderly exit of the last desktop window, independently of the running Core;
+see link:01_config.adoc#layout[Layout persistence]. Settings → Interface → Artwork
+instead sets defaults for new panels without overwriting existing instances. See
 link:01_config.adoc#artwork[Artwork configuration] for styles,
 animation parameters, defaults, and shared frame rate.
 

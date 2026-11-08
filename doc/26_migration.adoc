@@ -4,9 +4,9 @@
 
 == Before upgrading
 
-`rivu-migrate` checks database compatibility and validates configuration without
-rewriting it. `apply` upgrades supported databases and retains a durable SQLite
-backup. Current resources are unchanged and need no backup.
+`rivu-migrate check` inspects database compatibility and validates configuration
+without rewriting either. `apply` upgrades supported databases only after a
+durable SQLite backup; current resources are no-ops and need no backup.
 
 [[supported-source-formats]]
 The supported database upgrade is format `2` to `4`: it adds `playlists.position`
@@ -14,11 +14,11 @@ in playlist-ID order, preserving contents, playback statistics, indexes and queu
 state. It retires no source schema objects. Other noncurrent formats and unknown
 schema objects are rejected, not guessed or removed.
 
-Missing default resources are reported without creation; an explicitly selected
-missing database is an error. Valid unversioned configuration is current and
-remains untouched. See <<configuration-schema,Configuration schema>> for version
-rules and <<configuration-compatibility,Configuration compatibility>> for manual
-setting changes.
+Missing default resources are reported without creation. With explicit
+`--data-dir`, a missing `library.db` is an error; `--config` alone does not select
+a database. Valid unversioned configuration is current and remains untouched.
+See <<configuration-schema>> for version rules and <<configuration-compatibility>>
+for manual setting changes.
 
 Moving waveform ownership to the GUI changes local side-channel
 compatibility, not database or saved visualization configuration. Frontend and
@@ -149,8 +149,7 @@ creates no log files.
 
 == Apply protocol
 
-Current databases are no-ops and configuration stays read-only. A supported
-database conversion follows this protocol:
+A supported database conversion follows this protocol; configuration stays read-only:
 
 . Acquire data-directory ownership and fix the selected targets.
 . Recheck database structure and readability and strictly validate configuration.

@@ -47,11 +47,12 @@ enabled = true
 == Saving configuration
 
 Rivu saves `config.toml` on Settings Apply, IPC Configure, accepted processing edits
-(graph, Monitor EQ, presets/A/B, restoration or neural settings), and orderly exit.
-Processing edits save immediately. Other controls, including playback, output,
-visualization enablement, Waveform seeking, Library columns and folder changes,
-update memory; the next save includes their current values. Closing the window
-does not exit the core. A crash can lose changes since the last successful save.
+(graph, Monitor EQ, presets/A/B, restoration or neural settings), live Textures
+edits, and orderly exit. Processing and Textures edits save immediately. Other
+controls, including playback, output, visualization enablement, Waveform seeking,
+Library columns and folder changes, update memory; the next save includes their
+current values. Closing the window does not exit the core. A crash can lose changes
+since the last successful save.
 
 Saves patch values changed since startup or the last successful save, preserving
 untouched values, comments and formatting. Omitted defaults stay absent; explicitly
@@ -269,8 +270,8 @@ and restoration/neural defaults do not implicitly insert graph nodes.
 The graph edit revision is a runtime-only optimistic-edit token, not a TOML field.
 Unknown graph fields are rejected, as elsewhere in configuration.
 
-For example, the following sets Monitor EQ and restoration/neural defaults; it
-does not construct a processing graph:
+For example, this sets Monitor EQ and restoration defaults without constructing
+a processing graph:
 
 [source,toml]
 ----
@@ -291,18 +292,14 @@ strength = 1.0
 spectral_gain_floor_db = -18.0
 wet = 0.8
 
-[neural]
-worker = "/absolute/model-bundle/runtime/worker.py"
-speech_interpreter = "/absolute/.venv/bin/python"
-speech_manifest = "/absolute/moss-bundle/manifest.json"
-separation_interpreter = "/absolute/.venv/bin/python"
-separation_manifest = "/absolute/kim-bundle/manifest.json"
-device = "cpu"
-threads = 4
 ----
 
-Replace paths with preparation output; no shell expansion occurs. Missing
-manifests leave neural operations unavailable, not automatically downloaded.
+Neural models require explicit preparation; missing manifests leave operations
+unavailable rather than triggering downloads. Use `rivu processing setup MODEL`
+and follow the full
+link:27_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[neural setup guide]
+for bundle selection, activation and compatible worker/interpreter paths. Paths
+are literal; no shell expansion occurs.
 See link:27_audio_processing.adoc[Audio processing] for graph editing, filter
 semantics, shared and isolated Python environments, licensing, CLI examples and bounds.
 
@@ -364,7 +361,7 @@ frames without timer throttling. Lower caps reduce rendering work at the cost
 of less smooth motion. The cap does not force idle panels to refresh, change
 audio analysis or Waveform processing, or throttle input and business updates.
 It is not a hard limit on total window submissions and does not control textures.
-Apply updates both animation consumers without restarting or resetting rotation.
+Apply updates open panels without restarting or resetting rotation.
 
 
 === Appearance and library display

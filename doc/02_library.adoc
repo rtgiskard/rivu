@@ -75,9 +75,9 @@ rivu library scan ~/Music --wait
 
 The desktop does not scan roots at startup. Scans run in the background without
 stopping playback. `--force` rereads unchanged audio metadata; CUE sheets are always
-reread. A failed scan may still save readable tracks: fix errors and rescan before
-cleaning missing records. See <<scan-policies-and-recovery,Scan policies and recovery>>
-for path and admission rules.
+reread. Readable tracks may be saved even when the task fails: fix errors and rescan
+before cleaning missing records. Path, admission and recovery rules are under
+<<scan-policies-and-recovery,Scan policies and recovery>>.
 
 Scans, Other checks, playlist imports, and external-file queue additions share one
 media-task slot; another request is rejected while one is active. Library shows
@@ -321,8 +321,8 @@ an already saved play. A new playback may be blocked until recovery succeeds;
 independent controls such as volume remain available. This recovery does not
 survive process exit.
 
-`rivu library history --limit N` returns up to N retained rows in both text and JSON
-output. See <<cli-output,CLI output>> for result shapes.
+`rivu library history --limit N` returns up to N retained rows (default 20) in both
+text and JSON output. See <<cli-output,CLI output>> for result shapes.
 
 == Paged views
 
@@ -582,11 +582,10 @@ waiting for a producer or blocking unrelated imports. A source changed during
 analysis fails rather than saving mixed-version metadata. Playback and waveform
 loading also require ordinary files.
 
-Ordinary scans reuse fingerprints when size and modification time are unchanged.
-Reusing metadata also requires the current probe version. `--force` rereads both
-while preserving user edits; CUE sheets are always reread. An unchanged scan
-preserves existing views; an unchanged playlist import still creates its requested
-playlist.
+Ordinary scans reuse fingerprints when size and modification time are unchanged;
+metadata reuse also requires the current probe version. `--force` rereads both
+while preserving user edits; CUE sheets are always reread. Reuse does not suppress
+playlist creation: an unchanged import still creates its requested playlist.
 
 Overlapping explicit scan scopes are traversed once while retaining their own
 depth and missing-detection boundaries. Configured roots still must not overlap.
@@ -702,10 +701,10 @@ external database edits. Queue restoration: link:04_playback.adoc#queue[Playback
 
 === Independent migration tool
 
-Use `rivu-migrate check` to inspect formats or `apply` for supported offline
-upgrades. Stop Rivu and external writers before applying. The tool keeps a durable
-backup and preserves user data and playlist catalog order; current resources are
-validated without rewriting, and missing resources are not initialized.
+`rivu-migrate check` inspects formats; `apply` performs supported offline upgrades.
+Stop Rivu and external writers before applying. Upgrades keep a durable backup and
+preserve user data and playlist catalog order. Both commands validate current
+resources without rewriting them and do not initialize missing resources.
 
 [source,sh]
 ----
@@ -776,8 +775,8 @@ failures, `status`. No Core revision or task ID is invented for an uncertain
 transport result. Argument/usage errors retain Clap diagnostics and exit status 2;
 runtime failures exit 1. A successful command exits 0.
 
-Listings can leave partial or invalid JSON after failure: check the exit status
-and discard incomplete output. See <<paged-views,Paged views>>.
+After a failed listing, discard its possibly partial or invalid output before
+retrying; see <<paged-views,Paged views>>.
 Queue listing binds its current-occurrence marker and all batches to the initial
 queue revision; a concurrent queue change fails the listing instead of combining
 different snapshots.
@@ -788,8 +787,10 @@ Result shapes follow the queried resource:
   `playlist list` returns summaries (`id`, `name`, `entry_count`);
   `playlist show PLAYLIST_ID` returns entries. `library history` returns retained
   history rows up to `--limit`.
-* `status` returns instance state; effective `config` and `config_path` are under
-  `configuration`. Field contracts: link:21_ipc.adoc[IPC].
+* `status` returns instance state. `configuration` contains the settings snapshot
+  and `config_path`; live volume, shuffle, repeat and output selection are reported
+  in the playback and system sections and can be newer than that snapshot.
+  Field contracts: link:21_ipc.adoc[IPC].
 * Command acknowledgements report `Succeeded`, `Failed`, `NotAdmitted`, or
   `Unknown`, including failed authoritative results on stdout. Failure need not
   mean rollback; an unknown outcome requires inspecting state before retrying.
