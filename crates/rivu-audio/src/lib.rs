@@ -394,7 +394,7 @@ pub enum AudioEvent {
         bitrate_bps: Option<u64>,
     },
     DecoderStopped {
-        generation: u64,
+        snapshot: AudioSnapshot,
     },
     /// A rejected input leaves playback active; only its matching intent may roll back.
     SeekRejected {

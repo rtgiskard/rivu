@@ -238,14 +238,14 @@ impl Core {
             }
             event @ (AudioEvent::OutputSettingsFailed { .. }
             | AudioEvent::EqualizerSettingsFailed { .. }) => self.audio_settings_failed(event),
-            AudioEvent::DecoderStopped { generation }
-                if self.transport.live_source == Some(generation) =>
+            AudioEvent::DecoderStopped { snapshot }
+                if self.transport.live_source == Some(snapshot.generation) =>
             {
                 // A late physical close may settle an uncertain stop. It cannot
                 // retire a newer source, advance navigation or fence twice.
-                self.transport.confirm_source_closed(generation);
-                if generation == self.transport.generation {
-                    self.finish_playback(Ok(None), false, Ok(()))?;
+                self.transport.confirm_source_closed(snapshot.generation);
+                if snapshot.generation == self.transport.generation {
+                    self.finish_playback(Ok(Some(snapshot)), false, Ok(()))?;
                 } else {
                     self.state.playback.stopped_source_generation =
                         self.transport.physically_closed_source;

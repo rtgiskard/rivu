@@ -271,30 +271,12 @@ impl Worker {
                     source.disable_opening_fallback();
                 }
                 if !enabled && self.opening.as_ref().is_some_and(Opening::uses_ffmpeg) {
-                    let AudioSnapshot {
-                        generation,
-                        position_seconds,
-                        listened_seconds,
-                    } = self.stop();
-                    self.event(AudioEvent::Progress {
-                        generation,
-                        position_seconds,
-                        listened_seconds,
-                    });
-                    self.event(AudioEvent::DecoderStopped { generation });
+                    let snapshot = self.stop();
+                    self.event(AudioEvent::DecoderStopped { snapshot });
                 }
                 if !enabled && self.playback.as_ref().is_some_and(Playback::uses_ffmpeg) {
-                    let AudioSnapshot {
-                        generation,
-                        position_seconds,
-                        listened_seconds,
-                    } = self.stop();
-                    self.event(AudioEvent::Progress {
-                        generation,
-                        position_seconds,
-                        listened_seconds,
-                    });
-                    self.event(AudioEvent::DecoderStopped { generation });
+                    let snapshot = self.stop();
+                    self.event(AudioEvent::DecoderStopped { snapshot });
                 }
             }
             AudioCommand::MediaReadBuffer(mebibytes) => {
@@ -1782,11 +1764,9 @@ mod tests {
         assert!(worker.opening.is_none());
         assert!(matches!(
             events.try_recv(),
-            Ok(AudioEvent::Progress { generation: 41, .. })
-        ));
-        assert!(matches!(
-            events.try_recv(),
-            Ok(AudioEvent::DecoderStopped { generation: 41 })
+            Ok(AudioEvent::DecoderStopped {
+                snapshot: AudioSnapshot { generation: 41, .. }
+            })
         ));
         assert!(events.is_empty());
     }
@@ -1808,15 +1788,13 @@ mod tests {
         assert!(worker.opening.is_none());
         assert!(matches!(
             events.try_recv(),
-            Ok(AudioEvent::Progress {
-                generation: 41,
-                listened_seconds: 0.0,
-                ..
+            Ok(AudioEvent::DecoderStopped {
+                snapshot: AudioSnapshot {
+                    generation: 41,
+                    listened_seconds: 0.0,
+                    ..
+                }
             })
-        ));
-        assert!(matches!(
-            events.try_recv(),
-            Ok(AudioEvent::DecoderStopped { generation: 41 })
         ));
         assert!(events.is_empty());
     }
@@ -1911,7 +1889,12 @@ mod tests {
                 .unwrap();
             let (events, event_receive) = async_channel::bounded(1);
             events
-                .try_send(AudioEvent::DecoderStopped { generation: 7 })
+                .try_send(AudioEvent::DecoderStopped {
+                    snapshot: AudioSnapshot {
+                        generation: 7,
+                        ..AudioSnapshot::default()
+                    },
+                })
                 .unwrap();
             let mut stop = AudioStop::new(
                 commands,
@@ -1927,7 +1910,9 @@ mod tests {
             );
             assert!(matches!(
                 retired.as_slice(),
-                [AudioEvent::DecoderStopped { generation: 7 }]
+                [AudioEvent::DecoderStopped {
+                    snapshot: AudioSnapshot { generation: 7, .. }
+                }]
             ));
             assert!(matches!(
                 receive.try_recv().unwrap().command,
@@ -1954,7 +1939,12 @@ mod tests {
             );
 
             events
-                .try_send(AudioEvent::DecoderStopped { generation: 8 })
+                .try_send(AudioEvent::DecoderStopped {
+                    snapshot: AudioSnapshot {
+                        generation: 8,
+                        ..AudioSnapshot::default()
+                    },
+                })
                 .unwrap();
             let snapshot = AudioSnapshot {
                 generation: 7,
@@ -1969,17 +1959,28 @@ mod tests {
             assert!(matches!(
                 retired.as_slice(),
                 [
-                    AudioEvent::DecoderStopped { generation: 7 },
-                    AudioEvent::DecoderStopped { generation: 8 },
+                    AudioEvent::DecoderStopped {
+                        snapshot: AudioSnapshot { generation: 7, .. }
+                    },
+                    AudioEvent::DecoderStopped {
+                        snapshot: AudioSnapshot { generation: 8, .. }
+                    },
                 ]
             ));
             let event_receive = stop.into_events();
             events
-                .try_send(AudioEvent::DecoderStopped { generation: 9 })
+                .try_send(AudioEvent::DecoderStopped {
+                    snapshot: AudioSnapshot {
+                        generation: 9,
+                        ..AudioSnapshot::default()
+                    },
+                })
                 .unwrap();
             assert!(matches!(
                 event_receive.try_recv(),
-                Ok(AudioEvent::DecoderStopped { generation: 9 })
+                Ok(AudioEvent::DecoderStopped {
+                    snapshot: AudioSnapshot { generation: 9, .. }
+                })
             ));
         });
     }
@@ -2360,12 +2361,13 @@ mod tests {
                 listened_seconds: 1.0,
             },
         );
+        let snapshot = AudioSnapshot {
+            generation: 2,
+            position_seconds: 4.5,
+            listened_seconds: 2.01,
+        };
         let sender = std::thread::spawn(move || {
-            send_event(
-                &events,
-                &shutdown,
-                AudioEvent::DecoderStopped { generation: 2 },
-            );
+            send_event(&events, &shutdown, AudioEvent::DecoderStopped { snapshot });
             send_event(
                 &events,
                 &shutdown,
@@ -2379,10 +2381,11 @@ mod tests {
             receive.recv_blocking().unwrap(),
             AudioEvent::Ended { generation: 1, .. }
         ));
-        assert!(matches!(
-            receive.recv_blocking().unwrap(),
-            AudioEvent::DecoderStopped { generation: 2 }
-        ));
+        let AudioEvent::DecoderStopped { snapshot: received } = receive.recv_blocking().unwrap()
+        else {
+            panic!("full queue lost the decoder stop snapshot");
+        };
+        assert_eq!(received, snapshot);
         assert!(matches!(
             receive.recv_blocking().unwrap(),
             AudioEvent::Failed { generation: 3, .. }

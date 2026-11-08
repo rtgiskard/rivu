@@ -173,7 +173,12 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
                 message: "Decoder failed".into(),
             }
         } else {
-            AudioEvent::DecoderStopped { generation }
+            AudioEvent::DecoderStopped {
+                snapshot: audio::AudioSnapshot {
+                    generation,
+                    ..Default::default()
+                },
+            }
         };
         assert!(core.business_event(BusinessEvent::Audio(terminal)));
         let state = core.shared.read();
@@ -1406,7 +1411,12 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
             })
             .unwrap();
         sender
-            .try_send(AudioEvent::DecoderStopped { generation })
+            .try_send(AudioEvent::DecoderStopped {
+                snapshot: audio::AudioSnapshot {
+                    generation,
+                    ..Default::default()
+                },
+            })
             .unwrap();
         core.finish_playback(
             Ok(Some(rivu_audio::AudioSnapshot {
@@ -1652,13 +1662,17 @@ fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
 }
 
 #[test]
-fn stopped_decoder_final_progress_counts_once_and_fences_late_events() {
+fn stopped_decoder_snapshot_counts_once_and_fences_late_events() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
     progress(&mut core, 2.0, 2.0);
-    progress(&mut core, 2.1, 2.1);
     let generation = core.transport.generation;
-    core.audio_event(AudioEvent::DecoderStopped { generation })
+    let snapshot = audio::AudioSnapshot {
+        generation,
+        position_seconds: 2.01,
+        listened_seconds: 2.01,
+    };
+    core.audio_event(AudioEvent::DecoderStopped { snapshot })
         .unwrap();
     core.audio_event(AudioEvent::Progress {
         generation,
@@ -1674,6 +1688,22 @@ fn stopped_decoder_final_progress_counts_once_and_fences_late_events() {
         core.state.playback.stopped_source_generation,
         Some(generation)
     );
+    core.audio_event(AudioEvent::DecoderStopped { snapshot })
+        .unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    playing(&mut core, 2);
+    progress(&mut core, 1.0, 1.0);
+    let current_generation = core.transport.generation;
+    let revision = core.state.playback.seek_revision;
+    core.audio_event(AudioEvent::DecoderStopped { snapshot })
+        .unwrap();
+    assert_eq!(core.transport.generation, current_generation);
+    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 2);
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.state.playback.position, 1.0);
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(play_count(&core, 2), 0);
 }
 
 #[test]
@@ -1975,10 +2005,10 @@ fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
         assert_eq!(core.state.playback.seek_revision, revision);
         assert_eq!(play_count(&core, 1), u64::from(confirmed));
         if !confirmed {
-            // A retry's physical receipt must name the original unresolved source.
-            core.finish_playback(Ok(Some(snapshot)), false, Ok(()))
+            // A late physical close settles only the original unresolved source.
+            core.audio_event(AudioEvent::DecoderStopped { snapshot })
                 .unwrap();
-            core.audio_event(AudioEvent::DecoderStopped { generation: source })
+            core.audio_event(AudioEvent::DecoderStopped { snapshot })
                 .unwrap();
             assert_eq!(core.state.playback.stopped_source_generation, Some(source));
             assert_eq!(core.transport.generation, generation);
