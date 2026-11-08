@@ -40,6 +40,38 @@ else:
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_identified, require_alignment
 
+def _paired_records(manifest, root):
+    if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+        raise ValueError("paired manifest schema 1 with prepared float identities required; re-prepare corpus")
+    records = manifest.get("records")
+    if not isinstance(records, list) or not records:
+        raise ValueError("paired manifest requires prepared float identity records; re-prepare corpus")
+    by_name = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("paired manifest records must be objects")
+        name = record.get("utterance")
+        if not isinstance(name, str) or not re.fullmatch(r"[^/\\]+\.wav", name) or name in by_name:
+            raise ValueError("paired manifest requires unique WAV utterance names")
+        for kind in ("clean", "noisy"):
+            pair = record.get(kind)
+            item = pair.get("float") if isinstance(pair, dict) else None
+            if (not isinstance(item, dict) or not isinstance(item.get("sha256"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"])
+                    or type(item.get("bytes")) is not int or item["bytes"] <= 0):
+                raise ValueError("paired records require clean/noisy prepared float SHA256/bytes; re-prepare corpus")
+        by_name[name] = record
+    for kind in ("clean", "noisy"):
+        if {path.name for path in (root / kind).glob("*.wav")} != set(by_name):
+            raise ValueError("paired manifest utterances differ from prepared " + kind + " files")
+    return [(name, by_name[name]) for name in sorted(by_name)]
+
+
+def _require_prepared_identity(audio, expected, label):
+    if any(audio.identity[key] != expected[key] for key in ("sha256", "bytes")):
+        raise ValueError("prepared corpus identity mismatch: " + label)
+
+
 
 def cases(kind, root, selected):
     if kind == "synthetic":
@@ -53,12 +85,12 @@ def cases(kind, root, selected):
                     continue
                 yield folder.name+"-"+source.stem,source,folder/"clean.wav",folder/"manifest.json",None,False,None
     elif kind == "paired":
-        for source in sorted((root/"noisy").glob("*.wav")):
-            yield source.stem,source,root/"clean"/source.name,root/"manifest.json",None,False,None
+        for name, record in _paired_records(read_json(root / "manifest.json"), root):
+            source = root / "noisy" / name
+            yield source.stem,source,root/"clean"/name,root/"manifest.json",None,False,record
     else:
         for folder, record in music_records(read_json(root/"manifest.json"), root):
-            identity = {key:record[key] for key in ("source", "sha256")}
-            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",record["diagnostic_only"],identity
+            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",record["diagnostic_only"],record
 
 
 def main():
@@ -101,6 +133,12 @@ def main():
         backing_pcm = load_identified(backing, dtype="float32", max_frames=None) if backing else None
         if backing_pcm is not None:
             require_alignment(reference_pcm, backing_pcm, "backing reference")
+        if args.kind == "music":
+            for stem, audio in (("mixture", input_pcm), ("vocals", reference_pcm), ("accompaniment", backing_pcm)):
+                _require_prepared_identity(audio, source_identity["float"][stem], name + "/" + stem)
+        elif args.kind == "paired":
+            for kind, audio in (("clean", reference_pcm), ("noisy", input_pcm)):
+                _require_prepared_identity(audio, source_identity[kind]["float"], name + "/" + kind)
         request={"version":1,"task_id":name,"operation":operation,"input_path":str(source.resolve()),
                  "output_dir":str(output/name),"model_manifest":str(model),"device":"cpu","threads":args.threads,
                  "parameters":{"overlap":0.75} if operation=="separate" else {"wet_mix":1.0,"attenuation_limit_db":80}}
@@ -128,8 +166,8 @@ def main():
                 "reference_sha256":reference_pcm.identity["sha256"],"corpus_manifest_sha256":digest(provenance),"worker":result,
                 "worker_subprocess_wall_seconds":worker_seconds,"input_quality":metrics(reference_audio,input_audio,rate,core),
                 "output_quality":metrics(reference_audio,estimate,rate,core)}
-        if source_identity is not None:
-            record["corpus_source"]=source_identity
+        if args.kind == "music":
+            record["corpus_source"]={key:source_identity[key] for key in ("source", "sha256")}
         record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
         if backing:
             estimated_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)

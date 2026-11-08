@@ -14,6 +14,11 @@ import json
 from pathlib import Path
 import subprocess
 
+if __package__:
+    from .evaluate import identity
+else:
+    from evaluate import identity
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -49,7 +54,9 @@ def main():
         subprocess.run(command, check=True)
         records.append({"source": str(source), "sha256": hashes[source],
                         "diagnostic_only": hashes[source] in diagnostic_hashes,
-                        "directory": target.name, "command": command})
+                        "directory": target.name, "command": command,
+                        "float": {stem: identity(target / (stem + ".wav"))
+                                  for stem in ("mixture", "vocals", "accompaniment")}})
     report = {"schema": 2, "provenance": args.provenance, "records": records,
               "caveat": "Lossy encoded excerpts, small subset, not a full-corpus quality claim; inspect accompaniment as well as vocals."}
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")

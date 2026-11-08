@@ -14,7 +14,10 @@ import zipfile
 
 import numpy as np
 import soundfile as sf
-from evaluate import identity
+if __package__:
+    from .evaluate import identity
+else:
+    from evaluate import identity
 
 UTTERANCES = [
     *[f"p232_{n:03}.wav" for n in (1, 2, 3, 5, 6, 7, 9, 10, 11, 12)],

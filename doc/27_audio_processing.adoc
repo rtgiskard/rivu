@@ -962,8 +962,14 @@ defined/undefined and signed infinity counts. A median between opposite infiniti
 is undefined. These numerical cases do not establish quality.
 
 The link:../tools/audio_quality/music_manifest.py[music corpus manifest contract]
-records each prepared directory relative to the corpus root and explicitly binds
-`diagnostic_only` to source identity and SHA256.
+records each prepared directory relative to the corpus root, explicitly binds
+`diagnostic_only` to source identity and SHA256, and requires a `float` identity
+(`path`, SHA256 and byte count) for each generated mixture, vocals and accompaniment
+WAV. The evaluator checks the loaded PCM file snapshots against those prepared
+identities before launching a model. Paired VoiceBank evaluation likewise consumes
+the recorded clean/noisy `float` identities and requires complete manifest membership.
+Recorded paths are provenance, not admission locations: a corpus can move without
+its original containers or archives, but replacing prepared WAV content is rejected.
 Directory numbering is not a diagnostic rule. During preparation, mark any known
 reference erratum with repeatable `--diagnostic-source` paths; the marker follows
 identical source bytes even when renamed or reordered. Run the following from the
@@ -977,8 +983,9 @@ python tools/audio_quality/prepare_music.py "$al_james_source" "$other_source" \
   --output .cache/new-music-float --provenance 'actual source and license'
 ----
 
-Prepare a new corpus if its manifest lacks these identity records. Keep recorded
-measurements bound to their original corpus and timing definitions.
+Prepare a new corpus if its manifest lacks the required prepared-file identities;
+incomplete legacy manifests are rejected. Keep recorded measurements bound to
+their original corpus and timing definitions.
 
 Automatic metrics and actual listening are distinct evidence. No automated
 analysis is reported as human listening. Missing listening approval remains an

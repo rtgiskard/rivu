@@ -3,7 +3,9 @@ import copy
 import hashlib
 import json
 import math
+import io
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,18 +13,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import zipfile
 import numpy as np
 import soundfile as sf
 
 if __package__:
     from . import benchmark, evaluate
-    from ..audio_quality import evaluate as quality, compare_separation, prepare_music, run_classical
+    from ..audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
     from ..audio_quality.metric_core import score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
 else:
     import benchmark
     import evaluate
-    from audio_quality import evaluate as quality, compare_separation, prepare_music, run_classical
+    from audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
     from audio_quality.metric_core import score_difference, score_summary
     from audio_quality.music_manifest import music_records
 
@@ -135,7 +138,13 @@ class MusicIdentityTests(unittest.TestCase):
     def prepare(self, root, inputs, diagnostic):
         argv = ["prepare_music.py", *map(str, inputs), "--output", str(root),
                 "--provenance", "deterministic test", "--diagnostic-source", str(diagnostic)]
-        with patch.object(sys, "argv", argv), patch.object(prepare_music.subprocess, "run"), patch("builtins.print"):
+        def decode(command, **kwargs):
+            target = Path(command[-1]).parent
+            value = hashlib.sha256(Path(command[command.index("-i") + 1]).read_bytes()).digest()[0] / 512
+            for stem, factor in (("mixture", 1.5), ("vocals", 1), ("accompaniment", 0.5)):
+                sf.write(target / (stem + ".wav"), np.array([[value, -value], [-value, value]]) * factor,
+                         8000, subtype="FLOAT")
+        with patch.object(sys, "argv", argv), patch.object(prepare_music.subprocess, "run", side_effect=decode), patch("builtins.print"):
             prepare_music.main()
         return json.loads((root / "manifest.json").read_text())
 
@@ -162,13 +171,19 @@ class MusicIdentityTests(unittest.TestCase):
             root = Path(temporary)
             (root / "track-00").mkdir()
             record = {"source":"renamable.stem.mp4", "sha256":"a"*64,
-                      "directory":"track-00", "diagnostic_only":False}
+                      "directory":"track-00", "diagnostic_only":False,
+                      "float":{stem:{"sha256":"b"*64, "bytes":100} for stem in ("mixture", "vocals", "accompaniment")}}
             valid = {"schema":2, "records":[record]}
             music_records(valid, root)
-            for field in ("source", "sha256", "diagnostic_only"):
+            for field in ("source", "sha256", "diagnostic_only", "float"):
                 invalid = copy.deepcopy(valid)
                 del invalid["records"][0][field]
                 with self.assertRaises(ValueError):
+                    music_records(invalid, root)
+            for stem in ("mixture", "vocals", "accompaniment"):
+                invalid = copy.deepcopy(valid)
+                del invalid["records"][0]["float"][stem]
+                with self.assertRaisesRegex(ValueError, "prepared float"):
                     music_records(invalid, root)
             with self.assertRaisesRegex(ValueError, "re-prepare"):
                 music_records({"schema":1, "records":[record]}, root)
@@ -176,6 +191,144 @@ class MusicIdentityTests(unittest.TestCase):
             conflict = {**record, "directory":"track-01", "diagnostic_only":True}
             with self.assertRaisesRegex(ValueError, "conflicting"):
                 music_records({"schema":2, "records":[record, conflict]}, root)
+
+    def test_original_and_relocated_prepared_music_preserve_diagnostic_membership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            sources = [base / name for name in ("erratum.mp4", "ordinary.mp4")]
+            for index, source in enumerate(sources):
+                source.write_bytes(bytes([index + 1]))
+            root = base / "prepared"
+            self.prepare(root, sources, sources[0])
+            for source in sources:
+                source.unlink()
+            for relocated in (False, True):
+                if relocated:
+                    moved = base / "relocated"
+                    root.rename(moved)
+                    root = moved
+                model = base / "model.json"
+                model.write_text(json.dumps({"operation":"separate"}))
+                output = root / ("evaluation-moved" if relocated else "evaluation-original")
+                def worker(command, **kwargs):
+                    request = json.loads(Path(command[-1]).read_text())
+                    folder = Path(request["input_path"]).parent
+                    destination = Path(request["output_dir"])
+                    destination.mkdir()
+                    outputs = {}
+                    for stem in ("vocals", "accompaniment"):
+                        path = destination / (stem + ".wav")
+                        shutil.copyfile(folder / path.name, path)
+                        outputs[stem] = str(path)
+                    result = {"source_sha256":evaluate.digest(request["input_path"]), "outputs":outputs,
+                              "processing":{"core_seconds":1}, "metrics":{"real_time_factor":1}}
+                    (destination / "result.json").write_text(json.dumps(result))
+                    event = {"version":evaluate.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
+                    return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
+                argv = ["evaluate.py", "--kind", "music", "--corpus-root", str(root),
+                        "--model-manifest", str(model), "--output-dir", str(output)]
+                with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run", side_effect=worker), patch("builtins.print"):
+                    evaluate.main()
+                report = json.loads((output / "report.json").read_text())
+                self.assertEqual([run["diagnostic_only"] for run in report["runs"]], [True, False])
+                self.assertEqual(report["summary"]["primary_cases"], 1)
+                self.assertEqual(report["runs"][0]["corpus_source"]["sha256"], hashlib.sha256(bytes([1])).hexdigest())
+
+    def test_swapped_complete_music_triplets_fail_before_model(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            sources = [base / "a.mp4", base / "b.mp4"]
+            for index, source in enumerate(sources):
+                source.write_bytes(bytes([index + 1]))
+            root = base / "prepared"
+            self.prepare(root, sources, sources[0])
+            for stem in ("mixture", "vocals", "accompaniment"):
+                left, right = (root / directory / (stem + ".wav") for directory in ("track-00", "track-01"))
+                first, second = left.read_bytes(), right.read_bytes()
+                left.write_bytes(second)
+                right.write_bytes(first)
+            model = base / "model.json"
+            model.write_text(json.dumps({"operation":"separate"}))
+            argv = ["evaluate.py", "--kind", "music", "--corpus-root", str(root),
+                    "--model-manifest", str(model), "--output-dir", str(root / "evaluation")]
+            with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run") as worker:
+                with self.assertRaisesRegex(ValueError, "prepared corpus identity mismatch"):
+                    evaluate.main()
+                worker.assert_not_called()
+            self.assertFalse((root / "evaluation" / "track-00-request.json").exists())
+
+
+class PairedCorpusIdentityTests(unittest.TestCase):
+    def prepare(self, base):
+        archives = {}
+        for kind, factor in (("clean", 1), ("noisy", 1.5)):
+            archive = base / (kind + ".zip")
+            samples = np.sin(np.arange(512, dtype="float32") * 0.125) * 0.25 * factor
+            stream = io.BytesIO()
+            sf.write(stream, samples, 48000, format="WAV", subtype="PCM_16")
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr(kind + "_testset_wav/p232_001.wav", stream.getvalue())
+            archives[kind] = archive
+        root = base / "prepared"
+        argv = ["prepare_voicebank.py", "--clean-zip", str(archives["clean"]),
+                "--noisy-zip", str(archives["noisy"]), "--output", str(root)]
+        with patch.object(sys, "argv", argv), patch.object(prepare_voicebank, "UTTERANCES", ["p232_001.wav"]), patch("builtins.print"):
+            prepare_voicebank.main()
+        for archive in archives.values():
+            archive.unlink()
+        model = base / "model.json"
+        model.write_text(json.dumps({"operation":"speech"}))
+        return root, model
+
+    def evaluate_until_model(self, root, model, output, reject=False):
+        argv = ["evaluate.py", "--kind", "paired", "--corpus-root", str(root),
+                "--model-manifest", str(model), "--output-dir", str(output)]
+        with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"pystoi":SimpleNamespace(stoi=None)}), \
+                patch("importlib.metadata.version", return_value="fixture"), \
+                patch.object(evaluate.subprocess, "run", side_effect=RuntimeError("model boundary reached")) as worker:
+            if reject:
+                with self.assertRaisesRegex(ValueError, "prepared corpus identity mismatch"):
+                    evaluate.main()
+                worker.assert_not_called()
+                self.assertFalse((output / "p232_001-request.json").exists())
+            else:
+                with self.assertRaisesRegex(RuntimeError, "model boundary reached"):
+                    evaluate.main()
+                worker.assert_called_once()
+
+    def test_original_and_relocated_prepared_pairs_need_no_original_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, model = self.prepare(base)
+            self.evaluate_until_model(root, model, base / "original-evaluation")
+            moved = base / "moved"
+            root.rename(moved)
+            self.evaluate_until_model(moved, model, base / "moved-evaluation")
+
+    def test_replaced_clean_or_noisy_pcm_fails_before_model(self):
+        for kind in ("clean", "noisy"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                root, model = self.prepare(base)
+                path = root / kind / "p232_001.wav"
+                audio, rate = sf.read(path)
+                sf.write(path, audio * 0.5, rate, subtype="FLOAT")
+                self.evaluate_until_model(root, model, base / "evaluation", reject=True)
+
+    def test_incomplete_legacy_pair_manifest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, _ = self.prepare(base)
+            valid = json.loads((root / "manifest.json").read_text())
+            for kind in ("clean", "noisy"):
+                invalid = copy.deepcopy(valid)
+                del invalid["records"][0][kind]["float"]
+                (root / "manifest.json").write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError, "prepared float"):
+                    list(evaluate.cases("paired", root, set()))
+            (root / "manifest.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "re-prepare"):
+                list(evaluate.cases("paired", root, set()))
 
 
 class ClassicalSummaryTests(unittest.TestCase):
@@ -224,7 +377,9 @@ class EvaluationIdentityTests(unittest.TestCase):
         for name, data in (("vocals", audio), ("mixture", audio * 1.5), ("accompaniment", audio * 0.5)):
             sf.write(folder / (name + ".wav"), data, 8000, subtype="FLOAT")
         (root / "manifest.json").write_text(json.dumps({"schema":2, "records":[{
-            "directory":"track-00", "source":"original.mp4", "sha256":"a"*64, "diagnostic_only":False}]}))
+            "directory":"track-00", "source":"original.mp4", "sha256":"a"*64, "diagnostic_only":False,
+            "float":{stem:quality.identity(folder / (stem + ".wav"))
+                     for stem in ("mixture", "vocals", "accompaniment")}}]}))
         model = root / "model.json"
         model.write_text(json.dumps({"operation":"separate"}))
         argv = ["evaluate.py", "--kind", "music", "--corpus-root", str(root),
