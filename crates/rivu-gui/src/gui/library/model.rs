@@ -32,6 +32,7 @@ pub(in crate::gui) fn merge_selection(
 struct RootCounts {
     owner: QueryTracker,
     roots: Vec<std::path::PathBuf>,
+    counted_roots: Arc<[usize]>,
     totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
     pending: HashSet<usize>,
     failed: HashSet<usize>,
@@ -68,6 +69,7 @@ struct SearchCounts {
 pub(super) struct SearchCountRequest {
     pub(super) query: Query,
     pub(super) roots: Vec<std::path::PathBuf>,
+    pub(super) counted_roots: Arc<[usize]>,
     pub(super) revisions: QueryRevisions,
     pub(super) root_totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
     pub(super) other_total: Option<usize>,
@@ -186,6 +188,7 @@ impl LibraryBrowser {
             Some(SearchCountRequest {
                 query,
                 roots: roots.to_vec(),
+                counted_roots: Arc::clone(&self.counts.counted_roots),
                 revisions,
                 root_totals: Arc::clone(&self.counts.totals),
                 other_total: counts.other_total,
@@ -374,6 +377,21 @@ impl LibraryBrowser {
             roots: roots.to_vec(),
         };
         if self.counts.owner.sync(&query, revisions) {
+            if self.counts.roots != roots {
+                // Coverage is roots-owned, independent of filters and revisions.
+                self.counts.counted_roots = roots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, root)| {
+                        (!roots.iter().enumerate().any(|(other_index, parent)| {
+                            index != other_index
+                                && root.starts_with(parent)
+                                && (root != parent || other_index < index)
+                        }))
+                        .then_some(index)
+                    })
+                    .collect();
+            }
             self.counts.totals = Arc::default();
             self.counts.pending.clear();
             self.counts.failed.clear();

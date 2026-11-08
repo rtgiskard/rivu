@@ -12,6 +12,7 @@ async fn library_search_counts(
     let model::SearchCountRequest {
         query: worker_query,
         roots,
+        counted_roots,
         revisions,
         ticket,
         root_totals,
@@ -35,15 +36,8 @@ async fn library_search_counts(
     let mut matched = 0;
     let mut total = 0;
     let mut root_counts = std::collections::HashMap::new();
-    for (index, root) in roots.iter().enumerate() {
-        // Nested configured roots describe the same tracks, not extra occurrences.
-        if roots.iter().enumerate().any(|(other_index, parent)| {
-            index != other_index
-                && root.starts_with(parent)
-                && (root != parent || other_index < index)
-        }) {
-            continue;
-        }
+    for &index in counted_roots.iter() {
+        let root = &roots[index];
         let root_total = *root_totals.get(root)?;
         let root_matched = if unfiltered {
             root_total
