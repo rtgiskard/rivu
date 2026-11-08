@@ -962,9 +962,7 @@ impl Decoder {
         let channels = self.layout.len();
         let count =
             (frame.nb_samples as usize - offset).min(super::source::pcm_chunk_frames(channels)?);
-        let samples = super::source::reserve_pcm(output, count, channels)?;
-        output.resize(samples, 0.0);
-        copy_frame(frame, offset, output)?;
+        copy_frame(frame, offset, count, output)?;
         self.pending_frame =
             (offset + count < frame.nb_samples as usize).then_some((offset + count, timing));
         Ok(FrameTiming { offset, ..timing })
@@ -1065,7 +1063,7 @@ fn frame_channel(rt: &Runtime, layout: &AVChannelLayout, index: u32) -> Option<C
         .ok()
         .and_then(Channel::from_standard_index)
 }
-fn copy_frame(frame: &AVFrame, offset: usize, output: &mut [f32]) -> Result<()> {
+fn copy_frame(frame: &AVFrame, offset: usize, count: usize, output: &mut Vec<f32>) -> Result<()> {
     use abi::{
         AVSampleFormat_AV_SAMPLE_FMT_DBL as F64, AVSampleFormat_AV_SAMPLE_FMT_DBLP as F64P,
         AVSampleFormat_AV_SAMPLE_FMT_FLT as F32, AVSampleFormat_AV_SAMPLE_FMT_FLTP as F32P,
@@ -1075,10 +1073,11 @@ fn copy_frame(frame: &AVFrame, offset: usize, output: &mut [f32]) -> Result<()> 
         AVSampleFormat_AV_SAMPLE_FMT_U8 as U8, AVSampleFormat_AV_SAMPLE_FMT_U8P as U8P,
     };
     let channels = frame.ch_layout.nb_channels as usize;
+    let samples = super::source::reserve_pcm(output, count, channels)?;
     if channels == 0
-        || !output.len().is_multiple_of(channels)
+        || !samples.is_multiple_of(channels)
         || offset
-            .checked_add(output.len() / channels)
+            .checked_add(count)
             .is_none_or(|end| end > frame.nb_samples.max(0) as usize)
         || (frame.nb_samples.max(0) as usize)
             .checked_mul(channels)
@@ -1098,34 +1097,38 @@ fn copy_frame(frame: &AVFrame, offset: usize, output: &mut [f32]) -> Result<()> 
     }
     // FFmpeg owns aligned storage for nb_samples complete frames. Dispatch once
     // per frame, rather than checking format and looking up a plane per sample.
+    let uninitialized = &mut output.spare_capacity_mut()[..samples];
     unsafe {
         match frame.format {
-            U8 | U8P => copy_samples::<u8>(frame, offset, output, planar, |value| {
+            U8 | U8P => copy_samples::<u8>(frame, offset, uninitialized, planar, |value| {
                 (value as f32 - 128.0) / 128.0
             }),
-            S16 | S16P => copy_samples::<i16>(frame, offset, output, planar, |value| {
+            S16 | S16P => copy_samples::<i16>(frame, offset, uninitialized, planar, |value| {
                 value as f32 / 32768.0
             }),
-            S32 | S32P => copy_samples::<i32>(frame, offset, output, planar, |value| {
+            S32 | S32P => copy_samples::<i32>(frame, offset, uninitialized, planar, |value| {
                 value as f32 / 2147483648.0
             }),
-            S64 | S64P => copy_samples::<i64>(frame, offset, output, planar, |value| {
+            S64 | S64P => copy_samples::<i64>(frame, offset, uninitialized, planar, |value| {
                 value as f32 / 9223372036854775808.0
             }),
-            F32 | F32P => copy_samples::<f32>(frame, offset, output, planar, finite_sample),
-            F64 | F64P => copy_samples::<f64>(frame, offset, output, planar, |value| {
+            F32 | F32P => copy_samples::<f32>(frame, offset, uninitialized, planar, finite_sample),
+            F64 | F64P => copy_samples::<f64>(frame, offset, uninitialized, planar, |value| {
                 finite_sample(value as f32)
             }),
             _ => bail!("Unsupported FFmpeg sample format {}", frame.format),
         }
     }
+    // Every supported dispatch writes every slot. Errors above leave length zero;
+    // no uninitialized sample becomes visible, including on conversion failure.
+    unsafe { output.set_len(samples) };
     Ok(())
 }
 
 unsafe fn copy_samples<T: Copy>(
     frame: &AVFrame,
     offset: usize,
-    output: &mut [f32],
+    output: &mut [std::mem::MaybeUninit<f32>],
     planar: bool,
     convert: impl Fn(T) -> f32,
 ) {
@@ -1139,7 +1142,7 @@ unsafe fn copy_samples<T: Copy>(
                 )
             };
             for (out, &sample) in output.iter_mut().skip(channel).step_by(channels).zip(plane) {
-                *out = convert(sample);
+                out.write(convert(sample));
             }
         }
     } else {
@@ -1152,7 +1155,7 @@ unsafe fn copy_samples<T: Copy>(
             )
         };
         for (out, &sample) in output.iter_mut().zip(samples) {
-            *out = convert(sample);
+            out.write(convert(sample));
         }
     }
 }
@@ -1436,6 +1439,31 @@ mod tests {
     }
 
     #[test]
+    fn conversion_initializes_only_the_selected_fragment_and_keeps_errors_empty() {
+        let samples = [0.25_f32, -0.5, 0.75, -1.0];
+        let mut frame: AVFrame = unsafe { std::mem::zeroed() };
+        frame.format = AVSampleFormat_AV_SAMPLE_FMT_FLT;
+        frame.ch_layout.nb_channels = 2;
+        frame.nb_samples = 2;
+        frame.data[0] = samples.as_ptr().cast_mut().cast();
+        frame.extended_data = frame.data.as_mut_ptr();
+        let mut output = Vec::with_capacity(4);
+        let allocation = output.as_ptr();
+        copy_frame(&frame, 1, 1, &mut output).unwrap();
+        assert_eq!(output, [0.75, -1.0]);
+        assert_eq!(output.as_ptr(), allocation);
+        assert!(copy_frame(&frame, 2, 1, &mut output).is_err());
+        assert!(output.is_empty());
+        frame.format = -1;
+        assert!(copy_frame(&frame, 0, 2, &mut output).is_err());
+        assert!(output.is_empty());
+        frame.format = AVSampleFormat_AV_SAMPLE_FMT_FLT;
+        copy_frame(&frame, 0, 2, &mut output).unwrap();
+        assert_eq!(output, samples);
+        assert_eq!(output.as_ptr(), allocation);
+    }
+
+    #[test]
     fn packed_signed_64_bit_samples_are_not_planar() {
         let samples = [i64::MIN, 0, i64::MAX, 1i64 << 62];
         let mut frame: AVFrame = unsafe { std::mem::zeroed() };
@@ -1444,8 +1472,8 @@ mod tests {
         frame.nb_samples = 2;
         frame.data[0] = samples.as_ptr().cast_mut().cast();
         frame.extended_data = frame.data.as_mut_ptr();
-        let mut output = [0.0; 4];
-        copy_frame(&frame, 0, &mut output).unwrap();
+        let mut output = Vec::with_capacity(4);
+        copy_frame(&frame, 0, 2, &mut output).unwrap();
         assert_eq!(output, [-1.0, 0.0, 1.0, 0.5]);
     }
 
@@ -1462,8 +1490,8 @@ mod tests {
         frame.ch_layout.nb_channels = 2;
         frame.nb_samples = 3;
         frame.extended_data = planes.as_mut_ptr();
-        let mut output = [0.0; 6];
-        copy_frame(&frame, 0, &mut output).unwrap();
+        let mut output = Vec::with_capacity(6);
+        copy_frame(&frame, 0, 3, &mut output).unwrap();
         assert_eq!(output, [0.0, 0.0, 2.0, -3.0, f32::MAX, 0.5]);
     }
 }

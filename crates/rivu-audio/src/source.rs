@@ -461,7 +461,7 @@ impl Source {
             decode: Decode::Memory { pcm, position },
             time_base: TimeBase::try_new(1, rate).unwrap(),
             timestamp_tick: 1.0 / f64::from(rate),
-            frames: Vec::with_capacity(4096 * usize::from(channels)),
+            frames: Vec::new(),
             frame_start: start,
             next_media_start: None,
             delivered_frames: 0,
@@ -2191,6 +2191,26 @@ pub(super) mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[test]
+    fn retained_pcm_alias_reads_original_samples_after_lazy_buffer_creation() {
+        let budget = super::super::PcmBudget::new(64 * 1024);
+        let mut builder = super::super::PcmBuilder::new(
+            48_000,
+            Arc::from([Channel::FrontLeft, Channel::FrontRight]),
+            budget,
+        )
+        .unwrap();
+        builder.push(&[0.25; 64]).unwrap();
+        let pcm = builder.finish().unwrap();
+        let mut source = Source::from_pcm(pcm, 0.0).unwrap();
+        let mut work = DECODE_WORK_BUDGET;
+        assert!(matches!(
+            source.next_frames_with_cancel(None, &mut work).unwrap(),
+            DecodeStep::Frames(_)
+        ));
+        assert_eq!(source.decoded_samples(), &[0.25; 64]);
+    }
 
     #[track_caller]
     fn open_selected(
