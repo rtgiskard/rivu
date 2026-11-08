@@ -60,7 +60,7 @@ impl AudioProcessing {
         let export_visible = self.page == Page::Results
             && self.state.system.processing.as_ref().is_some_and(|task| {
                 task.operation == ProcessingOperation::Graph
-                    && task.phase == ProcessingPhase::Complete
+                    && super::super::results::graph_action_run(task).is_some()
             });
         if self.panel_inputs.get(&panel).is_some_and(|fields| {
             fields.iter().any(|(key, field)| {

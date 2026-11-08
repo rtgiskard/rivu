@@ -2457,6 +2457,7 @@ fn graph_audition_failure_keeps_retained_output_and_failed_operation_receipt() {
     );
     assert_eq!(failed.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
     assert!(!failed.graph_outputs.is_empty());
+    assert!(failed.graph_actions_available);
     assert_eq!(core.processing.results().len(), 1);
     assert!(core.processing.audition_projection().is_none());
     assert_eq!(terminal_wait(&mut core, 1), failed);
@@ -2466,6 +2467,9 @@ fn graph_audition_failure_keeps_retained_output_and_failed_operation_receipt() {
         .unwrap();
     complete(&mut core);
     assert!(destination.is_file());
+    assert_eq!(core.processing_status(1).unwrap(), failed);
+    let _commands = recording_audio(&mut core);
+    assert_eq!(core.processing_graph_audition(1, port).unwrap(), None);
     assert_eq!(core.processing_status(1).unwrap(), failed);
 }
 
@@ -3557,5 +3561,179 @@ fn streamed_graph_exports_recheck_publication_and_reclaim_unpublished_files() {
         } else {
             assert_eq!(std::fs::read_dir(export_dir).unwrap().count(), 0);
         }
+    }
+}
+
+#[test]
+fn cancelled_live_graph_retains_frozen_actions_for_export_and_reaudition() {
+    let (directory, mut core) = fixture();
+    let expected = source(directory.path());
+    let _commands = recording_audio(&mut core);
+    let run = core
+        .processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
+        .unwrap();
+    assert!(!core.processing_status(run).unwrap().graph_actions_available);
+    complete(&mut core);
+    core.cancel_processing(run).unwrap();
+    let cancelled = core.processing_status(run).unwrap();
+    assert_eq!(cancelled.phase, ProcessingPhase::Cancelled);
+    assert!(cancelled.graph_outputs.is_empty());
+    assert!(cancelled.graph_actions_available);
+
+    let destination = directory.path().join("cancelled-live-export.wav");
+    let export = core
+        .processing_graph_export(run, graph_port(2, 0), destination.clone())
+        .unwrap();
+    let queued = core.processing_status(export).unwrap();
+    assert_eq!(queued.graph_run_id, Some(run));
+    assert!(queued.graph_actions_available);
+    complete(&mut core);
+    let receipt = core.processing_status(export).unwrap();
+    assert_eq!(
+        receipt.phase,
+        ProcessingPhase::Complete,
+        "{:?}",
+        receipt.error
+    );
+    assert_eq!(receipt.graph_run_id, Some(run));
+    assert!(receipt.graph_actions_available);
+    let actual = hound::WavReader::open(destination)
+        .unwrap()
+        .samples::<f32>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(actual, expected);
+    let audition = core
+        .processing_graph_audition(receipt.graph_run_id.unwrap(), graph_port(2, 0))
+        .unwrap()
+        .expect("live source has no cached PCM and must prepare the frozen graph again");
+    complete(&mut core);
+    assert_eq!(core.processing.audition_projection().unwrap().id, audition);
+    assert_eq!(core.processing_status(run).unwrap(), cancelled);
+}
+
+#[test]
+fn export_failure_and_cancellation_keep_source_capabilities_until_directory_eviction() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let run = core
+        .processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    let mut receipts = Vec::new();
+    for cancelled in [false, true] {
+        let destination = directory.path().join(format!("receipt-{cancelled}.wav"));
+        let export = core
+            .processing_graph_export(run, graph_port(2, 0), destination.clone())
+            .unwrap();
+        assert!(
+            core.processing_graph_export(run, graph_port(2, 0), directory.path().join("busy.wav"),)
+                .is_err()
+        );
+        let event = completion(&mut core);
+        if cancelled {
+            core.cancel_processing(export).unwrap();
+        } else {
+            std::fs::write(&destination, b"existing destination").unwrap();
+        }
+        core.processing_event(event);
+        let receipt = core.processing_status(export).unwrap();
+        assert_eq!(
+            receipt.phase,
+            if cancelled {
+                ProcessingPhase::Cancelled
+            } else {
+                ProcessingPhase::Failed
+            }
+        );
+        assert_eq!(receipt.graph_run_id, Some(run));
+        assert!(receipt.graph_actions_available);
+        assert!(receipt.graph_outputs.is_empty());
+        assert!(receipt.graph_exported_path.is_none());
+        receipts.push(export);
+    }
+    let _commands = recording_audio(&mut core);
+    for &receipt in &receipts {
+        let source = core
+            .processing_status(receipt)
+            .unwrap()
+            .graph_run_id
+            .unwrap();
+        assert_eq!(
+            core.processing_graph_audition(source, graph_port(2, 0))
+                .unwrap(),
+            None
+        );
+    }
+    core.processing.select_audition(None);
+    for index in 0..4 {
+        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+            .unwrap();
+        if index == 0 {
+            let released = core.processing_status(run).unwrap();
+            assert!(released.graph_outputs.is_empty());
+            assert!(released.graph_actions_available);
+        }
+        complete(&mut core);
+    }
+    assert!(
+        core.processing
+            .results()
+            .iter()
+            .all(|result| result.status.id != run)
+    );
+    assert!(!core.processing_status(run).unwrap().graph_actions_available);
+    for receipt in receipts {
+        let evicted = core.processing_status(receipt).unwrap();
+        assert_eq!(evicted.graph_run_id, Some(run));
+        assert!(!evicted.graph_actions_available);
+        assert!(
+            core.processing_graph_audition(run, graph_port(2, 0))
+                .is_err()
+        );
+        assert!(
+            core.processing_graph_export(
+                run,
+                graph_port(2, 0),
+                directory.path().join("evicted.wav"),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn cancelled_and_failed_mix_receipts_retain_stem_audition_capabilities() {
+    for cancelled in [false, true] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        prepare_mix(&mut core);
+        let _commands = recording_audio(&mut core);
+        core.processing.panic_after_mix = !cancelled;
+        begin_mix(&mut core, 1);
+        let event = mix_completion(&mut core);
+        if cancelled {
+            core.cancel_processing(1).unwrap();
+        }
+        core.processing_event(event);
+        let receipt = core.processing_status(1).unwrap();
+        assert_eq!(
+            receipt.phase,
+            if cancelled {
+                ProcessingPhase::Cancelled
+            } else {
+                ProcessingPhase::Failed
+            }
+        );
+        let outputs = receipt.outputs.as_ref().unwrap();
+        assert!(outputs.vocals && outputs.accompaniment);
+        assert!(!receipt.graph_actions_available);
+        assert_eq!(
+            core.audition_processing(1, AuditionMode::Vocals, 0.0, 0.0)
+                .unwrap(),
+            None
+        );
+        assert_eq!(core.processing_status(1).unwrap(), receipt);
+        assert_eq!(core.processing.audition_projection().unwrap().id, 1);
     }
 }

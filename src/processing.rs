@@ -423,8 +423,18 @@ impl Service {
                 .iter()
                 .find(|result| result.status.id == current.id);
             let (outputs, graph_matches) = availability(retained, current);
-            if current.outputs != outputs || !graph_matches {
-                project(retained, Arc::make_mut(current), outputs, graph_matches);
+            let graph_actions_available = current.graph_run_id.is_some_and(|id| {
+                self.results
+                    .iter()
+                    .any(|result| result.status.id == id && result.status.settings.graph.is_some())
+            });
+            if current.outputs != outputs
+                || !graph_matches
+                || current.graph_actions_available != graph_actions_available
+            {
+                let status = Arc::make_mut(current);
+                status.graph_actions_available = graph_actions_available;
+                project(retained, status, outputs, graph_matches);
             }
         }
         for status in &mut self.history {
@@ -433,7 +443,16 @@ impl Service {
                 .iter()
                 .find(|result| result.status.id == status.id);
             let (outputs, graph_matches) = availability(retained, status);
+            status.graph_actions_available = status.graph_run_id.is_some_and(|id| {
+                self.results
+                    .iter()
+                    .any(|result| result.status.id == id && result.status.settings.graph.is_some())
+            });
             project(retained, status, outputs, graph_matches);
+        }
+        for result in &mut self.results {
+            // A retained source run owns its frozen graph even after releasing PCM.
+            result.status.graph_actions_available = result.status.settings.graph.is_some();
         }
     }
 
@@ -663,6 +682,7 @@ impl Service {
             },
             graph_revision: target.map(|_| config.processing_graph.revision),
             graph_run_id: target.map(|_| source_run.unwrap_or(id)),
+            graph_actions_available: false,
             graph_outputs: Vec::new(),
             graph_exported_path: None,
             graph_nodes: if let Some(target) = target {

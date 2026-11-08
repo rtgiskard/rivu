@@ -1876,6 +1876,7 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         },
         graph_revision: Some(0),
         graph_run_id: Some(90),
+        graph_actions_available: true,
         graph_outputs: vec![
             GraphNodeOutput {
                 port: GraphPort { node: 1, port: 0 },
@@ -1895,6 +1896,8 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         json["outputs"],
         serde_json::json!({"denoised": true, "vocals": false, "accompaniment": true})
     );
+    assert_eq!(json["graph_run_id"], 90);
+    assert_eq!(json["graph_actions_available"], true);
     assert!(json["graph_outputs"][0].get("path").is_none());
     assert!(json["graph_outputs"][1]["context"].get("path").is_none());
     let mut encoded = Vec::new();
@@ -1988,14 +1991,13 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
         panic!("expected shared processing response");
     };
+    let decoded_task = state_response(decoded).processing.unwrap().task.unwrap();
+    assert_eq!(decoded_task.phase, ProcessingPhase::Cancelled);
+    assert!(decoded_task.graph_actions_available);
+    assert_eq!(decoded_task.graph_run_id, Some(90));
     assert_eq!(
-        state_response(decoded)
-            .processing
-            .unwrap()
-            .task
-            .unwrap()
-            .phase,
-        ProcessingPhase::Cancelled
+        decoded_task.as_ref(),
+        snapshot.system.processing.as_deref().unwrap()
     );
     observed.apply(
         1,

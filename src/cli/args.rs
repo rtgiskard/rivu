@@ -166,7 +166,7 @@ pub(super) enum ProcessingGraphAction {
         #[arg(long)]
         wait: bool,
     },
-    /// Audition a node output retained by a completed graph run.
+    /// Audition a node output from a retained graph run.
     Audition {
         #[arg(value_name = "INSTANCE:TASK_ID")]
         id: super::tasks::TaskReference,

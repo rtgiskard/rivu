@@ -483,6 +483,9 @@ link:26_migration.adoc#version-authority[Database and configuration migration].
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
 the source run ID rather than becoming retained audition results or command aliases.
+Core also publishes `graph_actions_available` independently of phase and cached-output
+availability. It identifies whether that frozen run still accepts graph actions;
+clients must not infer this capability from successful task completion.
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core

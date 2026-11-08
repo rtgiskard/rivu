@@ -545,10 +545,13 @@ count through processing, mixing and audition; channel count alone is not a layo
 A new non-export run releases unselected PCM and prepared runners after successful
 admission, before worker allocation. Selected audition audio remains pinned.
 Up to four frozen run snapshots remain available for graph recomputation even
-when their PCM has been released. Availability in task status reflects this
-release; completion alone does not guarantee cached audio. Export jobs preserve
-their source handles and retain only a terminal receipt and the destination WAV,
-not another audition slot. `id` identifies the export receipt; `graph_run_id`
+when their PCM has been released. `graph_actions_available` reports whether that frozen
+run remains addressable; output availability separately reports cached audio. Neither
+capability is implied by task phase: a failed or cancelled operation can retain a
+usable run, while a completed task can outlive both capabilities. GUI graph actions
+use the run capability rather than accepting only completed tasks. Export jobs
+preserve their source handles and retain only a terminal receipt and the destination
+WAV, not another audition slot. `id` identifies the export receipt; `graph_run_id`
 identifies the frozen run used for further audition/export actions.
 See link:22_cache.adoc#processing-output-retention[Processing output retention].
 

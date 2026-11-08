@@ -378,8 +378,11 @@ pub struct ProcessingTaskStatus {
     pub settings: ProcessingSettings,
     #[serde(default)]
     pub graph_revision: Option<u64>,
-    /// Retained graph run used for snapshot actions, distinct from an export receipt.
+    /// Frozen source graph identity, also retained by export receipts after eviction.
     pub graph_run_id: Option<u64>,
+    /// The resource owner still retains that source graph for audition/export actions.
+    /// Independent of the operation phase and presence of cached PCM outputs.
+    pub graph_actions_available: bool,
     #[serde(default)]
     pub graph_outputs: Vec<GraphNodeOutput>,
     #[serde(default)]

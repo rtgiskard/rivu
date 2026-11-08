@@ -1946,7 +1946,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn completed_graph_results_keep_export_focus_across_redraws_and_typing(
+    fn retained_results_keep_actions_and_export_focus_across_terminal_phases(
         cx: &mut TestAppContext,
     ) {
         cx.update(Input::init);
@@ -1984,6 +1984,7 @@ mod tests {
                 },
                 graph_revision: Some(config.processing_graph.revision),
                 graph_run_id: Some(1),
+                graph_actions_available: true,
                 graph_outputs: Vec::new(),
                 graph_exported_path: None,
                 graph_nodes: Vec::new(),
@@ -2024,6 +2025,46 @@ mod tests {
                 "out.wav"
             );
         });
+        // Cancellation and audition/export failure change the receipt, not the frozen graph.
+        for phase in [ProcessingPhase::Cancelled, ProcessingPhase::Failed] {
+            processing.update(cx, |this, _| {
+                let task = Arc::make_mut(
+                    Rc::make_mut(&mut this.state)
+                        .system
+                        .processing
+                        .as_mut()
+                        .unwrap(),
+                );
+                task.phase = phase;
+                task.id = 2; // An export receipt operates on source run #1.
+                let current = super::super::results::graph_export_request_current;
+                assert!(current(Some(task), 2, 1));
+                assert!(!current(Some(task), 1, 1));
+                assert!(!current(Some(task), 2, 2));
+                assert!(!current(None, 2, 1));
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                assert!(input.read(cx).is_focused(window));
+            })
+            .unwrap();
+            for (present, absent) in [
+                ("graph-audition-7-1-1-0", "graph-audition-7-2-1-0"),
+                ("graph-export-7-1-1-0", "graph-export-7-2-1-0"),
+            ] {
+                assert!(
+                    gpui::VisualTestContext::from_window(handle, cx)
+                        .debug_bounds(present)
+                        .is_some()
+                );
+                assert!(
+                    gpui::VisualTestContext::from_window(handle, cx)
+                        .debug_bounds(absent)
+                        .is_none()
+                );
+            }
+        }
         // The same retained input is no longer a focus owner when its result disappears.
         processing.update(cx, |this, _| {
             Arc::make_mut(
@@ -2033,7 +2074,12 @@ mod tests {
                     .as_mut()
                     .unwrap(),
             )
-            .phase = ProcessingPhase::Failed;
+            .graph_actions_available = false;
+            assert!(!super::super::results::graph_export_request_current(
+                this.state.system.processing.as_deref(),
+                2,
+                1,
+            ));
         });
         cx.update_window(handle, |_, window, cx| {
             window.refresh();
@@ -2041,5 +2087,73 @@ mod tests {
             assert!(!input.read(cx).is_focused(window));
         })
         .unwrap();
+        assert!(
+            gpui::VisualTestContext::from_window(handle, cx)
+                .debug_bounds("graph-audition-7-1-1-0")
+                .is_none()
+        );
+
+        // Independent stem actions also follow owner-published outputs, not terminal phase.
+        for phase in [ProcessingPhase::Cancelled, ProcessingPhase::Failed] {
+            processing.update(cx, |this, _| {
+                let task = Arc::make_mut(
+                    Rc::make_mut(&mut this.state)
+                        .system
+                        .processing
+                        .as_mut()
+                        .unwrap(),
+                );
+                task.operation = ProcessingOperation::Separate;
+                task.phase = phase;
+                task.graph_run_id = None;
+                task.outputs = Some(rivu_protocol::model::ProcessingOutputs {
+                    denoised: false,
+                    vocals: true,
+                    accompaniment: true,
+                });
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            for label in [
+                "processing-audition-7-Original",
+                "processing-audition-7-Vocals",
+                "processing-audition-7-Accompaniment",
+                "processing-audition-7-Mix",
+            ] {
+                assert!(
+                    gpui::VisualTestContext::from_window(handle, cx)
+                        .debug_bounds(label)
+                        .is_some()
+                );
+            }
+            assert!(
+                gpui::VisualTestContext::from_window(handle, cx)
+                    .debug_bounds("processing-audition-7-Denoised")
+                    .is_none()
+            );
+        }
+        processing.update(cx, |this, _| {
+            Arc::make_mut(
+                Rc::make_mut(&mut this.state)
+                    .system
+                    .processing
+                    .as_mut()
+                    .unwrap(),
+            )
+            .outputs = None;
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert!(
+            gpui::VisualTestContext::from_window(handle, cx)
+                .debug_bounds("processing-audition-7-Vocals")
+                .is_none()
+        );
     }
 }

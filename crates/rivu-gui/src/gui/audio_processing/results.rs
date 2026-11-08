@@ -20,6 +20,18 @@ impl ResultsState {
     }
 }
 
+pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus) -> Option<u64> {
+    task.graph_run_id.filter(|_| task.graph_actions_available)
+}
+
+pub(super) fn graph_export_request_current(
+    task: Option<&rivu_protocol::model::ProcessingTaskStatus>,
+    task_id: u64,
+    run_id: u64,
+) -> bool {
+    task.is_some_and(|task| task.id == task_id && graph_action_run(task) == Some(run_id))
+}
+
 impl AudioProcessing {
     fn captured_parameters(&self, prefix: &str, value: &Value, cx: &App) -> Div {
         let theme = rivu_ui::theme::palette(cx);
@@ -191,32 +203,41 @@ impl AudioProcessing {
             if let Some(error) = &task.error {
                 content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
             }
-            if task.phase == ProcessingPhase::Complete && task.outputs.is_some() {
+            if let Some(outputs) = &task.outputs {
                 content = content.child(caption(theme, self.tr("processing-audition-source")));
                 let mut auditions = row().flex_wrap().gap_1();
-                let modes = if task.operation == ProcessingOperation::Separate {
-                    vec![
-                        (AuditionMode::Original, "processing-original"),
-                        (AuditionMode::Vocals, "processing-vocals"),
-                        (AuditionMode::Accompaniment, "processing-accompaniment"),
-                        (AuditionMode::Mix, "processing-mix"),
-                    ]
-                } else {
-                    vec![
-                        (AuditionMode::Original, "processing-original"),
-                        (AuditionMode::Denoised, "processing-processed"),
-                    ]
-                };
-                for (mode, label) in modes {
-                    auditions = auditions.child(button(
-                        SharedString::from(format!("audition-{panel}-{mode:?}")),
-                        self.tr(label),
-                        cx,
-                        move |this, _, cx| this.audition(id, mode, cx),
-                    ));
+                let modes = [
+                    (AuditionMode::Original, "processing-original", true),
+                    (
+                        AuditionMode::Denoised,
+                        "processing-processed",
+                        outputs.denoised,
+                    ),
+                    (AuditionMode::Vocals, "processing-vocals", outputs.vocals),
+                    (
+                        AuditionMode::Accompaniment,
+                        "processing-accompaniment",
+                        outputs.accompaniment,
+                    ),
+                    (
+                        AuditionMode::Mix,
+                        "processing-mix",
+                        outputs.vocals && outputs.accompaniment,
+                    ),
+                ];
+                for (mode, label, _) in modes.into_iter().filter(|(_, _, available)| *available) {
+                    auditions = auditions.child(
+                        button(
+                            SharedString::from(format!("audition-{panel}-{mode:?}")),
+                            self.tr(label),
+                            cx,
+                            move |this, _, cx| this.audition(id, mode, cx),
+                        )
+                        .debug_selector(move || format!("processing-audition-{panel}-{mode:?}")),
+                    );
                 }
                 content = content.child(auditions);
-                if task.operation == ProcessingOperation::Separate {
+                if outputs.vocals && outputs.accompaniment {
                     content = content
                         .child(self.field_view(
                             FieldKey::VocalGain,
@@ -404,6 +425,16 @@ impl AudioProcessing {
         if self.choosing_path.is_some() {
             return;
         }
+        let Some(run_id) = self
+            .state
+            .system
+            .processing
+            .as_deref()
+            .filter(|task| task.id == task_id)
+            .and_then(graph_action_run)
+        else {
+            return;
+        };
         let Some(field) = self.fields.get(&FieldKey::GraphExport) else {
             return;
         };
@@ -425,6 +456,11 @@ impl AudioProcessing {
                 }
                 cx.notify();
                 if !this.panel_inputs.contains_key(&panel)
+                    || !graph_export_request_current(
+                        this.state.system.processing.as_deref(),
+                        task_id,
+                        run_id,
+                    )
                     || !path_snapshot_current(
                         (task_id, draft_generation, &original),
                         (
@@ -478,7 +514,7 @@ impl AudioProcessing {
             .system
             .processing
             .as_ref()
-            .is_some_and(|task| task.phase == ProcessingPhase::Complete)
+            .is_some_and(|task| graph_action_run(task).is_some())
         {
             Some(self.panel_input(
                 panel,
@@ -523,19 +559,21 @@ impl AudioProcessing {
                 ),
             ));
         }
+        // Receipt descriptions are independent from the retained-resource action gate below.
         if task.phase == ProcessingPhase::Complete {
-            let live = matches!(
-                task.settings.graph_mode,
-                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
-            );
             let ready = if task.graph_exported_path.is_some() {
                 "processing-graph-export-ready"
-            } else if live {
+            } else if matches!(
+                task.settings.graph_mode,
+                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
+            ) {
                 "processing-result-live-prepared"
             } else {
                 "processing-graph-memory-ready"
             };
             content = content.child(caption(theme, self.tr(ready)));
+        }
+        if graph_action_run(task).is_some() {
             content = content.child(
                 column()
                     .min_w_0()
@@ -555,7 +593,7 @@ impl AudioProcessing {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(export_input.expect("complete graph task export input")),
+                            .child(export_input.expect("retained graph source export input")),
                     ),
             );
             let ports = task
@@ -597,64 +635,77 @@ impl AudioProcessing {
                                 port.port
                             ),
                         ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-audition-{panel}-{id}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr(if export_receipt {
-                                "processing-graph-audition"
-                            } else if retained {
-                                "processing-result-audition-cached"
-                            } else {
-                                "processing-result-calculate-audition"
-                            }),
-                            cx,
-                            move |this, _, cx| {
-                                this.send(Command::ProcessingGraphAudition { id, node: port }, cx)
-                            },
-                        ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-export-{panel}-{id}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr(if export_receipt {
-                                "processing-graph-export"
-                            } else if retained {
-                                "processing-result-export-cached"
-                            } else {
-                                "processing-result-calculate-export"
-                            }),
-                            cx,
-                            move |this, _, cx| {
-                                let path = this
-                                    .fields
-                                    .get(&FieldKey::GraphExport)
-                                    .map(|field| field.input.read(cx).text().to_owned())
-                                    .unwrap_or_default();
-                                if !path.is_empty() {
-                                    this.results.errors.remove(&panel);
-                                    this.send(
-                                        Command::ProcessingGraphExport {
-                                            id,
-                                            node: port,
-                                            path: PathBuf::from(path),
-                                        },
-                                        cx,
-                                    );
+                        .child(
+                            button(
+                                SharedString::from(format!(
+                                    "graph-audition-{panel}-{id}-{}-{}",
+                                    port.node, port.port
+                                )),
+                                self.tr(if export_receipt {
+                                    "processing-graph-audition"
+                                } else if retained {
+                                    "processing-result-audition-cached"
                                 } else {
-                                    this.results.errors.insert(
-                                        panel,
-                                        this.context
-                                            .i18n
-                                            .text("processing-graph-export-required")
-                                            .to_owned(),
-                                    );
-                                    cx.notify();
-                                }
-                            },
-                        )),
+                                    "processing-result-calculate-audition"
+                                }),
+                                cx,
+                                move |this, _, cx| {
+                                    this.send(
+                                        Command::ProcessingGraphAudition { id, node: port },
+                                        cx,
+                                    )
+                                },
+                            )
+                            .debug_selector(move || {
+                                format!("graph-audition-{panel}-{id}-{}-{}", port.node, port.port)
+                            }),
+                        )
+                        .child(
+                            button(
+                                SharedString::from(format!(
+                                    "graph-export-{panel}-{id}-{}-{}",
+                                    port.node, port.port
+                                )),
+                                self.tr(if export_receipt {
+                                    "processing-graph-export"
+                                } else if retained {
+                                    "processing-result-export-cached"
+                                } else {
+                                    "processing-result-calculate-export"
+                                }),
+                                cx,
+                                move |this, _, cx| {
+                                    let path = this
+                                        .fields
+                                        .get(&FieldKey::GraphExport)
+                                        .map(|field| field.input.read(cx).text().to_owned())
+                                        .unwrap_or_default();
+                                    if !path.is_empty() {
+                                        this.results.errors.remove(&panel);
+                                        this.send(
+                                            Command::ProcessingGraphExport {
+                                                id,
+                                                node: port,
+                                                path: PathBuf::from(path),
+                                            },
+                                            cx,
+                                        );
+                                    } else {
+                                        this.results.errors.insert(
+                                            panel,
+                                            this.context
+                                                .i18n
+                                                .text("processing-graph-export-required")
+                                                .to_owned(),
+                                        );
+                                        cx.notify();
+                                    }
+                                },
+                            )
+                            .debug_selector(move || {
+                                format!("graph-export-{panel}-{id}-{}-{}", port.node, port.port)
+                            }),
+                        ),
                 );
             }
         }
