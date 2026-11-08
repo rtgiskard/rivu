@@ -555,16 +555,19 @@ source results, encoded files persist on disk, and each window owns decoded
 display images. Releasing one layer does not imply reclamation of the others.
 
 The optional `rivu-metadata` artwork service accepts source identity and path,
-independently of track models. The application owns its shared manager, default
-image, and background scheduling; windows own decoded display images.
+independently of track models. Core and desktop processes own separate lookup
+managers and background scheduling over one shared disk cache; windows own decoded
+display images.
 
-=== Application-session lookup
+[[artwork-uri-leases]]
+=== Process-local lookup and shared URI leases
 
-One application-session manager serves MPRIS and all windows, including reopened
-ones, independently of visualization enablement. Cache-only reads perform no
-media I/O. Extraction runs on background executors and rejects non-regular sources;
-even a regular-file probe can block. GUI defaults use the embedded SVG, while
-MPRIS lazily exports a PNG fallback in the background.
+Core's manager serves MPRIS; the desktop manager serves its windows. A reopened
+desktop process starts a fresh lookup cache, independently of visualization
+enablement. Cache-only reads perform no filesystem I/O. Extraction runs on
+background executors and rejects non-regular sources; even a regular-file probe
+can block. GUI defaults use the embedded SVG, while MPRIS lazily exports a PNG
+fallback in the background.
 
 Logical identity is track ID, fingerprint, and path. Concurrent CUE identities can
 share physical probing of the same path/fingerprint without sharing completion
@@ -641,8 +644,9 @@ Tier names have no processing-version suffix, so future processing changes requi
 explicit invalidation. Thumbnail reads have a separate 8 MiB cap and still require
 source admission under the encoded policy. Thumbnails remain disposable while a
 source lookup is resident: displayed pixels do not depend on those files.
-The MPRIS default export is protected once exported; later sessions can clean it
-when no longer resident.
+The MPRIS default export is protected once exported, including against cleanup
+from a different process; it becomes eligible after its owning manager and leases
+are released.
 
 Only explicit link:01_config.adoc#artwork-cache-maintenance[Settings maintenance]
 enumerates and cleans files. It recognizes originals and thumbnails in one level
@@ -650,13 +654,20 @@ of two-character lowercase-hex buckets, excluding cache-root files, unknown name
 symlinks, and nested directories. Statistics and cleanup use modification age,
 not access age; reuse never refreshes timestamps.
 
-Resident lookup results protect all their files, including idle results and active
-old versions. Release makes results evictable; neither release nor eviction does
-filesystem work. Cleanup is age-based, not a capacity guarantee, so disk use can
-grow until requested. Acquisition excludes maintenance through probing and lookup
-registration; cleanup checks protection under exclusive exclusion, and slow probes
-can delay it. Cache-only reads do not wait. Maintenance never touches audio sources
-and reports inspection/deletion failures.
+Resident lookup results protect their originals, including idle results and active
+old versions, by retaining a shared file lock on each published original inode.
+URI leases retain that protection independently of manager lifetime. Cleanup takes
+a nonblocking exclusive lock and verifies the path still names the locked inode
+before unlinking; another process's active URI is protected without sharing lookup
+state. Publication acquires protection before exposing the original. File descriptors
+and locks retire with their owners or process exit; cache-only reads neither probe
+the filesystem nor acquire new locks.
+
+Release makes results evictable, and eviction does not delete files. Cleanup is
+age-based, not a capacity guarantee, so disk use can grow until requested. Busy
+originals are skipped rather than waiting for their consumers; unrelated probes
+do not exclude maintenance. Maintenance never touches audio sources and reports
+inspection/deletion failures.
 
 === Cached panel drawing
 

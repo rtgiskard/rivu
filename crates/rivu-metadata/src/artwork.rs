@@ -4,11 +4,15 @@
 
 pub mod cache_paths;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
     io::{self, Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
@@ -25,10 +29,14 @@ pub struct Source<'a> {
 const MAX_ARTWORK_ENTRIES: usize = 64;
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Debug)]
 struct ArtworkFile {
     uri: String,
     path: Arc<Path>,
     max_image_bytes: usize,
+    // The original inode is shared-locked before its name becomes visible and
+    // stays locked across cache residency and every clone of a published lease.
+    _lease: fs::File,
 }
 
 /// Holds a published file and protects its URI until it is released.
@@ -208,16 +216,6 @@ impl ArtworkCache {
             }
         }
     }
-
-    fn protects(&self, path: &Path) -> bool {
-        self.insertion_order.iter().any(|entry| {
-            entry
-                .lookup
-                .get()
-                .and_then(|lookup| lookup.image.as_ref())
-                .is_some_and(|file| file.path.as_ref() == path)
-        })
-    }
 }
 
 pub struct ArtworkManager {
@@ -225,13 +223,7 @@ pub struct ArtworkManager {
     max_image_bytes: usize,
     default_image: Option<&'static [u8]>,
     default: OnceLock<Option<Artwork>>,
-    // Background acquisition holds a reader through file creation and lookup
-    // publication. Cleanup holds a writer only for one file at a time. Cache-
-    // only reads never take this gate, and no lookup lock covers filesystem I/O.
-    maintenance: RwLock<()>,
     entries: Mutex<ArtworkCache>,
-    #[cfg(test)]
-    cleanup_waiting: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 impl ArtworkManager {
@@ -242,10 +234,7 @@ impl ArtworkManager {
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             default_image: None,
             default: OnceLock::new(),
-            maintenance: RwLock::new(()),
             entries: Mutex::new(ArtworkCache::default()),
-            #[cfg(test)]
-            cleanup_waiting: None,
         }
     }
 
@@ -270,7 +259,6 @@ impl ArtworkManager {
     /// Explicit blocking default-artwork export. Failure is logged and remembered once per session.
     pub fn export_default(&self) -> Option<Artwork> {
         let bytes = self.default_image?;
-        let _acquisition = self.maintenance.read();
         self.default
             .get_or_init(|| {
                 let path = cache_paths::original_path(
@@ -278,11 +266,8 @@ impl ArtworkManager {
                     blake3::hash(bytes),
                     "png",
                 );
-                match write_image(&path, bytes) {
-                    Ok(uri) => Some(Artwork {
-                        file: artwork_file(uri, self.max_image_bytes),
-                        _entry: None,
-                    }),
+                match write_image(&path, bytes, self.max_image_bytes) {
+                    Ok(file) => Some(Artwork { file, _entry: None }),
                     Err(error) => {
                         tracing::warn!(%error, "mpris_default_artwork_export_failed");
                         None
@@ -324,7 +309,6 @@ impl ArtworkManager {
         source: Source<'_>,
         probe: impl FnOnce() -> ArtworkSource,
     ) -> Option<Artwork> {
-        let _acquisition = self.maintenance.read();
         let mut probe = Some(probe);
         loop {
             let cached = {
@@ -433,20 +417,10 @@ impl ArtworkManager {
         clean: bool,
         report: &mut ArtworkCacheReport,
     ) {
-        // Serialize original-file creation/registration with removal. A decoded
-        // thumbnail holds pixels, not a URI lease: its disposable disk file can
-        // expire independently of a resident original, and a worker racing
-        // cleanup regenerates it on a cache-open miss.
-        let _removal = clean.then(|| {
-            #[cfg(test)]
-            if let Some(waiting) = &self.cleanup_waiting {
-                let _ = waiting.send(self.maintenance.try_write().is_none());
-            }
-            self.maintenance.write()
-        });
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) => {
                 report.failure(path, error);
                 return;
@@ -469,16 +443,40 @@ impl ArtworkManager {
         }
         report.expired_files += 1;
         report.expired_bytes += metadata.len();
-        if self.entries.lock().protects(path)
-            || self
-                .default
-                .get()
-                .and_then(Option::as_ref)
-                .is_some_and(|artwork| artwork.file.path.as_ref() == path)
-        {
-            report.protected_files += 1;
-            report.protected_bytes += metadata.len();
-            return;
+        // Every manager/process uses the original inode as the lease authority.
+        // Thumbnails hold no shared lock and remain independently disposable.
+        let file = match open_cached_image(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                report.failure(path, error);
+                return;
+            }
+        };
+        match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                report.protected_files += 1;
+                report.protected_bytes += metadata.len();
+                return;
+            }
+            Err(error) => {
+                report.failure(path, error);
+                return;
+            }
+        }
+        #[cfg(test)]
+        tests::file_event(tests::FileEvent::CleanupLocked, path);
+        // Another cleaner can have removed the opened inode before we locked
+        // it. Never unlink a replacement now published at the same name.
+        match same_image(path, &file, &metadata) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                report.failure(path, error);
+                return;
+            }
         }
         if clean {
             match fs::remove_file(path) {
@@ -486,6 +484,7 @@ impl ArtworkManager {
                     report.removed_files += 1;
                     report.removed_bytes += metadata.len();
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => report.failure(path, error),
             }
         }
@@ -582,8 +581,7 @@ impl ArtworkManager {
         };
         let hash = blake3::hash(bytes);
         let path = cache_paths::original_path(&self.directory.join("cache"), hash, extension);
-        let uri = write_image(&path, bytes).ok()?;
-        Some(artwork_file(uri, self.max_image_bytes))
+        write_image(&path, bytes, self.max_image_bytes).ok()
     }
 }
 
@@ -596,16 +594,20 @@ fn directory_image_priority(path: &Path) -> Option<u8> {
     }
 }
 
-fn artwork_file(uri: String, max_image_bytes: usize) -> Arc<ArtworkFile> {
-    let path = url::Url::parse(&uri)
-        .expect("artwork file URI")
-        .to_file_path()
-        .expect("local artwork");
-    Arc::new(ArtworkFile {
+fn artwork_file(
+    path: PathBuf,
+    file: fs::File,
+    max_image_bytes: usize,
+) -> io::Result<Arc<ArtworkFile>> {
+    let uri = url::Url::from_file_path(&path)
+        .map(String::from)
+        .map_err(|_| io::Error::other("Artwork path cannot be represented as a file URI"))?;
+    Ok(Arc::new(ArtworkFile {
         uri,
         path: Arc::from(path),
         max_image_bytes,
-    })
+        _lease: file,
+    }))
 }
 
 fn managed_filename(name: &std::ffi::OsStr) -> bool {
@@ -634,44 +636,106 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn file_uri(path: &Path) -> io::Result<String> {
-    let absolute = fs::canonicalize(path)?;
-    url::Url::from_file_path(absolute)
-        .map(String::from)
-        .map_err(|_| io::Error::other("Artwork path cannot be represented as a file URI"))
+fn flock(file: &fs::File, operation: libc::c_int) -> io::Result<()> {
+    loop {
+        // SAFETY: the borrowed descriptor remains open for the syscall. flock
+        // retains no pointer; closing the last descriptor releases the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
-fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => return reuse_image(path, data),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+fn open_cached_image(path: &Path) -> io::Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Artwork cache entry is not a regular file",
+        ));
     }
+    Ok(file)
+}
+
+fn same_image(path: &Path, file: &fs::File, expected: &fs::Metadata) -> io::Result<bool> {
+    let current = fs::symlink_metadata(path)?;
+    let opened = file.metadata()?;
+    Ok(current.is_file()
+        && current.dev() == opened.dev()
+        && current.ino() == opened.ino()
+        && current.dev() == expected.dev()
+        && current.ino() == expected.ino())
+}
+
+fn write_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<Arc<ArtworkFile>> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("Artwork has no directory"))?;
     fs::create_dir_all(parent)?;
-    // Publish only a complete file and never clobber another publisher. The
-    // cache is disposable: no fsync. A race winner still needs a content check.
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    // Resolve the parent, not a possibly stale final entry. Published file URIs
+    // are canonical even when the data directory is relative or symlinked.
+    let path = fs::canonicalize(parent)?.join(
+        path.file_name()
+            .ok_or_else(|| io::Error::other("Artwork has no filename"))?,
+    );
+    match reuse_image(&path, data, max_image_bytes) {
+        Ok(image) => return Ok(image),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::WouldBlock
+            ) => {}
+        Err(error) => return Err(error),
+    }
+    // Lock before atomic publication: there is no visible-but-unregistered
+    // interval in which a foreign cleaner can unlink the new original. The
+    // cache is disposable (no fsync), and a race winner still needs comparison.
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().expect("image parent"))?;
+    flock(temporary.as_file(), libc::LOCK_SH)?;
     temporary.write_all(data)?;
-    match temporary.persist_noclobber(path) {
-        Ok(_) => file_uri(path),
-        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => reuse_image(path, data),
+    match temporary.persist_noclobber(&path) {
+        Ok(file) => {
+            #[cfg(test)]
+            tests::file_event(tests::FileEvent::Published, &path);
+            artwork_file(path, file, max_image_bytes)
+        }
+        // One final acquisition is enough: continual foreign churn may fail a
+        // best-effort load, but never yields a lease for an unlinked inode.
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+            reuse_image(&path, data, max_image_bytes)
+        }
         Err(error) => Err(error.error),
     }
 }
 
-fn reuse_image(path: &Path, data: &[u8]) -> io::Result<String> {
+fn reuse_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<Arc<ArtworkFile>> {
     let mismatch = || io::Error::new(io::ErrorKind::InvalidData, "Artwork cache content mismatch");
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() != data.len() as u64 {
         return Err(mismatch());
     }
-    let file = rivu_utils::regular_file::open_regular_file(path)?;
+    let file = open_cached_image(path)?;
+    #[cfg(test)]
+    tests::file_event(tests::FileEvent::ReuseOpened, path);
+    // Blocking acquisition belongs only to background loads. Cleanup never
+    // waits for this shared lock, and getters only clone its in-memory owner.
+    flock(&file, libc::LOCK_SH)?;
+    if !same_image(path, &file, &metadata)? {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Artwork cache entry changed during acquisition",
+        ));
+    }
     // Stream at most the expected length plus one byte, including if the file
     // grows after metadata. Comparison uses fixed stack space, not a second image.
-    let mut reader = file.take(data.len() as u64 + 1);
+    let mut reader = (&file).take(data.len() as u64 + 1);
     let mut buffer = [0; 8192];
     let mut offset = 0;
     loop {
@@ -687,7 +751,7 @@ fn reuse_image(path: &Path, data: &[u8]) -> io::Result<String> {
     if offset != data.len() {
         return Err(mismatch());
     }
-    file_uri(path)
+    artwork_file(path.to_owned(), file, max_image_bytes)
 }
 
 #[cfg(any(test, feature = "test-support"))]

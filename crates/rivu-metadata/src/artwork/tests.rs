@@ -2,6 +2,54 @@ use super::fixtures::*;
 use super::*;
 use std::fs::File;
 
+mod leases;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FileEvent {
+    Published,
+    ReuseOpened,
+    CleanupLocked,
+}
+
+type FileHook = Box<dyn FnOnce(&Path)>;
+
+thread_local! {
+    static NEXT_FILE_EVENT: std::cell::RefCell<Option<(FileEvent, FileHook)>> =
+        std::cell::RefCell::new(None);
+}
+
+pub(super) fn file_event(event: FileEvent, path: &Path) {
+    let hook = NEXT_FILE_EVENT.with(|next| {
+        let mut next = next.borrow_mut();
+        if next
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == event)
+        {
+            next.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+struct FileEventGuard;
+
+impl Drop for FileEventGuard {
+    fn drop(&mut self) {
+        NEXT_FILE_EVENT.with(|next| next.borrow_mut().take());
+    }
+}
+
+fn on_file_event(event: FileEvent, hook: impl FnOnce(&Path) + 'static) -> FileEventGuard {
+    NEXT_FILE_EVENT.with(|next| {
+        assert!(next.borrow_mut().replace((event, Box::new(hook))).is_none());
+    });
+    FileEventGuard
+}
+
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -79,7 +127,9 @@ fn existing_originals_require_bounded_content_equality_without_overwriting() {
     *collision.last_mut().unwrap() ^= 1;
     fs::write(&path, &collision).unwrap();
     assert_eq!(
-        write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+        write_image(&path, DEFAULT_IMAGE, MAX_IMAGE_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::InvalidData
     );
     assert!(manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).is_none());
@@ -93,7 +143,9 @@ fn existing_originals_require_bounded_content_equality_without_overwriting() {
         .set_len(MAX_IMAGE_BYTES as u64 + 1)
         .unwrap();
     assert_eq!(
-        write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+        write_image(&path, DEFAULT_IMAGE, MAX_IMAGE_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::InvalidData
     );
     assert_eq!(
@@ -103,7 +155,13 @@ fn existing_originals_require_bounded_content_equality_without_overwriting() {
     fs::write(&path, DEFAULT_IMAGE).unwrap();
     age_file(&path);
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
-    assert_eq!(file_path(&write_image(&path, DEFAULT_IMAGE).unwrap()), path);
+    assert_eq!(
+        write_image(&path, DEFAULT_IMAGE, MAX_IMAGE_BYTES)
+            .unwrap()
+            .path
+            .as_ref(),
+        path
+    );
     assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
 }
 
@@ -115,11 +173,11 @@ fn racing_different_publishers_never_clobber_the_winner() {
     let results = std::thread::scope(|scope| {
         let left = scope.spawn(|| {
             barrier.wait();
-            write_image(&path, b"left")
+            write_image(&path, b"left", MAX_IMAGE_BYTES)
         });
         let right = scope.spawn(|| {
             barrier.wait();
-            write_image(&path, b"rght")
+            write_image(&path, b"rght", MAX_IMAGE_BYTES)
         });
         [left.join().unwrap(), right.join().unwrap()]
     });
@@ -174,7 +232,9 @@ fn original_publication_never_reuses_a_symlink() {
     let path = directory.path().join("cached.png");
     std::os::unix::fs::symlink(&target, &path).unwrap();
     assert_eq!(
-        write_image(&path, DEFAULT_IMAGE).unwrap_err().kind(),
+        write_image(&path, DEFAULT_IMAGE, MAX_IMAGE_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::InvalidData
     );
     assert!(
@@ -932,7 +992,7 @@ fn fifo_without_writer_falls_back_and_releases_worker_and_maintenance() {
 }
 
 #[test]
-fn cache_only_reads_do_not_wait_for_probe_or_manual_cleanup() {
+fn cache_only_reads_do_not_wait_for_an_inflight_probe() {
     let directory = tempfile::tempdir().unwrap();
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
     let selected = source_fixture(directory.path().join("missing.wav"));
@@ -956,7 +1016,6 @@ fn cache_only_reads_do_not_wait_for_probe_or_manual_cleanup() {
         assert_eq!(observed.unwrap(), None);
         loader.join().unwrap();
     });
-    let _cleaning = manager.maintenance.write();
     assert_eq!(manager.cached_result(selected.source()), Some(None));
     assert!(manager.cached(selected.source()).is_none());
 }
@@ -1174,19 +1233,13 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
 }
 
 #[test]
-fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
+fn foreign_cleanup_preserves_original_before_lookup_registration() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let mut manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
-    let (waiting, cleanup_waiting) = std::sync::mpsc::channel();
-    manager.cleanup_waiting = Some(waiting);
+    let manager = ArtworkManager::new(directory.path());
+    let cleaner = ArtworkManager::new(directory.path());
     let selected = source_fixture(source);
-    let cache = directory.path().join("artwork/cache");
-    let path = cache_paths::original_path(&cache, blake3::hash(DEFAULT_IMAGE), "png");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, DEFAULT_IMAGE).unwrap();
-    age_file(&path);
     let (started, loading) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
@@ -1194,23 +1247,16 @@ fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
         let selected = &selected;
         let loader = scope.spawn(move || {
             manager.load_with(selected.source(), || {
+                let image = manager.source_uri(&selected.path, manager.max_image_bytes);
                 started.send(()).unwrap();
                 released.recv_timeout(Duration::from_secs(5)).unwrap();
-                manager.source_uri(&selected.path, manager.max_image_bytes)
+                image
             })
         });
-        // This sender must drop before scope joins on assertion unwinding.
+        // Drop before the scope joins if an assertion unwinds.
         let release_before_join = release;
         loading.recv_timeout(Duration::from_secs(5)).unwrap();
-        let cleanup = scope.spawn(|| manager.maintain(Duration::from_secs(86_400), true));
-        assert!(
-            cleanup_waiting
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap()
-        );
-        release_before_join.send(()).unwrap();
-        let loaded = loader.join().unwrap().unwrap();
-        let report = cleanup.join().unwrap().unwrap();
+        let report = cleaner.maintain(Duration::ZERO, true).unwrap();
         assert_eq!(
             (
                 report.expired_files,
@@ -1219,7 +1265,9 @@ fn cleanup_waits_for_first_acquisition_and_preserves_newly_registered_file() {
             ),
             (1, 1, 0)
         );
-        assert_eq!(fs::read(file_path(loaded.uri())).unwrap(), DEFAULT_IMAGE);
+        release_before_join.send(()).unwrap();
+        let loaded = loader.join().unwrap().unwrap();
+        assert_eq!(fs::read(loaded.path()).unwrap(), DEFAULT_IMAGE);
     });
 }
 
