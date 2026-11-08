@@ -407,8 +407,10 @@ a checked Visualizations switch for immediate enablement. Textures opens
 the same live selector and adjustment panel from the application menu or Settings
 → Interface, beside Theme. Language occupies the first Interface row. Closing
 Textures returns to its entry point: the workspace for the application menu, or
-the existing Settings draft without applying, discarding or resetting it. Neither
-entry toggles effects directly.
+the existing Settings draft without applying, discarding or resetting it. Clicking
+the menu's texture status switch enables or disables effects immediately without
+opening the card; clicking the menu item body or the Settings entry opens the card
+without toggling effects.
 The twenty-six studies are grouped as follows, without changing their rendering
 compositions:
 

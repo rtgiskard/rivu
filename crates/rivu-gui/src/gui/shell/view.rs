@@ -414,28 +414,42 @@ impl Render for WindowView {
                             },
                         )
                         .child(
-                            rivu_ui::icon(
+                            IconButton::new(
+                                "material-menu-enabled",
                                 if material_session.enabled {
                                     "󰔡"
                                 } else {
                                     "󰔢"
                                 },
-                                cx,
+                                self.tr("material-enabled"),
                             )
-                            .ml_auto()
-                            .size(rems(1.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(rems(0.875))
-                            .line_height(relative(1.))
-                            .text_color(rgb(
-                                if material_session.enabled {
-                                    theme.accent
-                                } else {
-                                    theme.muted
+                            .switch(material_session.enabled)
+                            .selected_fill(false)
+                            .build_with(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Compact,
+                                cx,
+                                |this, _, cx| {
+                                    use appearance::material::{MaterialIntent, MaterialSession};
+                                    let enabled = MaterialSession::current(cx).enabled;
+                                    this.material_intent(MaterialIntent::SetEnabled(!enabled), cx);
                                 },
-                            )),
+                                |control| {
+                                    control
+                                        .ml_auto()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .size(rems(1.))
+                                        .p_0()
+                                        .text_size(rems(0.875))
+                                        .line_height(relative(1.))
+                                        .text_color(rgb(if material_session.enabled {
+                                            theme.accent
+                                        } else {
+                                            theme.muted
+                                        }))
+                                },
+                            ),
                         ),
                     )
                     .child(rivu_ui::menu_separator(theme))
