@@ -1940,20 +1940,18 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     };
     assert_eq!(*decoded, task);
 
-    let mut snapshot = crate::model::ClientSnapshot::default();
-    snapshot.system.processing = Some(Arc::new(task.clone()));
+    let mut snapshot = crate::model::ClientSnapshot {
+        processing: Some(Arc::new(task.clone())),
+        ..Default::default()
+    };
     let previous = snapshot.clone();
-    Arc::make_mut(snapshot.system.processing.as_mut().unwrap()).phase = ProcessingPhase::Cancelled;
+    Arc::make_mut(snapshot.processing.as_mut().unwrap()).phase = ProcessingPhase::Cancelled;
     assert_eq!(
-        previous.system.processing.as_ref().unwrap().phase,
+        previous.processing.as_ref().unwrap().phase,
         ProcessingPhase::Complete
     );
-    assert_eq!(
-        serde_json::to_value(&previous.system).unwrap()["processing"],
-        json
-    );
-    // A system request has identical bytes whether the owner retains a large
-    // processing graph or not: it cannot serialize or transfer that payload.
+    assert_eq!(serde_json::to_value(&previous.processing).unwrap(), json);
+    // A system-only response preserves an independently applied processing task.
     encode_response_frame_into(
         &WireResponse::State(wire_state(StateResponse {
             system: Some(snapshot.system.clone()),
@@ -1962,30 +1960,17 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
         &mut encoded,
     )
     .unwrap();
-    let system_with_task = encoded.clone();
-    let mut system_without_task = snapshot.system.clone();
-    system_without_task.processing = None;
-    encode_response_frame_into(
-        &WireResponse::State(wire_state(StateResponse {
-            system: Some(system_without_task),
-            ..Default::default()
-        })),
-        &mut encoded,
-    )
-    .unwrap();
-    assert_eq!(encoded, system_with_task);
     let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
         panic!("expected system-only state");
     };
     let system_only = state_response(decoded);
     assert!(system_only.processing.is_none());
-    assert!(system_only.system.as_ref().unwrap().processing.is_none());
     let mut observed = crate::response::ObservedState::new(1);
     observed.apply(
         1,
         StateResponse {
             processing: Some(crate::response::ProcessingState {
-                task: snapshot.system.processing.clone(),
+                task: snapshot.processing.clone(),
             }),
             ..Default::default()
         },
@@ -1993,14 +1978,14 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     observed.apply(1, system_only);
     let snapshot = observed.snapshot();
     assert_eq!(
-        snapshot.system.processing.as_ref().unwrap().phase,
+        snapshot.processing.as_ref().unwrap().phase,
         ProcessingPhase::Cancelled
     );
 
     encode_response_frame_into(
         &WireResponse::State(wire_state(StateResponse {
             processing: Some(crate::response::ProcessingState {
-                task: snapshot.system.processing.clone(),
+                task: snapshot.processing.clone(),
             }),
             ..StateResponse::default()
         })),
@@ -2016,7 +2001,7 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     assert_eq!(decoded_task.graph_run_id, Some(90));
     assert_eq!(
         decoded_task.as_ref(),
-        snapshot.system.processing.as_deref().unwrap()
+        snapshot.processing.as_deref().unwrap()
     );
     observed.apply(
         1,
@@ -2025,7 +2010,7 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
             ..Default::default()
         },
     );
-    assert!(observed.snapshot().system.processing.is_none());
+    assert!(observed.snapshot().processing.is_none());
 }
 
 #[test]

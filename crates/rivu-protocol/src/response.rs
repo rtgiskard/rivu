@@ -370,8 +370,7 @@ impl ObservedState {
             state.library = section;
             applied.library = current.library;
         }
-        if let Some(mut section) = response.system {
-            section.processing = state.system.processing.take();
+        if let Some(section) = response.system {
             state.system = section;
             applied.system = current.system;
         }
@@ -380,7 +379,7 @@ impl ObservedState {
             applied.configuration = current.configuration;
         }
         if let Some(section) = response.processing {
-            state.system.processing = section.task;
+            state.processing = section.task;
             applied.processing = current.processing;
         }
         true

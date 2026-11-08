@@ -299,7 +299,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         .recv_timeout(Duration::from_secs(5))
         .unwrap();
     let (_, initial) = watcher.take_update().unwrap().unwrap();
-    assert!(initial.system.processing.is_none());
+    assert!(initial.processing.is_none());
     continue_watch.send(()).unwrap();
     ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(watcher.latest.lock().is_none());
@@ -311,7 +311,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         .unwrap();
     let (_, shutdown) = watcher.take_update().unwrap().unwrap();
     assert!(shutdown.system.shutting_down);
-    assert!(shutdown.system.processing.is_none());
+    assert!(shutdown.processing.is_none());
     server.join().unwrap();
 }
 

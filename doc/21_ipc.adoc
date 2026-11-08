@@ -273,9 +273,11 @@ A→B→A and offset-only changes, gets a new ticket. Hidden pages invalidate wi
 reading. Layout establishes the viewport before read planning; drawing schedules
 no I/O. Cancelled reads retain their physical slot until the exchange retires.
 
-Processing task metadata is shared immutably across local snapshots; updates use
-copy-on-write, keeping older publications stable. Socket representation remains a
-task value. The TUI drops this unconsumed payload when merging state.
+Processing task metadata occupies its own response section and client snapshot
+field, independently of System state. Local snapshots share it immutably;
+copy-on-write keeps older publications stable. Socket representation remains a
+task value. System-only updates preserve the last applied task; an explicitly
+empty Processing section clears it. The TUI does not request this section.
 
 Startup and single-instance operation are documented in
 link:../readme.adoc[README]. Socket clients and Core must use compatible builds.

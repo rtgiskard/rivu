@@ -68,7 +68,7 @@ impl GuiSnapshot {
                 ffmpeg_status: state.system.ffmpeg_status.clone(),
                 shutting_down: state.system.shutting_down,
                 relocation_task: state.system.relocation_task.clone(),
-                processing: state.system.processing.clone(),
+                processing: state.processing.clone(),
                 processing_audition: state.processing_audition,
                 processing_selection: state.processing_selection,
             },

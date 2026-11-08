@@ -29,6 +29,7 @@ pub struct ClientSnapshot {
     pub processing_audition: Option<ProcessingAudition>,
     /// Retained resume target; actual processing_audition is empty while bypassed.
     pub processing_selection: Option<ProcessingAudition>,
+    pub processing: Option<Arc<ProcessingTaskStatus>>,
     pub system: SystemState,
     pub configuration: ConfigurationState,
 }
@@ -497,7 +498,6 @@ pub struct SystemState {
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<RelocationTaskStatus>,
-    pub processing: Option<Arc<ProcessingTaskStatus>>,
 }
 impl Default for SystemState {
     fn default() -> Self {
@@ -516,7 +516,6 @@ impl Default for SystemState {
             database_optimization: None,
             shutting_down: false,
             relocation_task: None,
-            processing: None,
         }
     }
 }

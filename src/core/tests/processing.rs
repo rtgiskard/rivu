@@ -118,12 +118,11 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
         ..Default::default()
     }));
     let full = handle.state(StateSections::ALL);
-    assert!(full.system.as_ref().unwrap().processing.is_none());
     assert!(full.processing.as_ref().unwrap().task.is_some());
     let before = full.revisions;
     let mut observed = rivu_protocol::response::ObservedState::new(1);
     observed.apply(1, full);
-    let retained = observed.snapshot().system.processing.clone();
+    let retained = observed.snapshot().processing.clone();
 
     core.processing
         .progress(id, 1, None, ProcessingPhase::Rendering);
@@ -143,7 +142,7 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
     });
     assert!(update.system.is_none());
     observed.apply(1, update);
-    assert_ne!(observed.snapshot().system.processing, retained);
+    assert_ne!(observed.snapshot().processing, retained);
 
     core.state.processing = None;
     core.publish();
@@ -156,7 +155,7 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
             ..Default::default()
         }),
     );
-    assert!(observed.snapshot().system.processing.is_some());
+    assert!(observed.snapshot().processing.is_some());
 
     core.state.system.shutting_down = true;
     core.publish();
