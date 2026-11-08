@@ -390,6 +390,8 @@ pub enum AudioEvent {
     },
     Ended {
         generation: u64,
+        /// Decoded duration after a complete, seek-free origin-to-EOF traversal drains.
+        completed_duration: Option<f64>,
         /// Precise selected-stream average, only after complete playback drains.
         bitrate_bps: Option<u64>,
     },

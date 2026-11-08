@@ -354,6 +354,7 @@ fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
     assert_eq!(play_count(&core, 1), 0);
     let event = AudioEvent::Ended {
         generation: core.transport.generation,
+        completed_duration: Some(3.0),
         bitrate_bps: None,
     };
     assert!(core.business_event(BusinessEvent::Audio(event)));
@@ -782,6 +783,7 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
         let generation = core.transport.generation;
         core.audio_event(AudioEvent::Ended {
             generation: generation.wrapping_sub(1),
+            completed_duration: None,
             bitrate_bps: Some(192_000),
         })
         .unwrap();
@@ -791,13 +793,15 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
             core.engine.events = Some(receive);
             send.try_send(AudioEvent::Ended {
                 generation,
+                completed_duration: None,
                 bitrate_bps: Some(192_000),
             })
             .unwrap();
-            core.finish_playback(Ok(None), false, Ok(())).unwrap();
+            core.finish_playback(Ok(None), Ok(())).unwrap();
         } else {
             core.audio_event(AudioEvent::Ended {
                 generation,
+                completed_duration: None,
                 bitrate_bps: Some(192_000),
             })
             .unwrap();
@@ -808,6 +812,7 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
         let revision = core.state.library.revision;
         core.audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: Some(256_000),
         })
         .unwrap();
@@ -818,9 +823,10 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
     let generation = core.transport.generation;
-    core.finish_playback(Ok(None), false, Ok(())).unwrap();
+    core.finish_playback(Ok(None), Ok(())).unwrap();
     core.audio_event(AudioEvent::Ended {
         generation,
+        completed_duration: None,
         bitrate_bps: Some(192_000),
     })
     .unwrap();
@@ -838,6 +844,7 @@ fn retiring_eof_bitrate_remains_fresh_after_final_statistics() {
     core.engine.events = Some(receive);
     send.try_send(AudioEvent::Ended {
         generation,
+        completed_duration: None,
         bitrate_bps: Some(192_000),
     })
     .unwrap();
@@ -847,7 +854,6 @@ fn retiring_eof_bitrate_remains_fresh_after_final_statistics() {
             position_seconds: 10.0,
             listened_seconds: 3.0,
         })),
-        true,
         Ok(()),
     )
     .unwrap();
@@ -872,6 +878,7 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
             started(&mut core, Some(10.0)).unwrap();
             AudioEvent::Ended {
                 generation,
+                completed_duration: None,
                 bitrate_bps: Some(192_000),
             }
         } else {
@@ -1097,7 +1104,6 @@ fn paused_confirmations_do_not_advance_activity_at_stop() {
             position_seconds: 20.0,
             listened_seconds: 20.0,
         })),
-        false,
         Ok(()),
     )
     .unwrap();
@@ -1172,7 +1178,6 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
                 position_seconds: 2.0,
                 listened_seconds: heard,
             })),
-            false,
             Ok(()),
         )
         .unwrap();
@@ -1302,6 +1307,7 @@ fn retiring_settings_failures_publish_only_current_targets_across_stop_and_repla
             sender
                 .try_send(AudioEvent::Ended {
                     generation,
+                    completed_duration: None,
                     bitrate_bps: None,
                 })
                 .unwrap();
@@ -1319,8 +1325,7 @@ fn retiring_settings_failures_publish_only_current_targets_across_stop_and_repla
             if path == "stop-drain" {
                 // The acknowledgement is already received; queued events belong
                 // to finish_playback's post-reply drain, before generation fencing.
-                core.finish_playback(Ok(Some(snapshot)), false, Ok(()))
-                    .unwrap();
+                core.finish_playback(Ok(Some(snapshot)), Ok(())).unwrap();
             } else {
                 let (commands, receive) = async_channel::bounded(1);
                 let idle_commands = core.engine.replace_commands(commands);
@@ -1401,6 +1406,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         sender
             .try_send(AudioEvent::Ended {
                 generation,
+                completed_duration: None,
                 bitrate_bps: None,
             })
             .unwrap();
@@ -1424,7 +1430,6 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
                 position_seconds: heard,
                 listened_seconds: heard,
             })),
-            false,
             Ok(()),
         )
         .unwrap();
@@ -1458,6 +1463,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     sender
         .try_send(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap();
@@ -1470,7 +1476,6 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
                 position_seconds: 10.0,
                 listened_seconds: 10.0
             })),
-            false,
             Ok(())
         )
         .is_err()
@@ -1504,6 +1509,7 @@ fn stale_events_cannot_count_or_stop_new_playback() {
     .unwrap();
     core.audio_event(AudioEvent::Ended {
         generation,
+        completed_duration: None,
         bitrate_bps: None,
     })
     .unwrap();
@@ -1559,7 +1565,24 @@ fn rejected_recent_update_stops_without_counting_the_start() {
 }
 
 #[test]
-fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
+fn stale_completed_duration_cannot_resolve_new_generation() {
+    let (_directory, mut core) = fixture_with_duration(None);
+    pending(&mut core, 1);
+    started(&mut core, None).unwrap();
+    progress(&mut core, 10.0, 8.0);
+    let generation = core.transport.generation.wrapping_sub(1);
+    core.audio_event(AudioEvent::Ended {
+        generation,
+        completed_duration: Some(10.0),
+        bitrate_bps: None,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.duration, None);
+    assert_eq!(play_count(&core, 1), 0);
+}
+
+#[test]
+fn unknown_duration_waits_for_complete_traversal_eof() {
     for (heard, expected) in [(2.0, 0), (2.01, 1), (8.0, 1)] {
         let (_directory, mut core) = fixture_with_duration(None);
         pending(&mut core, 1);
@@ -1570,6 +1593,7 @@ fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
         assert!(
             core.audio_event(AudioEvent::Ended {
                 generation,
+                completed_duration: Some(10.0),
                 bitrate_bps: None
             })
             .is_err()
@@ -1581,7 +1605,7 @@ fn unknown_duration_waits_for_natural_eof_and_uses_confirmed_position() {
 }
 
 #[test]
-fn natural_eof_uses_final_snapshot_position_instead_of_previous_progress() {
+fn natural_eof_never_infers_duration_from_final_snapshot() {
     let (_directory, mut core) = fixture_with_duration(None);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
@@ -1593,47 +1617,62 @@ fn natural_eof_uses_final_snapshot_position_instead_of_previous_progress() {
             position_seconds: 10.0,
             listened_seconds: 1.5,
         })),
-        true,
         Ok(()),
     )
     .unwrap();
-    assert_eq!(core.state.playback.duration, Some(10.0));
+    assert_eq!(core.state.playback.duration, None);
     assert_eq!(play_count(&core, 1), 0);
     assert_eq!(core.state.playback.position, 0.0);
     assert!(core.transport.session.is_none());
 }
 
 #[test]
-fn natural_eof_preserves_previous_position_for_stale_or_invalid_final_snapshot() {
-    for (stale, position) in [
-        (true, 10.0),
-        (false, f64::NAN),
-        (false, f64::INFINITY),
-        (false, f64::NEG_INFINITY),
-        (false, -1.0),
+fn invalid_completed_duration_cannot_resolve_unknown_duration() {
+    for duration in [
+        None,
+        Some(0.0),
+        Some(-1.0),
+        Some(f64::NAN),
+        Some(f64::INFINITY),
     ] {
         let (_directory, mut core) = fixture_with_duration(None);
         pending(&mut core, 1);
         started(&mut core, None).unwrap();
-        progress(&mut core, 1.0, 0.0);
+        progress(&mut core, 100.0, 3.0);
         let generation = core.transport.generation;
-        core.finish_playback(
-            Ok(Some(audio::AudioSnapshot {
-                generation: if stale {
-                    generation.wrapping_sub(1)
-                } else {
-                    generation
-                },
-                position_seconds: position,
-                listened_seconds: 0.0,
-            })),
-            true,
-            Ok(()),
+        core.retiring_audio_event(
+            generation,
+            AudioEvent::Ended {
+                generation,
+                completed_duration: duration,
+                bitrate_bps: None,
+            },
         )
         .unwrap();
-        assert_eq!(core.state.playback.duration, Some(1.0));
+        core.stop().unwrap();
+        assert_eq!(core.state.playback.duration, None);
         assert_eq!(play_count(&core, 1), 0);
     }
+}
+
+#[test]
+fn completed_duration_preserves_known_duration() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    progress(&mut core, 100.0, 1.0);
+    let generation = core.transport.generation;
+    core.retiring_audio_event(
+        generation,
+        AudioEvent::Ended {
+            generation,
+            completed_duration: Some(2.0),
+            bitrate_bps: None,
+        },
+    )
+    .unwrap();
+    core.stop().unwrap();
+    assert_eq!(core.state.playback.duration, Some(10.0));
+    assert_eq!(play_count(&core, 1), 0);
 }
 
 #[test]
@@ -1647,6 +1686,7 @@ fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
     assert!(
         core.audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None
         })
         .is_err()
@@ -1704,6 +1744,38 @@ fn stopped_decoder_snapshot_counts_once_and_fences_late_events() {
     assert_eq!(core.state.playback.position, 1.0);
     assert_eq!(play_count(&core, 1), 1);
     assert_eq!(play_count(&core, 2), 0);
+}
+
+#[test]
+fn completed_duration_count_failure_still_retires_and_retries_once() {
+    let (directory, mut core) = fixture_with_duration(None);
+    pending(&mut core, 1);
+    started(&mut core, None).unwrap();
+    progress(&mut core, 100.0, 3.0);
+    let generation = core.transport.generation;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_eof_count BEFORE UPDATE OF play_count ON tracks WHEN NEW.play_count != OLD.play_count BEGIN SELECT RAISE(ABORT,'count rejected'); END;").unwrap();
+    assert!(
+        core.audio_event(AudioEvent::Ended {
+            generation,
+            completed_duration: Some(10.0),
+            bitrate_bps: None,
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert!(core.transport.session.is_none());
+    assert!(core.transport.retired.is_some());
+    assert_ne!(core.transport.generation, generation);
+    assert_eq!(core.state.playback.duration, Some(10.0));
+    assert_eq!(play_count(&core, 1), 0);
+    connection
+        .execute_batch("DROP TRIGGER reject_eof_count;")
+        .unwrap();
+    core.flush_deferred_playback().unwrap();
+    core.flush_deferred_playback().unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    assert!(core.transport.retired.is_none());
 }
 
 #[test]
@@ -1831,7 +1903,6 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
                     position_seconds: 3.0,
                     listened_seconds: 3.0
                 })),
-                false,
                 Ok(()),
             )
             .is_err()
@@ -1895,7 +1966,6 @@ fn stop_bookkeeping_error_does_not_skip_final_confirmed_statistics() {
                 position_seconds: 3.0,
                 listened_seconds: 3.0,
             })),
-            false,
             Err(anyhow::anyhow!("Earlier event projection failed")),
         )
         .unwrap_err();
@@ -1927,7 +1997,7 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
             })
             .unwrap();
     }
-    assert!(core.finish_playback(Ok(None), false, Ok(())).is_err());
+    assert!(core.finish_playback(Ok(None), Ok(())).is_err());
     let retired = core.transport.retired.as_ref().unwrap();
     assert_eq!(retired.stats.heard, 8.0);
     assert!(retired.stats.counted);
@@ -1950,11 +2020,7 @@ fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
     progress(&mut core, 3.0, 3.0);
     core.transport.session.as_mut().unwrap().last_heard_at = Some(17);
     let error = core
-        .finish_playback(
-            Err(anyhow::anyhow!("Output stop unavailable")),
-            false,
-            Ok(()),
-        )
+        .finish_playback(Err(anyhow::anyhow!("Output stop unavailable")), Ok(()))
         .unwrap_err();
     assert_eq!(error.to_string(), "Output stop unavailable");
     assert_eq!(core.store.history(MAX_QUERY_ROWS).unwrap()[0].played_at, 17);
@@ -1981,7 +2047,6 @@ fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
             } else {
                 Err(anyhow::anyhow!("stop unavailable"))
             },
-            false,
             Ok(()),
         );
         assert_eq!(result.is_ok(), confirmed);
@@ -1996,7 +2061,6 @@ fn repeated_stop_keeps_the_original_source_fact_without_a_new_fence() {
                 position_seconds: 90.0,
                 listened_seconds: 90.0,
             })),
-            false,
             Ok(()),
         )
         .unwrap();

@@ -100,7 +100,6 @@ pub(super) struct PlaybackSession {
     pub(super) loaded_track: Arc<Track>,
     pub(super) source: Option<(crate::store::PlaybackSource, std::fs::Metadata)>,
     pub(super) heard: f64,
-    pub(super) position: Option<f64>,
     pub(super) started: bool,
     pub(super) counted: bool,
     pub(super) last_heard_at: Option<i64>,
@@ -209,11 +208,12 @@ impl Core {
             }
             AudioEvent::Ended {
                 generation,
+                completed_duration,
                 bitrate_bps,
             } if generation == self.transport.generation => {
-                self.playback_ended_bitrate(bitrate_bps)?;
+                self.playback_ended(completed_duration, bitrate_bps);
                 let status = self.state.playback.status;
-                self.stop_playback(true)?;
+                self.stop_playback()?;
                 self.advance_with_status(true, status)?;
             }
             AudioEvent::SeekRejected {
@@ -245,7 +245,7 @@ impl Core {
                 // retire a newer source, advance navigation or fence twice.
                 self.transport.confirm_source_closed(snapshot.generation);
                 if snapshot.generation == self.transport.generation {
-                    self.finish_playback(Ok(Some(snapshot)), false, Ok(()))?;
+                    self.finish_playback(Ok(Some(snapshot)), Ok(()))?;
                 } else {
                     self.state.playback.stopped_source_generation =
                         self.transport.physically_closed_source;
@@ -319,18 +319,31 @@ impl Core {
         true
     }
 
-    pub(in crate::core) fn playback_ended_bitrate(&mut self, bitrate: Option<u64>) -> Result<()> {
-        // Only the worker's actual full-source EOF can supply this value.
-        if self
+    fn playback_ended(&mut self, duration: Option<f64>, bitrate: Option<u64>) {
+        let Some(playback) = self
             .transport
             .session
             .as_ref()
-            .is_some_and(|playback| playback.started && playback.loaded_track.cue.is_none())
+            .filter(|playback| playback.started)
+        else {
+            return;
+        };
+        // Accept EOF facts before stopping; statistics commit with the final heard
+        // snapshot so a database failure cannot skip physical/session retirement.
+        if !self
+            .state
+            .playback
+            .duration
+            .is_some_and(|value| value.is_finite() && value > 0.0)
+            && let Some(duration) = duration.filter(|value| value.is_finite() && *value > 0.0)
+        {
+            self.state.playback.duration = Some(duration);
+        }
+        if playback.loaded_track.cue.is_none()
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
         {
             self.persist_playback_bitrate(bitrate, true);
         }
-        Ok(())
     }
 
     pub(in crate::core) fn start(&mut self, queue_id: u64, history: QueueHistory) -> Result<()> {
@@ -383,7 +396,6 @@ impl Core {
                 loaded_track: Arc::clone(&track),
                 source,
                 heard: 0.0,
-                position: None,
                 started: false,
                 counted: false,
                 last_heard_at: None,
@@ -507,7 +519,6 @@ impl Core {
         {
             if position.is_finite() {
                 self.state.playback.position = position;
-                playback.position = Some(position);
             }
             if heard.is_finite() && heard > playback.heard {
                 let heard_at = playback
@@ -540,8 +551,11 @@ impl Core {
             }
             AudioEvent::Ended {
                 generation: event_generation,
+                completed_duration,
                 bitrate_bps,
-            } if event_generation == generation => self.playback_ended_bitrate(bitrate_bps)?,
+            } if event_generation == generation => {
+                self.playback_ended(completed_duration, bitrate_bps);
+            }
             // Settings failures describe the current desired configuration, not
             // terminal playback control. Admit them before fencing this source.
             event @ (AudioEvent::OutputSettingsFailed { .. }
@@ -568,7 +582,6 @@ impl Core {
     pub(in crate::core) fn finish_playback(
         &mut self,
         snapshot: Result<Option<audio::AudioSnapshot>>,
-        natural: bool,
         bookkeeping: Result<()>,
     ) -> Result<()> {
         let generation = self.transport.generation;
@@ -605,34 +618,18 @@ impl Core {
             Ok(snapshot) => (snapshot, Ok(())),
             Err(error) => (None, Err(error)),
         };
-        if let Some(playback) = &mut self.transport.session {
-            if let Some(snapshot) = snapshot
-                && snapshot.generation == generation
-            {
-                if snapshot.position_seconds.is_finite() && snapshot.position_seconds >= 0.0 {
-                    playback.position = Some(snapshot.position_seconds);
-                }
-                if snapshot.listened_seconds.is_finite() {
-                    // Late paused confirmations still count as heard audio, but
-                    // their activity timestamp cannot cross the pause boundary.
-                    let heard_at = playback
-                        .paused_at
-                        .map_or_else(now, |paused_at| now().min(paused_at));
-                    if playback.record_heard(snapshot.listened_seconds, heard_at) {
-                        self.state.playback.last_heard_at = playback.last_heard_at;
-                    }
-                }
-            }
-            if natural
-                && !self
-                    .state
-                    .playback
-                    .duration
-                    .is_some_and(|duration| duration.is_finite() && duration > 0.0)
-            {
-                // Only backend-confirmed position at EOF can resolve an unknown
-                // duration; a seek target or accumulated heard time cannot.
-                self.state.playback.duration = playback.position.filter(|position| *position > 0.0);
+        if let Some(playback) = &mut self.transport.session
+            && let Some(snapshot) = snapshot
+            && snapshot.generation == generation
+            && snapshot.listened_seconds.is_finite()
+        {
+            // Late paused confirmations still count as heard audio, but
+            // their activity timestamp cannot cross the pause boundary.
+            let heard_at = playback
+                .paused_at
+                .map_or_else(now, |paused_at| now().min(paused_at));
+            if playback.record_heard(snapshot.listened_seconds, heard_at) {
+                self.state.playback.last_heard_at = playback.last_heard_at;
             }
         }
         if let Some(stats) = self.transport.session.take() {
@@ -652,7 +649,7 @@ impl Core {
         let statistics = self.flush_deferred_playback();
         stopped.and(bookkeeping).and(statistics)
     }
-    pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
+    pub(in crate::core) fn stop_playback(&mut self) -> Result<()> {
         let mut stop = self.engine.stop_request();
         let generation = self.transport.generation;
         let mut bookkeeping = Ok(());
@@ -668,7 +665,7 @@ impl Core {
         }))
         .map(Some);
         self.engine.restore_events(stop.into_events());
-        self.finish_playback(snapshot, natural, bookkeeping)
+        self.finish_playback(snapshot, bookkeeping)
     }
 
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
@@ -676,7 +673,7 @@ impl Core {
         // Prepared graph handoff consumes its intent before establishing a source.
         self.pending_processing_audition = None;
         self.transport.pending_navigation = None;
-        self.stop_playback(false)
+        self.stop_playback()
     }
 
     pub(in crate::core) fn prepare_source_replacement(&mut self) -> Result<SourceReplacement> {
@@ -698,7 +695,6 @@ impl Core {
             Ok(snapshot) => {
                 self.finish_playback(
                     Ok(Some(snapshot)),
-                    false,
                     Err(anyhow::anyhow!(
                         "Audio stop snapshot belongs to a different playback generation"
                     )),
@@ -706,14 +702,14 @@ impl Core {
                 bail!("Audio source replacement was rejected");
             }
             Err(error) => {
-                self.finish_playback(Err(error), false, bookkeeping)?;
+                self.finish_playback(Err(error), bookkeeping)?;
                 bail!("Audio source replacement could not stop its source");
             }
         };
         let drained = self.drain_playback_events(generation);
         let progress = self.playback_progress(snapshot.position_seconds, snapshot.listened_seconds);
         if let Err(error) = bookkeeping.and(drained).and(progress) {
-            self.finish_playback(Ok(Some(snapshot)), false, Err(error))?;
+            self.finish_playback(Ok(Some(snapshot)), Err(error))?;
             bail!("Audio source replacement bookkeeping failed");
         }
         Ok(SourceReplacement {
@@ -733,7 +729,7 @@ impl Core {
         command: AudioCommand,
     ) -> Result<()> {
         if let Err(error) = self.engine.send(command) {
-            return self.finish_playback(Ok(None), false, Err(error));
+            return self.finish_playback(Ok(None), Err(error));
         }
         self.transport.generation = self.transport.generation.wrapping_add(1);
         self.transport.admit_source();

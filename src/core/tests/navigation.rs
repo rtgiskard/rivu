@@ -107,6 +107,7 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         core.command(Command::Pause).unwrap();
         core.audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap();
@@ -135,6 +136,7 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         assert_eq!(loads, [true]);
         core.audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap();
@@ -549,6 +551,7 @@ fn ended_missing_next_stops_and_resume_attempts_a_load() {
     let error = core
         .audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap_err();
@@ -597,6 +600,7 @@ fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
     let error = core
         .audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap_err();
@@ -910,6 +914,7 @@ fn stale_queue_natural_eof_recovers_order_and_keeps_paused_intent() {
         let _commands = recording_audio(&mut core);
         core.audio_event(AudioEvent::Ended {
             generation: core.transport.generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap();
@@ -1066,6 +1071,7 @@ fn accepted_load_survives_selection_save_failure_and_late_projection() {
     );
     core.audio_event(AudioEvent::Ended {
         generation: old_source,
+        completed_duration: None,
         bitrate_bps: None,
     })
     .unwrap();

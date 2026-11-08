@@ -429,7 +429,6 @@ fn pending(core: &mut Core, queue_id: u64) {
             .playback_source(core.state.current_track().unwrap())
             .unwrap(),
         heard: 0.0,
-        position: None,
         started: false,
         counted: false,
         last_heard_at: None,

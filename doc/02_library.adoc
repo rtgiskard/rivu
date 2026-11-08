@@ -299,9 +299,10 @@ A playback increments its play count once when confirmed heard time *strictly
 exceeds* `playback.play_count_threshold_percent` of the track duration (20% by default).
 Exactly reaching the threshold does not count. Pause/resume and seeks do not
 reset count state or create additional counts; skipped or unconfirmed output
-time is not heard time. When duration is unknown, counting waits for a natural
-EOF to supply a positive duration from the final backend position; without one,
-no count is added.
+time is not heard time. When duration is unknown, counting waits for a complete,
+seek-free traversal from the beginning through natural EOF to supply a positive
+decoded duration; pauses do not invalidate this traversal. After a seek, duration
+remains unknown and no percentage-based count is added.
 
 A successful playback start creates or updates one recent entry per track,
 ordered newest first. Paused time and failed loads do not advance activity.

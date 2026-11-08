@@ -695,6 +695,7 @@ impl Worker {
             if self.playback.as_ref().unwrap().finished() {
                 let playback = self.playback.as_ref().unwrap();
                 let bitrate_bps = playback.completed_bitrate();
+                let completed_duration = playback.completed_duration();
                 let AudioSnapshot {
                     generation,
                     position_seconds,
@@ -707,6 +708,7 @@ impl Worker {
                 });
                 self.event(AudioEvent::Ended {
                     generation,
+                    completed_duration,
                     bitrate_bps,
                 });
                 continue;
@@ -1843,6 +1845,7 @@ mod tests {
             events
                 .try_send(AudioEvent::Ended {
                     generation: 1,
+                    completed_duration: None,
                     bitrate_bps: None,
                 })
                 .unwrap();
@@ -1859,6 +1862,7 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 worker.event(AudioEvent::Ended {
                     generation: 2,
+                    completed_duration: None,
                     bitrate_bps: None,
                 });
                 worker.run();
@@ -2297,6 +2301,7 @@ mod tests {
                 events
                     .try_send(AudioEvent::Ended {
                         generation: 1,
+                        completed_duration: None,
                         bitrate_bps: None,
                     })
                     .unwrap();
@@ -2308,6 +2313,7 @@ mod tests {
                 let worker = std::thread::spawn(move || {
                     worker.event(AudioEvent::Ended {
                         generation: 2,
+                        completed_duration: None,
                         bitrate_bps: None,
                     });
                     worker.run();
@@ -2349,6 +2355,7 @@ mod tests {
         events
             .try_send(AudioEvent::Ended {
                 generation: 1,
+                completed_duration: None,
                 bitrate_bps: None,
             })
             .unwrap();
@@ -2400,6 +2407,7 @@ mod tests {
         events
             .try_send(AudioEvent::Ended {
                 generation: 1,
+                completed_duration: None,
                 bitrate_bps: None,
             })
             .unwrap();
@@ -2409,6 +2417,7 @@ mod tests {
                 &shutdown.events,
                 AudioEvent::Ended {
                     generation: 2,
+                    completed_duration: None,
                     bitrate_bps: None,
                 },
             );

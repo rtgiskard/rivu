@@ -221,6 +221,7 @@ fn eof_during_scan_saving_preserves_later_pause_intent() {
     progress(&mut core, 3.0, 3.0);
     core.audio_event(AudioEvent::Ended {
         generation: core.transport.generation,
+        completed_duration: None,
         bitrate_bps: None,
     })
     .unwrap();
@@ -261,6 +262,7 @@ fn stop_after_saving_eof_cancels_navigation_without_reopening_the_source() {
     let source = core.transport.generation;
     core.audio_event(AudioEvent::Ended {
         generation: source,
+        completed_duration: None,
         bitrate_bps: None,
     })
     .unwrap();

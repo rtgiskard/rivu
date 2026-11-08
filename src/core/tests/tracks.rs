@@ -1128,6 +1128,7 @@ fn removing_missing_tracks_retires_session_after_failed_scan_projection() {
         core.audio_event(late_started).unwrap();
         core.audio_event(AudioEvent::Ended {
             generation,
+            completed_duration: None,
             bitrate_bps: None,
         })
         .unwrap();
@@ -1266,6 +1267,7 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
             core.audio_event(late_started).unwrap();
             core.audio_event(AudioEvent::Ended {
                 generation,
+                completed_duration: None,
                 bitrate_bps: None,
             })
             .unwrap();

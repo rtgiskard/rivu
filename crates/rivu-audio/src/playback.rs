@@ -409,6 +409,12 @@ impl Playback {
             .unwrap_or_else(|| self.source.info())
     }
 
+    pub(super) fn completed_duration(&self) -> Option<f64> {
+        self.finished()
+            .then(|| self.source.completed_duration())
+            .flatten()
+    }
+
     pub(super) fn completed_bitrate(&self) -> Option<u64> {
         if self.source_info.is_some() {
             return None;
@@ -1870,7 +1876,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn complete_bitrate_waits_for_output_drain_and_cue_end_never_upgrades() {
+    fn completion_facts_wait_for_output_drain_and_exclude_cue_ranges() {
         let file = pcm_samples(320);
         for restricted in [false, true] {
             let (mut playback, mut render) = test_playback(
@@ -1885,6 +1891,7 @@ pub(super) mod tests {
                     Source::open(file.path(), 64 * 1024, DecoderHint::Native, false).unwrap();
             }
             assert_eq!(playback.completed_bitrate(), None);
+            assert_eq!(playback.completed_duration(), None);
             playback.fill().unwrap();
             assert!(playback.eof);
             assert_eq!(
@@ -1892,6 +1899,7 @@ pub(super) mod tests {
                 None,
                 "decoded EOF is not audible EOF"
             );
+            assert_eq!(playback.completed_duration(), None);
             let mut data = [0.0; 160];
             render(&mut data, 0);
             render(&mut data, 20);
@@ -1901,12 +1909,14 @@ pub(super) mod tests {
                 None,
                 "queued device tail has not elapsed"
             );
+            assert_eq!(playback.completed_duration(), None);
             render(&mut data, 60);
             assert!(playback.finished());
             assert_eq!(
                 playback.completed_bitrate(),
                 (!restricted).then_some(128_000)
             );
+            assert_eq!(playback.completed_duration(), (!restricted).then_some(0.04));
         }
     }
 

@@ -1133,6 +1133,11 @@ impl Source {
         &self.info
     }
 
+    pub(super) fn completed_duration(&self) -> Option<f64> {
+        (self.complete_stream && self.exhausted && self.delivered_frames > 0)
+            .then(|| self.delivered_frames as f64 / f64::from(self.info.sample_rate))
+    }
+
     /// Available only after actual demux/decoder EOF, never segment exhaustion.
     pub(super) fn completed_bitrate(&self) -> Option<u64> {
         if !self.complete_stream {
@@ -2467,6 +2472,38 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn completed_duration_requires_uninterrupted_origin_traversal() {
+        let file = opus_file();
+        let mut hints = vec![DecoderHint::Native];
+        if cfg!(feature = "ffmpeg") {
+            hints.push(DecoderHint::Ffmpeg);
+        }
+        for hint in hints {
+            for seek in [None, Some(0.0), Some(0.1)] {
+                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                source.info.duration = None;
+                assert_eq!(source.completed_duration(), None);
+                if let Some(target) = seek {
+                    source.seek(target).unwrap();
+                }
+                let samples = decode_remaining(&mut source);
+                if seek.is_none() {
+                    assert_eq!(
+                        source.completed_duration(),
+                        Some(
+                            samples.len() as f64
+                                / source.layout.len() as f64
+                                / f64::from(source.info.sample_rate)
+                        )
+                    );
+                } else {
+                    assert_eq!(source.completed_duration(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_complete_stream_upgrades_estimate_from_only_encoded_audio_payload() {
         let file = opus_file();
         // Independently inspect this deterministic fixture's one-packet pages:
@@ -3138,6 +3175,7 @@ pub(super) mod tests {
                 Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
             let expected = decode_remaining(&mut reference);
             assert_eq!(expected.len(), 96_000);
+            assert_eq!(reference.completed_duration(), Some(12.0));
             for start in [9.25, 100.0] {
                 let mut source = Source::begin_open(
                     file.path(),
@@ -3154,8 +3192,10 @@ pub(super) mod tests {
                 }
                 let offset = ((start * 8000.0) as usize).min(expected.len());
                 assert_eq!(decode_remaining(&mut source), expected[offset..]);
+                assert_eq!(source.completed_duration(), None);
                 source.seek(0.0).unwrap();
                 assert_eq!(decode_remaining(&mut source), expected);
+                assert_eq!(source.completed_duration(), None);
             }
         }
     }
