@@ -1,4 +1,4 @@
-use super::Settings;
+use super::{Settings, Target};
 use gpui::{Context, SharedString};
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
@@ -158,7 +158,7 @@ fn size_label(bytes: u64) -> String {
 
 impl Settings {
     pub(in crate::gui) fn sync_library_stats(&mut self, cx: &mut Context<Self>) {
-        if !self.active {
+        if !self.active || self.model.target() != Target::Global {
             return;
         }
         if self.root_stats.sync(
@@ -191,7 +191,7 @@ impl Settings {
             let _ = this.update(cx, |this, cx| {
                 // Refresh identity before accepting a worker that outlived its session,
                 // a removed root, or a catalog commit not yet delivered to the window.
-                if this.active {
+                if this.active && this.model.target() == Target::Global {
                     this.root_stats.sync(
                         &this.model.draft.library_roots,
                         this.handle.library_revision(),
@@ -238,6 +238,8 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
+
     use super::*;
 
     fn response(read: &Read, revision: u64, total: usize) -> QueryResponse {
@@ -257,6 +259,52 @@ mod tests {
                     .collect(),
             )),
         }
+    }
+
+    #[gpui::test]
+    fn artwork_sessions_do_not_start_or_revive_root_statistics(cx: &mut gpui::TestAppContext) {
+        use super::super::tests::{SettingsWindow, fixture};
+        use super::super::{ArtworkOptions, Config, ConfigPatch};
+
+        let (directory, runtime, settings) = fixture(cx);
+        let baseline = runtime.handle.config_snapshot();
+        let config = Config {
+            library_roots: vec![directory.path().join("music")],
+            ..baseline.as_ref().clone()
+        };
+        let response = futures::executor::block_on(
+            runtime
+                .handle
+                .apply_settings(ConfigPatch::between(&baseline, &config)),
+        );
+        assert!(response.observed_result().is_ok());
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                let options = ArtworkOptions::from(&config);
+                this.open_artwork(7, options, window, cx);
+                assert!(!this.root_stats.in_flight.pending());
+                this.sync_library_stats(cx);
+                assert!(!this.root_stats.in_flight.pending());
+
+                this.open(window, cx);
+                assert!(this.root_stats.in_flight.pending());
+                let query = Query::LibraryRootStats {
+                    roots: config.library_roots.clone(),
+                };
+                let generation = this.root_stats.owner.generation();
+                this.open_artwork(8, options, window, cx);
+                assert!(!this.root_stats.owner.accepts(
+                    &query,
+                    generation,
+                    revisions(this.handle.library_revision()),
+                ));
+            });
+        })
+        .unwrap();
     }
 
     #[test]

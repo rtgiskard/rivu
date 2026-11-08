@@ -2004,8 +2004,12 @@ impl Settings {
         self.artwork_cache_error = None;
         self.fill(cx);
         self.active = true;
-        self.root_stats.retry();
-        self.sync_library_stats(cx);
+        if self.model.target() == Target::Global {
+            self.root_stats.retry();
+            self.sync_library_stats(cx);
+        } else {
+            self.root_stats.cancel();
+        }
         self.scope.focus(window, cx);
         cx.notify();
     }
@@ -2632,7 +2636,9 @@ mod tests {
     // gpui::* also imports its test macro; expansion needs Rust's builtin attribute.
     use core::prelude::v1::test;
 
-    fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<Settings>) {
+    pub(super) fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, CoreRuntime, Entity<Settings>) {
         cx.update(|cx| {
             rivu_ui::theme::set_palette(rivu_presentation::theme::palette(Theme::default()), cx);
             rivu_ui::theme::set_typography(
@@ -2692,7 +2698,7 @@ mod tests {
         (runtime.handle.config_snapshot(), result)
     }
 
-    struct SettingsWindow(Entity<Settings>);
+    pub(super) struct SettingsWindow(pub(super) Entity<Settings>);
 
     impl Render for SettingsWindow {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
