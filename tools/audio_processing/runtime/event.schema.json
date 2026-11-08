@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:rivu:audio-processing:event:2",
+  "$id": "urn:rivu:audio-processing:event:4",
   "title": "Bounded framed JSON control and raw PCM outputs",
   "type": "object",
   "required": ["version", "task_id", "type"],
   "unevaluatedProperties": false,
   "properties": {
-    "version": {"const": 2},
+    "version": {"const": 4},
     "task_id": {"type": "string", "maxLength": 128},
     "type": {"enum": ["progress", "complete", "error"]}
   },
@@ -33,10 +33,10 @@
         "type": {"const": "complete"},
         "outputs": {
           "type": "object",
-          "description": "Availability of exact source-aligned raw PCM streams. Complete is valid only after every declared frame has arrived; no retained output paths exist.",
+          "description": "True declares a complete exact source-aligned PCM stream. speech=input is valid only for wet_mix=0 application streams: no PCM frames are sent; reuse retained input only after validated input-end/EOF and successful child exit. Explicit export emits true after writing its copied PCM. No retained output paths exist.",
           "additionalProperties": false,
           "properties": {
-            "speech": {"const": true},
+            "speech": {"enum": [true, "input"]},
             "vocals": {"const": true},
             "accompaniment": {"const": true}
           },

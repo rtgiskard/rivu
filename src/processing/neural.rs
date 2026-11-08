@@ -1,5 +1,6 @@
 //! Bounded duplex PCM transport. Frames are kind:u8 + length:u32-le + payload.
 //! JSON (0), input PCM (1), input end (2), speech/vocals/accompaniment PCM (17/18/19).
+//! Dry speech sends only input-end/EOF; validated completion reuses retained input.
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
 use super::render::{ProgressReporter, check_cancel};
 use super::{
@@ -321,6 +322,7 @@ fn run_model(
         #[cfg(not(feature = "onnx"))]
         bail!("Native ONNX inference requires a build with the onnx feature enabled");
     }
+    let dry = speech && config.speech_wet_mix == 0.0;
     let mut parameters = if speech {
         serde_json::json!({"wet_mix":config.speech_wet_mix,"attenuation_limit_db":config.speech_attenuation_limit_db})
     } else {
@@ -336,7 +338,11 @@ fn run_model(
         "model_manifest":model.manifest,"parameters":parameters,"threads":config.threads,
         "device":if config.device == rivu_format::config::NeuralDevice::Cpu {"cpu"} else {"cuda"}
     }))?;
-    let mut outgoing = Vec::with_capacity(MAX_FRAME + 5);
+    let mut outgoing = Vec::with_capacity(if dry {
+        request.len() + 5
+    } else {
+        MAX_FRAME + 5
+    });
     frame(&mut outgoing, JSON, &request)?;
     let interpreter = if speech {
         &config.speech_interpreter
@@ -372,11 +378,11 @@ fn run_model(
         nonblocking(&stderr)?;
         let mut decoder = Decoder::default();
         let mut sent = 0;
-        let mut input_frame = 0;
+        let mut input_frame = if dry { input.frames() } else { 0 };
         let mut end_sent = false;
         let channels = usize::from(input.channels());
-        let mut samples = vec![0.0f32; 8192 * channels];
-        let mut decoded = Vec::with_capacity(MAX_FRAME / 4);
+        let mut samples = vec![0.0f32; if dry { 0 } else { 8192 * channels }];
+        let mut decoded = Vec::with_capacity(if dry { 0 } else { MAX_FRAME / 4 });
         let mut builders = [None, None, None];
         let mut frames = [0u64; 3];
         let mut complete = None;
@@ -508,6 +514,7 @@ fn run_model(
                                 _ => bail!("Unknown neural event type"),
                             }
                         } else {
+                            ensure!(!dry, "Unexpected PCM for retained dry input");
                             let index = match kind {
                                 SPEECH if speech => 0,
                                 VOCALS if !speech => 1,
@@ -609,7 +616,11 @@ fn run_model(
         );
         for &(index, key) in expected {
             ensure!(
-                frames[index] == input.frames() && event["outputs"][key] == true,
+                if dry {
+                    frames[index] == 0 && event["outputs"][key] == "input"
+                } else {
+                    frames[index] == input.frames() && event["outputs"][key] == true
+                },
                 "Missing or truncated neural output: {key}"
             );
         }
@@ -619,10 +630,14 @@ fn run_model(
             "Missing model hash"
         );
         Ok(AudioOutputs {
-            denoised: builders[0]
-                .take()
-                .map(audio::PcmBuilder::finish)
-                .transpose()?,
+            denoised: if dry {
+                Some(input.clone())
+            } else {
+                builders[0]
+                    .take()
+                    .map(audio::PcmBuilder::finish)
+                    .transpose()?
+            },
             vocals: builders[1]
                 .take()
                 .map(audio::PcmBuilder::finish)
@@ -867,6 +882,31 @@ mod tests {
     }
 
     #[test]
+    fn subprocess_dry_reuses_input_storage_without_pcm_roundtrip() {
+        for channels in [1, 2] {
+            subprocess_fixture(
+                ProcessingOperation::Speech,
+                channels,
+                8201,
+                "dry-success",
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn subprocess_dry_requires_valid_completion_and_successful_exit() {
+        for outcome in [
+            "dry-nonzero",
+            "dry-unexpected-pcm",
+            "dry-stream-output",
+            "dry-misaligned",
+        ] {
+            subprocess_fixture(ProcessingOperation::Speech, 1, 37, outcome, None);
+        }
+    }
+
+    #[test]
     fn subprocess_failure_after_pcm_discards_unpublished_output() {
         subprocess_fixture(
             ProcessingOperation::Speech,
@@ -965,9 +1005,25 @@ assert request['frames'] > 0
 speech = request['operation'] == 'speech'
 assert speech or request['operation'] == 'separate'
 channels = request['channels']
-assert channels == (1 if speech else 2)
+assert channels in ((1, 2) if speech else (2,))
 outcome = request['model_manifest'].rsplit('/', 1)[-1]
 streams = [(17, 'speech', 1)] if speech else [(19, 'accompaniment', -1), (18, 'vocals', 1)]
+if speech and request['parameters']['wet_mix'] == 0:
+    kind, payload = read_frame()
+    assert kind == 2 and not payload, 'dry speech must not transport PCM'
+    assert sys.stdin.buffer.read() == b''
+    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
+        completed=request['frames'], total=request['frames'],
+        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+    if outcome == 'dry-unexpected-pcm':
+        send(17, struct.pack('<f', 0))
+    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
+        sample_rate=request['sample_rate'], channels=channels,
+        frames=request['frames'] + (1 if outcome == 'dry-misaligned' else 0),
+        outputs=dict(speech=True if outcome == 'dry-stream-output' else 'input'),
+        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+    sys.stdout.buffer.flush()
+    raise SystemExit(7 if outcome == 'dry-nonzero' else 0)
 pcm = bytearray()
 while True:
     kind, payload = read_frame()
@@ -1027,11 +1083,22 @@ if outcome == 'complete-then-nonzero':
             worker,
             speech_manifest: Some(directory.path().join(outcome)),
             separation_manifest: Some(directory.path().join(outcome)),
+            speech_wet_mix: if outcome.starts_with("dry-") {
+                0.0
+            } else {
+                1.0
+            },
             ..Default::default()
         };
         let budget = audio::PcmBudget::new(64 * 1024 * 1024);
         let expected: Vec<f32> = (0..frames * usize::from(channels))
-            .map(|i| ((i % 17) as f32 - 8.0) / 4.0)
+            .map(|i| {
+                if outcome.starts_with("dry-") && i == 0 {
+                    -0.0
+                } else {
+                    ((i % 17) as f32 - 8.0) / 4.0
+                }
+            })
             .collect();
         let layout = layout.unwrap_or_else(|| {
             if channels == 1 {
@@ -1117,7 +1184,7 @@ if outcome == 'complete-then-nonzero':
                 ..
             }
         ));
-        if outcome != "success" {
+        if !matches!(outcome, "success" | "dry-success") {
             let error = match result {
                 Ok(_) => panic!("failed worker must not publish PCM"),
                 Err(error) => format!("{error:#}"),
@@ -1132,6 +1199,13 @@ if outcome == 'complete-then-nonzero':
         }
         let outputs = result
             .expect("stdlib neural worker must complete successfully (requires python3 on PATH)");
+        if outcome == "dry-success" {
+            assert_eq!(
+                budget.used_bytes(),
+                source_bytes,
+                "dry output duplicated PCM storage"
+            );
+        }
         assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
         assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
         let speech = operation == ProcessingOperation::Speech;

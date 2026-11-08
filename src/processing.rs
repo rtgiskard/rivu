@@ -29,8 +29,8 @@ mod tests;
 
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const MEMORY_LIMIT: u64 = 512 * 1024 * 1024;
-pub(crate) const WORKER_REQUEST_VERSION: u64 = 2;
-pub(crate) const WORKER_EVENT_VERSION: u64 = 2;
+pub(crate) const WORKER_REQUEST_VERSION: u64 = 4;
+pub(crate) const WORKER_EVENT_VERSION: u64 = 4;
 
 #[cfg(test)]
 thread_local! {

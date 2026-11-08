@@ -7,7 +7,9 @@ is UTF-8 JSON, 1 is interleaved float32-le input, and 2 is
 the empty input-end marker, which must be followed immediately by stdin EOF.
 Each process handles one task; the producer must close stdin without waiting for
 completion. Output kinds 17/18/19 are speech/vocals/accompaniment
-PCM at the exact source format. Only explicit export.py/evaluation writes files.
+PCM at the exact source format. Dry speech sends no PCM in either direction:
+input-end/EOF and a validated speech="input" completion retain caller storage.
+Only explicit export.py/evaluation writes files, including dry PCM exports.
 
 The sequential context reader retains at most one bounded model window, not the
 whole signal. MossFormer2 uses 8s cores plus 2s context; other models use 24s plus
@@ -28,8 +30,8 @@ import time
 import struct
 
 sys.dont_write_bytecode = True
-VERSION = 2
-EVENT_VERSION = 2
+VERSION = 4
+EVENT_VERSION = 4
 CORE_SECONDS = 24
 CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
@@ -263,6 +265,7 @@ class StreamInput:
     def __init__(self, stream, request):
         self.stream = stream
         self.frames, self.channels = request["frames"], request["channels"]
+        self.reuse_input = request.get("operation") == "speech" and request.get("parameters", {}).get("wet_mix", 1.0) == 0.0
         self.buffer = None
         self.left = self.right = self.received = 0
         self.pending = memoryview(b"")
@@ -294,7 +297,8 @@ class StreamInput:
         return audio
 
     def finish(self):
-        require(self.right == self.frames and self.received == self.frames and not self.pending,
+        expected = 0 if self.reuse_input else self.frames
+        require(self.right == expected and self.received == expected and not self.pending,
                 "protocol", "input frame count mismatch")
         kind, payload = read_frame(self.stream)
         require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
@@ -315,6 +319,11 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
     controls = request.get("parameters", {})
     require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
+    if dry and not collect_report:
+        source.finish()
+        emit("complete", outputs={"speech":"input"}, sample_rate=rate, channels=channels,
+             frames=frames, model=model)
+        return None
     if not dry:
         check_packages(manifest)
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):

@@ -30,9 +30,10 @@ def input_stream_pcm(audio):
 def input_stream(request, audio):
     result = io.BytesIO()
     worker.write_frame(result, worker.JSON_FRAME, json.dumps(request).encode())
-    data = memoryview(audio).cast("B")
-    for offset in range(0, len(data), 8192):
-        worker.write_frame(result, worker.INPUT_PCM, data[offset:offset+8192])
+    if not (request["operation"] == "speech" and request.get("parameters", {}).get("wet_mix", 1.0) == 0):
+        data = memoryview(audio).cast("B")
+        for offset in range(0, len(data), 8192):
+            worker.write_frame(result, worker.INPUT_PCM, data[offset:offset+8192])
     worker.write_frame(result, worker.INPUT_END, b"")
     return result.getvalue()
 
@@ -119,6 +120,32 @@ class FramingTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "memory_capacity")
             allocate.assert_not_called()
 
+    def test_dry_stream_needs_no_pcm_window_or_numpy(self):
+        import builtins
+        request = {"version":worker.VERSION, "task_id":"dry-no-pcm", "operation":"speech",
+                   "sample_rate":192000, "channels":2, "frames":14400*192000,
+                   "model_manifest":"/manifest.json", "parameters":{"wet_mix":0}}
+        worker.validate_request(request)
+        source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_END)), request)
+        events = []
+        original_import = builtins.__import__
+        def guarded_import(name, *args, **kwargs):
+            if name == "numpy":
+                raise AssertionError("dry stream loaded NumPy")
+            return original_import(name, *args, **kwargs)
+        with patch.object(worker, "validate_manifest", return_value={"id":"DeepFilterNet3"}), \
+             patch.object(worker, "validate_execution") as execution, \
+             patch.object(source, "window", side_effect=AssertionError("dry PCM window")), \
+             patch.object(worker, "check_packages", side_effect=AssertionError("dry model packages")), \
+             patch.object(builtins, "__import__", side_effect=guarded_import):
+            worker._process_validated(request, source,
+                lambda *_: self.fail("dry stream wrote PCM"),
+                lambda kind, **fields: events.append((kind, fields)), collect_report=False)
+        execution.assert_called_once()
+        self.assertEqual(events[-1][0], "complete")
+        self.assertEqual(events[-1][1]["outputs"], {"speech":"input"})
+        self.assertEqual(events[-1][1]["frames"], request["frames"])
+
     def test_stream_core_skips_export_evidence_and_keeps_completion(self):
         import numpy as np
         for operation, dry in (("speech", True), ("speech", False), ("separate", False)):
@@ -149,16 +176,19 @@ class FramingTests(unittest.TestCase):
                      patch.object(np, "percentile", side_effect=AssertionError("export latency")), \
                      patch.object(worker.json.JSONEncoder, "iterencode", side_effect=AssertionError("export report encoding")), \
                      patch.dict(os.environ):
-                    source = worker.StreamInput(io.BytesIO(input_stream_pcm(audio)), request)
+                    source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_END) if dry else input_stream_pcm(audio)), request)
                     report = worker._process_validated(request, source, write,
                         lambda kind, **fields: events.append((kind, fields)), collect_report=False)
                 self.assertIsNone(report)
                 self.assertIsNone(source.buffer)
-                np.testing.assert_array_equal(np.concatenate(outputs["speech" if operation == "speech" else "vocals"]), expected)
-                if operation == "separate":
-                    np.testing.assert_array_equal(np.concatenate(outputs["accompaniment"]), audio-expected)
+                if dry:
+                    self.assertEqual(outputs, {})
+                else:
+                    np.testing.assert_array_equal(np.concatenate(outputs["speech" if operation == "speech" else "vocals"]), expected)
+                    if operation == "separate":
+                        np.testing.assert_array_equal(np.concatenate(outputs["accompaniment"]), audio-expected)
                 self.assertEqual(events[-1], ("complete", {
-                    "outputs":dict.fromkeys(outputs, True), "sample_rate":8000, "channels":2,
+                    "outputs":{"speech":"input"} if dry else dict.fromkeys(outputs, True), "sample_rate":8000, "channels":2,
                     "frames":len(audio), "model":{"id":manifest["id"], "sha256":"model-hash"}}))
 
 
@@ -212,7 +242,6 @@ class StreamEntrypointTests(unittest.TestCase):
                     {"id":manifest["id"], "sha256":worker.canonical_digest(manifest)}])
 
     def test_real_subprocess_rejects_other_worker_and_interpreter(self):
-        import numpy as np
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             bundle_fixture(base)
@@ -224,7 +253,7 @@ class StreamEntrypointTests(unittest.TestCase):
             request = {"version":worker.VERSION, "task_id":"identity", "operation":"speech",
                        "sample_rate":8000, "channels":1, "frames":1,
                        "model_manifest":str(base / "manifest.json"), "parameters":{"wet_mix":0}}
-            wire = input_stream(request, np.zeros((1, 1), dtype="<f4"))
+            wire = input_stream(request, b"")
             for interpreter, script, message in (
                 (sys.executable, other / "runtime/worker.py", "executing worker"),
                 (str(alternate_python), base / "runtime/worker.py", "executing interpreter"),
@@ -242,32 +271,26 @@ class StreamEntrypointTests(unittest.TestCase):
                     self.assertIn(message, events[-1]["message"])
                     self.assertFalse(any(event["type"] == "complete" for event in events))
 
-    def test_real_dry_worker_preserves_pcm_bits(self):
-        import numpy as np
+    def test_real_dry_worker_acknowledges_input_without_pcm(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             bundle_fixture(base)
-            audio = np.linspace(-1.25, 1.25, 2*(8000+37), dtype="<f4").reshape(-1, 2)
-            audio[0, 0] = -0.0
             request = {"version":worker.VERSION,"task_id":"real-dry-stream","operation":"speech","sample_rate":8000,
-                       "channels":2,"frames":len(audio),"model_manifest":str(base / "manifest.json"),
+                       "channels":2,"frames":8000+37,"model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
-                                       input=input_stream(request, audio), capture_output=True, cwd=base, timeout=30)
+                                       input=input_stream(request, b""), capture_output=True, cwd=base, timeout=30)
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-            stream, pcm, events = io.BytesIO(completed.stdout), bytearray(), []
+            stream, events = io.BytesIO(completed.stdout), []
             while stream.tell() < len(completed.stdout):
                 self.assertFalse(events and events[-1]["type"] in ("complete", "error"))
                 kind, payload = worker.read_frame(stream)
-                if kind == worker.JSON_FRAME:
-                    events.append(json.loads(payload))
-                else:
-                    self.assertEqual(kind, worker.STEM_KINDS["speech"])
-                    pcm.extend(payload)
-            self.assertEqual(pcm, audio.tobytes())
+                self.assertEqual(kind, worker.JSON_FRAME)
+                events.append(json.loads(payload))
             self.assertEqual(events[-1]["type"], "complete")
+            self.assertEqual(events[-1]["outputs"], {"speech":"input"})
             self.assertEqual((events[-1]["frames"], events[-1]["channels"], events[-1]["sample_rate"]),
-                             (len(audio), 2, 8000))
+                             (8000+37, 2, 8000))
 
 
 class LocalBackendTransportTests(unittest.TestCase):
@@ -428,11 +451,12 @@ raise SystemExit(result)
                 completed, audio, events, outputs = self.run_backend("speech", wet)
                 self.assertEqual(completed.returncode, 0, completed.stderr.decode())
                 self.assertEqual(events[-1]["type"], "complete")
-                self.assertEqual(events[-1]["outputs"], {"speech":True})
-                self.assertEqual(set(outputs), {17})
+                self.assertEqual(events[-1]["outputs"], {"speech":"input" if wet == 0 else True})
+                self.assertEqual(set(outputs), set() if wet == 0 else {17})
                 self.assertEqual((events[-1]["sample_rate"], events[-1]["channels"]), (8000, 2))
-                expected = audio if wet == 0 else audio*0.5 if wet == 1 else audio*(1-wet)+(audio*0.5)*wet
-                np.testing.assert_array_equal(outputs[17].view("uint32"), expected.view("uint32"))
+                if wet:
+                    expected = audio*0.5 if wet == 1 else audio*(1-wet)+(audio*0.5)*wet
+                    np.testing.assert_array_equal(outputs[17].view("uint32"), expected.view("uint32"))
                 self.assertEqual(events[-1]["frames"], len(audio))
                 if wet:
                     self.assertIn(b"bounded model diagnostic", completed.stderr)
@@ -456,6 +480,17 @@ raise SystemExit(result)
         self.assertEqual(outputs[17].shape, audio.shape)
         self.assertNotIn("complete", [event["type"] for event in events])
 
+    def test_dry_requires_empty_end_without_pcm(self):
+        for ending in (b"", encode(worker.INPUT_PCM, b"\0"*4), encode(worker.INPUT_END, b"x")):
+            with self.subTest(ending=ending):
+                completed, _, events, outputs = self.run_backend(
+                    "speech", wet=0, frames=37, malformed=lambda wire:wire[:-5]+ending)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(events[-1]["type"], "error")
+                self.assertEqual(events[-1]["code"], "protocol")
+                self.assertEqual(outputs, {})
+                self.assertNotIn("complete", [event["type"] for event in events])
+
     def test_trailing_input_is_failure_not_completion(self):
         for suffix in (b"x", encode(worker.INPUT_PCM, b"\0"*4),
                        encode(worker.INPUT_END), encode(worker.JSON_FRAME, b"{}")):
@@ -472,7 +507,8 @@ raise SystemExit(result)
             "speech", wet=0, frames=37, held_open_suffix=b"")
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         self.assertEqual(events[-1]["type"], "complete")
-        self.assertEqual(outputs[17].shape, audio.shape)
+        self.assertEqual(outputs, {})
+        self.assertEqual(events[-1]["outputs"], {"speech":"input"})
 
     def test_delayed_trailing_byte_after_end_is_rejected(self):
         completed, _, events, _ = self.run_backend(
@@ -495,7 +531,7 @@ raise SystemExit(result)
                 request_end = 5 + int.from_bytes(wire[1:5], "little")
                 return wire[:request_end] + suffix
             with self.subTest(name=name):
-                completed, _, events, outputs = self.run_backend("speech", wet=0, channels=1, frames=1,
+                completed, _, events, outputs = self.run_backend("speech", channels=1, frames=1,
                                                                  malformed=malformed)
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(events[-1]["type"], "error")
@@ -513,8 +549,7 @@ raise SystemExit(result)
                 self.assertEqual(outputs, {})
                 self.assertNotIn("complete", [event["type"] for event in events])
 
-    def test_mono_dry_short_and_partial_tail_preserve_pcm_bits(self):
-        import numpy as np
+    def test_mono_dry_short_and_partial_tail_acknowledge_input(self):
         for frames in (1, 8000+37):
             with self.subTest(frames=frames):
                 completed, audio, events, outputs = self.run_backend("speech", wet=0, channels=1, frames=frames)
@@ -522,18 +557,20 @@ raise SystemExit(result)
                 self.assertEqual(events[-1]["type"], "complete")
                 self.assertEqual((events[-1]["sample_rate"], events[-1]["channels"], events[-1]["frames"]),
                                  (8000, 1, frames))
-                self.assertEqual(set(outputs), {17})
-                np.testing.assert_array_equal(outputs[17].view("uint32"), audio.view("uint32"))
+                self.assertEqual(outputs, {})
+                self.assertEqual(events[-1]["outputs"], {"speech":"input"})
 
     @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for event protocol validation")
     def test_actual_stream_events_validate_against_protocol_schema(self):
         import jsonschema
-        completed, _, events, _ = self.run_backend("speech", frames=37)
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-        self.assertEqual(events[-1]["type"], "complete")
         validator = jsonschema.Draft202012Validator(json.loads(Path(worker.__file__).with_name("event.schema.json").read_text()))
-        for event in events:
-            validator.validate(event)
+        for wet in (0, 1):
+            with self.subTest(wet=wet):
+                completed, _, events, _ = self.run_backend("speech", wet=wet, frames=37)
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                self.assertEqual(events[-1]["type"], "complete")
+                for event in events:
+                    validator.validate(event)
 
 
 if __name__ == "__main__":

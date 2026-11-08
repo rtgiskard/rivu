@@ -431,9 +431,12 @@ with the updated tools into a new bundle and configure its emitted paths. Do not
 patch hashed bundle files in place or assume a directory move updates absolute
 manifest paths.
 
-Python application inference runs `worker.py --stream`; request and event versions
-are defined by `VERSION` and `EVENT_VERSION` in
-link:../tools/audio_processing/runtime/worker.py[the worker contract].
+Python application inference runs `worker.py --stream`; request and event protocol
+version 4 is defined by `VERSION` and `EVENT_VERSION` in
+link:../tools/audio_processing/runtime/worker.py[the worker contract]. Explicitly
+reprovision or prepare older bundles with updated tools and configure the new
+bundle's emitted paths. Earlier protocol versions are not accepted; inference
+never rewrites an older bundle or falls back to another runtime.
 Stdin/stdout carry JSON controls and interleaved float32-le PCM in
 frames: one-byte kind, four-byte little-endian length, at most 64 KiB payload.
 Requests declare rate, channels and exact frame count, not audio paths. Each
@@ -452,6 +455,14 @@ than falling back to timed polling.
 Application streams collect no export-only PCM hashes, timing/energy statistics
 or detailed report; completion still requires validated input-end and EOF.
 
+For Python speech with `wet_mix=0`, the request still declares the retained input's
+format and frame count, but sends only the empty input-end marker and EOF, without
+PCM in either direction. The child validates the manifest, artifact hashes,
+runtime identity and controls, then acknowledges `outputs={"speech":"input"}`.
+Rust checks alignment, completion and successful child exit before reusing the
+same retained PCM storage. No model dependencies, inference or context windows
+are loaded for this application dry path.
+
 Benchmark/corpus tools use the explicit
 link:../tools/audio_processing/export.py[`export.py --request` adapter], separate
 from application execution. File jobs require absolute `input_path` and
@@ -462,6 +473,9 @@ Detailed hashes and timing/energy evidence are collected only for this explicit
 export. The actual UTF-8 `result.json`, including its final newline, is limited
 to 8 MiB. Completion follows closed and checked audio files and a successfully
 written report; failure removes the new export directory.
+Dry file export still reads and validates finite source PCM, writes bit-exact
+float32 samples and collects the detailed report; its completion declares the
+written speech output rather than requesting retained application storage.
 These offline adapters record the implementation and interpreter actually used.
 Their reports do not prove that a provisioned bundle's runtime snapshot executed
 when the adapter used the checkout implementation instead.

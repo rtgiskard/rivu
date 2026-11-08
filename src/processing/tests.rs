@@ -416,7 +416,7 @@ kind, payload = read()
 request = json.loads(payload)
 manifest = json.load(open(request['model_manifest']))
 model = dict(id=manifest['id'], sha256=manifest['id'] + '-hash')
-send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='progress', completed=0,
+send(0, json.dumps(dict(version=request['version'], task_id=request['task_id'], type='progress', completed=0,
                         total=request['frames'], model=model)).encode())
 while True:
     kind, payload = read()
@@ -426,11 +426,11 @@ while True:
     if model['id'] == 'first':
         send(17, payload)
 if model['id'] == 'second':
-    send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='error',
+    send(0, json.dumps(dict(version=request['version'], task_id=request['task_id'], type='error',
                             message='second model failed')).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7)
-send(0, json.dumps(dict(version=2, task_id=request['task_id'], type='complete',
+send(0, json.dumps(dict(version=request['version'], task_id=request['task_id'], type='complete',
                         sample_rate=request['sample_rate'], channels=request['channels'],
                         frames=request['frames'], outputs=dict(speech=True), model=model)).encode())
 sys.stdout.buffer.flush()
