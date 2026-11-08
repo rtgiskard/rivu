@@ -1020,14 +1020,27 @@ pub fn read_toml(path: &Path) -> io::Result<String> {
 /// Rejects inputs above [`MAX_CONFIG_BYTES`] before parsing. The caller owns the
 /// input allocation; use [`read_toml`] to bound filesystem reads as well.
 pub fn from_toml(contents: &str) -> Result<Config> {
+    config_from_document(parse_config_document(contents)?)
+}
+
+fn parse_config_document(contents: &str) -> Result<toml_edit::Document<&str>> {
     check_config_size(contents.len() as u64)?;
+    let document = toml_edit::Document::parse(contents).context(
+        "cannot establish configuration schema_version; check TOML syntax and version type",
+    )?;
     // Read the version before current fields: a future format may use field
     // names or types that this decoder cannot interpret.
     #[derive(Deserialize)]
     struct SchemaMetadata {
         schema_version: Option<i64>,
     }
-    let metadata: SchemaMetadata = toml::from_str(contents).context(
+    // Project only metadata, rather than cloning/deserializing the whole tree
+    // before rejecting a version that cannot use the current field contract.
+    let mut metadata = toml_edit::DocumentMut::new();
+    if let Some(version) = document.get("schema_version") {
+        metadata.insert("schema_version", version.clone());
+    }
+    let metadata: SchemaMetadata = toml_edit::de::from_document(metadata).context(
         "cannot establish configuration schema_version; check TOML syntax and version type",
     )?;
     if let Some(version) = metadata.schema_version {
@@ -1036,8 +1049,14 @@ pub fn from_toml(contents: &str) -> Result<Config> {
             "unsupported configuration schema_version {version}; expected {CONFIG_SCHEMA_VERSION}"
         );
     }
-    let file: file::FileConfig =
-        toml::from_str(contents).context("cannot parse TOML configuration")?;
+    Ok(document)
+}
+
+fn config_from_document<S: AsRef<str>>(
+    document: impl Into<toml_edit::de::Deserializer<S>>,
+) -> Result<Config> {
+    let file = file::FileConfig::deserialize(document.into())
+        .context("cannot parse TOML configuration")?;
     let mut config = file.into_config();
     config.ui_language = normalize_language(&config.ui_language).to_owned();
     if config.ui_font.is_empty() {
@@ -1067,14 +1086,19 @@ pub fn to_toml(config: &Config) -> Result<String> {
 /// otherwise the validated original supplies it. Empty input defaults that baseline.
 /// Existing input and the final output retain the shared size and validation rules.
 pub fn update_toml(contents: &str, baseline: Option<&Config>, config: &Config) -> Result<String> {
-    let original = from_toml(contents)?;
+    let document = parse_config_document(contents)?;
+    // toml_edit's deserializer consumes its tree. Clone once before into_mut
+    // materializes decoration: raw input stays borrowed and comments stay spans.
+    let original = config_from_document(document.clone())?;
     let baseline = baseline.unwrap_or(&original);
     config.validate()?;
-    let mut document: toml_edit::DocumentMut = contents.parse()?;
+    let mut document = document.into_mut();
     file::FileConfig::patch(document.as_table_mut(), baseline, config)
         .context("cannot update configuration")?;
     let contents = document.to_string();
     check_config_size(contents.len() as u64)?;
-    validate_toml(&contents)?;
+    // Validate the composed fields by consuming the edited tree, not reparsing
+    // its text (or cloning the now-owned decoration for another decoder).
+    config_from_document(document)?;
     Ok(contents)
 }

@@ -326,6 +326,10 @@ fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values
         "schema_version = 2\n[library]\nroots = ['/Music', '/Music/Live']\n",
     ] {
         assert!(validate_toml(input).is_err(), "accepted {input}");
+        assert!(
+            update_toml(input, None, &Config::default()).is_err(),
+            "accepted {input}"
+        );
     }
     assert_eq!(
         from_toml("schema_version = 2\n").unwrap(),
@@ -357,12 +361,25 @@ fn absent_version_uses_current_schema_and_serializes_explicitly() {
 
 #[test]
 fn explicit_versions_gate_current_fields_and_syntax_errors_keep_the_parse_cause() {
-    let error =
-        from_toml("schema_version = 3\n[playback]\nvolume_percent = 'future'\n").unwrap_err();
-    assert!(error.downcast_ref::<toml::de::Error>().is_none());
+    let input = "schema_version = 3\n[playback]\nvolume_percent = 'future'\n";
+    for error in [
+        from_toml(input).unwrap_err(),
+        update_toml(input, None, &Config::default()).unwrap_err(),
+    ] {
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported configuration schema_version 3")
+        );
+        assert!(error.downcast_ref::<toml_edit::de::Error>().is_none());
+    }
     for input in ["[interface", "schema_version = 2\n[interface"] {
-        let error = from_toml(input).unwrap_err();
-        assert!(error.downcast_ref::<toml::de::Error>().is_some());
+        for error in [
+            from_toml(input).unwrap_err(),
+            update_toml(input, None, &Config::default()).unwrap_err(),
+        ] {
+            assert!(error.downcast_ref::<toml_edit::TomlError>().is_some());
+        }
     }
 }
 
@@ -505,6 +522,29 @@ fn graph_patch_saves_edits_without_runtime_revision() {
     assert_eq!(config.processing_graph.revision, 1);
     assert!(saved.starts_with("# graph settings\n"));
     assert_eq!(loaded.volume, 0.25);
+}
+
+#[test]
+fn incremental_edits_validate_the_composed_document_not_only_the_requested_config() {
+    let original = to_toml(&Config::default()).unwrap();
+    let mut baseline = from_toml(&original).unwrap();
+    // A valid saved baseline may differ from independently edited file contents.
+    // Remap the baseline graph consistently, leaving the original file untouched.
+    for node in &mut baseline.processing_graph.nodes {
+        node.id += 100;
+    }
+    for edge in &mut baseline.processing_graph.edges {
+        edge.from.node += 100;
+        edge.to.node += 100;
+    }
+    baseline.processing_graph.next_id += 100;
+    baseline.validate().unwrap();
+    let mut config = baseline.clone();
+    config.processing_graph.nodes[0].position = [800.0, 500.0];
+    config.validate().unwrap();
+    // Only nodes changed relative to baseline; retaining original edges/next_id
+    // alongside those nodes would produce an invalid graph despite valid config.
+    assert!(update_toml(&original, Some(&baseline), &config).is_err());
 }
 
 #[test]
