@@ -36,7 +36,7 @@ pub(in crate::gui) trait MaterialAppearance: Sized {
     fn is_texture(&self) -> bool;
     fn is_procedural_water(&self) -> bool;
     fn motion(self, speed: f32, window: &Window, cx: &App) -> bool;
-    fn motion_enabled(self, speed: f32, reduce_motion: bool, active: bool) -> bool;
+    fn motion_enabled(self, speed: f32, reduce_motion: bool, visible: bool) -> bool;
     fn backdrop(
         self,
         theme: &'static Palette,
@@ -128,10 +128,10 @@ impl MaterialAppearance for MaterialPreset {
     }
 
     fn motion(self, speed: f32, window: &Window, cx: &App) -> bool {
-        self.motion_enabled(speed, cx.reduce_motion(), window.is_window_active())
+        self.motion_enabled(speed, cx.reduce_motion(), window.is_visible())
     }
 
-    fn motion_enabled(self, speed: f32, reduce_motion: bool, active: bool) -> bool {
+    fn motion_enabled(self, speed: f32, reduce_motion: bool, visible: bool) -> bool {
         (self.is_texture()
             || matches!(
                 self,
@@ -140,7 +140,7 @@ impl MaterialAppearance for MaterialPreset {
             && speed.is_finite()
             && speed > 0.
             && !reduce_motion
-            && active
+            && visible
     }
 
     fn backdrop(
@@ -1142,20 +1142,49 @@ mod tests {
         });
     }
 
-    #[test]
-    fn procedural_water_motion_respects_every_static_gate() {
-        for water in MaterialPreset::ALL
-            .into_iter()
-            .filter(|m| m.is_procedural_water())
-        {
-            assert!(water.motion_enabled(1., false, true));
-            assert!(!water.motion_enabled(0., false, true));
-            assert!(!water.motion_enabled(-1., false, true));
-            assert!(!water.motion_enabled(1., true, true));
-            assert!(!water.motion_enabled(1., false, false));
-            assert!(!water.motion_enabled(f32::NAN, false, true));
-            assert!(!water.motion_enabled(f32::INFINITY, false, true));
-        }
+    #[gpui::test]
+    fn material_motion_follows_visibility_not_focus(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        window.simulate_visibility_change(WindowVisibility::Visible);
+        window.update(|window, _| window.activate_window());
+        window.run_until_parked();
+        let animated: Vec<_> = window.update(|window, cx| {
+            MaterialPreset::ALL
+                .into_iter()
+                .filter(|material| material.motion(1., window, cx))
+                .collect()
+        });
+        assert!(animated.contains(&MaterialPreset::Sheen));
+        assert!(animated.contains(&MaterialPreset::StillWater));
+        window.deactivate_window();
+        window.run_until_parked();
+        window.update(|window, cx| {
+            assert!(!window.is_window_active());
+            for material in &animated {
+                assert!(material.motion(1., window, cx), "{material:?}");
+            }
+        });
+        window.simulate_visibility_change(WindowVisibility::Hidden);
+        window.run_until_parked();
+        window.update(|window, cx| {
+            for material in &animated {
+                assert!(!material.motion(1., window, cx), "{material:?}");
+            }
+        });
+        window.simulate_visibility_change(WindowVisibility::Visible);
+        window.run_until_parked();
+        window.update(|window, cx| {
+            for material in &animated {
+                assert!(material.motion(1., window, cx), "{material:?}");
+                for speed in [0., -1., f32::NAN, f32::INFINITY] {
+                    assert!(!material.motion(speed, window, cx), "{material:?}: {speed}");
+                }
+            }
+            cx.set_reduce_motion(true);
+            for material in &animated {
+                assert!(!material.motion(1., window, cx), "{material:?}");
+            }
+        });
     }
 
     #[test]

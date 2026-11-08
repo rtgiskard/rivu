@@ -520,9 +520,9 @@ panels and visualizations keep their independent behavior and ownership.
 
 Prismatic architecture, Nocturne light, Quiet water and the Experimental
 artwork-reflection Mirror lake use GPUI's synchronized animation clock, not
-independent application timers. Motion runs only while material effects are enabled, the window is active,
-and reduced motion is disabled, with positive motion speed. Disabling audio
-visualizations does not affect material motion or cover transitions.
+independent application timers. Motion requires enabled material effects, a visible
+window, positive speed and reduced motion disabled; focus loss alone does not stop it.
+Disabling audio visualizations does not affect material motion or cover transitions.
 Nocturne light keeps reading panels still; its playback illumination moves.
 Artwork-panel and audio-visualization FPS limits share their own window-local
 frame gate; they do not throttle material motion or image transitions.
@@ -656,7 +656,7 @@ opacity, 25% wave strength, 32% highlight and 0.55× speed; CG Water retains its
 baseline. Per-preset restoration, Reset and modified-state tracking follow the
 shared preference contract above; stale controls cannot edit a different preset.
 
-All use GPUI's synchronized, seamless 24-second cycle at speed 1. Inactive windows,
+All use GPUI's synchronized, seamless 24-second cycle at speed 1. Hidden windows,
 reduced motion, zero speed or zero wave strength select a static phase without
 attaching animation. The caller schedules motion; the renderer receives bounds
 and scalar parameters only. No per-frame bitmaps, image uploads, geometry grids
