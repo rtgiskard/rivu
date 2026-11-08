@@ -1,6 +1,7 @@
 //! History projection and transactional selection; independent of panel instances.
 
 use super::HistorySort;
+use rivu_presentation::history::{compare_recent, reorder_changed_rows};
 use rivu_protocol::model::HistoryEntry;
 use std::{collections::HashSet, sync::Arc};
 
@@ -93,70 +94,17 @@ impl HistoryBrowser {
         self.source.len()
     }
 
-    fn recent_key(entry: &HistoryEntry, playback: Option<(i64, i64)>) -> (i64, bool) {
-        let current = playback.filter(|&(id, _)| id == entry.track_id);
-        (
-            current.map_or(entry.played_at, |(_, time)| time),
-            current.is_some(),
-        )
-    }
-
-    fn compare_recent_indices(&self, a: usize, b: usize) -> std::cmp::Ordering {
-        let ordering = Self::recent_key(&self.source[a], self.playback)
-            .cmp(&Self::recent_key(&self.source[b], self.playback));
-        let ordering = if self.descending {
-            ordering.reverse()
-        } else {
-            ordering
-        };
-        // Rebuild's stable sort preserves source order for equal keys.
-        ordering.then_with(|| a.cmp(&b))
-    }
-
     fn reorder_playback(&mut self, previous: Option<(i64, i64)>) -> bool {
-        let mut affected = [
+        let affected = [
             previous.and_then(|(id, _)| self.positions.get(&id).copied()),
             self.playback
                 .and_then(|(id, _)| self.positions.get(&id).copied()),
         ];
-        if affected[0] == affected[1] {
-            affected[1] = None;
-        }
-        // Only the old and new current rows can have changed keys. Most ticks
-        // keep them between the same neighbors, without touching the projection.
-        let needs_reorder = affected.iter().flatten().any(|&position| {
-            let index = self.indices[position];
-            (position > 0
-                && self
-                    .compare_recent_indices(self.indices[position - 1], index)
-                    .is_gt())
-                || (position + 1 < self.indices.len()
-                    && self
-                        .compare_recent_indices(index, self.indices[position + 1])
-                        .is_gt())
-        });
-        if !needs_reorder {
+        let Some(start) = reorder_changed_rows(&mut self.indices, affected, |a, b| {
+            compare_recent(&self.source, self.playback, self.descending, a, b)
+        }) else {
             return false;
-        }
-
-        // Remove both changed keys before searching the otherwise sorted rows.
-        // Descending positions keep the second removal's original index valid.
-        affected.sort_unstable_by(|a, b| b.cmp(a));
-        let mut removed = [None, None];
-        let mut start = self.indices.len();
-        for (slot, position) in removed.iter_mut().zip(affected) {
-            if let Some(position) = position {
-                start = start.min(position);
-                *slot = Some(self.indices.remove(position));
-            }
-        }
-        for index in removed.into_iter().flatten() {
-            let position = self
-                .indices
-                .partition_point(|&other| self.compare_recent_indices(other, index).is_lt());
-            self.indices.insert(position, index);
-            start = start.min(position);
-        }
+        };
         // Reinserting the second row can shift the first inserted row again.
         // Refresh the affected suffix rather than retaining stale intermediate positions.
         for position in start..self.indices.len() {
@@ -176,8 +124,9 @@ impl HistoryBrowser {
         }));
         self.indices.sort_by(|&a, &b| {
             let ordering = match self.sort {
-                HistorySort::Recent => Self::recent_key(&self.source[a], self.playback)
-                    .cmp(&Self::recent_key(&self.source[b], self.playback)),
+                HistorySort::Recent => {
+                    return compare_recent(&self.source, self.playback, self.descending, a, b);
+                }
                 HistorySort::Title => self.title_keys[a].cmp(&self.title_keys[b]),
                 HistorySort::Plays => self.source[a].play_count.cmp(&self.source[b].play_count),
             };

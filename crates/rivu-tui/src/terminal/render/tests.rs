@@ -844,3 +844,95 @@ fn drawing_without_a_layout_commit_cannot_change_retention_or_navigation() {
     assert!(!ui.queue.pages.contains_key(&80));
     assert_ne!(ui.queue.viewport_rows, coordinates.2);
 }
+
+#[test]
+fn missing_titles_use_shared_fallback_in_lists_playback_and_details() {
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let i18n = Arc::new(Localizer::for_terminal("en-US"));
+    for title in ["", " \t\n", "\u{2003}", "  Valid title  "] {
+        for cue_number in [None, Some(3)] {
+            let expected = if !title.trim().is_empty() {
+                title
+            } else if cue_number.is_some() {
+                "night.live · #03"
+            } else {
+                "night.live"
+            };
+            let mut row = track(2);
+            row.path = "/music/night.live.flac".into();
+            row.title = title.into();
+            row.cue_number = cue_number;
+            let columns = BrowserColumns {
+                title: 80,
+                artist: 0,
+                album: 0,
+                codec: 0,
+                duration: 0,
+                markers: 0,
+            };
+            let rendered = columns.line(RowContent::track(&row), colors).to_string();
+            assert!(rendered.contains(&format!("{expected} — {}", row.artist)));
+            let entry = PlaylistEntryRow {
+                id: 7,
+                track_id: row.id,
+                position: 0,
+                offset: 0,
+                path: row.path.clone(),
+                title: row.title.clone(),
+                artist: row.artist.clone(),
+                album: row.album.clone(),
+                duration: row.duration,
+                codec: row.codec.clone(),
+                channels: row.channels,
+                sample_rate: row.sample_rate,
+                bits_per_sample: row.bits_per_sample,
+                bitrate_bps: row.bitrate_bps,
+                bitrate_exact: row.bitrate_exact,
+                cue_number,
+                favorite: false,
+                missing: false,
+            };
+            assert_eq!(
+                columns
+                    .line(RowContent::playlist(&entry), colors)
+                    .to_string(),
+                rendered
+            );
+
+            let mut current = full_track(2);
+            current.path = row.path;
+            current.title = title.into();
+            current.artist = "artist".into();
+            current.cue = cue_number.map(|number| rivu_protocol::model::CueSegment {
+                sheet: "/music/night.cue".into(),
+                number,
+                start_frame: 0,
+                end_frame: None,
+            });
+            let current = Arc::new(current);
+            let snapshot = TuiSnapshot {
+                current_track: Some(Arc::clone(&current)),
+                ..Default::default()
+            };
+            let mut ui = UiState::new(Arc::clone(&i18n));
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    commit_layout(frame.area(), &mut ui);
+                    draw(frame, &snapshot, &mut ui);
+                })
+                .unwrap();
+            assert!(terminal_text(&terminal).contains(&format!("{expected} — artist")));
+            let details = Details {
+                target: Some(2),
+                source_label: "shell-panel-queue",
+                state: DetailState::Ready(current),
+                ..Details::default()
+            };
+            assert_eq!(
+                details_lines(&details, &i18n, 100, colors)[0].to_string(),
+                expected
+            );
+        }
+    }
+}

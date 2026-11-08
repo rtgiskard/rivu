@@ -13,7 +13,6 @@ use super::{
     artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
     components::{artwork::artwork_preview, track::favorite_button},
     feature::FeatureContext,
-    format_time,
 };
 use crate::projection::GuiSnapshot;
 use chrono::{DateTime, Local};
@@ -24,6 +23,7 @@ use gpui::{
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_metadata::artwork::ArtworkManager;
+use rivu_presentation::time::{format_cue_frame, format_time};
 use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,
@@ -835,11 +835,6 @@ impl Metadata {
     pub(in crate::gui) fn release_render_images(&self, window: &mut Window, cx: &mut App) {
         self.artwork_view.release_all_images(window, cx);
     }
-}
-
-fn format_cue_frame(frame: u64) -> String {
-    let seconds = frame / 75;
-    format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame % 75)
 }
 
 fn metadata_copy(

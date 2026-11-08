@@ -2,11 +2,11 @@
 use super::{
     appearance::fonts::tabular_numbers,
     feature::FeatureContext,
-    format_time,
     interaction::{Dragging, SeekCommit},
 };
 use crate::projection::GuiSnapshot;
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
+use rivu_presentation::time::format_time;
 use rivu_protocol::model::{Command, PlaybackState, PlaybackStatus, RepeatMode};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,

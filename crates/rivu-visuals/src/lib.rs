@@ -29,12 +29,3 @@ fn visualization_status(message: impl Into<SharedString>) -> Div {
         .text_color(rgb(0xb1bbc5))
         .child(message.into())
 }
-
-fn format_time(seconds: f64) -> String {
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.0) as u64
-    } else {
-        0
-    };
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}

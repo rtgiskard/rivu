@@ -6,14 +6,15 @@ use crate::projection::TuiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use rivu_presentation::{
+    history::{activity_key, compare_recent, playback_activity, reorder_changed_rows},
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext, Modifiers},
 };
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{
-        Command, DirectoryRow, HistoryEntry, LibraryRow, PlaybackStatus, PlaylistEntryRow,
-        PlaylistSummary, Query, QueueRow,
+        Command, DirectoryRow, HistoryEntry, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query,
+        QueueRow,
     },
     response::{QueryError, ViewResponse},
 };
@@ -196,27 +197,16 @@ impl RecentTracks {
     }
 
     pub(super) fn played_at(&self, entry: &HistoryEntry) -> i64 {
-        Self::recent_key(entry, self.playback).0
-    }
-
-    fn recent_key(entry: &HistoryEntry, playback: Option<(i64, i64)>) -> (i64, bool) {
-        let current = playback.filter(|&(id, _)| id == entry.track_id);
-        (
-            current.map_or(entry.played_at, |(_, time)| time),
-            current.is_some(),
-        )
+        activity_key(entry, self.playback).0
     }
 
     fn sync(&mut self, state: &TuiSnapshot, query: &str) {
         let source = &state.library.history;
-        let playback = (state.playback.status != PlaybackStatus::Stopped)
-            .then(|| {
-                state
-                    .current_track()
-                    .map(|track| track.id)
-                    .zip(state.playback.last_heard_at)
-            })
-            .flatten();
+        let playback = playback_activity(
+            state.playback.status,
+            state.current_track().map(|track| track.id),
+            state.playback.last_heard_at,
+        );
         let rebuild = !self.entries.loaded || !Arc::ptr_eq(&self.source, source);
         let previous_playback = self.playback;
         if !rebuild && previous_playback == playback {
@@ -225,12 +215,7 @@ impl RecentTracks {
         let selected_id = self.selected().map(|entry| entry.track_id);
         let old_position = self.entries.selection.selected().unwrap_or(0);
         self.playback = playback;
-        let key = |&index: &usize| {
-            (
-                std::cmp::Reverse(Self::recent_key(&source[index], playback)),
-                index,
-            )
-        };
+        let compare = |a, b| compare_recent(source, playback, true, a, b);
         if rebuild {
             let mut indices = self.entries.pages.remove(&0).unwrap_or_default();
             indices.clear();
@@ -242,43 +227,21 @@ impl RecentTracks {
                         .to_lowercase()
                         .contains(&normalized_query)
             }));
-            indices.sort_unstable_by_key(key);
+            indices.sort_unstable_by(|&a, &b| compare(a, b));
             self.source = Arc::clone(source);
             let total = indices.len();
             self.entries.clear();
             self.entries.insert(0, total.max(1), total, indices);
         } else if let Some(indices) = self.entries.pages.get_mut(&0) {
-            let mut affected = [previous_playback, playback].map(|current| {
+            let affected = [previous_playback, playback].map(|current| {
                 current.and_then(|(id, _)| {
                     indices
                         .iter()
                         .position(|&index| source[index].track_id == id)
                 })
             });
-            if affected[0] == affected[1] {
-                affected[1] = None;
-            }
-            // Only the old and new current rows change keys. Ordinary playback
-            // ticks keep the projection and its allocation untouched.
-            let needs_reorder = affected.iter().flatten().any(|&position| {
-                (position > 0 && key(&indices[position - 1]) > key(&indices[position]))
-                    || (position + 1 < indices.len()
-                        && key(&indices[position]) > key(&indices[position + 1]))
-            });
-            if !needs_reorder {
+            if reorder_changed_rows(indices, affected, compare).is_none() {
                 return;
-            }
-            // Remove both changed keys before searching the otherwise sorted rows.
-            affected.sort_unstable_by(|a, b| b.cmp(a));
-            let mut removed = [None, None];
-            for (slot, position) in removed.iter_mut().zip(affected) {
-                if let Some(position) = position {
-                    *slot = Some(indices.remove(position));
-                }
-            }
-            for index in removed.into_iter().flatten() {
-                let position = indices.partition_point(|other| key(other) < key(&index));
-                indices.insert(position, index);
             }
         }
         self.entries.columns = None;

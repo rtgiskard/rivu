@@ -1708,7 +1708,12 @@ impl Waveform {
                             .text_xs()
                             .text_color(rgb(0xb1bbc5))
                             .child("0:00")
-                            .child(label_duration.map_or_else(|| "—".into(), super::format_time)),
+                            .child(
+                                label_duration.map_or_else(
+                                    || "—".into(),
+                                    rivu_presentation::time::format_time,
+                                ),
+                            ),
                     )
                 })
                 .children(status.map(|message| {

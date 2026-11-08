@@ -1,23 +1,8 @@
 use crate::gui::appearance::fonts;
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, rgb};
+use rivu_presentation::track::track_title;
 use rivu_ui::{caption, column, lazy_row_tooltip, row, row_tooltip, two_line_text};
-use std::{borrow::Cow, fmt::Write, path::Path};
-
-pub(in crate::gui) fn track_title<'a>(
-    title: &'a str,
-    path: &'a Path,
-    cue_number: Option<u32>,
-) -> Cow<'a, str> {
-    if title.trim().is_empty() {
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        match cue_number {
-            Some(number) => Cow::Owned(format!("{stem} · #{number:02}")),
-            None => stem,
-        }
-    } else {
-        Cow::Borrowed(title)
-    }
-}
+use std::{borrow::Cow, fmt::Write};
 
 /// Cached source facts only; formatting never opens media or queries the library.
 #[derive(Clone, Copy, Default)]
@@ -227,7 +212,7 @@ pub(crate) fn track_list_row(
             caption(
                 theme,
                 text.duration
-                    .map_or_else(|| "—".to_owned(), crate::gui::format_time),
+                    .map_or_else(|| "—".to_owned(), rivu_presentation::time::format_time),
             )
             .font_features(fonts::tabular_numbers())
             .w_16()
@@ -292,11 +277,26 @@ mod tests {
 
     #[test]
     fn title_fallback_uses_stem_only_for_missing_or_blank_titles() {
-        let path = Path::new("/music/夜曲.live.flac");
-        for title in ["", " \t\n", "\u{2003}"] {
-            assert_eq!(track_title(title, path, None), "夜曲.live");
-        }
-        let title = "  A complete title  ";
-        assert_eq!(track_title(title, path, Some(2)), title);
+        let mut track = rivu_protocol::model::LibraryRow {
+            id: 1,
+            path: "/music/夜曲.live.flac".into(),
+            title: " \t\n".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: String::new(),
+            channels: 2,
+            sample_rate: 0,
+            bits_per_sample: None,
+            cue_number: Some(2),
+            bitrate_bps: None,
+            bitrate_exact: false,
+            favorite: false,
+            missing: false,
+            play_count: 0,
+        };
+        assert_eq!(TrackText::from(&track).title, "夜曲.live · #02");
+        track.title = "  A complete title  ".into();
+        assert_eq!(TrackText::from(&track).title, track.title);
     }
 }

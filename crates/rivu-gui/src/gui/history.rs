@@ -16,6 +16,7 @@ use gpui::{
 use model::HistoryBrowser;
 pub(super) use model::HistoryCommit;
 use panel::HistoryColumnWidths;
+use rivu_presentation::history::playback_activity;
 use rivu_protocol::model::{Command, PlaybackStatus};
 use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};
@@ -96,14 +97,11 @@ impl History {
     }
 
     fn playback(state: &GuiSnapshot) -> Option<(i64, i64)> {
-        (state.playback.status != PlaybackStatus::Stopped)
-            .then(|| {
-                state
-                    .current_track()
-                    .map(|track| track.id)
-                    .zip(state.playback.last_heard_at)
-            })
-            .flatten()
+        playback_activity(
+            state.playback.status,
+            state.current_track().map(|track| track.id),
+            state.playback.last_heard_at,
+        )
     }
 
     pub(super) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {

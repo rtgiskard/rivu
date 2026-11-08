@@ -5431,6 +5431,7 @@ dependencies = [
  "parking_lot",
  "rivu-analysis",
  "rivu-format",
+ "rivu-presentation",
  "rivu-protocol",
  "rivu-ui",
 ]

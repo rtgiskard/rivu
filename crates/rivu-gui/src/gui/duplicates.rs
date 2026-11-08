@@ -1,9 +1,10 @@
 //! Duplicates owns review state, query gates, commands and dialog rendering.
 //! Core retains relocation workers and task IDs; dismissal never joins a worker.
 
-use super::{feature::FeatureContext, format_time};
+use super::feature::FeatureContext;
 use crate::projection::GuiSnapshot;
 use gpui::{prelude::*, *};
+use rivu_presentation::time::format_time;
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{

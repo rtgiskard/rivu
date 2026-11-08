@@ -1,9 +1,10 @@
 //! Library tree and panel rendering; feature lifecycle remains in the parent.
 use super::*;
-use crate::gui::components::track::{AudioSpecs, audio_specs, track_title};
+use crate::gui::components::track::{AudioSpecs, audio_specs};
 use crate::gui::list_interaction::LibraryDrag;
 use gpui::{AnyElement, Div, Render, div, px, rgb};
 use rivu_format::config::{LibraryColumn, LibraryColumns};
+use rivu_presentation::track::track_title;
 use rivu_protocol::model::LibraryRow;
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, lazy_row_tooltip,
@@ -16,7 +17,7 @@ pub(in crate::gui) fn track_detail(
 ) -> String {
     let mut detail = track
         .duration
-        .map_or_else(|| "—".to_owned(), crate::gui::format_time);
+        .map_or_else(|| "—".to_owned(), rivu_presentation::time::format_time);
     let specs = audio_specs(AudioSpecs::from(track));
     if !specs.is_empty() {
         detail.push_str(" · ");
@@ -63,9 +64,10 @@ fn track_columns(
                     track.album.clone().into()
                 }
             }
-            LibraryColumn::Duration => track
-                .duration
-                .map_or_else(|| "-".into(), |value| crate::gui::format_time(value).into()),
+            LibraryColumn::Duration => track.duration.map_or_else(
+                || "-".into(),
+                |value| rivu_presentation::time::format_time(value).into(),
+            ),
             LibraryColumn::Codec => {
                 if track.codec.is_empty() {
                     "-".into()

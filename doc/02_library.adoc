@@ -224,6 +224,7 @@ Missing artists and albums use compact person and disc symbols; hover a symbol
 for its meaning. Unknown duration is `-`, not a zero-length recording.
 A missing or whitespace-only title falls back to the source filename without its
 extension; untitled CUE entries also include their track number.
+The TUI uses the same title fallback.
 
 Hover track text for full metadata and audio specifications: codec, sample rate,
 source bit depth, channels, and bitrate. Unknown specifications are omitted;

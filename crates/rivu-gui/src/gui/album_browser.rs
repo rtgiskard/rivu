@@ -11,6 +11,7 @@ use std::{
 use gpui::{prelude::*, *};
 
 use crate::frontend::FrontendHandle;
+use rivu_presentation::track::track_title;
 use rivu_protocol::{
     model::{AlbumKey, AlbumSort, Command, PlaybackStatus, Track},
     response::QueryRevisions,
@@ -20,7 +21,7 @@ use super::{
     artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
     components::{
         search::{SearchScope, new_search, set_search_counts},
-        track::{TrackText, track_list_row, track_title},
+        track::{TrackText, track_list_row},
     },
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
     scrolling::ScrollViews,

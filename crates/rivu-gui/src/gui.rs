@@ -63,12 +63,3 @@ fn chooser_result<T>(
         Err(error) => Err(error),
     }
 }
-
-fn format_time(seconds: f64) -> String {
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.) as u64
-    } else {
-        0
-    };
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}

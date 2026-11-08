@@ -15,6 +15,8 @@ use ratatui::{
 use rivu_presentation::{
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext},
+    time::{format_cue_frame, format_time},
+    track::track_title,
 };
 use rivu_protocol::model::{
     DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary, QueueRow,
@@ -284,20 +286,16 @@ fn details_lines(
     let mut lines = Vec::new();
     if let Some(id) = details.target {
         if let DetailState::Ready(track) = &details.state {
-            let title = if track.title.is_empty() {
-                "—"
-            } else {
-                &track.title
-            };
-            for line in wrap_details(title, width) {
+            let title = track_title(
+                &track.title,
+                &track.path,
+                track.cue.as_ref().map(|cue| cue.number),
+            );
+            for line in wrap_details(&title, width) {
                 lines.push(Line::from(Span::styled(
                     line,
                     Style::default()
-                        .fg(if track.title.is_empty() {
-                            colors.secondary
-                        } else {
-                            colors.text
-                        })
+                        .fg(colors.text)
                         .add_modifier(Modifier::BOLD),
                 )));
             }
@@ -423,7 +421,7 @@ fn details_lines(
                     ),
                     (
                         "gl-duration",
-                        track.duration.map(fmt_time).unwrap_or_default(),
+                        track.duration.map(format_time).unwrap_or_default(),
                     ),
                     (
                         "gl-bitrate",
@@ -470,20 +468,16 @@ fn details_lines(
             ));
             lines.push(Line::default());
             if let Some(cue) = &track.cue {
-                let position = |frame: u64| {
-                    let seconds = frame / 75;
-                    format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame % 75)
-                };
                 detail_fields(
                     &mut lines,
                     &[
                         ("gl-cue-sheet", cue.sheet.to_string_lossy().into_owned()),
                         ("gl-cue-number", cue.number.to_string()),
-                        ("gl-cue-start", position(cue.start_frame)),
+                        ("gl-cue-start", format_cue_frame(cue.start_frame)),
                         (
                             "gl-cue-end",
                             cue.end_frame
-                                .map(position)
+                                .map(format_cue_frame)
                                 .unwrap_or_else(|| i18n.text("gl-file-end").to_owned()),
                         ),
                     ],
@@ -971,12 +965,18 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
             format!(" {}  ", playback_symbol(state.playback.status)),
             Style::default().fg(colors.positive),
         ));
-        now.push(Span::raw(track.title.as_str()));
+        let title = track_title(
+            &track.title,
+            &track.path,
+            track.cue.as_ref().map(|cue| cue.number),
+        );
+        let title_is_empty = title.is_empty();
+        now.push(Span::raw(title));
         if !track.artist.is_empty() {
             now.push(Span::styled(
                 format!(
                     "{}{}",
-                    if track.title.is_empty() { "" } else { " — " },
+                    if title_is_empty { "" } else { " — " },
                     track.artist
                 ),
                 Style::default().fg(colors.artist),
@@ -998,8 +998,8 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     let ratio = duration.map_or(0.0, |duration| (position / duration).clamp(0.0, 1.0));
     let time = format!(
         " {} / {} ",
-        fmt_time(position),
-        duration.map_or_else(|| "–:––".into(), fmt_time)
+        format_time(position),
+        duration.map_or_else(|| "–:––".into(), format_time)
     );
     let progress = Layout::horizontal([
         Constraint::Min(1),
@@ -1226,6 +1226,7 @@ fn draw_messages(
 pub(super) struct RowContent<'a> {
     pub(super) title: Cow<'a, str>,
     title_path: Option<&'a std::path::Path>,
+    title_track: Option<(&'a std::path::Path, Option<u32>)>,
     fitted_label_width: Option<usize>,
     pub(super) artist: &'a str,
     pub(super) album: &'a str,
@@ -1243,6 +1244,7 @@ impl<'a> RowContent<'a> {
         Self {
             title: Cow::Borrowed(&track.title),
             title_path: None,
+            title_track: Some((&track.path, track.cue_number)),
             fitted_label_width: None,
             artist: &track.artist,
             album: &track.album,
@@ -1260,6 +1262,7 @@ impl<'a> RowContent<'a> {
         Self {
             title: Cow::Borrowed(&entry.title),
             title_path: None,
+            title_track: Some((&entry.path, entry.cue_number)),
             fitted_label_width: None,
             artist: &entry.artist,
             album: &entry.album,
@@ -1277,6 +1280,7 @@ impl<'a> RowContent<'a> {
         Self {
             title,
             title_path: None,
+            title_track: None,
             fitted_label_width: None,
             artist: "",
             album: "",
@@ -1400,9 +1404,13 @@ impl BrowserColumns {
         }
         let mut spans = Vec::with_capacity(13);
         // Column measurement needs only attributes; expand Other paths for visible rows only.
-        let row_title = match row.title_path {
-            Some(path) => Cow::Owned(format!("{} · {}", row.title, path.display())),
+        let title = match row.title_track {
+            Some((path, cue_number)) => track_title(&row.title, path, cue_number),
             None => row.title,
+        };
+        let row_title = match row.title_path {
+            Some(path) => Cow::Owned(format!("{title} · {}", path.display())),
+            None => title,
         };
         let prefix = if row.file_icon {
             "󰎇"
@@ -1445,7 +1453,7 @@ impl BrowserColumns {
         }
         if self.duration != 0 {
             let duration = if row.is_track {
-                row.duration.map_or_else(|| "–:––".into(), fmt_time)
+                row.duration.map_or_else(|| "–:––".into(), format_time)
             } else {
                 String::new()
             };
@@ -1936,13 +1944,6 @@ fn draw_tree(
             body,
         );
     }
-}
-
-pub(super) fn fmt_time(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return "0:00".into();
-    }
-    format!("{}:{:02}", (seconds as u64) / 60, (seconds as u64) % 60)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ test-support = ["rivu-protocol/test-support", "rivu-analysis/test-support"]
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }
 rivu-analysis = { path = "../rivu-analysis" }
+rivu-presentation = { path = "../rivu-presentation" }
 rivu-ui = { path = "../rivu-ui" }
 gpui.workspace = true
 parking_lot = "0.12"
