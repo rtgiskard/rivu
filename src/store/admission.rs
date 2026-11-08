@@ -1,5 +1,5 @@
 use super::positions::insert_staged_tracks;
-use super::scan::PROBE_VERSION;
+use super::scan::{PROBE_VERSION, staged_insert_sql, staged_library_column, staged_update_sql};
 use super::{CatalogChanges, Store};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result};
@@ -92,47 +92,21 @@ impl Store {
                 OR (t.path=s.path AND t.file_size=s.file_size AND t.modified_ns=s.modified_ns
                     AND s.modified_ns<>?1 AND t.fingerprint IS s.fingerprint))", [i64::MIN])?;
         let mut impacts = tx.query_row(&format!("SELECT
-            COALESCE(MAX(t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
-                OR t.file_size IS NOT s.file_size
-                OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
-                OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
-                OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
-                OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.channels IS NOT s.channels
-                OR t.sample_rate IS NOT s.sample_rate OR t.missing IS NOT 0
-                OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
-                OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number
-                OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date),0),
+            {},
             COALESCE(MAX(t.id IS NULL),0),
             COALESCE(MAX((t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL)
                 AND (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint OR t.missing IS NOT 0)),0),
             COALESCE(MAX((t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL)
                 AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
             {}
-            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", super::scan::staged_projection_columns(false)), [], |row| {
+            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_library_column(false), super::scan::staged_projection_columns(false)), [], |row| {
             Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, ..CatalogChanges::default() })
         })?;
-        let changed = tx.execute("UPDATE tracks SET
-            fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
-            raw_title=s.raw_title,raw_artist=s.raw_artist,raw_album=s.raw_album,duration=s.duration,
-            codec=s.codec,channels=s.channels,sample_rate=s.sample_rate,missing=0,probe_version=s.probe_version,
-            bitrate_bps=s.bitrate_bps,bitrate_exact=s.bitrate_exact,track_number=s.track_number,
-            disc_number=s.disc_number,bits_per_sample=s.bits_per_sample,release_date=s.release_date
-            FROM external_sources AS s WHERE tracks.id=s.resolved_id AND (
-                tracks.fingerprint IS NOT s.fingerprint OR tracks.file_size IS NOT s.file_size
-                OR tracks.modified_ns IS NOT s.modified_ns OR tracks.raw_title IS NOT s.raw_title
-                OR tracks.raw_artist IS NOT s.raw_artist OR tracks.raw_album IS NOT s.raw_album
-                OR tracks.duration IS NOT s.duration OR tracks.codec IS NOT s.codec
-                OR tracks.channels IS NOT s.channels OR tracks.sample_rate IS NOT s.sample_rate
-                OR tracks.missing IS NOT 0 OR tracks.probe_version IS NOT s.probe_version
-                OR tracks.bitrate_bps IS NOT s.bitrate_bps OR tracks.bitrate_exact IS NOT s.bitrate_exact
-                OR tracks.track_number IS NOT s.track_number OR tracks.disc_number IS NOT s.disc_number
-                OR tracks.bits_per_sample IS NOT s.bits_per_sample OR tracks.release_date IS NOT s.release_date)", [])?;
-        let added = tx.execute("INSERT INTO tracks(path,fingerprint,file_size,modified_ns,
-            raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,probe_version,
-            bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date)
-            SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,
-            codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,
-            disc_number,bits_per_sample,release_date FROM external_sources WHERE resolved_id IS NULL ORDER BY ordinal", [])?;
+        let changed = tx.execute(&staged_update_sql("external_sources", false), [])?;
+        let added = tx.execute(
+            &staged_insert_sql("external_sources", false, "ORDER BY ordinal"),
+            [],
+        )?;
         tx.execute("UPDATE external_sources AS s SET resolved_id=(SELECT id FROM tracks INDEXED BY tracks_path WHERE path=s.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1) WHERE resolved_id IS NULL", [])?;
         tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
         {

@@ -14,6 +14,66 @@ use std::sync::Arc;
 // Bump when probing semantics change; fingerprints remain reusable.
 pub(super) const PROBE_VERSION: i64 = 2;
 
+const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
+const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
+
+fn staged_fields(cue: bool) -> impl Iterator<Item = &'static str> {
+    SOURCE_FIELDS
+        .split(',')
+        .chain(CUE_FIELDS.split(',').filter(move |_| cue))
+}
+
+/// Scans and external admission persist the same source facts. Only scans own
+/// CUE identity/ranges, absence policy and relocation decisions.
+pub(super) fn staged_update_sql(table: &str, cue: bool) -> String {
+    use std::fmt::Write;
+    let mut sql = String::with_capacity(3000);
+    sql.push_str("UPDATE tracks SET missing=0");
+    for field in staged_fields(cue) {
+        write!(sql, ",{field}=s.{field}").unwrap();
+    }
+    write!(
+        sql,
+        " FROM {table} AS s WHERE tracks.id=s.resolved_id AND (tracks.missing IS NOT 0"
+    )
+    .unwrap();
+    for field in staged_fields(cue) {
+        write!(sql, " OR tracks.{field} IS NOT s.{field}").unwrap();
+    }
+    sql.push(')');
+    sql
+}
+
+pub(super) fn staged_insert_sql(table: &str, cue: bool, order: &str) -> String {
+    let columns = if cue {
+        format!("{SOURCE_FIELDS},{CUE_FIELDS}")
+    } else {
+        SOURCE_FIELDS.to_owned()
+    };
+    format!(
+        "INSERT INTO tracks({columns}) SELECT {columns} FROM {table} WHERE resolved_id IS NULL {order}"
+    )
+}
+
+pub(super) fn staged_library_column(cue: bool) -> String {
+    let cue = if cue {
+        "OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number
+         OR t.cue_start_frame IS NOT s.cue_start_frame OR t.cue_end_frame IS NOT s.cue_end_frame"
+    } else {
+        ""
+    };
+    format!("COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
+        OR t.fingerprint IS NOT s.fingerprint OR t.file_size IS NOT s.file_size
+        OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
+        OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
+        OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
+        OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.channels IS NOT s.channels
+        OR t.sample_rate IS NOT s.sample_rate OR t.missing IS NOT 0
+        OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
+        OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number
+        OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date {cue}),0)")
+}
+
 /// Compare staged values before updating tracks; hidden raw changes are excluded.
 pub(super) fn staged_projection_columns(cue: bool) -> String {
     let visible = "t.path IS NOT s.path
@@ -831,22 +891,9 @@ impl Store {
         // while the old rows and their overrides are still available. These flags
         // describe changed dependencies, not hashes of materialized query results.
         let mut impacts = tx.query_row(
-            &format!("SELECT
-                COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
-                    OR t.fingerprint IS NOT s.fingerprint
-                    OR t.file_size IS NOT s.file_size
-                    OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
-                    OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
-                    OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
-                    OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec
-                    OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
-                    OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number
-                    OR t.cue_start_frame IS NOT s.cue_start_frame
-                    OR t.cue_end_frame IS NOT s.cue_end_frame OR t.missing IS NOT 0
-                    OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
-                    OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number
-                    OR t.bits_per_sample IS NOT s.bits_per_sample
-                    OR t.release_date IS NOT s.release_date),0),
+            &format!(
+                "SELECT
+                {},
                 COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
                     OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number),0),
                 COALESCE(MAX(
@@ -861,7 +908,10 @@ impl Store {
                     AND (t.id IS NULL OR t.file_size IS NOT s.file_size
                         OR t.modified_ns IS NOT s.modified_ns)),0),
                 {}
-             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_projection_columns(true)),
+             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
+                staged_library_column(true),
+                staged_projection_columns(true)
+            ),
             [],
             |row| {
                 Ok(CatalogChanges {
@@ -876,45 +926,8 @@ impl Store {
                 })
             },
         )?;
-        let mut changed_tracks = tx.execute(
-            "UPDATE tracks SET
-                path=s.path,fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
-                raw_title=s.raw_title,raw_artist=s.raw_artist,raw_album=s.raw_album,duration=s.duration,
-                codec=s.codec,channels=s.channels,sample_rate=s.sample_rate,cue_sheet=s.cue_sheet,
-                cue_number=s.cue_number,cue_start_frame=s.cue_start_frame,cue_end_frame=s.cue_end_frame,
-                missing=0,probe_version=s.probe_version,bitrate_bps=s.bitrate_bps,bitrate_exact=s.bitrate_exact,
-                track_number=s.track_number,disc_number=s.disc_number,bits_per_sample=s.bits_per_sample,
-                release_date=s.release_date
-             FROM temp.scan_stage AS s WHERE tracks.id=s.resolved_id AND (
-                tracks.path IS NOT s.path OR tracks.fingerprint IS NOT s.fingerprint
-                OR tracks.file_size IS NOT s.file_size OR tracks.modified_ns IS NOT s.modified_ns
-                OR tracks.raw_title IS NOT s.raw_title OR tracks.raw_artist IS NOT s.raw_artist
-                OR tracks.raw_album IS NOT s.raw_album OR tracks.duration IS NOT s.duration
-                OR tracks.codec IS NOT s.codec OR tracks.channels IS NOT s.channels
-                OR tracks.sample_rate IS NOT s.sample_rate OR tracks.cue_sheet IS NOT s.cue_sheet
-                OR tracks.cue_number IS NOT s.cue_number
-                OR tracks.cue_start_frame IS NOT s.cue_start_frame
-                OR tracks.cue_end_frame IS NOT s.cue_end_frame OR tracks.missing IS NOT 0
-                OR tracks.probe_version IS NOT s.probe_version
-                OR tracks.bitrate_bps IS NOT s.bitrate_bps
-                OR tracks.bitrate_exact IS NOT s.bitrate_exact
-                OR tracks.track_number IS NOT s.track_number OR tracks.disc_number IS NOT s.disc_number
-                OR tracks.bits_per_sample IS NOT s.bits_per_sample
-                OR tracks.release_date IS NOT s.release_date
-             )",
-            [],
-        )?;
-        changed_tracks += tx.execute(
-            "INSERT INTO tracks(
-                path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
-                channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
-                bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date
-             ) SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,
-                channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,
-                bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date
-             FROM temp.scan_stage WHERE resolved_id IS NULL",
-            [],
-        )?;
+        let mut changed_tracks = tx.execute(&staged_update_sql("temp.scan_stage", true), [])?;
+        changed_tracks += tx.execute(&staged_insert_sql("temp.scan_stage", true, ""), [])?;
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
         let mut mark_missing = tx.prepare(&format!(
             "UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0 RETURNING EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),{}",
