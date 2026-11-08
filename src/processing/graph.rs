@@ -91,28 +91,11 @@ struct Edge {
     position: usize,
 }
 
-enum Processor {
-    Source(audio::PcmAudio),
-    Decoder,
-    Pass,
-    Iir(rivu_dsp::equalizer::iir::Equalizer),
-    Fir(rivu_dsp::equalizer::fir::FirEqualizer),
-    Denoise(Box<rivu_dsp::denoise::BlockDenoiser>),
-}
-
-impl From<audio::NativeProcessor> for Processor {
-    fn from(processor: audio::NativeProcessor) -> Self {
-        match processor {
-            audio::NativeProcessor::Pass => Self::Pass,
-            audio::NativeProcessor::Iir(eq) => Self::Iir(eq),
-            audio::NativeProcessor::Fir(eq) => Self::Fir(eq),
-            audio::NativeProcessor::Denoise(denoise) => Self::Denoise(denoise),
-        }
-    }
-}
 struct Node {
     inputs: Vec<Edge>,
-    processor: Processor,
+    source: Option<audio::PcmAudio>,
+    // None is an immutable source boundary or the streaming decoder input.
+    processor: Option<audio::NativeProcessor>,
     output: Vec<f32>,
     output_node: usize,
     latency: u64,
@@ -186,23 +169,24 @@ impl Engine {
         let mut inputs = Vec::new();
         let mut latency = 0;
         let mut frames = self.source.as_ref().map_or(0, audio::PcmAudio::frames);
+        let source;
         let processor;
         let mut timing = (0, 0);
         if let Some(boundary) = boundaries.get(&port) {
             ensure!(boundary.start_frame <= 0, "Invalid causal graph boundary");
             latency = boundary.start_frame.unsigned_abs();
             frames = boundary.pcm.frames();
-            processor = Processor::Source(boundary.pcm.clone());
+            source = Some(boundary.pcm.clone());
+            processor = None;
         } else if matches!(kind, GraphNodeKind::Source) {
-            processor = if let Some(source) = &self.source {
-                Processor::Source(source.clone())
-            } else {
+            source = self.source.clone();
+            if source.is_none() {
                 ensure!(
                     self.streaming,
                     "Original graph source was released while reachable"
                 );
-                Processor::Decoder
-            };
+            }
+            processor = None;
         } else {
             for input_port in 0..kind.inputs() {
                 let edge = graph
@@ -266,7 +250,8 @@ impl Engine {
             }
             let plan = audio::NativeNodePlan::new(kind, self.rate, self.channels)?;
             timing = plan.timing_frames();
-            processor = plan.prepare(profiles.get(&port.node), BLOCK)?.into();
+            source = None;
+            processor = Some(plan.prepare(profiles.get(&port.node), BLOCK)?);
         }
         let input_frames = frames;
         let (delay, tail) = (timing.0 as u64, timing.1 as u64);
@@ -275,18 +260,23 @@ impl Engine {
             .context("Graph latency overflow")?;
         frames = frames.checked_add(tail).context("Graph length overflow")?;
         let index = self.nodes.len();
-        let needs_sum = !matches!(processor, Processor::Source(_) | Processor::Decoder)
+        let needs_sum = processor.is_some()
             && !(inputs.len() == 1 && inputs[0].gain == 1.0 && inputs[0].delay.is_empty());
         if needs_sum && self.sum.is_empty() {
             self.sum.resize(BLOCK * self.channels, 0.0);
         }
-        let output_node = if matches!(processor, Processor::Pass) && !needs_sum {
+        let output_node = if processor
+            .as_ref()
+            .is_some_and(audio::NativeProcessor::is_pass)
+            && !needs_sum
+        {
             self.nodes[inputs[0].node].output_node
         } else {
             index
         };
         self.nodes.push(Node {
             inputs,
+            source,
             processor,
             output: if output_node == index {
                 vec![0.0; BLOCK * self.channels]
@@ -334,19 +324,19 @@ impl Engine {
             // count. Every processor below writes its complete active prefix.
             node.output[frames * self.channels..count * self.channels].fill(0.0);
             let output = &mut node.output[..frames * self.channels];
-            match &node.processor {
-                Processor::Source(pcm) => {
+            match (&node.source, &mut node.processor) {
+                (Some(pcm), _) => {
                     let read = pcm.read_frames(position, output);
                     output[read * self.channels..].fill(0.0);
                 }
-                Processor::Decoder => {
+                (None, None) => {
                     if let Some(input) = decoder {
                         output.copy_from_slice(&input[..output.len()]);
                     } else {
                         output.fill(0.0);
                     }
                 }
-                _ => {
+                (None, Some(processor)) => {
                     if node.inputs.len() == 1
                         && node.inputs[0].gain == 1.0
                         && node.inputs[0].delay.is_empty()
@@ -381,18 +371,12 @@ impl Engine {
                     let input_frames = input_end.map_or(frames, |end| {
                         end.saturating_sub(position).min(frames as u64) as usize
                     });
-                    match &mut node.processor {
-                        Processor::Iir(eq) => eq.process(output)?,
-                        Processor::Fir(eq) => eq.process_interleaved(output)?,
-                        Processor::Denoise(denoise) => denoise.process(
-                            output,
-                            input_frames * self.channels,
-                            input_end.is_some_and(|end| position + count as u64 >= end),
-                            &mut || cancel.load(Ordering::Acquire),
-                        )?,
-                        Processor::Pass => {}
-                        Processor::Source(_) | Processor::Decoder => unreachable!(),
-                    }
+                    processor.process(
+                        output,
+                        input_frames * self.channels,
+                        input_end.is_some_and(|end| position + count as u64 >= end),
+                        &mut || cancel.load(Ordering::Acquire),
+                    )?;
                 }
             }
         }
@@ -491,10 +475,7 @@ impl Engine {
         Ok(frames)
     }
     fn alias(&self, target: usize) -> Option<audio::PcmAudio> {
-        match &self.nodes[self.nodes[target].output_node].processor {
-            Processor::Source(pcm) => Some(pcm.clone()),
-            _ => None,
-        }
+        self.nodes[self.nodes[target].output_node].source.clone()
     }
     fn render(
         mut self,
