@@ -8,6 +8,25 @@ maintained in link:91_design_decisions.adoc[Engineering conclusions and design d
 
 == Open and deferred
 
+[[artwork-cold-source-identity]]
+=== Cold embedded artwork can acquire a stale requested source identity
+
+Status: reproduced, unresolved, 2026-11-08. Investigation only; no production
+identity-policy change adopted.
+
+If an uncached library source A is replaced at its path by B before artwork is
+loaded, the manager can associate B's embedded image with the requested fingerprint
+of A. Restoring A or requesting the same identity at a missing path still returns
+B within that manager. A fresh manager reading restored A returns A; the wrong
+source association was not observed to persist across managers.
+
+This differs from intentional historical reuse: an image actually obtained from A
+remains valid for A's identity after the source moves or disappears. A correction
+must validate the cold observation's source identity without discarding this
+historical reuse. Read-before/read-after stat stability alone cannot establish that
+the opened content matches the requested fingerprint. Cache-file leases protect
+URI lifetime, not this source-to-image association.
+
 [[pipewire-context-retention]]
 === Native PipeWire context retirement retains libdbus allocations
 
