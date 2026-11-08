@@ -107,7 +107,6 @@ struct Node {
     processor: Processor,
     output: Vec<f32>,
     output_node: usize,
-    sum: Vec<f64>,
     latency: u64,
     frames: u64,
     input_frames: u64,
@@ -124,6 +123,7 @@ struct Engine {
     rate: u32,
     source: Option<audio::PcmAudio>,
     streaming: bool,
+    sum: Vec<f64>,
 }
 impl Engine {
     fn new(source: &audio::PcmAudio) -> Self {
@@ -135,6 +135,7 @@ impl Engine {
             rate: source.sample_rate(),
             source: Some(source.clone()),
             streaming: false,
+            sum: Vec::new(),
         }
     }
     fn for_decoder(rate: u32, layout: Arc<[audio::Channel]>) -> Self {
@@ -146,6 +147,7 @@ impl Engine {
             rate,
             source: None,
             streaming: true,
+            sum: Vec::new(),
         }
     }
     fn for_retained(
@@ -300,6 +302,9 @@ impl Engine {
         let index = self.nodes.len();
         let needs_sum = !matches!(processor, Processor::Source(_) | Processor::Decoder)
             && !(inputs.len() == 1 && inputs[0].gain == 1.0 && inputs[0].delay.is_empty());
+        if needs_sum && self.sum.is_empty() {
+            self.sum.resize(BLOCK * self.channels, 0.0);
+        }
         let output_node = if matches!(processor, Processor::Pass) && !needs_sum {
             self.nodes[inputs[0].node].output_node
         } else {
@@ -314,11 +319,6 @@ impl Engine {
                 Vec::new()
             },
             output_node,
-            sum: if needs_sum {
-                vec![0.0; BLOCK * self.channels]
-            } else {
-                Vec::new()
-            },
             latency,
             frames,
             input_frames,
@@ -379,7 +379,7 @@ impl Engine {
                         let input = &previous[previous[node.inputs[0].node].output_node].output;
                         output.copy_from_slice(&input[..output.len()]);
                     } else {
-                        let sum = &mut node.sum[..output.len()];
+                        let sum = &mut self.sum[..output.len()];
                         sum.fill(0.0);
                         for edge in &mut node.inputs {
                             let input =
@@ -1730,6 +1730,49 @@ mod tests {
     }
 
     #[test]
+    fn sequential_mix_nodes_reuse_one_accumulator_without_leaking_previous_sums() {
+        let mut graph = chain(vec![
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+        ]);
+        for node in [3, 4] {
+            graph.edges.push(GraphEdge {
+                from: GraphPort { node: 1, port: 0 },
+                to: GraphPort { node, port: 1 },
+            });
+        }
+        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let data: Vec<_> = (0..BLOCK * 2 + 7).map(|i| (i % 17) as f32 / 16.0).collect();
+        let input = pcm(&data, &budget);
+        let mut engine = Engine::new(&input);
+        let target = engine
+            .compile(
+                &graph,
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        engine.sum.fill(f64::NAN);
+        let output = engine
+            .render(target, budget, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            samples(&output.pcm),
+            data.iter().map(|x| x * 3.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn unequal_mix_branches_zero_extend_after_reusing_output_buffers() {
         let budget = audio::PcmBudget::new(MEMORY_LIMIT);
         let input = pcm(&vec![2.0; BLOCK + 3], &budget);
@@ -1761,8 +1804,8 @@ mod tests {
             .unwrap();
         for node in &mut engine.nodes {
             node.output.fill(f32::NAN);
-            node.sum.fill(f64::NAN);
         }
+        engine.sum.fill(f64::NAN);
         let output = engine
             .render(target, budget, &AtomicBool::new(false))
             .unwrap();
