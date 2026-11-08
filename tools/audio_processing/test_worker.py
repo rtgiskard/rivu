@@ -472,7 +472,8 @@ class ExplicitExportTests(unittest.TestCase):
                 self.assertEqual(report["frames"], len(audio))
                 self.assertEqual(report["metrics"]["output_peaks"]["speech"], 1.25)
                 expected_rms = float(np.sqrt(np.mean(np.square(audio.astype("float64")))))
-                self.assertAlmostEqual(report["metrics"]["input_rms"], expected_rms, places=12)
+                # Blocked einsum and dense sum have different reduction orders.
+                np.testing.assert_allclose(report["metrics"]["input_rms"], expected_rms, rtol=1e-12, atol=1e-14)
                 self.assertEqual(report["metrics"]["input_rms"], report["metrics"]["target_rms"])
                 for metric in ("load_seconds", "inference_seconds", "resampling_seconds"):
                     self.assertEqual(report["metrics"][metric], 0)
@@ -786,7 +787,7 @@ class RealSeparationTests(unittest.TestCase):
             report = json.loads((base / "result/result.json").read_text())
             for metric, samples in (("input_rms", audio), ("target_rms", stems["vocals"])):
                 expected_rms = float(np.sqrt(np.mean(np.square(samples.astype("float64")))))
-                self.assertAlmostEqual(report["metrics"][metric], expected_rms, places=12)
+                np.testing.assert_allclose(report["metrics"][metric], expected_rms, rtol=1e-12, atol=1e-14)
 
     def test_kim_source_rate_stereo_boundary_and_exact_complement(self):
         self.check_model("RIVU_KIM_MANIFEST", "melband_roformer_kim")

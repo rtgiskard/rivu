@@ -88,7 +88,9 @@ class MetricSemanticsTests(unittest.TestCase):
         measured = benchmark.metrics(reference, estimate, 8000, core_seconds=1)
         error = estimate-reference
         self.assertAlmostEqual(measured["absolute_snr_db"], 10*np.log10(np.sum(reference**2)/np.sum(error**2)), places=11)
-        self.assertAlmostEqual(measured["rms_error"], np.sqrt(np.mean(error**2)), places=14)
+        # Dense and blocked reductions differ in summation order; use relative
+        # tolerances for linear metrics rather than fixed decimal places.
+        np.testing.assert_allclose(measured["rms_error"], np.sqrt(np.mean(error**2)), rtol=1e-12, atol=1e-14)
         for channel in range(2):
             ref = reference[:,channel]-reference[:,channel].mean()
             est = estimate[:,channel]-estimate[:,channel].mean()
@@ -96,7 +98,7 @@ class MetricSemanticsTests(unittest.TestCase):
             target = gain*ref
             expected = 10*np.log10(np.dot(target, target)/np.dot(est-target, est-target))
             self.assertAlmostEqual(measured["si_sdr_db"][channel], expected, places=11)
-            self.assertAlmostEqual(measured["reference_gain"][channel], gain, places=14)
+            np.testing.assert_allclose(measured["reference_gain"][channel], gain, rtol=1e-12, atol=1e-14)
         rms, peak = benchmark.reconstruction_metrics(reference, estimate, reference-estimate)
         residual = reference-estimate-(reference-estimate)
         self.assertEqual(rms, np.sqrt(np.mean(residual**2)))
