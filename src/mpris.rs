@@ -931,7 +931,7 @@ fn load_artwork(
     }
     let identity = ArtworkIdentity::new(crate::artwork_source(track));
     let manager = Arc::clone(artwork);
-    let track = track.clone();
+    let track = Arc::clone(requested.current_track.as_ref()?);
     let workers = Arc::clone(workers);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancellation = Arc::clone(&cancelled);
