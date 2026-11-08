@@ -1,5 +1,8 @@
 use super::positions::insert_staged_tracks;
-use super::scan::{PROBE_VERSION, staged_insert_sql, staged_library_column, staged_update_sql};
+use super::scan::{
+    PROBE_VERSION, effective_source_from_row, effective_source_select, staged_insert_sql,
+    staged_library_column, staged_update_sql,
+};
 use super::{CatalogChanges, Store};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result};
@@ -19,14 +22,15 @@ impl Store {
             .map(i64::try_from)
             .transpose()
             .context("Queue entry ID exceeds database range")?;
-        // Compare raw SQLite values so an unrelated malformed Track projection
-        // cannot turn a valid admission into a rollback or a current refresh.
-        let observed = || -> Result<Option<Vec<rusqlite::types::Value>>> {
-            Ok(tx.query_row(
-                "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=(SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1)",
+        let observed = || {
+            tx.query_row(
+                effective_source_select!(
+                    "(SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1)"
+                ),
                 [current_id],
-                |row| (0..20).map(|index| row.get(index)).collect(),
-            ).optional()?)
+                effective_source_from_row,
+            )
+            .optional()
         };
         let current_before = observed()?;
         tx.execute_batch("CREATE TEMP TABLE external_sources(
@@ -174,6 +178,81 @@ mod tests {
             paths.iter().map(|path| record(path)).collect(),
             occurrences,
         )
+    }
+
+    #[test]
+    fn source_observation_tolerates_malformed_fields_and_compares_effective_changes() {
+        for scan in [false, true] {
+            let store = Store::open(Path::new(":memory:")).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO tracks(id,path) VALUES(100,'/unrelated.wav')",
+                    [],
+                )
+                .unwrap();
+            store
+                .admit_external_queue(&admission(&["/current.wav"], vec![0]), None, None)
+                .unwrap();
+            let current_entry = store.queue_ids().unwrap()[0];
+            let current_track = store.queue_track_id(current_entry).unwrap();
+            assert_ne!(current_track, current_entry as i64);
+            store.conn.execute(
+                "UPDATE tracks SET play_count='malformed',duration='malformed',title_override='User title' WHERE id=?1",
+                [current_track],
+            ).unwrap();
+            let apply = |source: ScanRecord| {
+                if scan {
+                    store
+                        .apply_scan_observing(
+                            &ScanResult {
+                                roots: vec![source.path.clone()],
+                                records: vec![std::sync::Arc::new(source)],
+                                min_duration_secs: 0,
+                                ..Default::default()
+                            },
+                            Some(current_track),
+                        )
+                        .unwrap()
+                } else {
+                    store
+                        .admit_external_queue(
+                            &ExternalAdmission::from_test_records(vec![source], vec![0]),
+                            None,
+                            Some(current_entry),
+                        )
+                        .unwrap()
+                        .1
+                }
+            };
+            let unrelated = apply(record("/new.wav"));
+            assert!(unrelated.changed);
+            assert_eq!(unrelated.current_track, Some(false));
+            assert!(store.known_source(Path::new("/new.wav")).unwrap().is_some());
+            store
+                .conn
+                .execute(
+                    "UPDATE tracks SET duration=?1 WHERE id=?2",
+                    params![record("/current.wav").media.duration, current_track],
+                )
+                .unwrap();
+            let mut source = record("/current.wav");
+            source.media.title = "New hidden raw title".into();
+            let hidden = apply(source.clone());
+            assert!(hidden.changed);
+            assert_eq!(hidden.current_track, Some(false));
+            source.media.codec = "flac".into();
+            let visible = apply(source);
+            assert_eq!(visible.current_track, Some(true));
+            assert_eq!(
+                store.conn.query_row(
+                    "SELECT COALESCE(title_override,raw_title),codec,play_count FROM tracks WHERE id=?1",
+                    [current_track],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                ).unwrap(),
+                ("User title".into(), "flac".into(), "malformed".into()),
+            );
+        }
     }
 
     #[test]

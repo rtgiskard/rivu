@@ -14,8 +14,30 @@ use std::sync::Arc;
 // Bump when probing semantics change; fingerprints remain reusable.
 pub(super) const PROBE_VERSION: i64 = 2;
 
-const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
+pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
+
+// Keep both identity selectors on the same projection without allocating SQL.
+macro_rules! effective_source_select {
+    ($identity:literal) => {
+        concat!(
+            "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=",
+            $identity
+        )
+    };
+}
+pub(super) use effective_source_select;
+
+// Observe source facts without decoding Track or unrelated user-state fields.
+pub(super) fn effective_source_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<[rusqlite::types::Value; 20]> {
+    let mut values = std::array::from_fn(|_| rusqlite::types::Value::Null);
+    for (column, value) in values.iter_mut().enumerate() {
+        *value = row.get(column)?;
+    }
+    Ok(values)
+}
 
 fn staged_fields(cue: bool) -> impl Iterator<Item = &'static str> {
     SOURCE_FIELDS
@@ -23,15 +45,23 @@ fn staged_fields(cue: bool) -> impl Iterator<Item = &'static str> {
         .chain(CUE_FIELDS.split(',').filter(move |_| cue))
 }
 
+// Source facts replace source facts; overrides, history and references stay owned
+// by the retained track. The source relation is always aliased as `s`.
+pub(super) fn write_source_assignments(sql: &mut String, cue: bool) {
+    use std::fmt::Write;
+    sql.push_str("missing=0");
+    for field in staged_fields(cue) {
+        write!(sql, ",{field}=s.{field}").unwrap();
+    }
+}
+
 /// Scans and external admission persist the same source facts. Only scans own
 /// CUE identity/ranges, absence policy and relocation decisions.
 pub(super) fn staged_update_sql(table: &str, cue: bool) -> String {
     use std::fmt::Write;
     let mut sql = String::with_capacity(3000);
-    sql.push_str("UPDATE tracks SET missing=0");
-    for field in staged_fields(cue) {
-        write!(sql, ",{field}=s.{field}").unwrap();
-    }
+    sql.push_str("UPDATE tracks SET ");
+    write_source_assignments(&mut sql, cue);
     write!(
         sql,
         " FROM {table} AS s WHERE tracks.id=s.resolved_id AND (tracks.missing IS NOT 0"
@@ -577,14 +607,13 @@ impl Store {
         }
         let transaction_started = std::time::Instant::now();
         let tx = self.conn.unchecked_transaction()?;
-        // Compare SQLite values, not a decoded Track: malformed projection data
-        // must not turn an otherwise valid catalog transaction into a rollback.
-        let observed = |id| -> Result<Option<Vec<rusqlite::types::Value>>> {
-            Ok(tx.query_row(
-                "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=?1",
+        let observed = |id| {
+            tx.query_row(
+                effective_source_select!("?1"),
                 [id],
-                |row| (0..20).map(|column| row.get(column)).collect(),
-            ).optional()?)
+                effective_source_from_row,
+            )
+            .optional()
         };
         let current_before = current_track.map(observed).transpose()?;
         let mut scope_workspace = result.retained_budget.as_ref().map(ImportBudget::scoped);

@@ -1,5 +1,6 @@
 use super::Store;
 use super::rows::{TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, track_from_row};
+use super::scan::{SOURCE_FIELDS, write_source_assignments};
 use anyhow::{Context, Result, bail};
 use rivu_protocol::model::{DuplicateGroup, DuplicateMember, Page};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -288,11 +289,10 @@ impl Store {
         // Snapshot the target's scanned raw metadata before releasing its unique
         // path. No target user state is transferred or discarded.
         tx.execute(
-            "CREATE TEMP TABLE relocation_target AS
-             SELECT path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
-                    duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,
-                    track_number,disc_number,bits_per_sample,release_date
-             FROM tracks WHERE id=?1",
+            &format!(
+                "CREATE TEMP TABLE relocation_target AS
+                 SELECT {SOURCE_FIELDS} FROM tracks WHERE id=?1"
+            ),
             [target.identity.id],
         )?;
         let queue = tx.query_row(
@@ -305,17 +305,11 @@ impl Store {
             params![source.identity.id, target.identity.id], |row| row.get(0),
         )?;
         tx.execute("DELETE FROM tracks WHERE id=?1", [target.identity.id])?;
-        let updated = tx.execute(
-            "UPDATE tracks SET path=t.path,fingerprint=t.fingerprint,
-                file_size=t.file_size,modified_ns=t.modified_ns,
-                raw_title=t.raw_title,raw_artist=t.raw_artist,raw_album=t.raw_album,
-                duration=t.duration,codec=t.codec,channels=t.channels,sample_rate=t.sample_rate,
-                probe_version=t.probe_version,bitrate_bps=t.bitrate_bps,bitrate_exact=t.bitrate_exact,
-                track_number=t.track_number,disc_number=t.disc_number,
-                bits_per_sample=t.bits_per_sample,release_date=t.release_date,missing=0
-             FROM temp.relocation_target AS t WHERE tracks.id=?1",
-            [source.identity.id],
-        )?;
+        let mut update_sql = String::with_capacity(768);
+        update_sql.push_str("UPDATE tracks SET ");
+        write_source_assignments(&mut update_sql, false);
+        update_sql.push_str(" FROM temp.relocation_target AS s WHERE tracks.id=?1");
+        let updated = tx.execute(&update_sql, [source.identity.id])?;
         super::changed(updated, "track", source.identity.id)?;
         tx.execute_batch("DROP TABLE temp.relocation_target")?;
         tx.commit()?;
