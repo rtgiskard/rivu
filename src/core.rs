@@ -394,6 +394,7 @@ struct Core {
     task_waiters: Arc<Mutex<TaskWaiters>>,
     task_completions_pending: bool,
     transport: playback::PlaybackOwner,
+    projections: projections::ProjectionRecovery,
     output_settings_request: u64,
     next_playlist_token: u64,
     database_unavailable: bool,
@@ -477,6 +478,7 @@ mod maintenance;
 mod playback;
 mod playlists;
 mod processing;
+mod projections;
 mod queue;
 mod relocation;
 mod settings;

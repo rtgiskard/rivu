@@ -298,6 +298,7 @@ impl CoreRuntime {
             task_waiters,
             task_completions_pending: false,
             transport: playback::PlaybackOwner::new(0),
+            projections: projections::ProjectionRecovery::default(),
             output_settings_request: 0,
             next_playlist_token: 0,
             database_unavailable: false,

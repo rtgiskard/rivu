@@ -107,6 +107,8 @@ fn save_external(
     }
     if dependencies.refresh_history {
         saved.history = Some(store.history(MAX_QUERY_ROWS));
+    }
+    if impacts.current_track == Some(true) {
         saved.current_track = Some((|| {
             current_id
                 .map(|id| store.queue_track_id(id))
@@ -425,20 +427,14 @@ impl Core {
             saved.error = Some(error);
         }
         task.status.library_committed = saved.committed;
-        if saved.committed {
-            if !saved.uncertain
-                && let Some(impacts) = saved.impacts
-            {
-                self.store.invalidate_catalog_caches(impacts, false);
-            } else {
-                self.store.invalidate_caches();
-            }
-        }
         // Confirmed effects remain authoritative even when later retirement
         // fails. Publish their tokens before isolating an uncertain outcome,
         // without reading or applying potentially stale view projections.
         if let Some(impacts) = saved.impacts {
             self.announce_catalog_changes(impacts);
+        }
+        if saved.committed && (saved.uncertain || saved.impacts.is_none()) {
+            self.store.invalidate_caches();
         }
         if saved.uncertain {
             self.database_outcome_uncertain();
@@ -464,28 +460,18 @@ impl Core {
                 "Queue committed but refreshing its projection failed: {error:#}"
             ));
         }
-        if let Some(total) = saved.track_total {
-            match total {
-                Ok(total) => self.state.library.track_total = total,
-                Err(error) => errors.push(format!("Refreshing library count failed: {error:#}")),
-            }
-        }
-        if let Some(history) = saved.history {
-            match history {
-                Ok(history) => self.replace_history(history),
-                Err(error) => errors.push(format!("Refreshing library history failed: {error:#}")),
-            }
+        if let Err(error) = self.accept_prepared_projections(projections::PreparedProjections {
+            library_total: saved.track_total,
+            history: saved.history,
+            ..Default::default()
+        }) {
+            errors.push(format!("{error:#}"));
         }
         if let Some(track) = saved.current_track {
-            let projection_stale = self.transport.projection_stale;
-            self.transport.projection_stale = true;
+            self.projections.current_track = true;
             match track.and_then(|track| self.replace_current_track(track)) {
                 Ok(()) => {
-                    // A failed scalar projection must remain gated even if
-                    // the independently captured track snapshot is readable.
-                    if !projection_stale {
-                        self.transport.projection_stale = false;
-                    }
+                    self.projections.current_track = false;
                 }
                 Err(error) => errors.push(format!(
                     "Refreshing current track after admission failed: {error:#}"

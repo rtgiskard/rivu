@@ -21,11 +21,24 @@ impl Core {
         if let Some(current) = self.state.current_track.as_ref()
             && track_ids.contains(&current.id)
         {
-            let track = self.store.track(current.id)?;
-            if track.as_ref() != Some(current.as_ref()) {
-                self.replace_current_track(track)?;
-            }
+            self.refresh_current_track()?;
         }
+        Ok(())
+    }
+
+    pub(in crate::core) fn refresh_current_track(&mut self) -> Result<()> {
+        self.projections.current_track = true;
+        let track = self
+            .state
+            .queue
+            .current_id
+            .map(|id| self.store.queue_track_id(id))
+            .transpose()?
+            .map(|id| self.store.track(id))
+            .transpose()?
+            .flatten();
+        self.replace_current_track(track)?;
+        self.projections.current_track = false;
         Ok(())
     }
 
@@ -147,36 +160,35 @@ impl Core {
             album.as_deref(),
             decoder_hint,
         )?;
-        self.invalidate_collection_impacts(impact.queue, impact.albums);
-        if impact.member_facts {
-            self.state.library.duplicate_members_revision = self
-                .state
-                .library
-                .duplicate_members_revision
-                .wrapping_add(1);
-        }
+        self.accept_catalog_facts(
+            crate::store::CatalogChanges {
+                changed: impact.changed,
+                library: impact.library,
+                queue: impact.queue,
+                albums: impact.albums,
+                duplicate_members: impact.member_facts,
+                ..Default::default()
+            },
+            Some(&[track_id]),
+            impact.playlists.as_deref(),
+        );
         if impact.library {
-            self.state
-                .library
-                .change_metadata(Some(&[track_id]), impact.playlists.as_deref());
-            (|| -> Result<()> {
-                self.refresh_affected_queue_tracks(&[track_id])?;
-                if title.is_some()
-                    && self
-                        .state
-                        .library
-                        .history
-                        .iter()
-                        .any(|entry| entry.track_id == track_id)
-                {
-                    let track = self.store.track(track_id)?.context("Track not found")?;
-                    self.refresh_history_track(&track);
-                }
-                Ok(())
-            })()
-            .context(
-                "Track edit committed, but refreshing views failed; some projections may be stale",
-            )?;
+            self.transport.history_pending |= title.is_some()
+                && self
+                    .state
+                    .library
+                    .history
+                    .iter()
+                    .any(|entry| entry.track_id == track_id);
+            let current = self.refresh_affected_queue_tracks(&[track_id]);
+            let catalog = self.refresh_catalog_projections();
+            let errors: Vec<_> = [current, catalog]
+                .into_iter()
+                .filter_map(Result::err)
+                .collect();
+            if !errors.is_empty() {
+                return Err(projections::ProjectionSyncError(errors).into());
+            }
         }
         Ok(())
     }
@@ -360,7 +372,7 @@ impl Core {
         };
         self.announce_catalog_changes(impacts);
         let playlists = self.invalidate_playlist_members(affected_playlists);
-        let catalog = self.refresh_catalog_projections(impacts);
+        let catalog = self.refresh_catalog_projections();
         // Recover the committed scalar projection and selected track; a failed
         // refresh keeps dependent queue controls gated until recovery succeeds.
         let queue = if queue_changed {
@@ -368,9 +380,15 @@ impl Core {
         } else {
             Ok(())
         };
-        playlists.and(catalog).and(queue).context(
-            "Track deletion committed, but refreshing views failed; some projections may be stale",
-        )
+        let errors: Vec<_> = [playlists, catalog, queue]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(projections::ProjectionSyncError(errors).into())
+        }
     }
 
     pub(in crate::core) fn set_play_count(&mut self, track_id: i64, play_count: u64) -> Result<()> {
@@ -407,24 +425,5 @@ impl Core {
             current.last_played = stats.last_played;
         }
         Ok(())
-    }
-
-    pub(in crate::core) fn refresh_history_track(&mut self, track: &Track) {
-        let Some(index) = self
-            .state
-            .library
-            .history
-            .iter()
-            .position(|entry| entry.track_id == track.id)
-        else {
-            return;
-        };
-        let entry = &self.state.library.history[index];
-        if entry.title == track.title && entry.play_count == track.play_count {
-            return;
-        }
-        let entry = &mut Arc::make_mut(&mut self.state.library.history)[index];
-        entry.title.clone_from(&track.title);
-        entry.play_count = track.play_count;
     }
 }

@@ -10,21 +10,7 @@ impl Core {
     pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
         self.transport.projection_stale = true;
         self.refresh_queue_projection()?;
-        // Track decoding is part of recovery too: a successful scalar read alone
-        // must not reopen controls after a committed metadata mutation.
-        self.transport.projection_stale = true;
-        let track = self
-            .state
-            .queue
-            .current_id
-            .map(|id| self.store.queue_track_id(id))
-            .transpose()?
-            .map(|id| self.store.track(id))
-            .transpose()?
-            .flatten();
-        self.replace_current_track(track)?;
-        self.transport.projection_stale = false;
-        Ok(())
+        self.refresh_current_track()
     }
 
     pub(in crate::core) fn set_shuffle(&mut self, enabled: bool) {
@@ -121,6 +107,9 @@ impl Core {
             self.reload_queue()?;
         } else {
             self.persist_queue_current()?;
+        }
+        if self.projections.current_track {
+            self.refresh_current_track()?;
         }
         Ok(())
     }

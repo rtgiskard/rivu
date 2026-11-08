@@ -1,5 +1,4 @@
 use super::*;
-use crate::store::CountDomain;
 
 struct ReadState {
     config: Arc<Config>,
@@ -458,24 +457,55 @@ struct ReadConnection {
     scalar_playlist_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded queue keeps ordinary reads inline instead of allocating for every query."
+)]
+enum ReadWork {
+    Query(ReadRequest),
+    Recover {
+        demand: projections::ProjectionDemand,
+        completion: oneshot::Sender<projections::PreparedProjections>,
+    },
+}
+
 /// One independent SQLite owner, with bounded admission and one live snapshot.
 /// It never occupies a long-job blocking permit or the control owner.
 pub(super) struct ReadQueries {
-    requests: mpsc::Sender<ReadRequest>,
+    requests: mpsc::Sender<ReadWork>,
     worker: Option<JoinHandle<()>>,
     pub(super) fence: Arc<ReadFence>,
 }
 
 impl ReadQueries {
     pub(super) fn start(path: PathBuf, shared: Arc<RwLock<CoreState>>) -> Result<Self> {
-        let (requests, receiver) = mpsc::bounded::<ReadRequest>(64);
+        let (requests, receiver) = mpsc::bounded::<ReadWork>(64);
         let fence = Arc::new(ReadFence::default());
         let worker_fence = Arc::clone(&fence);
         let worker = thread::Builder::new()
             .name("rivu-queries".into())
             .spawn(move || {
                 let mut reader = None;
-                while let Ok(request) = receiver.recv_blocking() {
+                while let Ok(work) = receiver.recv_blocking() {
+                    let request = match work {
+                        ReadWork::Query(request) => request,
+                        ReadWork::Recover { demand, completion } => {
+                            let prepared =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    Self::recover_pinned(
+                                        &path,
+                                        &mut reader,
+                                        &shared,
+                                        &worker_fence,
+                                        demand,
+                                    )
+                                }))
+                                .unwrap_or_default();
+                            // Delivery never blocks the reader's physical retirement.
+                            let _ = completion.send(prepared);
+                            continue;
+                        }
+                    };
                     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         Self::execute(&path, &mut reader, &shared, &worker_fence, &request)
                     }))
@@ -491,6 +521,89 @@ impl ReadQueries {
             worker: Some(worker),
             fence,
         })
+    }
+
+    pub(super) fn recover(
+        &self,
+        demand: projections::ProjectionDemand,
+        completion: oneshot::Sender<projections::PreparedProjections>,
+    ) -> bool {
+        self.requests
+            .try_send(ReadWork::Recover { demand, completion })
+            .is_ok()
+    }
+
+    fn recover_pinned(
+        path: &Path,
+        reader: &mut Option<ReadConnection>,
+        shared: &RwLock<CoreState>,
+        fence: &Arc<ReadFence>,
+        demand: projections::ProjectionDemand,
+    ) -> projections::PreparedProjections {
+        {
+            let mut gate = fence.state.lock();
+            while gate.owner_busy {
+                fence.owner_ready.wait(&mut gate);
+            }
+            if gate.maintenance {
+                return projections::PreparedProjections::default();
+            }
+            gate.active = true;
+        }
+        let _lease = ReadLease(Arc::clone(fence));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<projections::PreparedProjections> {
+                if reader.is_none() {
+                    *reader = Some(ReadConnection {
+                        store: Store::open_reader(path)?,
+                        library_revision: demand.revisions.library,
+                        duplicate_groups_revision: demand.revisions.duplicate_groups,
+                        scalar_revisions: (
+                            demand.revisions.structure,
+                            demand.revisions.album,
+                            demand.revisions.queue,
+                        ),
+                        scalar_playlist_revisions: Arc::clone(
+                            &shared.read().library.playlist_entry_revisions,
+                        ),
+                    });
+                }
+                let snapshot = reader
+                    .as_ref()
+                    .expect("reader opened")
+                    .store
+                    .read_snapshot()?;
+                {
+                    let mut gate = fence.state.lock();
+                    while gate.owner_busy {
+                        fence.owner_ready.wait(&mut gate);
+                    }
+                    let current = shared.read().query_revisions();
+                    anyhow::ensure!(
+                        !gate.maintenance
+                            && (!demand.track_total
+                                || current.structure == demand.revisions.structure)
+                            && (!demand.history || current.library == demand.revisions.library)
+                            && (!demand.playlist_total
+                                || current.playlist == demand.revisions.playlist),
+                        "Projection ownership changed"
+                    );
+                }
+                // Only this accepted snapshot may invalidate the reused reader's
+                // cached values. Recovery must not inherit an older count owner.
+                snapshot.invalidate_caches();
+                let prepared = projections::PreparedProjections::read(&snapshot, demand);
+                snapshot.finish()?;
+                Ok(prepared)
+            },
+        ));
+        match result {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(_)) | Err(_) => {
+                drop(reader.take());
+                projections::PreparedProjections::default()
+            }
+        }
     }
 
     fn execute(
@@ -610,36 +723,21 @@ impl ReadQueries {
                     }
                     // Only accepted snapshots can change cache ownership. A rejected
                     // version cannot tag old cached totals as belonging to a newer one.
-                    if connection.library_revision != revisions.library {
-                        snapshot.invalidate_scalar_count_domains(&[
-                            CountDomain::FilteredLibrary,
-                            CountDomain::Other,
-                            CountDomain::Directory,
-                            CountDomain::Queue,
-                            CountDomain::PlaylistEntries,
-                        ]);
-                        connection.library_revision = revisions.library;
-                    }
-                    if connection.duplicate_groups_revision != revisions.duplicate_groups {
-                        snapshot.invalidate_duplicate_group_count();
-                        connection.duplicate_groups_revision = revisions.duplicate_groups;
-                    }
                     let scalar_revisions = (revisions.structure, revisions.album, revisions.queue);
-                    if connection.scalar_revisions.0 != scalar_revisions.0 {
-                        snapshot.invalidate_scalar_count_domains(&[
-                            CountDomain::Other,
-                            CountDomain::Directory,
-                        ]);
-                    }
-                    if connection.scalar_revisions.1 != scalar_revisions.1 {
-                        snapshot.invalidate_scalar_count_domains(&[
-                            CountDomain::Albums,
-                            CountDomain::AlbumTracks,
-                        ]);
-                    }
-                    if connection.scalar_revisions.2 != scalar_revisions.2 {
-                        snapshot.invalidate_scalar_count_domains(&[CountDomain::Queue]);
-                    }
+                    snapshot.invalidate_catalog_caches(
+                        crate::store::CatalogChanges {
+                            library: connection.library_revision != revisions.library,
+                            structure: connection.scalar_revisions.0 != scalar_revisions.0,
+                            albums: connection.scalar_revisions.1 != scalar_revisions.1,
+                            queue: connection.scalar_revisions.2 != scalar_revisions.2,
+                            duplicate_groups: connection.duplicate_groups_revision
+                                != revisions.duplicate_groups,
+                            ..Default::default()
+                        },
+                        false,
+                    );
+                    connection.library_revision = revisions.library;
+                    connection.duplicate_groups_revision = revisions.duplicate_groups;
                     connection.scalar_revisions = scalar_revisions;
                     if !Arc::ptr_eq(
                         &connection.scalar_playlist_revisions,
@@ -681,8 +779,10 @@ impl ReadQueries {
             ticket,
             reply,
         };
-        if let Err(error) = self.requests.try_send(request) {
-            let request = error.into_inner();
+        if let Err(error) = self.requests.try_send(ReadWork::Query(request)) {
+            let ReadWork::Query(request) = error.into_inner() else {
+                unreachable!()
+            };
             let response = QueryResponse {
                 revisions: request.state.revisions,
                 result: Err(QueryError::Message("Read queue is full or stopped".into())),

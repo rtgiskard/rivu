@@ -15,6 +15,20 @@ impl Store {
         current_id: Option<u64>,
     ) -> Result<(usize, CatalogChanges, usize)> {
         let tx = self.conn.unchecked_transaction()?;
+        let current_id = current_id
+            .map(i64::try_from)
+            .transpose()
+            .context("Queue entry ID exceeds database range")?;
+        // Compare raw SQLite values so an unrelated malformed Track projection
+        // cannot turn a valid admission into a rollback or a current refresh.
+        let observed = || -> Result<Option<Vec<rusqlite::types::Value>>> {
+            Ok(tx.query_row(
+                "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=(SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1)",
+                [current_id],
+                |row| (0..20).map(|index| row.get(index)).collect(),
+            ).optional()?)
+        };
+        let current_before = observed()?;
         tx.execute_batch("CREATE TEMP TABLE external_sources(
             ordinal INTEGER PRIMARY KEY,resolved_id INTEGER,path TEXT NOT NULL,fingerprint BLOB,
             file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,raw_title TEXT NOT NULL,
@@ -133,15 +147,12 @@ impl Store {
             }
         }
         let count = insert_staged_tracks(&tx, 0, index)?;
-        let current_id = current_id
-            .map(i64::try_from)
-            .transpose()
-            .context("Queue entry ID exceeds database range")?;
         tx.execute(
             "UPDATE rivu_meta SET current_queue_entry_id=?1 WHERE singleton=1 AND current_queue_entry_id IS NOT ?1",
             [current_id],
         )?;
         tx.execute_batch("DROP TABLE external_sources;")?;
+        impacts.current_track = Some(observed()? != current_before);
         tx.commit()?;
         impacts.changed = changed != 0 || added != 0;
         impacts.queue |= count != 0;

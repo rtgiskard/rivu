@@ -416,6 +416,82 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
     };
     assert!(status.library_committed);
     assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(core.projections.current_track);
+    assert!(!core.projections.track_total);
+    assert!(!core.transport.projection_stale);
+    let committed = core.state.query_revisions();
+    connection
+        .execute_batch(
+            "DROP TRIGGER corrupt_admission_projection; UPDATE tracks SET channels=1 WHERE id=1;",
+        )
+        .unwrap();
+    core.recover_projections_on_demand();
+    assert!(!core.projections.current_track);
+    assert_eq!(core.state.query_revisions(), committed);
+    assert_eq!(core.store.queue_ids().unwrap().len(), before + 1);
+}
+
+#[test]
+fn unrelated_external_admission_does_not_refresh_broken_current_projection() {
+    let (directory, mut core) = admission_fixture();
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+    let before = core.state.queue.total;
+    let path = directory.path().join("unrelated.wav");
+    write_pcm_frames(&path, 1);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])
+        .unwrap();
+    core.start_external_admission(vec![path], None, None)
+        .unwrap();
+    finish_admission(&mut core);
+    let status = core.scan_results.back().unwrap();
+    assert!(status.library_committed);
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
+    assert!(status.error.is_none());
+    assert_eq!(core.state.queue.total, before + 1);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert!(Arc::ptr_eq(
+        core.state.current_track.as_ref().unwrap(),
+        &current
+    ));
+    assert!(!core.projections.current_track);
+    assert!(!core.transport.projection_stale);
+}
+
+#[test]
+fn queue_structure_recovery_stays_complete_when_current_recovery_fails() {
+    let (directory, mut core) = admission_fixture();
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute("UPDATE tracks SET channels='unreadable' WHERE id=1", [])
+        .unwrap();
+    core.store.invalidate_caches();
+    core.store.enqueue_tracks(&[2]).unwrap();
+    core.transport.projection_stale = true;
+    assert!(core.ensure_queue_control_ready().is_err());
+    assert_eq!(
+        core.state.queue.total,
+        core.store.queue_ids().unwrap().len()
+    );
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert!(!core.transport.projection_stale);
+    assert!(core.projections.current_track);
+    // The queue scalar is now unavailable: current recovery must not reread it.
+    connection.execute_batch("CREATE TABLE saved_queue_meta AS SELECT * FROM rivu_meta; DELETE FROM rivu_meta; UPDATE tracks SET channels=1 WHERE id=1;").unwrap();
+    core.ensure_queue_control_ready().unwrap();
+    assert!(!core.projections.current_track);
+    assert!(!core.transport.projection_stale);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    connection
+        .execute_batch(
+            "INSERT INTO rivu_meta SELECT * FROM saved_queue_meta; DROP TABLE saved_queue_meta;",
+        )
+        .unwrap();
 }
 
 #[test]

@@ -218,6 +218,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
         core.state.current_track.as_ref().unwrap(),
         &current
     ));
+    assert!(core.projections.current_track);
     assert!(matches!(
         core.view(&Query::TrackBatch {
             query: None,
@@ -239,9 +240,43 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
     connection
         .execute_batch("DROP TRIGGER fail_edit_refresh; UPDATE tracks SET channels=2 WHERE id=1;")
         .unwrap();
-    core.refresh_queue_tracks().unwrap();
+    core.recover_projections_on_demand();
+    assert!(!core.projections.current_track);
     assert_eq!(core.state.current_track().unwrap().title, "Committed title");
     assert_eq!(core.state.query_revisions(), committed);
+}
+
+#[test]
+fn committed_favorite_refresh_failure_recovers_without_replaying_toggle() {
+    for toggle in [false, true] {
+        let (directory, mut core) = fixture_with_database(Some(10.0));
+        core.state.queue.current_id = Some(1);
+        core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
+        core.save_queue().unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_favorite_refresh AFTER UPDATE OF favorite ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;").unwrap();
+        let result = if toggle {
+            core.toggle_favorite(&[1, 1])
+        } else {
+            core.set_favorite(&[1, 1], true)
+        };
+        assert!(result.is_err());
+        assert!(core.projections.current_track);
+        let committed = core.state.query_revisions();
+        if !toggle {
+            core.set_favorite(&[1], true).unwrap();
+            assert_eq!(core.state.query_revisions(), committed);
+        }
+        connection
+            .execute_batch(
+                "DROP TRIGGER fail_favorite_refresh; UPDATE tracks SET channels=2 WHERE id=1;",
+            )
+            .unwrap();
+        core.recover_projections_on_demand();
+        assert!(!core.projections.current_track);
+        assert!(core.state.current_track().unwrap().favorite);
+        assert_eq!(core.state.query_revisions(), committed);
+    }
 }
 
 #[test]

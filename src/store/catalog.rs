@@ -16,6 +16,9 @@ pub struct CatalogChanges {
     pub duplicate_groups: bool,
     /// Size/mtime verification facts for fingerprinted ordinary members.
     pub duplicate_members: bool,
+    /// Whether the explicitly observed current identity changed. None means the
+    /// producer did not observe one; consumers conservatively use library impact.
+    pub(crate) current_track: Option<bool>,
     /// Successfully scanned new identities excluded by the duration threshold.
     pub skipped_short_tracks: usize,
 }
@@ -32,7 +35,6 @@ pub(crate) struct CatalogDependencies {
     pub duplicate_member_revision: bool,
     pub refresh_history: bool,
     pub refresh_track_total: bool,
-    pub refresh_queue: bool,
     pub clear_track_cache: bool,
     pub clear_filtered_track_count: bool,
     pub clear_catalog_counts: bool,
@@ -53,7 +55,6 @@ impl CatalogChanges {
             duplicate_member_revision: self.duplicate_members,
             refresh_history: self.library,
             refresh_track_total: self.structure,
-            refresh_queue: self.library || self.queue,
             clear_track_cache: self.library,
             clear_filtered_track_count: self.library,
             clear_catalog_counts: self.library || self.structure,

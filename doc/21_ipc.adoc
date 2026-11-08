@@ -215,11 +215,14 @@ state transition and applies that outcome; it does not infer task identity from
 the current active-task slots. The task owner retains any deferred reply through
 completion or shutdown.
 
-SQLite writes and their state transitions stay atomic on Core. A separate bounded
-query owner reuses a read connection and pins a SQLite snapshot per request,
-validating it against captured Core revisions. A publication fence prevents reads
-from pairing a committed database change with preceding state. Count reuse follows
-data-domain revisions; maintenance waits for physical snapshot retirement.
+Core serializes foreground SQLite writes with their revision transitions. Admitted
+background saves retain independent transaction evidence until Core accepts their
+completion; database commit and display-projection refresh are not one atomic
+operation. A separate bounded query owner reuses a read connection and pins a
+SQLite snapshot per request, validating it against captured Core revisions. The
+publication fence and save gate prevent reads from pairing committed database
+changes with preceding state. Count reuse follows data-domain revisions;
+maintenance waits for physical snapshot retirement.
 
 IPC disconnection or shutdown drops a pending query's reply receiver. Demand
 replacement and logical failure revoke the corresponding read, including an
@@ -643,6 +646,15 @@ coexist with another transaction's unknown outcome; confirmation does not lift
 that isolation. Only an unconfirmed write interval becomes unknown on worker
 retirement. Failure while preparing a post-commit projection does not turn an
 already confirmed transaction into an unknown write.
+
+Failed catalog counts, recent entries and current-track refreshes retain bounded
+pending synchronization state. A later query or business-control demand can retry
+those reads without replaying the mutation or advancing catalog versions again.
+Summary/history recovery shares the single query owner and publication fence;
+completion is accepted only for the corresponding data versions. State reads and
+Watch remain cache-only, and recovery completion never schedules another attempt
+by itself. Unrelated catalog changes need not reload queue structure or decode
+the current Track; control decisions retain their own authoritative identity.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes

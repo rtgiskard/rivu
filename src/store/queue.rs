@@ -119,7 +119,12 @@ impl Store {
     }
 
     pub(crate) fn queue_track_id(&self, id: u64) -> Result<i64> {
-        Ok(self.queue_location(id)?.0)
+        let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
+        self.conn
+            .prepare_cached("SELECT track_id FROM playlist_entries WHERE playlist_id=0 AND id=?1")?
+            .query_row([id], |row| row.get(0))
+            .optional()?
+            .context("Queue entry not found")
     }
 
     pub(crate) fn queue_existing_ids(&self, ids: &[u64]) -> Result<HashSet<u64>> {

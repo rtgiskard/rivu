@@ -69,6 +69,14 @@ fn committed_scan_invalidates_before_failed_refresh() {
         core.state.current_track.as_ref().unwrap(),
         &current
     ));
+    assert!(core.projections.current_track);
+    connection
+        .execute_batch("DROP TRIGGER fail_scan_refresh; UPDATE tracks SET channels=2 WHERE id=1;")
+        .unwrap();
+    core.recover_projections_on_demand();
+    assert!(!core.projections.current_track);
+    assert!(core.state.current_track().unwrap().missing);
+    assert_eq!(core.state.query_revisions(), committed);
 }
 
 #[test]
@@ -452,7 +460,7 @@ fn playlist_refresh_failure_preserves_both_committed_results() {
     connection
         .execute_batch(
             "CREATE TRIGGER fail_import_refresh AFTER INSERT ON playlists
-             BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;",
+             BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=1; END;",
         )
         .unwrap();
     let before = core.state.query_revisions();
@@ -471,6 +479,14 @@ fn playlist_refresh_failure_preserves_both_committed_results() {
             .unwrap()
             .len(),
         1
+    );
+    assert!(core.transport.history_pending);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Refreshing history failed")
     );
     assert_eq!(core.state.library.track_total, 5);
     assert_eq!(core.state.library.playlist_total, 2);
@@ -1262,7 +1278,9 @@ fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
     let finished = loop {
         match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             ScanEvent::Progress { .. } => {}
-            event @ ScanEvent::KnownSources { .. } => core.scan_event(event),
+            event @ (ScanEvent::KnownSources { .. } | ScanEvent::Projections { .. }) => {
+                core.scan_event(event)
+            }
             ScanEvent::Finished(scan) => break scan,
             ScanEvent::Saved(_) => panic!("Scan cannot save before Core authorizes it"),
         }
@@ -1289,7 +1307,9 @@ fn saving_scan_rejects_cancellation_and_invalidates_the_owner_cache() {
     let finished = loop {
         match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             ScanEvent::Progress { .. } => {}
-            event @ ScanEvent::KnownSources { .. } => core.scan_event(event),
+            event @ (ScanEvent::KnownSources { .. } | ScanEvent::Projections { .. }) => {
+                core.scan_event(event)
+            }
             ScanEvent::Finished(scan) => break scan,
             ScanEvent::Saved(_) => panic!("Saving requires Core authorization"),
         }
@@ -2420,4 +2440,153 @@ fn other_check_saving_rejects_cancel_and_shutdown_waits_for_commit() {
     for track_id in 1..=4 {
         assert!(core.store.track(track_id).unwrap().unwrap().missing);
     }
+}
+
+#[test]
+fn unrelated_scan_does_not_decode_current_track_or_reread_queue_structure() {
+    let (directory, mut core) = fixture();
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+    let selected = core.state.queue.current_id;
+    let position = core.state.queue.current_position;
+    let path = core.track(2).unwrap().path;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    // Both reads would now fail. The committed scan changes another queued row,
+    // not queue membership or the selected identity's effective metadata.
+    connection.execute_batch("UPDATE tracks SET channels='unreadable' WHERE id=1; UPDATE playlist_entries SET position='unreadable' WHERE id=1;").unwrap();
+    core.store.invalidate_caches();
+    let status = save_prepared_scan(
+        &mut core,
+        ScanFinished {
+            id: 1,
+            result: Ok(ScanResult {
+                roots: vec![path],
+                ..Default::default()
+            }),
+            import: None,
+            progress: ScanProgress {
+                phase: ScanPhase::ReadingMetadata,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            },
+            other_tracks_check: false,
+        },
+    );
+    assert!(status.library_committed);
+    assert_eq!(
+        status.progress.phase,
+        ScanPhase::Completed,
+        "{:?}",
+        status.error
+    );
+    assert!(Arc::ptr_eq(
+        core.state.current_track.as_ref().unwrap(),
+        &current
+    ));
+    assert_eq!(core.state.queue.current_id, selected);
+    assert_eq!(core.state.queue.current_position, position);
+    assert!(core.store.track_is_missing(2).unwrap());
+}
+
+#[test]
+fn projection_read_failure_recovers_on_query_without_replaying_committed_writes() {
+    let (directory, mut core) = fixture();
+    let database = directory.path().join("library.db");
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    core.publish();
+    core.read_queries = Some(
+        super::super::query_worker::ReadQueries::start(database.clone(), Arc::clone(&core.shared))
+            .unwrap(),
+    );
+    // Warm the sole reader before the next committed writes.
+    let (reply, response) = oneshot::channel();
+    core.read_queries.as_ref().unwrap().submit(
+        Query::PlaylistSummaries {
+            query: None,
+            offset: 0,
+            limit: 0,
+        },
+        None,
+        &core.state,
+        reply,
+    );
+    assert!(matches!(
+        futures::executor::block_on(response).unwrap(),
+        CoreResponse::Query(QueryResponse { result: Ok(_), .. })
+    ));
+    let known = core
+        .store
+        .stored_scan_files(&[directory.path().to_path_buf()])
+        .unwrap()
+        .remove(0);
+    let impacts = core
+        .store
+        .apply_scan(&ScanResult {
+            records: vec![Arc::new(ScanRecord {
+                path: directory.path().join("new.wav"),
+                size: 1,
+                modified_ns: 1,
+                fingerprint: None,
+                media: known.media.unwrap(),
+            })],
+            ..Default::default()
+        })
+        .unwrap();
+    let playlist = core
+        .store
+        .create_playlist_with_tracks("Committed", &[1])
+        .unwrap();
+    core.invalidate_playlist_creation(true);
+    core.advance_playlist_entry_revision(playlist);
+    core.store.mark_played(1, 7).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch("ALTER TABLE tracks RENAME TO hidden_tracks; ALTER TABLE playlists RENAME TO hidden_playlists;").unwrap();
+    let error = core.apply_catalog_changes(impacts).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<super::super::projections::ProjectionSyncError>()
+            .is_some()
+    );
+    assert!(
+        core.projections.track_total
+            && core.projections.playlist_total
+            && core.transport.history_pending
+    );
+    let committed = core.state.query_revisions();
+    connection.execute_batch("ALTER TABLE hidden_tracks RENAME TO tracks; ALTER TABLE hidden_playlists RENAME TO playlists;").unwrap();
+    core.publish();
+    let (reply, response) = oneshot::channel();
+    core.dispatch_request(Request {
+        operation: Operation::Query {
+            query: Query::LibraryStats,
+            ticket: None,
+        },
+        reply: Some(reply),
+    });
+    let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(event, ScanEvent::Projections { .. }));
+    core.scan_event(event);
+    assert!(matches!(
+        futures::executor::block_on(response).unwrap(),
+        CoreResponse::Query(QueryResponse { result: Ok(_), .. })
+    ));
+    assert_eq!(core.state.library.track_total, 5);
+    assert_eq!(core.state.library.playlist_total, 1);
+    assert_eq!(core.state.library.history[0].track_id, 1);
+    assert_eq!(core.state.library.history[0].played_at, 7);
+    assert!(
+        !core.projections.track_total
+            && !core.projections.playlist_total
+            && !core.transport.history_pending
+    );
+    assert_eq!(core.state.query_revisions(), committed);
+    assert_eq!(core.store.track_count().unwrap(), 5);
+    assert_eq!(
+        core.store.playlist_summary_page(None, 0, 0).unwrap().total,
+        1
+    );
 }

@@ -115,6 +115,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
         task_completions_pending: false,
         transport: super::playback::PlaybackOwner::new(1),
+        projections: super::projections::ProjectionRecovery::default(),
         output_settings_request: 0,
         next_playlist_token: 0,
         database_unavailable: false,

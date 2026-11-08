@@ -21,6 +21,10 @@ pub(super) enum ScanEvent {
     },
     Finished(ScanFinished),
     Saved(catalog::ScanSaved),
+    Projections {
+        demand: projections::ProjectionDemand,
+        prepared: projections::PreparedProjections,
+    },
 }
 pub(super) const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 pub(super) struct ScanTask {
@@ -147,12 +151,7 @@ impl ScanCommits {
 }
 
 /// Prepared projections are independent of authoritative transaction evidence.
-#[derive(Default)]
-struct ScanProjections {
-    library_total: Option<Result<usize>>,
-    history: Option<Result<Vec<HistoryEntry>>>,
-    playlist_total: Option<Result<usize>>,
-}
+type ScanProjections = projections::PreparedProjections;
 
 pub(super) struct ScanSaved {
     id: u64,
@@ -162,6 +161,7 @@ pub(super) struct ScanSaved {
     scan_errors: Option<String>,
     error: Option<anyhow::Error>,
     projections: ScanProjections,
+    observed_track_id: Option<i64>,
 }
 
 struct ScanSavingCompletion {
@@ -205,6 +205,7 @@ fn save_scan(
             scan_errors: None,
             error: None,
             projections: ScanProjections::default(),
+            observed_track_id: None,
         }),
     };
     let saved = completion.saved.as_mut().unwrap();
@@ -225,6 +226,13 @@ fn save_scan(
             return;
         }
     };
+    saved.observed_track_id = match current_id.map(|id| store.queue_track_id(id)).transpose() {
+        Ok(id) => id,
+        Err(error) => {
+            saved.error = Some(error);
+            return;
+        }
+    };
     saved.commits.selection = CatalogCommit::Pending;
     if let Err(error) = store.set_queue_current(current_id) {
         saved.commits.selection = CatalogCommit::NotCommitted;
@@ -235,8 +243,10 @@ fn save_scan(
     let save_started = Instant::now();
     saved.commits.library = CatalogCommit::Pending;
     let applied = match other_roots {
-        Some(roots) => store.apply_other_tracks_check(&mut result, &roots),
-        None => store.apply_scan(&result),
+        Some(roots) => {
+            store.apply_other_tracks_check_observing(&mut result, &roots, saved.observed_track_id)
+        }
+        None => store.apply_scan_observing(&result, saved.observed_track_id),
     };
     let impacts = match applied.with_context(|| {
         if scan.import.is_some() {
@@ -351,13 +361,29 @@ impl Core {
         &mut self,
         impacts: crate::store::CatalogChanges,
     ) {
+        self.transport.history_pending |= impacts.dependencies(false).refresh_history;
+        self.accept_catalog_facts(impacts, None, None);
+    }
+
+    pub(in crate::core) fn accept_catalog_facts(
+        &mut self,
+        impacts: crate::store::CatalogChanges,
+        tracks: Option<&[i64]>,
+        playlists: Option<&[i64]>,
+    ) {
+        // Same-owner targeted writes already evict their own Track entries.
+        // Independent catalog producers must invalidate this owner's caches.
+        if tracks.is_none() {
+            self.store.invalidate_catalog_caches(impacts, false);
+        }
         let dependencies = impacts.dependencies(false);
+        self.projections.track_total |= dependencies.refresh_track_total;
         self.invalidate_collection_impacts(
             dependencies.queue_revision,
             dependencies.album_revision,
         );
         if dependencies.library_revision {
-            self.state.library.revision = self.state.library.revision.wrapping_add(1);
+            self.state.library.change_metadata(tracks, playlists);
         }
         if dependencies.structure_revision {
             self.state.library.structure_revision =
@@ -382,39 +408,29 @@ impl Core {
         impacts: crate::store::CatalogChanges,
     ) -> Result<()> {
         self.announce_catalog_changes(impacts);
-        let catalog = self.refresh_catalog_projections(impacts);
+        let catalog = self.refresh_catalog_projections();
         // A failed projection read cannot hide another committed domain.
-        let dependencies = impacts.dependencies(false);
-        let queue = if dependencies.refresh_queue {
-            self.refresh_queue_tracks()
+        let queue = if impacts.current_track.unwrap_or(impacts.library) {
+            self.refresh_current_track()
         } else {
             Ok(())
         };
-        catalog.and(queue)
+        let errors: Vec<_> = [catalog, queue]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(projections::ProjectionSyncError(errors).into())
+        }
     }
 
-    pub(in crate::core) fn refresh_catalog_projections(
-        &mut self,
-        impacts: crate::store::CatalogChanges,
-    ) -> Result<()> {
-        let dependencies = impacts.dependencies(false);
-        let library = if dependencies.refresh_track_total {
-            self.store
-                .track_count()
-                .map(|total| self.state.library.track_total = total)
-                .context("Refreshing library count failed; previous count retained")
-        } else {
-            Ok(())
-        };
-        let history = if dependencies.refresh_history {
-            self.store
-                .history(MAX_QUERY_ROWS)
-                .map(|history| self.replace_history(history))
-                .context("Refreshing history failed; previous history retained")
-        } else {
-            Ok(())
-        };
-        library.and(history)
+    pub(in crate::core) fn refresh_catalog_projections(&mut self) -> Result<()> {
+        self.accept_prepared_projections(ScanProjections::read(
+            &self.store,
+            self.projection_demand(),
+        ))
     }
 
     pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<u64> {
@@ -735,6 +751,9 @@ impl Core {
 
     pub(in crate::core) fn scan_event(&mut self, event: ScanEvent) {
         match event {
+            ScanEvent::Projections { demand, prepared } => {
+                self.complete_projection_recovery(demand, prepared);
+            }
             ScanEvent::KnownSources { id, paths, reply } => {
                 let result = (|| {
                     let task = self
@@ -932,6 +951,7 @@ impl Core {
                     "Scan saving completion failed ({joined:?}); database changes may already be committed; inspect the library before retrying"
                 )),
                 projections: ScanProjections::default(),
+                observed_track_id: None,
             });
             let _ = deliver_scan_event(&sender, ScanEvent::Saved(saved)).await;
         });
@@ -1004,46 +1024,16 @@ impl Core {
             errors.push(error);
         }
         if let Some(impacts) = impacts {
-            self.store
-                .invalidate_catalog_caches(impacts, playlist_id.is_some());
-        }
-        if let Some(impacts) = impacts {
-            if let Some(total) = saved.projections.library_total {
-                match total {
-                    Ok(total) => self.state.library.track_total = total,
-                    Err(error) => errors.push(
-                        error.context("Refreshing library count failed; previous count retained"),
-                    ),
-                }
-            }
-            if let Some(history) = saved.projections.history {
-                match history {
-                    Ok(history) => self.replace_history(history),
-                    Err(error) => errors.push(
-                        error.context("Refreshing history failed; previous history retained"),
-                    ),
-                }
-            }
-            let dependencies = impacts.dependencies(playlist_id.is_some());
-            if dependencies.refresh_queue
-                && let Err(error) = self.refresh_queue_tracks()
+            let current_id = self.state.current_track().map(|track| track.id);
+            if (impacts.current_track.unwrap_or(impacts.library)
+                || (impacts.library && current_id != saved.observed_track_id))
+                && let Err(error) = self.refresh_current_track()
             {
-                errors.push(error.context(if library_committed {
-                    "Scan committed, but refreshing views failed; some projections may be stale"
-                } else {
-                    "Scan saving failed and refreshing views failed; database changes may already be committed"
-                }));
+                errors.push(error.context("Scan committed, but refreshing current track failed"));
             }
         }
-        if playlist_id.is_some()
-            && let Some(total) = saved.projections.playlist_total
-        {
-            match total {
-                Ok(total) => self.state.library.playlist_total = total,
-                Err(error) => errors.push(
-                    error.context("Scan saved and playlist created, but playlist refresh failed"),
-                ),
-            }
+        if let Err(error) = self.accept_prepared_projections(saved.projections) {
+            errors.push(error);
         }
         if !errors.is_empty() {
             task.status.progress.errors = task.status.progress.errors.saturating_add(errors.len());
@@ -1191,6 +1181,7 @@ mod tests {
                     scan_errors: None,
                     error: None,
                     projections: ScanProjections::default(),
+                    observed_track_id: None,
                 }),
             };
             panic!("projection preparation failed after all commits");
@@ -1263,6 +1254,7 @@ mod tests {
                     history: Some(Ok(Vec::new())),
                     playlist_total: Some(Ok(999)),
                 },
+                observed_track_id: None,
             });
             let after = core.state.query_revisions();
             assert_ne!(after.library, before.library);
@@ -1312,6 +1304,7 @@ mod tests {
                         scan_errors: None,
                         error: None,
                         projections: ScanProjections::default(),
+                        observed_track_id: None,
                     }),
                 };
                 if committed {
@@ -1391,6 +1384,7 @@ mod tests {
                 scan_errors: None,
                 error: None,
                 projections: ScanProjections::default(),
+                observed_track_id: None,
             });
             assert_eq!(
                 core.scan_results.back().unwrap().progress.phase,

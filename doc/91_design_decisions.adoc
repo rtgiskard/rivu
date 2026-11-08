@@ -404,6 +404,33 @@ link:01_config.adoc#_appearance_and_library_display[Appearance and library displ
 The shared card, editing and navigation contract belongs in
 link:24_layout.adoc#material-appearance[Material appearance].
 
+[[DEC-016]]
+=== DEC-016: Separate committed facts from recoverable projections
+
+Status: implemented, 2026-11-08.
+
+Catalog transactions report authoritative effects independently of fallible
+projection preparation. Core accepts confirmed effects and invalidates affected
+query domains before refreshing views. Recovery retries projections, never the
+mutation; independently committed scan selection, library and playlist effects
+retain their own outcome evidence.
+
+Keep bounded pending projection work and refresh it on relevant demand or events,
+not a polling timer. Queue structure and current-track refresh dependencies must
+follow their actual inputs rather than every library change. Control decisions
+use the playback session identity and narrow authoritative database facts, not a
+possibly stale display Track.
+External admission follows the same rule: current-track, count and history
+refreshes retain independent recovery responsibility after the write commits.
+
+Retain the publication fence, pinned SQL snapshots and consumer generations:
+they respectively pair database visibility with Core versions, isolate a read,
+and reject results for superseded demand. Moving all views into write transactions
+would extend writer occupancy without making audio commands or publication
+atomic; replaying incremental display events would duplicate database rules.
+See link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[storage query contracts]
+and link:22_cache.adoc[query retention].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

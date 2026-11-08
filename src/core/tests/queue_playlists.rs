@@ -2196,7 +2196,6 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     // Evict the surviving track so recovery actually decodes the corrupt row.
     core.store.invalidate_caches();
     assert!(core.ensure_queue_control_ready().is_err());
-    assert!(core.transport.projection_stale);
     assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
     assert_eq!(core.transport.history, [1, 4, 5]);
     assert_eq!(core.transport.history_cursor, 2);

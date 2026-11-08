@@ -125,6 +125,7 @@ impl Core {
     }
 
     pub(in crate::core) fn invalidate_playlist_creation(&mut self, has_members: bool) {
+        self.projections.playlist_total = true;
         if has_members {
             self.state.library.duplicate_members_revision = self
                 .state
@@ -149,6 +150,7 @@ impl Core {
                 .wrapping_add(1);
         }
         self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
+        self.projections.playlist_total = true;
         self.refresh_playlist_count()
     }
 
@@ -169,10 +171,16 @@ impl Core {
     }
 
     fn refresh_playlist_count(&mut self) -> Result<()> {
-        self.state.library.playlist_total = self
-            .store.playlist_summary_page(None, 0, 0)
-            .context("Playlist change committed, but refreshing playlists failed; previous projection retained")?
-            .total;
+        self.projections.playlist_total = true;
+        let prepared = projections::PreparedProjections {
+            playlist_total: Some(
+                self.store
+                    .playlist_summary_page(None, 0, 0)
+                    .map(|page| page.total),
+            ),
+            ..Default::default()
+        };
+        self.accept_prepared_projections(prepared)?;
         Ok(())
     }
 

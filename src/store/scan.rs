@@ -317,6 +317,7 @@ impl Store {
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    #[cfg(test)]
     /// Refresh only identities still registered outside the current logical roots.
     /// CUE labels remain the registered identity's stored metadata; this operation
     /// never reparses sheets, discovers segments, relocates identities or admits rows.
@@ -324,6 +325,15 @@ impl Store {
         &self,
         result: &mut ScanResult,
         library_roots: &[PathBuf],
+    ) -> Result<CatalogChanges> {
+        self.apply_other_tracks_check_observing(result, library_roots, None)
+    }
+
+    pub(crate) fn apply_other_tracks_check_observing(
+        &self,
+        result: &mut ScanResult,
+        library_roots: &[PathBuf],
+        current_track: Option<i64>,
     ) -> Result<CatalogChanges> {
         let current: HashSet<_> = self
             .other_tracks_sources(library_roots)?
@@ -377,17 +387,27 @@ impl Store {
         }
         result.records = records;
         result.min_duration_secs = 0;
-        self.apply_scan_scoped(result, true)
+        self.apply_scan_scoped(result, true, current_track)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn apply_scan(&self, result: &ScanResult) -> Result<CatalogChanges> {
-        self.apply_scan_scoped(result, false)
+        self.apply_scan_scoped(result, false, None)
+    }
+
+    pub(crate) fn apply_scan_observing(
+        &self,
+        result: &ScanResult,
+        current_track: Option<i64>,
+    ) -> Result<CatalogChanges> {
+        self.apply_scan_scoped(result, false, current_track)
     }
 
     fn apply_scan_scoped(
         &self,
         result: &ScanResult,
         exact_sources: bool,
+        current_track: Option<i64>,
     ) -> Result<CatalogChanges> {
         let staging = result
             .retained_budget
@@ -416,6 +436,16 @@ impl Store {
         }
         let transaction_started = std::time::Instant::now();
         let tx = self.conn.unchecked_transaction()?;
+        // Compare SQLite values, not a decoded Track: malformed projection data
+        // must not turn an otherwise valid catalog transaction into a rollback.
+        let observed = |id| -> Result<Option<Vec<rusqlite::types::Value>>> {
+            Ok(tx.query_row(
+                "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=?1",
+                [id],
+                |row| (0..20).map(|column| row.get(column)).collect(),
+            ).optional()?)
+        };
+        let current_before = current_track.map(observed).transpose()?;
         let mut scope_workspace = result.retained_budget.as_ref().map(ImportBudget::scoped);
         let (mut exact, prefixes) =
             scan_scope(&result.roots, !exact_sources, scope_workspace.as_mut())?;
@@ -921,6 +951,9 @@ impl Store {
             }
         }
         drop(mark_missing);
+        impacts.current_track = current_track
+            .map(|id| observed(id).map(|after| Some(after) != current_before))
+            .transpose()?;
         tx.commit()?;
         tracing::info!(
             elapsed_ms = transaction_started.elapsed().as_millis(),

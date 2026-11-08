@@ -299,6 +299,12 @@ impl Core {
     }
 
     pub(super) fn dispatch_request(&mut self, request: Request) {
+        if matches!(
+            &request.operation,
+            Operation::Query { .. } | Operation::Command(_) | Operation::Navigate(_)
+        ) {
+            self.recover_projections_on_demand();
+        }
         match request.operation {
             Operation::Query { query, ticket } => {
                 if let Some(reads) = &self.read_queries
