@@ -11,7 +11,11 @@ model job at a time. Use the corresponding prepared interpreter, for example:
   python tools/audio_processing/evaluate.py --kind music --corpus-root /abs/music-float \
     --model-manifest /abs/kim/manifest.json --output-dir /abs/new-evaluation
 
-Omit --case to evaluate every canonical synthetic case. Paired corpora require
+Omit --case to evaluate every case. Repeat --case to select synthetic condition
+stems (for example clean or white_+0dB, across speech-* folders), paired utterance
+stems (for example p232_001), or music directories (for example track-00).
+Every requested selector must exist; unknown selectors reject the run before
+output creation or model execution. Paired corpora require
 clean/ and noisy/ matching FLOAT WAV files plus manifest.json. Music requires
 track-*/{mixture,vocals,accompaniment}.wav plus manifest.json with explicit
 source/SHA256/diagnostic_only records; music_manifest.py defines the contract.
@@ -74,6 +78,7 @@ def _require_prepared_identity(audio, expected, label):
 
 
 def cases(kind, root, selected):
+    matched = set()
     if kind == "synthetic":
         for folder in sorted(root.glob("speech-*")):
             if not folder.is_dir():
@@ -83,14 +88,24 @@ def cases(kind, root, selected):
                     continue
                 if selected and source.stem not in selected:
                     continue
+                matched.add(source.stem)
                 yield folder.name+"-"+source.stem,source,folder/"clean.wav",folder/"manifest.json",None,False,None
     elif kind == "paired":
         for name, record in _paired_records(read_json(root / "manifest.json"), root):
             source = root / "noisy" / name
+            if selected and source.stem not in selected:
+                continue
+            matched.add(source.stem)
             yield source.stem,source,root/"clean"/name,root/"manifest.json",None,False,record
     else:
         for folder, record in music_records(read_json(root/"manifest.json"), root):
+            if selected and folder.name not in selected:
+                continue
+            matched.add(folder.name)
             yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",record["diagnostic_only"],record
+    missing = selected - matched
+    if missing:
+        raise ValueError("unknown " + kind + " case selection: " + ", ".join(sorted(missing)))
 
 
 def main():
@@ -99,15 +114,19 @@ def main():
     parser.add_argument("--corpus-root",type=Path,required=True)
     parser.add_argument("--model-manifest",type=Path,required=True)
     parser.add_argument("--output-dir",type=Path,required=True)
-    parser.add_argument("--case",action="append",default=[])
+    parser.add_argument("--case",action="append",default=[],
+                        help="repeatable selector: synthetic condition stem, paired utterance stem, or music track directory; every selector must exist")
     parser.add_argument("--threads",type=int,default=4)
     args=parser.parse_args()
     if args.output_dir.exists() or not args.output_dir.parent.is_dir() or not 1<=args.threads<=8:
         parser.error("new output directory with existing parent and threads1..8 required")
     corpus=args.corpus_root.resolve()
-    records=list(cases(args.kind,corpus,set(args.case)))
+    try:
+        records=list(cases(args.kind,corpus,set(args.case)))
+    except ValueError as error:
+        parser.error(str(error))
     if not records:
-        parser.error("no matching paired corpus files")
+        parser.error("no matching corpus files")
     import numpy as np
     model=args.model_manifest.resolve()
     operation="separate" if args.kind=="music" else "speech"

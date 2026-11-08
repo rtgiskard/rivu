@@ -331,6 +331,122 @@ class PairedCorpusIdentityTests(unittest.TestCase):
                 list(evaluate.cases("paired", root, set()))
 
 
+class CaseSelectionTests(unittest.TestCase):
+    def corpus(self, root, kind):
+        root.mkdir()
+        samples = np.tile([[0.25, -0.125], [-0.25, 0.125]], (8, 1))
+        records = []
+        for index in range(2):
+            if kind == "synthetic":
+                folder = root / ("speech-" + str(index))
+                folder.mkdir()
+                for condition in ("clean", "white_+0dB", "not-canonical"):
+                    sf.write(folder / (condition + ".wav"), samples, 8000, subtype="FLOAT")
+            elif kind == "paired":
+                name = "p232_00" + str(index) + ".wav"
+                record = {"utterance":name}
+                for stem in ("clean", "noisy"):
+                    (root / stem).mkdir(exist_ok=True)
+                    path = root / stem / name
+                    sf.write(path, samples, 8000, subtype="FLOAT")
+                    record[stem] = {"float":quality.identity(path)}
+                records.append(record)
+            else:
+                folder = root / ("track-0" + str(index))
+                folder.mkdir()
+                identities = {}
+                for stem in ("mixture", "vocals", "accompaniment"):
+                    path = folder / (stem + ".wav")
+                    sf.write(path, samples, 8000, subtype="FLOAT")
+                    identities[stem] = quality.identity(path)
+                records.append({"directory":folder.name, "source":"source-" + str(index),
+                                "sha256":str(index) * 64, "diagnostic_only":index == 0,
+                                "float":identities})
+        if kind != "synthetic":
+            (root / "manifest.json").write_text(json.dumps({"schema":1 if kind == "paired" else 2,
+                                                           "records":records}))
+        return {"synthetic":"white_+0dB", "paired":"p232_001", "music":"track-01"}[kind]
+
+    def test_selectors_use_existing_identities_and_preserve_synthetic_groups(self):
+        for kind in ("synthetic", "paired", "music"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "corpus"
+                selector = self.corpus(root, kind)
+                all_cases = list(evaluate.cases(kind, root, set()))
+                selected = list(evaluate.cases(kind, root, {selector}))
+                self.assertEqual(len(all_cases), 4 if kind == "synthetic" else 2)
+                self.assertEqual([record[0] for record in selected],
+                                 ["speech-0-white_+0dB", "speech-1-white_+0dB"]
+                                 if kind == "synthetic" else [selector])
+                for selectors in ({"missing"}, {selector, "missing"}):
+                    with self.assertRaisesRegex(ValueError, "unknown " + kind + " case selection: missing"):
+                        list(evaluate.cases(kind, root, selectors))
+
+    def test_unknown_cli_selection_rejects_before_output_or_worker(self):
+        for kind in ("synthetic", "paired", "music"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                root = base / "corpus"
+                selector = self.corpus(root, kind)
+                output = base / "evaluation"
+                argv = ["evaluate.py", "--kind", kind, "--corpus-root", str(root),
+                        "--model-manifest", str(base / "unopened-model.json"),
+                        "--output-dir", str(output), "--case", selector, "--case", "missing"]
+                with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run") as worker, \
+                        patch.object(sys, "stderr", io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as error:
+                        evaluate.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("unknown " + kind + " case selection: missing", stderr.getvalue())
+                    worker.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_paired_and_music_cli_only_admit_selected_identity(self):
+        for kind in ("paired", "music"):
+            for corrupt in (False, True):
+                with self.subTest(kind=kind, corrupt=corrupt), tempfile.TemporaryDirectory() as temporary:
+                    base = Path(temporary)
+                    root = base / "corpus"
+                    selector = self.corpus(root, kind)
+                    model = base / "model.json"
+                    model.write_text(json.dumps({"operation":"speech" if kind == "paired" else "separate"}))
+                    output = base / "evaluation"
+                    source = root / "noisy" / (selector + ".wav") if kind == "paired" else root / selector / "mixture.wav"
+                    if corrupt:
+                        audio, rate = sf.read(source)
+                        sf.write(source, audio * 0.5, rate, subtype="FLOAT")
+                    argv = ["evaluate.py", "--kind", kind, "--corpus-root", str(root),
+                            "--model-manifest", str(model), "--output-dir", str(output), "--case", selector]
+                    with patch.object(sys, "argv", argv), \
+                            patch.dict(sys.modules, {"pystoi":SimpleNamespace(stoi=None)}), \
+                            patch("importlib.metadata.version", return_value="fixture"), \
+                            patch.object(evaluate.subprocess, "run", side_effect=RuntimeError("model boundary reached")) as worker:
+                        if corrupt:
+                            with self.assertRaisesRegex(ValueError, "prepared corpus identity mismatch"):
+                                evaluate.main()
+                            worker.assert_not_called()
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "model boundary reached"):
+                                evaluate.main()
+                            worker.assert_called_once()
+                            request = json.loads(Path(worker.call_args.args[0][-1]).read_text())
+                            self.assertEqual(request["task_id"], selector)
+                            self.assertEqual(Path(request["input_path"]), source)
+                            self.assertEqual(sorted(path.name for path in output.iterdir()), [selector + "-request.json"])
+
+    def test_selection_does_not_bypass_corpus_membership_validation(self):
+        for kind in ("paired", "music"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "corpus"
+                selector = self.corpus(root, kind)
+                if kind == "paired":
+                    (root / "noisy" / "p232_000.wav").unlink()
+                else:
+                    (root / "track-00").rename(root / "unlisted-track")
+                with self.assertRaisesRegex(ValueError, "differ from prepared"):
+                    list(evaluate.cases(kind, root, {selector}))
+
+
 class ClassicalSummaryTests(unittest.TestCase):
     def row(self, output, baseline, mode="stationary", noise_kind="white_0dB"):
         return {"mode":mode, "noise_kind":noise_kind,
