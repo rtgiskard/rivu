@@ -91,6 +91,47 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
 }
 
 #[test]
+fn cached_export_rejects_source_replacement_between_lookup_and_task_admission() {
+    let (directory, mut service, track, config) = fixture();
+    let result = &service.results[0];
+    let cached = CachedGraphOutput {
+        pcm: result.outputs.vocals.as_ref().unwrap().clone(),
+        stamp: result.stamp,
+    };
+    // Deterministically split Core's retained-result check from Service admission.
+    assert_eq!(SourceStamp::read(&track.path).unwrap(), cached.stamp);
+    fs::write(&track.path, b"replacement after retained-result lookup").unwrap();
+    let destination = directory.path().join("stale.wav");
+    let next_id = service.next_id;
+    let history = service.history.len();
+    let bytes = service.memory_bytes();
+    let error = service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target: GraphPort { node: 2, port: 0 },
+                mode: GraphExecutionMode::Offline,
+                export_path: Some(destination.clone()),
+                source_run: Some(1),
+                cached_output: Some(cached),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source file changed before export admission")
+    );
+    assert!(service.active_id().is_none());
+    assert_eq!(service.next_id, next_id);
+    assert_eq!(service.history.len(), history);
+    assert_eq!(service.memory_bytes(), bytes);
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn progress_backpressure_coalesces_blocks_but_preserves_stages_and_terminal() {
     bounded(|| {
         let (sender, receiver) = async_channel::bounded(1);

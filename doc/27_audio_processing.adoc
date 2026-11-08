@@ -542,6 +542,9 @@ Uncached file exports whose selected ancestor chain is entirely native instead
 write blocks directly into an unpublished WAV, without retaining complete output
 PCM or consuming another audition slot. Cached exports share their existing PCM;
 model ancestors and retained Hybrid boundaries keep their PCM requirements.
+Cached PCM carries the source stamp of its original render. Export admission
+compares that stamp with the current source; it cannot relabel retained samples
+with a newly read source version.
 For a fixed graph and format, streaming export's output memory does not grow with
 duration; decoder, DSP/profile state, delays and existing cached audio remain costs.
 Synchronous native processing borrows each format-checked decoder block until its

@@ -192,6 +192,7 @@ impl Core {
                 .get(&node)
                 .map(|output| crate::processing::CachedGraphOutput {
                     pcm: output.pcm.clone(),
+                    stamp: result.stamp,
                 });
         let mut config = self.preferences.checkpoint();
         config.processing_graph = graph;

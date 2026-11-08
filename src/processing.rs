@@ -69,6 +69,7 @@ pub(crate) struct GraphRequest {
 
 pub(crate) struct CachedGraphOutput {
     pub pcm: audio::PcmAudio,
+    pub stamp: SourceStamp,
 }
 
 #[derive(Default)]
@@ -621,6 +622,12 @@ impl Service {
             );
         }
         let stamp = SourceStamp::read(&track.path)?;
+        if let Some(cached) = &cached_output {
+            ensure!(
+                cached.stamp == stamp,
+                "Processing result is stale: source file changed before export admission"
+            );
+        }
         let id = self.next_id;
         self.next_id = self
             .next_id
