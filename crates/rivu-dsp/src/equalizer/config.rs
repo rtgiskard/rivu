@@ -207,6 +207,33 @@ impl fmt::Display for EqualizerError {
 impl std::error::Error for EqualizerError {}
 
 impl EqualizerConfig {
+    fn active_bands(&self) -> impl Iterator<Item = (usize, &EqBand)> {
+        let solo = self.bands.iter().any(|band| band.enabled && band.solo);
+        self.bands
+            .iter()
+            .enumerate()
+            .filter(move |(_, band)| self.enabled && band.enabled && (!solo || band.solo))
+    }
+
+    /// Ordered filters that construct DSP sections, excluding exact identity
+    /// peak/shelf bands. Callers must still validate all persistent controls.
+    pub fn effective_bands(&self) -> impl Iterator<Item = (usize, &EqBand)> {
+        self.active_bands().filter(|(_, band)| {
+            !(band.gain_db == 0.0
+                && matches!(
+                    band.kind,
+                    FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
+                ))
+        })
+    }
+
+    /// Number of recursive sections prepared for a validated configuration.
+    pub fn effective_section_count(&self) -> usize {
+        self.effective_bands()
+            .map(|(_, band)| usize::from(band.stages))
+            .sum()
+    }
+
     /// Validate persistent parameters independently of a particular stream.
     /// Disabled and non-solo bands are also validated, so invalid latent settings
     /// cannot become active merely by toggling a control.
@@ -293,11 +320,7 @@ impl EqualizerConfig {
             return Err(EqualizerError::InvalidChannelCount(channels));
         }
         let maximum_hz = f64::from(sample_rate) * MAX_FREQUENCY_RATE_RATIO;
-        let solo = self.bands.iter().any(|band| band.enabled && band.solo);
-        for (index, band) in self.bands.iter().enumerate() {
-            if !band.enabled || (solo && !band.solo) {
-                continue;
-            }
+        for (index, band) in self.active_bands() {
             if band.frequency_hz > maximum_hz {
                 return Err(EqualizerError::FrequencyExceedsRate {
                     band: index,
@@ -339,6 +362,57 @@ pub(super) fn validate_taps(taps: usize) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn effective_sections_share_selection_but_not_stream_validation_policy() {
+        let mut config = EqualizerConfig {
+            enabled: true,
+            bands: vec![
+                EqBand {
+                    kind: FilterKind::LowPass,
+                    stages: 2,
+                    solo: true,
+                    ..Default::default()
+                },
+                EqBand {
+                    solo: true,
+                    ..Default::default()
+                },
+                EqBand {
+                    kind: FilterKind::LowPass,
+                    stages: 4,
+                    ..Default::default()
+                },
+                EqBand {
+                    kind: FilterKind::LowPass,
+                    stages: 4,
+                    enabled: false,
+                    solo: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        config.validate_for_stream(48_000, 2).unwrap();
+        assert_eq!(
+            config
+                .effective_bands()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            [0]
+        );
+        assert_eq!(config.effective_section_count(), 2);
+        // Applied identity bands still obey stream constraints even though they
+        // allocate no recursive state. Excluded bands retain only persistent validation.
+        config.bands[1].frequency_hz = 96_000.0;
+        assert!(matches!(
+            config.validate_for_stream(48_000, 2),
+            Err(EqualizerError::FrequencyExceedsRate { band: 1, .. })
+        ));
+        config.enabled = false;
+        assert_eq!(config.effective_section_count(), 0);
+        config.validate_for_stream(48_000, 2).unwrap();
+    }
+
     #[test]
     fn implementation_and_taps_validate_without_execution() {
         EqImplementation::default().validate().unwrap();

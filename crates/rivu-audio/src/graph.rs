@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::{
     denoise::{BlockDenoiser, DenoiseMode, Denoiser},
-    equalizer::config::FilterKind,
     equalizer::fir::FirEqualizer,
     equalizer::iir::Equalizer,
 };
@@ -738,23 +737,7 @@ fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(
             implementation,
         } if config.enabled => match implementation {
             EqImplementation::Iir => {
-                let solo = config.bands.iter().any(|band| band.enabled && band.solo);
-                // Bank::prepare_response omits disabled, excluded, and identity
-                // sections; charge only the stages that it actually constructs.
-                let stages: usize = config
-                    .bands
-                    .iter()
-                    .filter(|band| {
-                        band.enabled
-                            && (!solo || band.solo)
-                            && !(band.gain_db == 0.0
-                                && matches!(
-                                    band.kind,
-                                    FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
-                                ))
-                    })
-                    .map(|band| band.stages as usize)
-                    .sum();
+                let stages = config.effective_section_count();
                 (
                     stages * channels * 16 * 3,
                     stages as u64 * channels as u64 * 12,
@@ -814,7 +797,7 @@ mod tests {
     use super::*;
     use rivu_dsp::{
         denoise::DenoiseConfig,
-        equalizer::config::{EqBand, EqualizerConfig, MAX_BANDS},
+        equalizer::config::{EqBand, EqualizerConfig, FilterKind, MAX_BANDS},
     };
     use rivu_format::config::processing_graph::{GraphEdge, GraphNode};
 

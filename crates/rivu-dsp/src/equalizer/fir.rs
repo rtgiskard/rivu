@@ -262,31 +262,28 @@ fn finite_complex(values: &[Complex<f32>]) -> bool {
 }
 
 fn same_selection(config: &EqualizerConfig, left: usize, right: usize) -> bool {
-    let solo = config.bands.iter().any(|band| band.enabled && band.solo);
     let selected = |channel| {
         config
-            .bands
-            .iter()
-            .filter(move |band| {
-                band.enabled
-                    && (!solo || band.solo)
-                    && !(band.gain_db == 0.0
-                        && matches!(
-                            band.kind,
-                            FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
-                        ))
-                    && match &band.channels {
-                        ChannelTarget::All => true,
-                        ChannelTarget::Selected(channels) => channels.contains(&channel),
-                    }
+            .effective_bands()
+            .map(|(_, band)| band)
+            .filter(move |band| match &band.channels {
+                ChannelTarget::All => true,
+                ChannelTarget::Selected(channels) => channels.contains(&channel),
             })
             .map(|band| {
+                let (gain, q, slope) = match band.kind {
+                    FilterKind::Peak => (band.gain_db, band.q, 0.0),
+                    FilterKind::LowShelf | FilterKind::HighShelf => {
+                        (band.gain_db, 0.0, band.shelf_slope)
+                    }
+                    _ => (0.0, band.q, 0.0),
+                };
                 (
                     band.kind,
                     band.frequency_hz.to_bits(),
-                    band.gain_db.to_bits(),
-                    band.q.to_bits(),
-                    band.shelf_slope.to_bits(),
+                    gain.to_bits(),
+                    q.to_bits(),
+                    slope.to_bits(),
                     band.stages,
                 )
             })
@@ -499,6 +496,79 @@ mod tests {
             for (frame, expected) in actual.as_chunks::<3>().0.iter().zip(expected) {
                 assert_eq!(frame[channel], expected);
             }
+        }
+    }
+
+    #[test]
+    fn channel_kernel_sharing_ignores_only_kind_irrelevant_controls() {
+        for kind in [
+            FilterKind::Peak,
+            FilterKind::LowShelf,
+            FilterKind::HighShelf,
+            FilterKind::LowPass,
+            FilterKind::HighPass,
+            FilterKind::BandPass,
+            FilterKind::Notch,
+        ] {
+            let left = EqBand {
+                kind,
+                gain_db: 6.0,
+                channels: ChannelTarget::Selected(vec![0]),
+                ..Default::default()
+            };
+            let mut right = EqBand {
+                channels: ChannelTarget::Selected(vec![1]),
+                ..left.clone()
+            };
+            match kind {
+                FilterKind::Peak => right.shelf_slope = 0.1,
+                FilterKind::LowShelf | FilterKind::HighShelf => right.q = 10.0,
+                _ => {
+                    right.gain_db = -12.0;
+                    right.shelf_slope = 0.1;
+                }
+            }
+            let config = EqualizerConfig {
+                enabled: true,
+                bands: vec![left, right],
+                ..Default::default()
+            };
+            let mut stereo = FirEqualizer::new(&config, 48_000, 2, 513).unwrap();
+            assert_eq!(stereo.channel_kernels, [0, 0], "{kind:?}");
+            let input: Vec<_> = (0..2048)
+                .flat_map(|i| [(i as f32 * 0.071).sin(), (i as f32 * 0.029).cos()])
+                .collect();
+            let mut actual = input.clone();
+            stereo.process_interleaved(&mut actual).unwrap();
+            for channel in 0..2 {
+                let mono_config = EqualizerConfig {
+                    bands: vec![EqBand {
+                        channels: ChannelTarget::All,
+                        ..config.bands[channel].clone()
+                    }],
+                    ..config.clone()
+                };
+                let mut mono = FirEqualizer::new(&mono_config, 48_000, 1, 513).unwrap();
+                let mut expected: Vec<_> = input
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|f| f[channel])
+                    .collect();
+                mono.process_interleaved(&mut expected).unwrap();
+                assert!(
+                    actual
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(expected)
+                        .all(|(f, x)| f[channel] == x)
+                );
+            }
+            let mut different = config;
+            different.bands[1].frequency_hz += 1.0;
+            let distinct = FirEqualizer::new(&different, 48_000, 2, 513).unwrap();
+            assert_eq!(distinct.channel_kernels, [0, 1], "{kind:?}");
         }
     }
 

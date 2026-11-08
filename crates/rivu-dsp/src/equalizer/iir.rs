@@ -221,22 +221,8 @@ impl Bank {
         bank.enabled = config.enabled;
         bank.preamp = 10.0_f64.powf(config.preamp_db / 20.0);
         bank.output_gain = 10.0_f64.powf(config.output_gain_db / 20.0);
-        let solo = config.bands.iter().any(|band| band.enabled && band.solo);
-        for (index, band) in config.bands.iter().enumerate() {
-            if !config.enabled || !band.enabled || (solo && !band.solo) {
-                continue;
-            }
+        for (index, band) in config.effective_bands() {
             let coefficients = Coefficients::prepare(band, sample_rate, index)?;
-            // A zero-gain peak/shelf is mathematically the identity; omit it to
-            // preserve exact identity and avoid unnecessary recursive state.
-            if band.gain_db == 0.0
-                && matches!(
-                    band.kind,
-                    FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
-                )
-            {
-                continue;
-            }
             let mask = match &band.channels {
                 ChannelTarget::All => u64::MAX,
                 ChannelTarget::Selected(selected) => {
