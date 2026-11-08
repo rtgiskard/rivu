@@ -20,10 +20,15 @@ Add the Audio processing panel from the layout panel catalog. Processing graph,
 Monitor EQ, Restoration, Speech enhancement, Separation, and Results are separate
 single-line tabs. Tabs scroll horizontally when space is limited. Switching tabs
 does not run a job, change the audition, or discard field drafts. Settings remain
-core-owned and shared with the CLI. Monitor EQ changes live playback independently
-of graph-node EQ. The footer identifies the source track, its sample rate and
-channel count, the actual audition and transport state; Monitor EQ status stays
-at the right. Processing never edits library media. Keep headroom when boosting
+core-owned and shared with the CLI. Multiple panels share parameter drafts and
+committed settings; input focus, cursor geometry and scroll state remain local to
+each panel. Monitor EQ changes live playback independently of graph-node EQ.
+The footer identifies the source track, its sample rate and
+channel count, the actual audition and transport state. The footer bypass button
+and its tooltip report Monitor EQ's enabled state. Hover the A/B swap button to inspect
+the backup summary, when present, and whether it matches the current configuration.
+With no backup, its tooltip explains the first swap.
+Processing never edits library media. Keep headroom when boosting
 or remixing: there is no implicit loudness matching or limiter.
 
 . Make the desired input track current in playback; it may remain paused while
@@ -53,6 +58,13 @@ audio from any live, hybrid or cached audition. EQ parameters, graph and restora
 settings, queue and retained results remain available; rendering and export jobs
 continue. Pending automatic audition is revoked, so a late result cannot undo the
 bypass. Re-enabling EQ or selecting a retained output is an explicit later action.
+With no selected audition, revoking pending audition alone needs no audio-command
+queue capacity; disabling Monitor EQ reserves only its own command.
+For a selected audition, required queue recovery and command-capacity admission
+finish before committing the bypass; insufficient capacity leaves Monitor EQ and
+the selected audition unchanged.
+When all playback effects are bypassed, the same footer button enables Monitor EQ;
+there is no separate enable switch in the Equalizer tab.
 
 === Node graph desktop workflow
 
@@ -86,10 +98,8 @@ is a separate action. The toolbar's info icon provides shortcut help.
 Wide panels show a resizable, collapsible inspector beside the canvas; narrow
 panels switch between canvas and parameters. The separator also supports
 Left/Right when focused. Working areas scroll independently of execution controls
-and the footer. Multiple panels share graph drafts and committed settings, but
-retain independent input focus, cursor geometry and parameter-view scroll state.
-Removing a panel discards its local interaction state. Input still delivered to
-that panel's previous frame is ignored; it cannot resume zoom/resize or recreate
+and the footer. Removing a panel discards its local interaction state. Input still
+delivered to that panel's previous frame is ignored; it cannot resume zoom/resize or recreate
 the removed panel's state.
 
 Enter or Apply this field commits a parameter draft, except for the live EQ
@@ -137,11 +147,15 @@ the stored value. Numeric controls retain the latest local intent while a comman
 is pending; unrelated graph revisions do not inherit it. Accepted edits are not
 rolled back when a slider gesture is cancelled.
 
-Enter a total band count of 0–32 and press Enter. Increasing it appends enabled,
-0 dB peak bands with default Q and all channels selected; decreasing removes
-bands from the end. Existing bands and overall gains are preserved. New bands
-fill logarithmic gaps from 20 Hz to the lower of 20 kHz and 0.499 × the known
-track rate (20 kHz when unknown). Reset restores all EQ parameters to defaults
+The band count precedes input/output gain in the same control row, separated by a
+vertical divider, and remains available when there are no bands. Enter 0–32 and
+press Enter. Increasing it appends
+enabled, 0 dB peak bands with default Q and all channels selected; decreasing removes
+bands from the end. Existing bands and overall gains are preserved. Apply all
+builds its atomic update from existing-band drafts before resizing: shrinking discards the
+removed tail bands and their edits, while retained-band edits and overall gains
+remain. New bands fill logarithmic gaps from 20 Hz to the lower of 20 kHz and
+0.499 × the known track rate (20 kHz when unknown). Reset restores all EQ parameters to defaults
 while retaining the enabled state: both overall gains become zero and the band
 list becomes empty. Graph EQ also returns to the default IIR implementation.
 Reset discards all unapplied EQ drafts for that target across panels, including
@@ -154,8 +168,10 @@ interaction cancels the preview. Clicking an overlapping stack cycles its member
 without moving them. Disabled bands remain selectable. Focused nodes support
 Left/Right semitone steps, Up/Down 0.5 dB gain steps, Enter/Space selection and
 Delete removal. Parameter fields provide exact values; deleting text there never
-deletes a band. Response-channel selection changes only the displayed curve,
-not processing targets. The curve/editor stack in narrow panels.
+deletes a band. The gain row keeps dB inside each numeric field and groups the
+input/output controls; Curve channel sits at the right or wraps below when space
+is limited. It changes only the displayed curve, not processing targets.
+Band parameters stay below the curve at every panel width.
 Bands outside the plotted frequency range remain valid. Their nodes show an
 edge marker and retain the exact frequency in the selected-band hint and
 tooltip; clamping the plotted position does not retune the band.
@@ -198,8 +214,9 @@ CLI SavePreset/ImportPreset omit `overwrite` or set it false to create only;
 Imports require an ordinary file of at most 64 KiB; devices/FIFOs are rejected
 and reads remain bounded if the file grows. A/B swaps with the saved alternate;
 the first swap saves the current configuration and uses the disabled default
-with zero gains and no bands. The editor shows current/backup summaries and
-whether they are identical. Save a preset if both alternatives must be retained.
+with zero gains and no bands. The A/B button's tooltip shows the backup summary
+and whether it matches the current configuration. Save a preset if both alternatives
+must be retained.
 
 
 [source,shell]
@@ -217,8 +234,8 @@ rivu processing eq '{"LoadPreset":{"name":"Voice presence"}}'
 rivu processing eq '{"ExportPreset":{"path":"/absolute/presence.json","name":"Voice presence"}}'
 ----
 
-`AddBands` uses the same core-owned generation rules as desktop Add and appends
-without replacing earlier edits. `AddBand` remains available for an explicit
+`AddBands` uses the same core-owned generation rules as increasing the desktop
+band count and appends without replacing earlier edits. `AddBand` remains available for an explicit
 band configuration, as shown above; use it when exact frequency, gain or filter
 settings are already known. Both operations respect the 32-band bank limit.
 

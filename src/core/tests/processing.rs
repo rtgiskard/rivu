@@ -2791,6 +2791,115 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
 }
 
 #[test]
+fn monitor_bypass_without_selected_audition_uses_actual_command_capacity() {
+    for monitor_enabled in [false, true] {
+        for available in 0..=2 {
+            let (_directory, mut core) = fixture();
+            let _commands = recording_audio(&mut core);
+            core.equalizer_edit(EqualizerEdit::Enabled(monitor_enabled))
+                .unwrap();
+            let baseline = core.preferences.settings().clone();
+            let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+            let (commands, receive) = async_channel::bounded(2);
+            for _ in 0..2 - available {
+                commands
+                    .try_send(audio::QueuedAudioCommand::test_unfenced(
+                        AudioCommand::Volume(0.5),
+                    ))
+                    .unwrap();
+            }
+            let _previous_commands = core.engine.replace_commands(commands);
+            let result = core.command(Command::ProcessingBypass);
+            if monitor_enabled && available == 0 {
+                result.unwrap_err();
+                assert_eq!(core.preferences.settings(), &baseline);
+                assert_eq!(
+                    std::fs::read(&core.state.configuration.config_path).unwrap(),
+                    saved
+                );
+            } else {
+                result.unwrap();
+                let mut expected = (*baseline).clone();
+                expected.equalizer.enabled = false;
+                assert_eq!(**core.preferences.settings(), expected);
+                assert_eq!(
+                    Config::load(&core.state.configuration.config_path).unwrap(),
+                    expected
+                );
+            }
+            for _ in 0..2 - available {
+                assert!(matches!(
+                    receive.try_recv().unwrap().command,
+                    AudioCommand::Volume(0.5)
+                ));
+            }
+            if monitor_enabled && available > 0 {
+                assert!(matches!(
+                    receive.try_recv().unwrap().command,
+                    AudioCommand::Equalizer(config) if !config.enabled
+                ));
+            }
+            assert!(receive.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn selected_bypass_recovers_metadata_before_admitting_or_saving_the_cutover() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let _commands = recording_audio(&mut core);
+    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
+    core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+        .unwrap();
+    let selected = core.processing.audition_projection().unwrap();
+    let generation = core.transport.generation;
+    let baseline = core.preferences.settings().clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+
+    // A committed catalog update can leave its metadata projection pending.
+    core.store
+        .edit_track(1, Some("Recovered source title"), None, None, None)
+        .unwrap();
+    core.transport.projection_stale = true;
+    let (commands, receive) = async_channel::bounded(3);
+    let _previous_commands = core.engine.replace_commands(commands);
+    core.command(Command::ProcessingBypass).unwrap_err();
+    assert_eq!(core.preferences.settings(), &baseline);
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    assert_eq!(core.processing.audition_projection(), Some(selected));
+    assert_eq!(core.transport.generation, generation);
+    assert!(!core.transport.projection_stale);
+    assert_eq!(
+        core.state.current_track().unwrap().title,
+        "Recovered source title"
+    );
+    assert!(matches!(
+        receive.try_recv().unwrap().command,
+        AudioCommand::Metadata { metadata, .. } if metadata.title == "Recovered source title"
+    ));
+    assert!(receive.try_recv().is_err());
+
+    let _commands = recording_final_snapshot(
+        &mut core,
+        audio::AudioSnapshot {
+            generation,
+            position_seconds: 0.04,
+            listened_seconds: 0.04,
+        },
+    );
+    core.command(Command::ProcessingBypass).unwrap();
+    assert!(!core.preferences.settings().equalizer.enabled);
+    assert!(core.processing.audition_projection().is_none());
+}
+
+#[test]
 fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
     let (directory, mut core) = fixture();
     source(directory.path());
@@ -2856,6 +2965,13 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
             .unwrap();
         let event = completion(&mut core);
         let generation = core.transport.generation;
+        let (commands, receive) = async_channel::bounded(1);
+        commands
+            .try_send(audio::QueuedAudioCommand::test_unfenced(
+                AudioCommand::Volume(0.5),
+            ))
+            .unwrap();
+        core.engine.replace_commands(commands);
         core.command(Command::ProcessingBypass).unwrap();
         assert_eq!(core.processing.cancellation_requested(1), Some(false));
         core.processing_event(event);
@@ -2868,6 +2984,11 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
         assert!(core.state.current_track.is_none());
         assert!(core.processing.audition_projection().is_none());
         assert!(core.pending_processing_audition.is_none());
+        assert!(matches!(
+            receive.try_recv().unwrap().command,
+            AudioCommand::Volume(0.5)
+        ));
+        assert!(receive.try_recv().is_err());
         if mode == GraphExecutionMode::Offline {
             let pcm =
                 pcm_samples(&core.processing.results()[0].graph_outputs[&graph_port(2, 0)].pcm);

@@ -133,10 +133,11 @@ impl AudioProcessing {
         content
     }
 
-    fn task_status(&self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn task_status(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let mut content = column().gap_2();
-        if let Some(task) = &self.state.system.processing {
+        let state = Rc::clone(&self.state);
+        if let Some(task) = &state.system.processing {
             let id = task.id;
             let terminal = matches!(
                 task.phase,
@@ -240,15 +241,15 @@ impl AudioProcessing {
                 if outputs.vocals && outputs.accompaniment {
                     content = content
                         .child(self.field_view(
+                            panel,
                             FieldKey::VocalGain,
                             self.tr("processing-vocal-gain"),
-                            true,
                             cx,
                         ))
                         .child(self.field_view(
+                            panel,
                             FieldKey::AccompanimentGain,
                             self.tr("processing-accompaniment-gain"),
-                            true,
                             cx,
                         ))
                         .child(

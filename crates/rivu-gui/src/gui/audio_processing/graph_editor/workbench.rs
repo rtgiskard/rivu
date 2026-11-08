@@ -64,8 +64,8 @@ impl AudioProcessing {
             });
         if self.panel_inputs.get(&panel).is_some_and(|fields| {
             fields.iter().any(|(key, field)| {
-                // Results owns its export editor even though graph parameters are hidden.
-                (*key != FieldKey::GraphExport || !export_visible)
+                // Other pages own their inputs; Results also owns graph export.
+                (key.graph_node().is_some() || (*key == FieldKey::GraphExport && !export_visible))
                     && field.input.read(cx).is_focused(window)
             })
         }) {

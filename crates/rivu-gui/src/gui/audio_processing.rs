@@ -1382,22 +1382,21 @@ impl AudioProcessing {
     }
 
     fn field_view(
-        &self,
+        &mut self,
+        panel: u64,
         key: FieldKey,
         label: impl Into<SharedString>,
-        enabled: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let field = &self.fields[&key];
         let label: SharedString = label.into();
+        let input = self.panel_input(panel, key, &label, cx);
         Self::parameter_row(
             caption(theme, label.clone())
                 .id(SharedString::from(format!("field-label-{key:?}")))
                 .tooltip(rivu_ui::text_tooltip(self.path_help(key).unwrap_or(label))),
-            field.input.clone(),
+            input,
         )
-        .opacity(if enabled { 1. } else { 0.5 })
     }
 
     fn parameter_row(label: impl IntoElement + Styled, control: impl IntoElement) -> Div {
@@ -1855,12 +1854,24 @@ impl AudioProcessing {
                     .child(choices),
             );
         }
-        if let Some(popup) = self
-            .preset_popup
-            .as_ref()
-            .filter(|popup| popup.panel == panel && popup.manage)
-            && let Some(bounds) = bounds.get()
-        {
+        if let Some(bounds) = bounds.get().filter(|_| {
+            self.preset_popup
+                .as_ref()
+                .is_some_and(|popup| popup.panel == panel && popup.manage)
+        }) {
+            let name_field = self.field_view(
+                panel,
+                FieldKey::PresetName,
+                self.tr("processing-preset-name"),
+                cx,
+            );
+            let path_field = self.field_view(
+                panel,
+                FieldKey::PresetPath,
+                self.tr("processing-preset-path"),
+                cx,
+            );
+            let popup = self.preset_popup.as_ref().expect("open preset management");
             content = content.child(
                 deferred(
                     anchored()
@@ -1900,12 +1911,7 @@ impl AudioProcessing {
                                 } else {
                                     column()
                                         .gap_1()
-                                        .child(self.field_view(
-                                            FieldKey::PresetName,
-                                            self.tr("processing-preset-name"),
-                                            true,
-                                            cx,
-                                        ))
+                                        .child(name_field)
                                         .child(disabled_control(
                                             theme,
                                             menu_item(
@@ -1983,12 +1989,7 @@ impl AudioProcessing {
                                                 }
                                             },
                                         ))
-                                        .child(self.field_view(
-                                            FieldKey::PresetPath,
-                                            self.tr("processing-preset-path"),
-                                            true,
-                                            cx,
-                                        ))
+                                        .child(path_field)
                                         .child(menu_item(
                                             ("import-preset", panel),
                                             self.tr(if preset_exists {
@@ -2047,22 +2048,28 @@ impl AudioProcessing {
         ))
     }
 
-    fn parameter_controls(&self, fields: &[DenoiseField], cx: &mut Context<Self>) -> Div {
+    fn parameter_controls(
+        &mut self,
+        panel: u64,
+        fields: &[DenoiseField],
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut content = column().min_w_0().gap_1();
         for &field in fields {
             content = content.child(self.field_view(
+                panel,
                 FieldKey::Denoise(field),
                 self.tr(field.label_id()),
-                true,
                 cx,
             ));
         }
         content
     }
 
-    fn restoration_view(&self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn restoration_view(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let config = &self.state.system.config.denoise;
+        let state = Rc::clone(&self.state);
+        let config = &state.system.config.denoise;
         let selected_mode = DenoiseField::Mode.text(config);
         let mut modes = row().gap_1();
         for &(slug, label) in DenoiseField::Mode.choices() {
@@ -2096,6 +2103,7 @@ impl AudioProcessing {
             );
         if config.mode != DenoiseMode::Off {
             content = content.child(self.parameter_controls(
+                panel,
                 &[
                     DenoiseField::Strength,
                     DenoiseField::SpectralGainFloorDb,
@@ -2109,21 +2117,24 @@ impl AudioProcessing {
             ));
         }
         if matches!(config.mode, DenoiseMode::Stationary | DenoiseMode::Adaptive) {
-            content =
-                content.child(self.parameter_controls(&[DenoiseField::StationaryNoiseDbfs], cx));
+            content = content.child(self.parameter_controls(
+                panel,
+                &[DenoiseField::StationaryNoiseDbfs],
+                cx,
+            ));
         }
         if config.mode == DenoiseMode::Profile {
             content = content
                 .child(self.field_view(
+                    panel,
                     FieldKey::ProfileStart,
                     self.tr("processing-profile-start"),
-                    true,
                     cx,
                 ))
                 .child(self.field_view(
+                    panel,
                     FieldKey::ProfileEnd,
                     self.tr("processing-profile-end"),
-                    true,
                     cx,
                 ));
         }
@@ -2175,7 +2186,7 @@ impl AudioProcessing {
                     },
                 ));
             if enabled {
-                section = section.child(self.parameter_controls(fields, cx));
+                section = section.child(self.parameter_controls(panel, fields, cx));
             }
             content = content.child(section);
         }
@@ -2184,32 +2195,34 @@ impl AudioProcessing {
                 .pt_2()
                 .border_t_1()
                 .border_color(rgb(theme.border))
-                .child(self.parameter_controls(&[DenoiseField::Wet], cx)),
+                .child(self.parameter_controls(panel, &[DenoiseField::Wet], cx)),
         )
     }
 
-    fn neural_fields(&self, fields: &[NeuralField], cx: &mut Context<Self>) -> Div {
+    fn neural_fields(&mut self, panel: u64, fields: &[NeuralField], cx: &mut Context<Self>) -> Div {
         let mut content = column().min_w_0().gap_1();
         for &field in fields {
             content = content.child(self.field_view(
+                panel,
                 FieldKey::Neural(field),
                 self.tr(field.label_id()),
-                true,
                 cx,
             ));
         }
         content
     }
 
-    fn neural_view(&self, panel: u64, speech: bool, cx: &mut Context<Self>) -> Div {
+    fn neural_view(&mut self, panel: u64, speech: bool, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let neural = &self.state.system.config.neural;
+        let state = Rc::clone(&self.state);
+        let neural = &state.system.config.neural;
         let open = if speech {
             self.speech_advanced
         } else {
             self.separation_advanced
         };
         let mut parameters = self.neural_fields(
+            panel,
             if speech {
                 &[
                     NeuralField::SpeechWetMix,
@@ -2247,6 +2260,7 @@ impl AudioProcessing {
             ));
         }
         let model = self.neural_fields(
+            panel,
             if speech {
                 &[NeuralField::SpeechManifest, NeuralField::SpeechInterpreter][..]
             } else {
@@ -2283,7 +2297,8 @@ impl AudioProcessing {
                 )),
         );
         if open {
-            let mut runtime = self.neural_fields(&[NeuralField::Worker, NeuralField::Threads], cx);
+            let mut runtime =
+                self.neural_fields(panel, &[NeuralField::Worker, NeuralField::Threads], cx);
             let mut devices = row().gap_1().flex_wrap();
             let selected_device = NeuralField::Device.text(neural);
             for &(value, label) in NeuralField::Device.choices() {
@@ -2642,16 +2657,6 @@ impl AudioProcessing {
                 }),
             );
         }
-        let monitor_status = caption(
-            theme,
-            self.tr(if self.state.system.config.equalizer.enabled {
-                "processing-workspace-monitor-on"
-            } else {
-                "processing-workspace-monitor-off"
-            }),
-        )
-        .flex_shrink_0()
-        .whitespace_nowrap();
         let transport = self.tr(match self.state.playback.status {
             rivu_protocol::model::PlaybackStatus::Playing => "gl-playing",
             rivu_protocol::model::PlaybackStatus::Paused => "gl-paused",
@@ -2738,15 +2743,23 @@ impl AudioProcessing {
         }
         let bypassed = !self.state.system.config.equalizer.enabled
             && self.state.system.processing_audition.is_none();
-        selected_audio = selected_audio.child(monitor_status).child(
+        selected_audio = selected_audio.child(
             IconButton::new(
                 ("processing-bypass", panel),
                 "󰓅",
-                self.tr(if bypassed {
-                    "processing-workspace-enable-monitor"
-                } else {
-                    "processing-workspace-bypass"
-                }),
+                SharedString::from(format!(
+                    "{}\n{}",
+                    self.tr(if bypassed {
+                        "processing-workspace-enable-monitor"
+                    } else {
+                        "processing-workspace-bypass"
+                    }),
+                    self.tr(if self.state.system.config.equalizer.enabled {
+                        "processing-workspace-monitor-on"
+                    } else {
+                        "processing-workspace-monitor-off"
+                    }),
+                )),
             )
             .toggled(bypassed)
             .selected_fill(false)

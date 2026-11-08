@@ -3,14 +3,21 @@ use anyhow::ensure;
 
 impl Core {
     pub(in crate::core) fn processing_bypass(&mut self) -> Result<()> {
-        // Reserve the complete cutover before changing desired configuration.
-        self.engine.ensure_command_capacity(3)?;
-        if self.preferences.settings().equalizer.enabled {
+        let audition = self.processing.audition_id();
+        if audition.is_some() {
+            // Queue recovery can deliver metadata; finish it before reserving the
+            // cutover and committing a disabled monitor configuration.
+            self.ensure_queue_control_ready()?;
+        }
+        let monitor_enabled = self.preferences.settings().equalizer.enabled;
+        let commands = usize::from(monitor_enabled) + 2 * usize::from(audition.is_some());
+        self.engine.ensure_command_capacity(commands)?;
+        if monitor_enabled {
             self.equalizer_edit(EqualizerEdit::Enabled(false))?;
         }
         // Revoking audition intent does not cancel the rendering/export owner.
         self.pending_processing_audition = None;
-        if let Some(id) = self.processing.audition_id()
+        if let Some(id) = audition
             && let Err(error) = self.audition_pcm(id, None)
         {
             self.stop()?;

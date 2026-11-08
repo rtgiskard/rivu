@@ -268,12 +268,29 @@ impl AudioProcessing {
             self.graph_editor.selected = graph.nodes.first().map(|n| n.id);
             self.graph_editor.target_port = 0;
         }
+        if let Some(node) = graph
+            .nodes
+            .iter()
+            .find(|node| Some(node.id) == self.graph_editor.selected)
+            && usize::from(self.graph_editor.target_port) >= output_count(&node.kind)
+        {
+            self.graph_editor.target_port = 0;
+        }
+        if self.graph_editor.connecting.is_some_and(|port| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.id == port.node)
+                .is_none_or(|node| usize::from(port.port) >= output_count(&node.kind))
+        }) {
+            self.graph_editor.connecting = None;
+        }
         if self
             .graph_editor
-            .connecting
-            .is_some_and(|p| !graph.nodes.iter().any(|n| n.id == p.node))
+            .highlight_connection
+            .is_some_and(|port| !graph.edges.iter().any(|edge| edge.to == port))
         {
-            self.graph_editor.connecting = None;
+            self.graph_editor.highlight_connection = None;
         }
         let selected = self.graph_editor.selected;
         self.fields.retain(|key, field| {
@@ -438,7 +455,7 @@ impl AudioProcessing {
         let Some(id) = self.graph_editor.selected else {
             self.graph_editor.fields_revision = None;
             for fields in self.panel_inputs.values_mut() {
-                fields.retain(|key, _| *key == FieldKey::GraphExport);
+                fields.retain(|key, _| key.graph_node().is_none());
             }
             return;
         };
@@ -472,10 +489,10 @@ impl AudioProcessing {
             Some(node) if node == id => active_keys.contains(key),
             Some(_) => field.dirty,
         });
-        // Keep only the current inspector's replicas. Drafts for other nodes
-        // remain in the backing fields; removed controls drop subscriptions.
+        // Retire replicas belonging to other graph inspectors, not shared page
+        // controls. Drafts for other nodes remain in the backing fields.
         for fields in self.panel_inputs.values_mut() {
-            fields.retain(|key, _| *key == FieldKey::GraphExport || active_keys.contains(key));
+            fields.retain(|key, _| key.graph_node().is_none() || active_keys.contains(key));
         }
         if !self.fields.contains_key(&FieldKey::GraphExport) {
             self.field(
@@ -1717,6 +1734,78 @@ mod tests {
             assert!(this.choosing_path.is_none());
             assert_eq!(this.graph_editor.field_errors[&key], "current failure");
         });
+    }
+
+    #[gpui::test]
+    async fn replacing_node_outputs_retires_invalid_targets_without_losing_valid_connections(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            this.graph_connect(GraphPort { node: 3, port: 1 }, true, cx);
+            assert_eq!(this.graph_editor.target_port, 1);
+            this.graph_editor.highlight_connection = Some(GraphPort { node: 2, port: 0 });
+        });
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Speech {
+                config: Default::default(),
+            },
+        );
+        processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            assert_eq!(this.graph_editor.selected, Some(3));
+            assert_eq!(this.graph_editor.target_port, 0);
+            assert!(this.graph_editor.connecting.is_none());
+            assert_eq!(
+                this.graph_editor.highlight_connection,
+                Some(GraphPort { node: 2, port: 0 }),
+            );
+            this.graph_connect(GraphPort { node: 2, port: 0 }, false, cx);
+            assert!(this.graph_editor.pending.is_none());
+            this.graph_connect(GraphPort { node: 3, port: 0 }, true, cx);
+        });
+        replace_backend_node(
+            &runtime,
+            GraphNodeKind::Speech {
+                config: rivu_format::config::NeuralConfig {
+                    threads: 2,
+                    ..Default::default()
+                },
+            },
+        );
+        let revision = runtime.handle.config_snapshot().processing_graph.revision;
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+                expected_revision: revision,
+                edit: Box::new(GraphEdit::Disconnect {
+                    to: GraphPort { node: 2, port: 0 },
+                }),
+            }))
+            .ack;
+        assert!(ack.is_success(), "{:?}", ack.error);
+        processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            assert!(this.graph_editor.highlight_connection.is_none());
+            assert_eq!(
+                this.graph_editor.connecting,
+                Some(GraphPort { node: 3, port: 0 }),
+            );
+            this.graph_connect(GraphPort { node: 2, port: 0 }, false, cx);
+        });
+        wait_for_commands(cx, &processing, handle).await;
+        assert!(
+            runtime
+                .handle
+                .config_snapshot()
+                .processing_graph
+                .edges
+                .iter()
+                .any(|edge| {
+                    edge.from == GraphPort { node: 3, port: 0 }
+                        && edge.to == GraphPort { node: 2, port: 0 }
+                })
+        );
     }
 
     #[gpui::test]
