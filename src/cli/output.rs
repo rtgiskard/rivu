@@ -16,10 +16,7 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
         queue: true,
         ..StateSections::default()
     })?;
-    let current = state
-        .queue
-        .context("State omitted queue section")?
-        .current_id;
+    let queue = state.queue.context("State omitted queue section")?;
     write_listing(
         i18n,
         &mut session,
@@ -30,9 +27,12 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
             limit: MAX_QUERY_ROWS,
             expected,
         },
-        |view| match view {
-            ViewResponse::QueueBatch(batch) => Some(batch),
-            _ => None,
+        |view, revisions| {
+            validate_queue_listing(i18n, queue.revision, revisions.queue)?;
+            Ok(match view {
+                ViewResponse::QueueBatch(batch) => Some(batch),
+                _ => None,
+            })
         },
         |output, row, _| {
             writeln!(
@@ -42,7 +42,11 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
                 row.id,
                 row.track_id,
                 TerminalEscaped(&row.track.title),
-                if current == Some(row.id) { " *" } else { "" }
+                if queue.current_id == Some(row.id) {
+                    " *"
+                } else {
+                    ""
+                }
             )?;
             Ok(())
         },
@@ -71,9 +75,11 @@ pub(super) fn list_library(
             limit: MAX_QUERY_ROWS,
             expected,
         },
-        |view| match view {
-            ViewResponse::TrackBatch(batch) => Some(batch),
-            _ => None,
+        |view, _| {
+            Ok(match view {
+                ViewResponse::TrackBatch(batch) => Some(batch),
+                _ => None,
+            })
         },
         |output, track, _| {
             write!(
@@ -172,9 +178,11 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
             limit: MAX_QUERY_ROWS,
             expected,
         },
-        |view| match view {
-            ViewResponse::PlaylistSummaryBatch(batch) => Some(batch),
-            _ => None,
+        |view, _| {
+            Ok(match view {
+                ViewResponse::PlaylistSummaryBatch(batch) => Some(batch),
+                _ => None,
+            })
         },
         |output, playlist, _| {
             writeln!(
@@ -213,9 +221,11 @@ pub(super) fn show_playlist(
             limit: MAX_QUERY_ROWS,
             expected,
         },
-        |view| match view {
-            ViewResponse::PlaylistEntryBatch(batch) => Some(batch),
-            _ => None,
+        |view, _| {
+            Ok(match view {
+                ViewResponse::PlaylistEntryBatch(batch) => Some(batch),
+                _ => None,
+            })
         },
         |output, entry, index| {
             writeln!(
@@ -241,7 +251,7 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
     session: &mut rivu_client::ClientSession,
     json: bool,
     mut query: impl FnMut(Option<C>, Option<QueryRevisions>) -> Query,
-    unpack: impl Fn(ViewResponse) -> Option<Batch<T, C>>,
+    unpack: impl Fn(ViewResponse, QueryRevisions) -> Result<Option<Batch<T, C>>>,
     mut text: impl FnMut(&mut dyn Write, &T, usize) -> Result<()>,
 ) -> Result<()> {
     let stdout = io::stdout();
@@ -255,7 +265,7 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
     loop {
         let response = session.query(query(after, expected))?;
         expected.get_or_insert(response.revisions);
-        let batch = unpack(listing_result(i18n, response.result)?)
+        let batch = unpack(listing_result(i18n, response.result)?, response.revisions)?
             .context("Listing query returned an unexpected response")?;
         for row in &batch.rows {
             if json {
@@ -278,6 +288,17 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
         writeln!(output, "]")?;
     }
     Ok(())
+}
+
+fn validate_queue_listing(i18n: &Localizer, initial: u64, observed: u64) -> Result<()> {
+    listing_result(
+        i18n,
+        if initial == observed {
+            Ok(())
+        } else {
+            Err(QueryError::RevisionChanged)
+        },
+    )
 }
 
 fn listing_result<T>(i18n: &Localizer, result: std::result::Result<T, QueryError>) -> Result<T> {
@@ -529,6 +550,16 @@ mod tests {
     use super::{show_history, write_error};
     use rivu_utils::terminal::TerminalEscaped;
     use std::path::Path;
+
+    #[test]
+    fn queue_listing_rejects_a_changed_initial_current_snapshot() {
+        let i18n = rivu_presentation::i18n::Localizer::for_cli("en-US");
+        super::validate_queue_listing(&i18n, 7, 7).unwrap();
+        // Current-occurrence changes advance the queue token even if the row
+        // order is unchanged, so the first batch must honor the initial token.
+        let error = super::validate_queue_listing(&i18n, 7, 8).unwrap_err();
+        assert_eq!(error.to_string(), i18n.text("core-listing-changed"));
+    }
 
     #[test]
     fn terminal_display_preserves_unicode_and_program_separators() {

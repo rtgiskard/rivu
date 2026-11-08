@@ -775,6 +775,9 @@ runtime failures exit 1. A successful command exits 0.
 
 Listings can leave partial or invalid JSON after failure: check the exit status
 and discard incomplete output. See <<paged-views,Paged views>>.
+Queue listing binds its current-occurrence marker and all batches to the initial
+queue revision; a concurrent queue change fails the listing instead of combining
+different snapshots.
 
 Result shapes follow the queried resource:
 
