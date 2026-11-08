@@ -222,7 +222,7 @@ fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
     assert_eq!(status.phase, ProcessingPhase::Failed);
     assert!(status.outputs.is_none());
     assert_eq!(
-        core.shared.read().system.processing.as_ref().unwrap().phase,
+        core.shared.read().processing.as_ref().unwrap().phase,
         ProcessingPhase::Failed
     );
 }
@@ -246,7 +246,7 @@ fn shutdown_publishes_processing_cancellation_before_reply() {
         if status.phase == ProcessingPhase::Cancelled)
     );
     assert_eq!(
-        core.shared.read().system.processing.as_ref().unwrap().phase,
+        core.shared.read().processing.as_ref().unwrap().phase,
         ProcessingPhase::Cancelled
     );
 }

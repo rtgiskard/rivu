@@ -1,4 +1,4 @@
-use rivu_protocol::model::{MediaTaskOwner, ProcessingAudition};
+use rivu_protocol::model::{MediaTaskOwner, ProcessingAudition, ProcessingTaskStatus};
 
 use super::{
     Arc, ConfigurationState, LibrarySnapshot, PlaybackState, Query, QueryRevisions, QueueState,
@@ -14,6 +14,7 @@ pub(crate) struct CoreState {
     /// Audio source ownership, independent of metadata and transport state.
     pub(crate) source_generation: u64,
     pub(crate) processing_audition: Option<ProcessingAudition>,
+    pub(crate) processing: Option<Arc<ProcessingTaskStatus>>,
     pub(crate) system: SystemState,
     pub(crate) configuration: ConfigurationState,
     pub(crate) scan_owner: Option<MediaTaskOwner>,
@@ -54,7 +55,7 @@ impl CoreState {
         };
         let system = &self.system;
         let old = &previous.system;
-        let processing_changed = match (&system.processing, &old.processing) {
+        let processing_changed = match (&self.processing, &previous.processing) {
             (Some(current), Some(previous)) => {
                 !Arc::ptr_eq(current, previous) && current != previous
             }

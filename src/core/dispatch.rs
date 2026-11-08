@@ -484,7 +484,7 @@ impl Core {
     /// Publish observations already captured by the serialized owner.
     pub(in crate::core) fn publish(&mut self) {
         self.preferences.project(&mut self.state);
-        self.state.system.processing = self.processing.current_projection();
+        self.state.processing = self.processing.current_projection();
         self.state.processing_audition = self.processing.audition_projection();
         self.state.source_generation = self.transport.generation;
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
@@ -529,9 +529,9 @@ impl Core {
             } else {
                 // Publication advances even without a System section change.
                 shared.system.revision = self.state.system.revision;
-                if changed.processing {
-                    shared.system.processing = self.state.system.processing.clone();
-                }
+            }
+            if changed.processing {
+                shared.processing = self.state.processing.clone();
             }
             if changed.configuration {
                 shared.configuration = self.state.configuration.clone();

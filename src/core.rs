@@ -311,7 +311,6 @@ impl CoreHandle {
             library: sections.library.then(|| state.library.clone()),
             system: sections.system.then(|| {
                 let mut system = state.system.clone();
-                system.processing = None;
                 system.scan_owner = state.scan_owner;
                 system
             }),
@@ -319,7 +318,7 @@ impl CoreHandle {
             processing: sections
                 .processing
                 .then(|| rivu_protocol::response::ProcessingState {
-                    task: state.system.processing.clone(),
+                    task: state.processing.clone(),
                 }),
         }
     }

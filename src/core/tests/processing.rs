@@ -145,7 +145,7 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
     observed.apply(1, update);
     assert_ne!(observed.snapshot().system.processing, retained);
 
-    core.state.system.processing = None;
+    core.state.processing = None;
     core.publish();
     assert_eq!(terminal.try_recv(), Err(mpsc::TryRecvError::Empty));
     assert_eq!(processing.try_recv(), Err(mpsc::TryRecvError::Empty));
@@ -315,7 +315,7 @@ fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
     assert_eq!(cancelled.outputs, frozen.outputs);
     assert_eq!(cancelled.settings, frozen.settings);
     assert_eq!(core.processing.history().len(), 1);
-    core.state.system.processing = None;
+    core.state.processing = None;
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
     core.publish();
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
@@ -2608,7 +2608,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
-    assert_eq!(core.state.system.processing.as_ref().unwrap().id, 3);
+    assert_eq!(core.state.processing.as_ref().unwrap().id, 3);
     assert_eq!(core.processing.audition_projection(), Some(selected));
     core.publish();
     assert_eq!(core.shared.read().processing_audition, Some(selected));
@@ -2985,7 +2985,7 @@ fn processing_and_audition_create_no_implicit_files() {
         complete(&mut core);
     }
     prepare_mix(&mut core);
-    let id = core.state.system.processing.as_ref().unwrap().id;
+    let id = core.state.processing.as_ref().unwrap().id;
     core.audition_processing(id, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
     let event = mix_completion(&mut core);
