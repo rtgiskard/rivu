@@ -149,19 +149,10 @@ impl FrequencyViews {
         data.frequencies = Vec::new();
         data.sample_rate = 0;
         data.latest_levels = Vec::new();
-        data.spectrum.peaks = Vec::new();
-        data.spectrum.peak_deadlines = Vec::new();
-        data.spectrum.bar_levels = Vec::new();
-        data.spectrum.bar_deadlines = Vec::new();
-        data.spectrum.smoothed_levels = Vec::new();
-        data.spectrum.points = Vec::new();
-        data.spectrum.rectangles = Vec::new();
-        data.spectrum.mappings = HashMap::new();
+        data.release_spectrum();
         data.last_analysis_sequence = None;
         data.error = None;
         data.last_paint_error = None;
-        data.spectrum.envelope_initialized = false;
-        data.spectrum.last_update = None;
         data.source_generation = None;
         data.stream_generation = data.stream_generation.wrapping_add(1);
     }
