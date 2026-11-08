@@ -48,7 +48,10 @@ impl DragDestination {
 #[derive(Clone)]
 pub(super) enum TrackSource {
     Tracks(Vec<i64>),
-    Album(rivu_protocol::model::AlbumKey),
+    Album {
+        key: rivu_protocol::model::AlbumKey,
+        revision: u64,
+    },
 }
 
 pub(super) struct ContentDrag {
@@ -162,7 +165,7 @@ pub(super) fn can_transfer(
     value.downcast_ref::<ContentDrag>().is_some_and(|drag| {
         drag.source().is_some_and(|source| match source {
             TrackSource::Tracks(ids) => !ids.is_empty(),
-            TrackSource::Album(_) => true,
+            TrackSource::Album { revision, .. } => *revision == state.library.album_revision,
         })
     })
 }
@@ -224,6 +227,27 @@ mod tests {
     }
 
     #[test]
+    fn album_drag_binds_start_revision_once_not_render_revision() {
+        let mut state = GuiSnapshot::default();
+        let drag = ContentDrag::pending();
+        state.library.album_revision += 1;
+        let Query::AlbumTracks { key, .. } = album_query() else {
+            unreachable!()
+        };
+        drag.initialize(TrackSource::Album {
+            key: key.clone(),
+            revision: state.library.album_revision,
+        });
+        assert!(can_transfer(&drag, &state, DragDestination::Queue, false));
+        state.library.album_revision += 1;
+        drag.initialize(TrackSource::Album {
+            key,
+            revision: state.library.album_revision,
+        });
+        assert!(!can_transfer(&drag, &state, DragDestination::Queue, false));
+    }
+
+    #[test]
     fn library_transfer_requires_initialized_nodes_and_idle_resolution() {
         use super::{LibraryDrag, LibraryNode, can_transfer};
         use crate::{gui::DragDestination, projection::GuiSnapshot};
@@ -272,7 +296,18 @@ mod tests {
         let Query::AlbumTracks { key, .. } = album_query() else {
             unreachable!()
         };
-        let album = ContentDrag::new(TrackSource::Album(key));
-        assert!(can_transfer(&album, &state, DragDestination::Queue, true,));
+        let album = ContentDrag::new(TrackSource::Album {
+            key,
+            revision: state.library.album_revision,
+        });
+        assert!(can_transfer(&album, &state, DragDestination::Queue, true));
+        let mut changed = state.clone();
+        changed.library.album_revision += 1;
+        assert!(!can_transfer(
+            &album,
+            &changed,
+            DragDestination::Queue,
+            false
+        ));
     }
 }

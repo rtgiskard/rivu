@@ -814,6 +814,7 @@ impl AlbumBrowser {
         let enqueue_key = key.clone();
         let menu_key = key.clone();
         let drag_key = key.clone();
+        let drag_snapshots = self.snapshots.clone();
         let hover_key = key.clone();
         let image = self
             .covers
@@ -899,10 +900,13 @@ impl AlbumBrowser {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     cx.emit(ContentMenuRequest {
-                        source: TrackSource::Album(menu_key.clone()),
+                        source: TrackSource::Album {
+                            key: menu_key.clone(),
+                            revision: this.snapshots.read().library.album_revision,
+                        },
                         position: event.position,
                         play: Some(Command::PlayAlbum {
                             key: menu_key.clone(),
@@ -910,15 +914,16 @@ impl AlbumBrowser {
                     });
                 }),
             )
-            .on_drag(
-                ContentDrag::new(TrackSource::Album(drag_key)),
-                move |_, _, window, cx| {
-                    rivu_ui::begin_list_drag(window, cx);
-                    cx.new(|_| rivu_ui::ListDragPreview {
-                        label: drag_label.clone(),
-                    })
-                },
-            )
+            .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
+                drag.initialize(TrackSource::Album {
+                    key: drag_key.clone(),
+                    revision: drag_snapshots.read().library.album_revision,
+                });
+                rivu_ui::begin_list_drag(window, cx);
+                cx.new(|_| rivu_ui::ListDragPreview {
+                    label: drag_label.clone(),
+                })
+            })
             .rounded_md()
             .hover(|style| style.bg(rgb(theme.highlight)))
             .overflow_hidden()
@@ -1047,10 +1052,13 @@ impl Render for AlbumBrowser {
                         .id("album-selected-title")
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(ContentMenuRequest {
-                                    source: TrackSource::Album(menu_key.clone()),
+                                    source: TrackSource::Album {
+                                        key: menu_key.clone(),
+                                        revision: this.snapshots.read().library.album_revision,
+                                    },
                                     position: event.position,
                                     play: Some(Command::PlayAlbum {
                                         key: menu_key.clone(),

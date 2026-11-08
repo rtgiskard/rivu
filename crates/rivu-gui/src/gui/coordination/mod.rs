@@ -365,7 +365,7 @@ impl WindowView {
                                         track_ids: track_ids.clone(),
                                     })
                                 }
-                                crate::gui::list_interaction::TrackSource::Album(_) => None,
+                                crate::gui::list_interaction::TrackSource::Album { .. } => None,
                             };
                             this.open_object_menu(
                                 request,

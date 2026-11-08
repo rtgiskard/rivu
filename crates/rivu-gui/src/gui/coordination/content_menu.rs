@@ -213,7 +213,7 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         let guard = match request.source {
-            TrackSource::Album(_) => ContentGuard::Library(
+            TrackSource::Album { .. } => ContentGuard::Library(
                 self.state.library.revision,
                 self.state.library.structure_revision,
             ),
@@ -253,9 +253,13 @@ impl WindowView {
             Some(Command::RemoveHistory { .. }) => "gl-remove-history",
             _ => "gl-remove-library-selected",
         };
+        let album_revision = match &request.source {
+            TrackSource::Album { revision, .. } => *revision,
+            TrackSource::Tracks(_) => self.state.library.album_revision,
+        };
         let menu = Some(ContentMenu {
             source: request.source,
-            album_revision: self.state.library.album_revision,
+            album_revision,
             nodes,
             tracks_only,
             guard,
@@ -281,7 +285,7 @@ impl WindowView {
         let Some(menu) = self.content_menu.as_ref() else {
             return;
         };
-        let TrackSource::Album(key) = &menu.source else {
+        let TrackSource::Album { key, .. } = &menu.source else {
             return;
         };
         let key = key.clone();
@@ -378,11 +382,11 @@ impl WindowView {
         }
         match source {
             TrackSource::Tracks(ids) => self.send_content_tracks(ids, destination, cx),
-            TrackSource::Album(key) => {
-                let source = rivu_protocol::model::CollectionSource::Album {
-                    key,
-                    revision: self.state.library.album_revision,
-                };
+            TrackSource::Album { key, revision } => {
+                if revision != self.state.library.album_revision {
+                    return;
+                }
+                let source = rivu_protocol::model::CollectionSource::Album { key, revision };
                 self.send_content_collection(source, destination, cx);
             }
         }
@@ -514,7 +518,7 @@ impl WindowView {
         };
         if menu.loading
             || !menu.guard.current(&self.state)
-            || (matches!(menu.source, TrackSource::Album(_))
+            || (matches!(menu.source, TrackSource::Album { .. })
                 && menu.album_revision != self.state.library.album_revision)
         {
             self.replace_content_menu(None, cx);
@@ -525,7 +529,7 @@ impl WindowView {
         if matches!(
             action,
             ContentAction::Favorite(_) | ContentAction::CreatePlaylist(_)
-        ) && matches!(menu.source, TrackSource::Album(_))
+        ) && matches!(menu.source, TrackSource::Album { .. })
         {
             self.resolve_content_action(action, cx);
             return;
@@ -552,7 +556,7 @@ impl WindowView {
                     });
                 } else {
                     match menu.source {
-                        TrackSource::Album(key) => self.send_content_collection(
+                        TrackSource::Album { key, .. } => self.send_content_collection(
                             rivu_protocol::model::CollectionSource::Album {
                                 key,
                                 revision: menu.album_revision,
@@ -1156,7 +1160,10 @@ mod tests {
         app.refresh(cx);
         app.open_content_menu(
             ContentMenuRequest {
-                source: TrackSource::Album(album.clone()),
+                source: TrackSource::Album {
+                    key: album.clone(),
+                    revision: app.state.library.album_revision,
+                },
                 position: point(px(10.), px(10.)),
                 play: Some(Command::PlayAlbum { key: album.clone() }),
             },
@@ -1164,7 +1171,7 @@ mod tests {
         );
         let menu = app.content_menu.as_ref().unwrap();
         assert!(!menu.loading);
-        assert!(matches!(&menu.source, TrackSource::Album(key) if key == album));
+        assert!(matches!(&menu.source, TrackSource::Album { key, .. } if key == album));
         assert_eq!(app.content_favorite_actions(cx), (true, true));
     }
 
@@ -1190,6 +1197,74 @@ mod tests {
         };
         assert_eq!(page.total, page.rows.len());
         page.rows.into_iter().map(|row| row.favorite).collect()
+    }
+
+    #[gpui::test]
+    fn album_drop_rejects_stale_origin_and_transfers_current_full_album(cx: &mut TestAppContext) {
+        let fixture = fixture(cx);
+        let queue_len = || {
+            let ack = futures::executor::block_on(
+                fixture
+                    .runtime
+                    .handle
+                    .request_ack(Command::Volume { value: 0.0 }),
+            )
+            .ack;
+            assert!(ack.is_success(), "{:?}", ack.error);
+            let ViewResponse::QueuePage(page) = fixture
+                .runtime
+                .handle
+                .query(Query::QueuePage {
+                    query: None,
+                    offset: 0,
+                    limit: rivu_protocol::model::MAX_QUERY_ROWS,
+                })
+                .result
+                .unwrap()
+            else {
+                panic!("expected queue page");
+            };
+            page.total
+        };
+        let revision = fixture.app.update(cx, |app, cx| {
+            app.refresh(cx);
+            app.state.library.album_revision
+        });
+        let ack =
+            futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
+                track_id: fixture.member,
+                title: Some("Changed during drag".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            }))
+            .ack;
+        assert!(ack.is_success(), "{:?}", ack.error);
+        fixture.app.update(cx, |app, cx| {
+            app.refresh(cx);
+            assert_ne!(app.state.library.album_revision, revision);
+            app.drop_content(
+                TrackSource::Album {
+                    key: fixture.album.clone(),
+                    revision,
+                },
+                DragDestination::Queue,
+                cx,
+            );
+        });
+        assert_eq!(queue_len(), 0);
+        fixture.app.update(cx, |app, cx| {
+            app.refresh(cx);
+            app.drop_content(
+                TrackSource::Album {
+                    key: fixture.album.clone(),
+                    revision: app.state.library.album_revision,
+                },
+                DragDestination::Queue,
+                cx,
+            );
+        });
+        assert_eq!(queue_len(), 3);
     }
 
     #[gpui::test]

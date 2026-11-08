@@ -1032,6 +1032,12 @@ the transaction resolves and inserts members. Staleness rejects the whole operat
 Every occurrence and its order survive, including repeated tracks; later edits to
 either collection are independent.
 
+Album drag gestures capture the source revision when the drag begins, just as
+collection menus retain their opening revision. Hover and final drop reject an
+obsolete source even after the client receives a newer snapshot; neither refreshes
+the gesture to the latest revision. Ordinary album playback/enqueue commands keep
+their execution-time member resolution.
+
 === Library root identity and configuration
 
 Configured roots are logical paths: relative paths resolve against the host's
