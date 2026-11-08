@@ -266,6 +266,7 @@ impl DetailsLayout {
             && match (&self.state, &details.state) {
                 (DetailState::Ready(a), DetailState::Ready(b)) => Arc::ptr_eq(a, b),
                 (DetailState::Loading, DetailState::Loading)
+                | (DetailState::Retired, DetailState::Retired)
                 | (DetailState::Removed, DetailState::Removed) => true,
                 (DetailState::Error(a), DetailState::Error(b))
                 | (DetailState::Container(a), DetailState::Container(b)) => Arc::ptr_eq(a, b),
@@ -334,6 +335,7 @@ fn details_lines(
             i18n.text("terminal-details-loading").to_owned(),
             Style::default().fg(colors.secondary),
         ))),
+        DetailState::Retired => {}
         DetailState::Removed => lines.push(Line::from(Span::styled(
             i18n.text("terminal-details-removed").to_owned(),
             Style::default().fg(colors.warning),
@@ -594,7 +596,7 @@ fn draw_details(
     let lines = &details.layout.as_ref().expect("details layout").lines;
     // Error navigation is independent of the retained track reading position.
     let scroll = match details.state {
-        DetailState::Loading => 0,
+        DetailState::Loading | DetailState::Retired => 0,
         DetailState::Error(_) => {
             details.error_max_scroll = lines.len().saturating_sub(area.height as usize);
             details.error_scroll = details.error_scroll.min(details.error_max_scroll);

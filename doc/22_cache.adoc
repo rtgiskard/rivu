@@ -127,6 +127,12 @@ Timeout shows an error, cancels the read, and rejects late payloads; explicit re
 still waits for physical retirement. Transport errors have no payload stamp and
 do not prove data changed. Command deadlines are independent.
 
+`RevisionChanged` and owner-scoped `Cancelled` retire the obsolete read without
+displaying a storage failure or immediately repeating identical demand. A changed
+authoritative query stamp, changed demand, or explicit retry permits another read;
+physical retirement still owns the execution slot. Genuine query failures remain
+visible through the feature's normal error handling.
+
 Album Browser publishes rows before querying an uncached unfiltered search total.
 An auxiliary failure leaves rows usable and the counter unavailable; its physical
 slot follows the same retirement rule.

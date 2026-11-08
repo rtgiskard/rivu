@@ -97,7 +97,7 @@ pub(super) async fn resolve_album<F: Future<Output = rivu_protocol::response::Qu
         let result = response.result?;
         anyhow::ensure!(
             scope.stamp(response.revisions) == expected,
-            "collection changed"
+            rivu_protocol::response::QueryError::RevisionChanged
         );
         let ViewResponse::AlbumTracks(page) = result else {
             anyhow::bail!("unexpected album response");

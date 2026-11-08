@@ -7,7 +7,7 @@ use gpui::Context;
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{DirectoryRow, LibrarySort, Query, QueryStamp},
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -21,6 +21,7 @@ use crate::gui::coordination::manual_actions::ManualIntentId;
 enum SelectionError {
     Message(&'static str),
     Detail(String),
+    Obsolete,
 }
 
 impl From<String> for SelectionError {
@@ -34,6 +35,7 @@ impl SelectionError {
         match self {
             Self::Message(id) => i18n.text(id).to_owned(),
             Self::Detail(detail) => detail,
+            Self::Obsolete => unreachable!("obsolete selections have no user-facing error"),
         }
     }
 }
@@ -216,6 +218,13 @@ impl RangeJob {
     }
 
     fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), SelectionError> {
+        let result = match response.result {
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                return Err(SelectionError::Obsolete);
+            }
+            Err(error) => return Err(SelectionError::Detail(error.to_string())),
+            Ok(result) => result,
+        };
         let stamp = match &slice.source {
             Source::Tree(branch) | Source::Flat(branch) if branch.is_forest() => {
                 let expected = self.scope.stamp.revisions();
@@ -223,16 +232,15 @@ impl RangeJob {
                     || expected.structure != response.revisions.structure
                     || expected.bitrate != response.revisions.bitrate
                 {
-                    return Err(SelectionError::Message("gl-library-changed"));
+                    return Err(SelectionError::Obsolete);
                 }
                 self.scope.stamp
             }
             _ => self.query(slice).stamp(response.revisions),
         };
         if stamp != self.scope.stamp {
-            return Err(SelectionError::Message("gl-library-changed"));
+            return Err(SelectionError::Obsolete);
         }
-        let result = response.result.map_err(|error| error.to_string())?;
         match (&slice.source, result) {
             (Source::Flat(_), ViewResponse::LibraryPage(page))
             | (Source::Tree(_), ViewResponse::LibraryPage(page)) => {
@@ -682,7 +690,9 @@ impl Library {
             Ok(false) => self.fail_selection(id, cx),
             Err(error) => {
                 self.fail_selection(id, cx);
-                self.report_error(error.localize(&self.i18n), cx);
+                if !matches!(error, SelectionError::Obsolete) {
+                    self.report_error(error.localize(&self.i18n), cx);
+                }
             }
         }
         cx.notify();
@@ -736,7 +746,9 @@ impl Library {
         {
             Err(error) => {
                 self.fail_selection(id, cx);
-                self.report_error(error.localize(&self.i18n), cx);
+                if !matches!(error, SelectionError::Obsolete) {
+                    self.report_error(error.localize(&self.i18n), cx);
+                }
                 cx.notify();
             }
             Ok(RangeStep::Idle) => {}
@@ -761,7 +773,9 @@ impl Library {
                                     .publish_range(token, &slice, response, revisions)
                                 {
                                     this.fail_selection(id, cx);
-                                    this.report_error(error.localize(&this.i18n), cx);
+                                    if !matches!(error, SelectionError::Obsolete) {
+                                        this.report_error(error.localize(&this.i18n), cx);
+                                    }
                                 }
                                 cx.notify();
                             });
@@ -780,7 +794,9 @@ impl Library {
                             .complete_range(token, &slice, response, revisions)
                         {
                             this.fail_selection(id, cx);
-                            this.report_error(error.localize(&this.i18n), cx);
+                            if !matches!(error, SelectionError::Obsolete) {
+                                this.report_error(error.localize(&this.i18n), cx);
+                            }
                         }
                         // A cancelled batch cannot apply or overlap its successor.
                         this.pump_library_range(cx);

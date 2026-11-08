@@ -1065,6 +1065,17 @@ impl Render for AlbumBrowser {
                 );
             let actions = rivu_ui::panel_header_actions()
                 .child(self.tracks_search.clone())
+                .when(self.model.retired(), |actions| {
+                    actions.child(
+                        IconButton::new("album-retired-retry", "󰑐", self.tr("gl-retry-loading"))
+                            .build(
+                                IconButtonStyle::Surface,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, _, cx| this.retry(cx),
+                            ),
+                    )
+                })
                 .child(
                     IconButton::new("album-play-all", "", self.tr("gl-play-album")).build(
                         IconButtonStyle::Surface,
@@ -1105,6 +1116,17 @@ impl Render for AlbumBrowser {
             );
             let actions = rivu_ui::panel_header_actions()
                 .child(self.album_search.clone())
+                .when(self.model.retired(), |actions| {
+                    actions.child(
+                        IconButton::new("albums-retired-retry", "󰑐", self.tr("gl-retry-loading"))
+                            .build(
+                                IconButtonStyle::Surface,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, _, cx| this.retry(cx),
+                            ),
+                    )
+                })
                 .child(
                     IconButton::new(
                         "albums-sort",

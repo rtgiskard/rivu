@@ -1104,13 +1104,14 @@ impl Playlists {
         let selection_entry = self.browser.playlists().selected_entry();
         let selection_unavailable = !self.browser.playlists().track_selection.ready();
         let selection_pending = self.browser.playlists().track_selection.busy;
-        let selection_message: SharedString = if !selection_unavailable {
-            "".into()
-        } else if selection_pending {
-            self.tr("gl-selection-refreshing")
-        } else {
-            self.tr("gl-selection-unavailable")
-        };
+        let selection_message: SharedString =
+            if !selection_unavailable || self.browser.playlists().track_selection.retired {
+                "".into()
+            } else if selection_pending {
+                self.tr("gl-selection-refreshing")
+            } else {
+                self.tr("gl-selection-unavailable")
+            };
         let selection_status = row()
             .flex_shrink_0()
             .min_w_0()

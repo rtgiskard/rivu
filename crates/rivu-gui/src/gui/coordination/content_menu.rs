@@ -346,6 +346,17 @@ impl WindowView {
                         this.replace_content_menu(None, cx);
                         this.error = Some(this.i18n.text("li-source-changed").to_owned());
                     }
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<rivu_protocol::response::QueryError>(),
+                            Some(
+                                rivu_protocol::response::QueryError::RevisionChanged
+                                    | rivu_protocol::response::QueryError::Cancelled
+                            )
+                        ) =>
+                    {
+                        this.replace_content_menu(None, cx);
+                    }
                     Err(error) => {
                         this.replace_content_menu(None, cx);
                         this.error = Some(error.to_string());

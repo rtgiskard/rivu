@@ -36,6 +36,7 @@ struct RootCounts {
     pending: HashSet<usize>,
     failed: HashSet<usize>,
     settled: bool,
+    retired: bool,
 }
 
 impl RootCounts {
@@ -45,6 +46,7 @@ impl RootCounts {
         self.pending.clear();
         self.failed.clear();
         self.settled = false;
+        self.retired = false;
     }
 }
 
@@ -376,6 +378,7 @@ impl LibraryBrowser {
             self.counts.pending.clear();
             self.counts.failed.clear();
             self.counts.settled = false;
+            self.counts.retired = false;
             self.counts.roots = roots.to_vec();
         }
     }
@@ -401,6 +404,7 @@ impl LibraryBrowser {
         self.search_counts.failed = false;
         self.counts.failed.clear();
         self.counts.settled = false;
+        self.counts.retired = false;
     }
 
     pub(super) fn root_counts_settled(&self) -> bool {
@@ -412,7 +416,7 @@ impl LibraryBrowser {
         structure_revision: u64,
     ) -> (u64, Vec<usize>) {
         self.sync_root_counts(roots, structure_revision);
-        if !self.counts.pending.is_empty() {
+        if self.counts.retired || !self.counts.pending.is_empty() {
             return (self.counts.owner.generation(), Vec::new());
         }
         let batches = (0..roots.len())
@@ -464,6 +468,18 @@ impl LibraryBrowser {
         if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
             self.counts.failed.insert(offset);
         }
+    }
+
+    pub(super) fn retire_root_counts(&mut self, generation: u64) {
+        if self.counts.owner.generation() == generation {
+            self.counts.owner.cancel();
+            self.counts.pending.clear();
+            self.counts.retired = true;
+        }
+    }
+
+    pub(super) fn root_counts_retired(&self) -> bool {
+        self.counts.retired
     }
 
     pub(super) fn root_count(&self, path: &std::path::Path) -> Option<usize> {
@@ -575,6 +591,10 @@ impl LibraryBrowser {
 
     pub(super) fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
         self.tree.fail(branch, generation);
+    }
+
+    pub(super) fn retire_directory(&mut self, branch: &TreeBranch, generation: u64) {
+        self.tree.retire_request(branch, generation);
     }
 
     pub(super) fn cancel_directory(&mut self, branch: &TreeBranch, generation: u64) {

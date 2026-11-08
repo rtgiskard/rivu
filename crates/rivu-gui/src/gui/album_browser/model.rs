@@ -3,7 +3,7 @@ use std::ops::Range;
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, Query, QueryStamp},
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 
 use super::super::paged::PagedRows;
@@ -73,6 +73,8 @@ pub(super) struct AlbumModel {
     page_timed_out: bool,
     albums_total: Option<(QueryStamp, usize)>,
     tracks_total: Option<(QueryStamp, usize)>,
+    albums_count_retired: bool,
+    tracks_count_retired: bool,
     selected: Option<AlbumKey>,
     albums: PagedRows<AlbumSummary>,
     tracks: PagedRows<LibraryRow>,
@@ -94,6 +96,8 @@ impl Default for AlbumModel {
             page_timed_out: false,
             albums_total: None,
             tracks_total: None,
+            albums_count_retired: false,
+            tracks_count_retired: false,
             selected: None,
             albums: PagedRows::default(),
             tracks: PagedRows::default(),
@@ -244,11 +248,27 @@ impl AlbumModel {
         true
     }
 
+    pub fn retired(&self) -> bool {
+        if self.selected.is_some() {
+            self.tracks.retired()
+        } else {
+            self.albums.retired()
+        }
+    }
+
     pub fn retry(&mut self) {
         if self.selected.is_some() {
+            if self.tracks_count_retired {
+                self.tracks.invalidate_payload();
+            }
             self.tracks.retry();
+            self.tracks_count_retired = false;
         } else {
+            if self.albums_count_retired {
+                self.albums.invalidate_payload();
+            }
             self.albums.retry();
+            self.albums_count_retired = false;
         }
     }
 
@@ -335,12 +355,26 @@ impl AlbumModel {
         if !self.visible
             || !self
                 .active_projection()
-                .accepts(query, generation, response.revisions)
+                .accepts(query, generation, current_revisions)
         {
             return completion;
         }
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (matches!(
+            (query, &response.result),
+            (Query::Albums { .. }, Ok(ViewResponse::Albums(_)))
+                | (Query::AlbumTracks { .. }, Ok(ViewResponse::AlbumTracks(_)))
+        ) && !self
+            .active_projection()
+            .accepts(query, generation, response.revisions))
+        {
+            self.retire_page();
+            return completion;
+        }
         match response.result {
-            Ok(ViewResponse::Albums(page)) => {
+            Ok(ViewResponse::Albums(page)) if matches!(query, Query::Albums { .. }) => {
                 let stamp = Query::Albums {
                     query: None,
                     sort: self.sort,
@@ -358,7 +392,7 @@ impl AlbumModel {
                 self.albums.accept(page);
                 completion.published = Published::Albums;
             }
-            Ok(ViewResponse::AlbumTracks(page)) => {
+            Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
                 let Query::AlbumTracks { key, .. } = query else {
                     unreachable!()
                 };
@@ -392,6 +426,11 @@ impl AlbumModel {
 
     pub fn prepare_count(&mut self, page_query: &Query, generation: u64) -> Option<CountRequest> {
         if self.page_timed_out
+            || if self.selected.is_some() {
+                self.tracks_count_retired
+            } else {
+                self.albums_count_retired
+            }
             || !self.visible
             || !self
                 .active_projection()
@@ -459,10 +498,30 @@ impl AlbumModel {
             || !self.active_projection().accepts(
                 &request.page_query,
                 request.generation,
-                response.revisions,
+                current_revisions,
             )
-            || request.query.stamp(response.revisions) != request.query.stamp(current_revisions)
         {
+            return completion;
+        }
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (response.result.is_ok()
+            && request.query.stamp(response.revisions) != request.query.stamp(current_revisions))
+        {
+            if self.selected.is_some() {
+                self.tracks_count_retired = true;
+            } else {
+                self.albums_count_retired = true;
+            }
+            self.retire_page();
+            return completion;
+        }
+        if !self.active_projection().accepts(
+            &request.page_query,
+            request.generation,
+            response.revisions,
+        ) {
             return completion;
         }
         let (total, matched, published) = match (&request.query, response.result) {
@@ -512,6 +571,12 @@ impl AlbumModel {
                 revisions,
             )
         });
+        if albums {
+            self.albums_count_retired = false;
+        }
+        if tracks {
+            self.tracks_count_retired = false;
+        }
         DataChange { albums, tracks }
     }
 
@@ -520,6 +585,16 @@ impl AlbumModel {
             &self.tracks_projection
         } else {
             &self.albums_projection
+        }
+    }
+
+    fn retire_page(&mut self) {
+        if self.selected.is_some() {
+            self.tracks_projection.cancel();
+            self.tracks.retire_pending();
+        } else {
+            self.albums_projection.cancel();
+            self.albums.retire_pending();
         }
     }
 
@@ -561,6 +636,177 @@ mod tests {
     use super::*;
     use crate::gui::paged;
     use rivu_protocol::model::Page;
+    #[test]
+    fn obsolete_pages_park_until_fresh_authority_or_retry_without_releasing_worker() {
+        for tracks in [false, true] {
+            for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                for explicit in [false, true] {
+                    let mut model = AlbumModel::default();
+                    let revisions = QueryRevisions {
+                        album: 7,
+                        ..Default::default()
+                    };
+                    model.sync(true, revisions, 2);
+                    if tracks {
+                        model.select(Some(key("A")));
+                    }
+                    let old = model.prepare().unwrap();
+                    let completion = model.complete_page(
+                        &old.query,
+                        old.generation,
+                        QueryResponse {
+                            revisions: Default::default(),
+                            result: Err(error.clone()),
+                        },
+                        revisions,
+                        "wrong response",
+                    );
+                    assert_eq!(completion.published, Published::None);
+                    assert!(model.retired());
+                    assert!(!old.ticket.is_current());
+                    assert!(model.albums.error(0).is_none());
+                    assert!(model.tracks.error(0).is_none());
+                    for _ in 0..3 {
+                        model.sync(true, revisions, 2);
+                        assert!(model.prepare().is_none());
+                    }
+                    let fresh = if explicit {
+                        model.retry();
+                        revisions
+                    } else {
+                        let fresh = QueryRevisions {
+                            album: 8,
+                            ..revisions
+                        };
+                        model.sync(true, fresh, 2);
+                        fresh
+                    };
+                    assert!(
+                        model.prepare().is_none(),
+                        "retirement keeps the physical slot"
+                    );
+                    model.retire_worker();
+                    let next = model.prepare().unwrap();
+                    assert_ne!(next.generation, old.generation);
+                    model.complete_page(
+                        &old.query,
+                        old.generation,
+                        response(&old, 0, revisions),
+                        fresh,
+                        "wrong response",
+                    );
+                    let completion = finish(&mut model, next, 2);
+                    assert_eq!(
+                        completion.published,
+                        if tracks {
+                            Published::Tracks
+                        } else {
+                            Published::Albums
+                        }
+                    );
+                    assert_eq!(model.total(), Some(2));
+                    assert!(!model.retired());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn obsolete_auxiliary_count_parks_loaded_pages_until_retry_or_new_revision() {
+        for tracks in [false, true] {
+            for explicit in [false, true] {
+                for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                    let mut model = AlbumModel::default();
+                    let revisions = QueryRevisions::default();
+                    model.sync(true, revisions, 2);
+                    if tracks {
+                        model.select(Some(key("A")));
+                        model.set_tracks_query(Some("needle".into()));
+                    } else {
+                        model.set_query(Some("needle".into()));
+                    }
+                    let page = model.prepare().unwrap();
+                    model.complete_page(
+                        &page.query,
+                        page.generation,
+                        response(&page, 1, revisions),
+                        revisions,
+                        "wrong response",
+                    );
+                    let count = model.prepare_count(&page.query, page.generation).unwrap();
+                    model.complete_count(
+                        &count,
+                        QueryResponse {
+                            revisions,
+                            result: Err(error.clone()),
+                        },
+                        revisions,
+                    );
+                    assert!(model.retired());
+                    assert!(model.prepare_count(&page.query, page.generation).is_none());
+                    assert!(model.prepare().is_none());
+                    model.retire_worker();
+                    for _ in 0..3 {
+                        model.sync(true, revisions, 2);
+                        assert!(model.prepare().is_none());
+                    }
+                    if explicit {
+                        model.retry();
+                    } else {
+                        model.sync(
+                            true,
+                            QueryRevisions {
+                                album: 1,
+                                ..revisions
+                            },
+                            2,
+                        );
+                    }
+                    let next = model.prepare().unwrap();
+                    let current = model.revisions;
+                    model.complete_page(
+                        &next.query,
+                        next.generation,
+                        response(&next, 1, current),
+                        current,
+                        "wrong response",
+                    );
+                    let next_count = model.prepare_count(&next.query, next.generation).unwrap();
+                    model.complete_count(
+                        &count,
+                        QueryResponse {
+                            revisions,
+                            result: Err(error.clone()),
+                        },
+                        current,
+                    );
+                    assert!(!model.retired(), "old count cannot retire the replacement");
+                    let result = match &next_count.query {
+                        Query::Albums { .. } => ViewResponse::Albums(Page {
+                            total: 3,
+                            rows: Vec::new(),
+                        }),
+                        Query::AlbumTracks { .. } => ViewResponse::AlbumTracks(Page {
+                            total: 3,
+                            rows: Vec::new(),
+                        }),
+                        _ => unreachable!(),
+                    };
+                    let completion = model.complete_count(
+                        &next_count,
+                        QueryResponse {
+                            revisions: current,
+                            result: Ok(result),
+                        },
+                        current,
+                    );
+                    assert_eq!(completion.counts, Some((1, 3)));
+                    model.retire_worker();
+                }
+            }
+        }
+    }
+
     fn key(title: &str) -> AlbumKey {
         AlbumKey {
             directory: "/music".into(),

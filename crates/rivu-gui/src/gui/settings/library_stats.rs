@@ -3,7 +3,7 @@ use gpui::{Context, SharedString};
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::{LibraryRootStats, MAX_QUERY_ROWS, Query},
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::{
     collections::HashMap,
@@ -20,6 +20,7 @@ pub(super) struct RootStats {
     // A canceled or timed-out query still owns its physical slot until it returns.
     in_flight: bool,
     error: Option<String>,
+    retired: bool,
 }
 
 struct Read {
@@ -55,6 +56,7 @@ impl RootStats {
         self.values.clear();
         self.next = 0;
         self.error = None;
+        self.retired = false;
     }
 
     pub(super) fn cancel(&mut self) {
@@ -67,7 +69,7 @@ impl RootStats {
     }
 
     fn prepare(&mut self) -> Option<Read> {
-        if self.in_flight || self.error.is_some() || self.next == self.roots.len() {
+        if self.in_flight || self.retired || self.error.is_some() || self.next == self.roots.len() {
             return None;
         }
         self.in_flight = true;
@@ -101,11 +103,14 @@ impl RootStats {
         if !self.current(&read) || self.error.is_some() {
             return;
         }
-        if read.query.stamp(response.revisions) != read.query.stamp(revisions(self.revision)) {
-            self.fail(
-                &read,
-                "Library changed while reading root statistics".into(),
-            );
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (matches!(&response.result, Ok(ViewResponse::LibraryRootStats(_)))
+            && read.query.stamp(response.revisions) != read.query.stamp(revisions(self.revision)))
+        {
+            self.owner.cancel();
+            self.retired = true;
             return;
         }
         match response.result {
@@ -208,11 +213,17 @@ impl Settings {
                 )
                 .into();
         }
-        self.tr(if self.root_stats.error.is_some() {
-            "settings-library-root-stats-unavailable"
-        } else {
-            "settings-library-root-stats-loading"
-        })
+        self.tr(
+            if self.root_stats.error.is_some() || self.root_stats.retired {
+                "settings-library-root-stats-unavailable"
+            } else {
+                "settings-library-root-stats-loading"
+            },
+        )
+    }
+
+    pub(super) fn root_stats_retryable(&self) -> bool {
+        self.root_stats.error.is_some() || self.root_stats.retired
     }
 
     pub(super) fn root_stats_error(&self) -> Option<&str> {
@@ -314,6 +325,45 @@ mod tests {
     }
 
     #[test]
+    fn obsolete_statistics_park_quietly_and_resume_on_retry_or_authority() {
+        for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+            for explicit in [false, true] {
+                let mut stats = RootStats::default();
+                let roots = vec!["/music".into()];
+                stats.sync(&roots, 7);
+                let old = stats.prepare().unwrap();
+                stats.complete(
+                    old,
+                    QueryResponse {
+                        revisions: Default::default(),
+                        result: Err(error.clone()),
+                    },
+                );
+                assert!(stats.retired);
+                assert!(!stats.in_flight);
+                assert!(stats.error.is_none());
+                for _ in 0..3 {
+                    assert!(!stats.sync(&roots, 7));
+                    assert!(stats.prepare().is_none());
+                }
+                let revision = if explicit {
+                    stats.retry();
+                    7
+                } else {
+                    stats.sync(&roots, 8);
+                    8
+                };
+                let next = stats.prepare().unwrap();
+                let loaded = response(&next, revision, 3);
+                stats.complete(next, loaded);
+                assert_eq!(stats.values[std::path::Path::new("/music")].total, 3);
+                assert!(stats.prepare().is_none());
+                assert!(!stats.retired);
+            }
+        }
+    }
+
+    #[test]
     fn root_stats_reject_worker_revisions_and_busy_failures() {
         let mut stats = RootStats::default();
         stats.sync(&["/music".into()], 1);
@@ -321,7 +371,8 @@ mod tests {
         let stale = response(&read, 2, 99);
         stats.complete(read, stale);
         assert!(stats.values.is_empty());
-        assert!(stats.error.is_some());
+        assert!(stats.error.is_none());
+        assert!(stats.retired);
         assert!(!stats.in_flight);
         assert!(stats.prepare().is_none());
 

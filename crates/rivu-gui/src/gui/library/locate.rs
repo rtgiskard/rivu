@@ -3,7 +3,7 @@ use gpui::{Context, ScrollStrategy, Window};
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{DirectoryRow, LibraryLocateResult, Query},
-    response::{QueryRevisions, ViewResponse},
+    response::{QueryError, QueryRevisions, ViewResponse},
 };
 use std::time::{Duration, Instant};
 
@@ -243,6 +243,7 @@ impl Library {
                         });
                         break;
                     }
+                    Err(QueryError::RevisionChanged | QueryError::Cancelled) => break,
                     Err(error) => {
                         let _ = this.update(cx, |this, cx| {
                             if !request.current(this) {

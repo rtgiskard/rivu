@@ -306,7 +306,7 @@ impl Settings {
                             )
                             .tooltip(text_tooltip(self.tr("settings-library-folders-add-hint"))),
                     )
-                    .when(self.root_stats_error().is_some(), |header| {
+                    .when(self.root_stats_retryable(), |header| {
                         header.child(button(
                             "settings-root-stats-retry",
                             self.tr("settings-retry-statistics"),

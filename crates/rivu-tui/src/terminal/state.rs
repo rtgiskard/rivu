@@ -176,6 +176,7 @@ impl Details {
 pub(super) enum DetailState {
     #[default]
     Loading,
+    Retired,
     Ready(Arc<rivu_protocol::model::Track>),
     Removed,
     Error(Arc<str>),
@@ -1183,6 +1184,10 @@ impl UiState {
         *self.failure_slot(request.demand.kind()) = Some(request.demand.clone());
         // An obsolete demand is parked quietly until its identity or freshness changes.
         if matches!(error, QueryError::RevisionChanged | QueryError::Cancelled) {
+            if self.details_active {
+                self.details.state = DetailState::Retired;
+                self.mark_local_change();
+            }
             return false;
         }
         let message = error.to_string();
@@ -1235,8 +1240,7 @@ impl UiState {
             .tracker
             .accepts_submission(request.submission, result.revisions)
         {
-            self.reads.requested = None;
-            return false;
+            return self.fail_query(request, QueryError::RevisionChanged);
         }
         if self.details_active {
             if !self.details.accept(request.demand.stamp, result.view) {

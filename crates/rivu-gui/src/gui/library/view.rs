@@ -240,6 +240,7 @@ impl Library {
                                 status,
                             } => {
                                 let failed = status == BranchStatus::Error;
+                                let retired = status == BranchStatus::Retired;
                                 let placeholder = rivu_ui::tree_row(
                                     theme,
                                     gpui::ElementId::named_usize("library-loading", index),
@@ -263,12 +264,12 @@ impl Library {
                                                 .h_full()
                                                 .pl(gpui::rems(depth as f32 * 1.25))
                                                 .child(
-                                                    rivu_ui::caption(theme, this.tr(if failed { "gl-unavailable" } else { "shell-loading" }))
-                                                        .when(!this.loading_text.show(&branch, failed), |text| text.invisible())
+                                                    rivu_ui::caption(theme, if retired { "".into() } else { this.tr(if failed { "gl-unavailable" } else { "shell-loading" }) })
+                                                        .when(!this.loading_text.show(&branch, failed || retired), |text| text.invisible())
                                                         .min_w_0()
                                                         .truncate(),
                                                 )
-                                                .when(failed, |view| {
+                                                .when(failed || retired, |view| {
                                                     view.child(
                                                         IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                                             this.library.retry_directory(&branch);
@@ -302,7 +303,7 @@ impl Library {
                                     BranchStatus::Loading => this.i18n.text("shell-loading").to_owned(),
                                     BranchStatus::Empty => this.i18n.text("gl-empty").to_owned(),
                                     BranchStatus::Error => this.i18n.text("gl-unavailable").to_owned(),
-                                    BranchStatus::Unloaded | BranchStatus::Ready => {
+                                    BranchStatus::Unloaded | BranchStatus::Ready | BranchStatus::Retired => {
                                         String::new()
                                     }
                                 };
@@ -330,11 +331,12 @@ impl Library {
                             node => this.library.selected_nodes().contains(node),
                         };
                         let id = node;
-                        let retry_counts = match entry {
+                        let count_failed = match entry {
                             DirectoryRow::OtherTracks => this.library.other_count_failed(),
                             DirectoryRow::Directory { path } => this.library.root_count_failed(path),
                             DirectoryRow::Track(_) => false,
                         };
+                        let retry_counts = count_failed || this.library.root_counts_retired();
                         let scan = path.map(|scan_path| {
                             let scan_path = scan_path.clone();
                             let hint = if retry_counts {
@@ -343,7 +345,7 @@ impl Library {
                                 this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                             };
                             IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
-                                if this.library.root_count_failed(&scan_path) {
+                                if this.library.root_count_failed(&scan_path) || this.library.root_counts_retired() {
                                     this.library.retry_root_counts();
                                     this.request_root_counts(cx);
                                 } else {
@@ -356,7 +358,7 @@ impl Library {
                                     );
                                 }
                             }, inline_action)
-                            .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
+                            .when(count_failed, |view| view.text_color(gpui::rgb(theme.error)))
                         }).or_else(|| matches!(entry, DirectoryRow::OtherTracks).then(|| {
                             let hint = if retry_counts {
                                 "gl-retry-other-counts"
@@ -368,14 +370,14 @@ impl Library {
                             IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint))
                                 .enabled(retry_counts || !this.state.system.scanning)
                                 .build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
-                                    if this.library.other_count_failed() {
+                                    if this.library.other_count_failed() || this.library.root_counts_retired() {
                                         this.library.retry_root_counts();
                                         this.request_root_counts(cx);
                                     } else {
                                         this.send(Command::CheckOtherTracks { force: this.library.force_scan() }, cx);
                                     }
                                 }, inline_action)
-                                .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
+                                .when(count_failed, |view| view.text_color(gpui::rgb(theme.error)))
                         }));
                         let title = gpui::SharedString::from(title);
                         let name_content = row()

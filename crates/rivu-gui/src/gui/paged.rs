@@ -15,6 +15,7 @@ pub(super) struct PagedRows<T> {
     pinned: Option<usize>,
     pending: Option<usize>,
     failures: BTreeMap<usize, String>,
+    retired: bool,
 }
 
 impl<T> Default for PagedRows<T> {
@@ -28,6 +29,7 @@ impl<T> Default for PagedRows<T> {
             pending: None,
             failures: BTreeMap::new(),
             pinned: None,
+            retired: false,
         }
     }
 }
@@ -70,6 +72,7 @@ impl<T> PagedRows<T> {
         *self = Self::default();
     }
     pub(super) fn invalidate(&mut self) {
+        self.retired = false;
         self.total = None;
         self.layout_len = self.layout_len.max(1);
         if self.visible.is_empty() {
@@ -86,6 +89,7 @@ impl<T> PagedRows<T> {
     }
     /// Discard stale technical fields without changing list identity or geometry.
     pub(super) fn invalidate_payload(&mut self) {
+        self.retired = false;
         self.clear_pages();
     }
     /// Change batch boundaries without invalidating current counts or selection position.
@@ -103,6 +107,11 @@ impl<T> PagedRows<T> {
     /// The consumer owns generation checks and retains its physical worker gate.
     pub(super) fn cancel_pending(&mut self) {
         self.pending = None;
+    }
+    /// Core rejected this snapshot. Quietly park demand until fresh authority or Retry.
+    pub(super) fn retire_pending(&mut self) {
+        self.pending = None;
+        self.retired = true;
     }
     pub(super) fn accept(&mut self, page: Page<T>) {
         let Some(offset) = self.pending.take() else {
@@ -135,14 +144,19 @@ impl<T> PagedRows<T> {
             .get(&(index / self.page_size * self.page_size))
             .map(String::as_str)
     }
+    pub(super) fn retired(&self) -> bool {
+        self.retired
+    }
+
     pub(super) fn retry(&mut self) {
         self.failures.clear();
+        self.retired = false;
     }
     pub(super) fn demand(&mut self, range: Range<usize>, page_size: usize) -> Option<usize> {
         self.configure_page_size(page_size);
         self.visible = range;
         self.trim();
-        if self.pending.is_some() || self.visible.is_empty() {
+        if self.retired || self.pending.is_some() || self.visible.is_empty() {
             return None;
         }
         let total = self.len();
@@ -206,6 +220,26 @@ mod tests {
             rows: (offset..(offset + 20).min(total)).collect(),
         });
     }
+    #[test]
+    fn retired_page_keeps_rows_and_geometry_without_replaying_unchanged_demand() {
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 100);
+        rows.begin(20, 20);
+        rows.retire_pending();
+        assert_eq!(rows.get(3), Some(&3));
+        assert_eq!(rows.total(), Some(100));
+        assert!(rows.error(20).is_none());
+        assert_eq!(rows.demand(20..40, 20), None);
+        rows.configure_page_size(10);
+        assert_eq!(rows.demand(20..40, 10), None);
+        rows.retry();
+        assert_eq!(rows.demand(20..40, 10), Some(20));
+        rows.begin(20, 10);
+        rows.retire_pending();
+        rows.invalidate();
+        assert_eq!(rows.demand(20..40, 10), Some(20));
+    }
+
     #[test]
     fn distant_scroll_and_return_preserve_absolute_positions_with_bounded_payload() {
         let mut rows = PagedRows::default();

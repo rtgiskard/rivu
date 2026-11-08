@@ -10,7 +10,7 @@ use rivu_protocol::{
         Command, DuplicateGroup, DuplicateMember, Page, Query, RelocationPhase,
         RelocationTaskStatus,
     },
-    response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
+    response::{Ack, QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
@@ -264,6 +264,7 @@ impl DuplicateReview {
                     TaskReadOutcome::Ignored
                 }
             }
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => TaskReadOutcome::Ignored,
             result => {
                 self.busy = None;
                 self.feedback = Some(match result {
@@ -466,11 +467,19 @@ impl DuplicateReview {
         response: QueryResponse,
         revisions: QueryRevisions,
     ) -> bool {
-        if !self.accepts_groups(epoch, query, generation, response.revisions) {
-            if self.groups_projection.generation() == generation {
-                self.groups_dirty = true;
-            }
+        if !self.accepts_groups(epoch, query, generation, revisions) {
             return false;
+        }
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (matches!(&response.result, Ok(ViewResponse::DuplicateGroups(_)))
+            && !self.accepts_groups(epoch, query, generation, response.revisions))
+        {
+            self.groups_projection.cancel();
+            self.groups_dirty = false;
+            self.groups_failed = true;
+            return true;
         }
         match response.result {
             Ok(ViewResponse::DuplicateGroups(page)) => {
@@ -500,15 +509,32 @@ impl DuplicateReview {
         revisions: QueryRevisions,
     ) -> bool {
         let (response, existence, selected) = result;
-        let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
-            query.stamp(selected.revisions) == query.stamp(response.revisions)
-        });
-        if !selected_current || !self.accepts_members(epoch, query, generation, response.revisions)
-        {
-            if self.members_projection.generation() == generation {
-                self.members_dirty = true;
-            }
+        if !self.accepts_members(epoch, query, generation, revisions) {
             return false;
+        }
+        let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
+            !matches!(&selected.result, Ok(ViewResponse::DuplicateMembers(_)))
+                || query.stamp(selected.revisions) == query.stamp(response.revisions)
+        });
+        let obsolete = matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || selected.as_ref().is_some_and(|(selected, _)| {
+            matches!(
+                &selected.result,
+                Err(QueryError::RevisionChanged | QueryError::Cancelled)
+            )
+        });
+        if obsolete
+            || (matches!(&response.result, Ok(ViewResponse::DuplicateMembers(_)))
+                && (!selected_current
+                    || !self.accepts_members(epoch, query, generation, response.revisions)))
+        {
+            self.members_projection.cancel();
+            self.members_dirty = false;
+            self.members_failed = true;
+            self.members_current = false;
+            return true;
         }
         let selected = match selected {
             Some((
@@ -1880,6 +1906,150 @@ mod tests {
     };
 
     #[test]
+    fn obsolete_review_reads_park_quietly_and_reopen_for_retry_or_revision() {
+        use rivu_protocol::response::QueryError;
+        for members in [false, true] {
+            for explicit in [false, true] {
+                for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                    let mut review = review();
+                    let revisions = QueryRevisions::default();
+                    let old = if members {
+                        review.request_members("fingerprint".into(), 0, revisions);
+                        let (read, _) = review.begin_members().unwrap();
+                        assert!(!review.members_worker_finished());
+                        assert!(review.accept_members(
+                            read.epoch,
+                            &read.query,
+                            read.generation,
+                            (
+                                QueryResponse {
+                                    revisions,
+                                    result: Ok(ViewResponse::DuplicateMembers(Page {
+                                        total: 1,
+                                        rows: Vec::new()
+                                    }))
+                                },
+                                Vec::new(),
+                                Some((
+                                    QueryResponse {
+                                        revisions,
+                                        result: Err(error.clone())
+                                    },
+                                    Vec::new()
+                                )),
+                            ),
+                            revisions
+                        ));
+                        read
+                    } else {
+                        review.request_groups(0, revisions);
+                        let read = review.begin_groups().unwrap();
+                        assert!(!review.groups_worker_finished());
+                        assert!(review.accept_groups(
+                            read.epoch,
+                            &read.query,
+                            read.generation,
+                            QueryResponse {
+                                revisions,
+                                result: Err(error.clone())
+                            },
+                            revisions
+                        ));
+                        read
+                    };
+                    assert!(review.feedback.is_none());
+                    assert!(!old.ticket.is_current());
+                    for _ in 0..3 {
+                        assert!(!review.sync_queries(revisions));
+                        assert!(review.begin_groups().is_none());
+                        assert!(review.begin_members().is_none());
+                    }
+                    let current = if explicit {
+                        if members {
+                            review.request_members("fingerprint".into(), 0, revisions);
+                        } else {
+                            review.request_groups(0, revisions);
+                        }
+                        revisions
+                    } else {
+                        let current = QueryRevisions {
+                            duplicate_groups: 1,
+                            duplicate_members: 1,
+                            ..revisions
+                        };
+                        review.sync_queries(current);
+                        current
+                    };
+                    if members {
+                        let (next, _) = review.begin_members().unwrap();
+                        assert!(!review.accept_members(
+                            old.epoch,
+                            &old.query,
+                            old.generation,
+                            (
+                                QueryResponse {
+                                    revisions,
+                                    result: Err(error.clone())
+                                },
+                                Vec::new(),
+                                None
+                            ),
+                            current
+                        ));
+                        assert!(!review.members_worker_finished());
+                        assert!(review.accept_members(
+                            next.epoch,
+                            &next.query,
+                            next.generation,
+                            (
+                                QueryResponse {
+                                    revisions: current,
+                                    result: Ok(ViewResponse::DuplicateMembers(Page {
+                                        total: 0,
+                                        rows: Vec::new()
+                                    }))
+                                },
+                                Vec::new(),
+                                None,
+                            ),
+                            current
+                        ));
+                        assert!(review.members_current);
+                    } else {
+                        let next = review.begin_groups().unwrap();
+                        assert!(!review.accept_groups(
+                            old.epoch,
+                            &old.query,
+                            old.generation,
+                            QueryResponse {
+                                revisions,
+                                result: Err(error.clone())
+                            },
+                            current
+                        ));
+                        assert!(!review.groups_worker_finished());
+                        assert!(review.accept_groups(
+                            next.epoch,
+                            &next.query,
+                            next.generation,
+                            QueryResponse {
+                                revisions: current,
+                                result: Ok(ViewResponse::DuplicateGroups(Page {
+                                    total: 0,
+                                    rows: Vec::new()
+                                }))
+                            },
+                            current
+                        ));
+                        assert_eq!(review.groups.as_ref().unwrap().total, 0);
+                    }
+                    assert!(review.feedback.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bitrate_change_reloads_only_members_preserving_choices_counts_and_worker_gates() {
         let mut review = ready_review();
         review.request_groups(12, QueryRevisions::default());
@@ -2674,7 +2844,7 @@ mod tests {
                 rows: vec![member(2, false).value],
             })),
         };
-        assert!(!review.accept_members(
+        assert!(review.accept_members(
             read.epoch,
             &read.query,
             read.generation,
@@ -2687,7 +2857,13 @@ mod tests {
         ));
         assert!(!review.members_current);
         assert!(review.members.is_empty());
-        assert!(review.members_dirty);
+        assert!(!review.members_dirty);
+        assert!(review.feedback.is_none());
+        assert!(review.begin_members().is_none());
+        review.sync_queries(QueryRevisions {
+            duplicate_members: 1,
+            ..revisions
+        });
         assert!(review.begin_members().is_some());
     }
 

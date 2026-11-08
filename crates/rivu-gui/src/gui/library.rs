@@ -556,7 +556,9 @@ impl Library {
             && matches!(
                 self.library.tree().item(index),
                 None | Some(TreeItem::Placeholder {
-                    status: tree::BranchStatus::Error | tree::BranchStatus::Empty,
+                    status: tree::BranchStatus::Error
+                        | tree::BranchStatus::Empty
+                        | tree::BranchStatus::Retired,
                     ..
                 })
             )

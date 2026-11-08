@@ -2,7 +2,7 @@ use crate::gui::{coordination::manual_actions::ManualIntentId, paged};
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{Query, QueryStamp, QueueRow},
-    response::{QueryRevisions, ViewResponse},
+    response::{QueryError, QueryRevisions, ViewResponse},
 };
 use std::{collections::HashMap, ops::Range};
 
@@ -185,6 +185,7 @@ pub(super) struct QueueBrowser {
     // Retained identities need relocation before their positions can authorize actions.
     positions_stale: bool,
     pub(super) selection_error: Option<String>,
+    pub(super) selection_retired: bool,
     pub(super) navigation: Option<usize>,
     pub(super) active: Option<QueueIdentity>,
     pub(super) pending: Option<QueueJob>,
@@ -268,6 +269,7 @@ impl QueueBrowser {
         self.pending = None;
         self.manual = None;
         self.selection_error = None;
+        self.selection_retired = false;
     }
     pub(in crate::gui) fn cancel_manual(&mut self) {
         if self.manual.is_some() {
@@ -276,7 +278,8 @@ impl QueueBrowser {
             self.pending = None;
             self.manual = None;
             // A manual action never owns reconciliation or its failure.
-            self.busy = self.positions_stale && self.selection_error.is_none();
+            self.busy =
+                self.positions_stale && self.selection_error.is_none() && !self.selection_retired;
             if !self.positions_stale {
                 self.selection_error = None;
             }
@@ -447,7 +450,7 @@ impl QueueBrowser {
         if self.sync(revisions, total) {
             return true;
         }
-        if self.selection_error.is_none() {
+        if self.selection_error.is_none() && !self.selection_retired {
             return false;
         }
         self.cancel();
@@ -475,10 +478,21 @@ impl QueueBrowser {
         response: rivu_protocol::response::QueryResponse,
         unexpected: impl FnOnce() -> String,
     ) {
-        if !self
-            .page_projection
-            .accepts(query, generation, response.revisions)
+        if self.page_projection.generation() != generation
+            || !self.page_projection.matches_identity(query)
         {
+            return;
+        }
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (matches!(&response.result, Ok(ViewResponse::QueuePage(_)))
+            && !self
+                .page_projection
+                .accepts(query, generation, response.revisions))
+        {
+            self.page_projection.cancel();
+            self.rows.retire_pending();
             return;
         }
         match response.result {
@@ -507,6 +521,7 @@ impl QueueBrowser {
         self.reconcile_projection.sync(&query, revisions);
         self.positions_stale = true;
         self.busy = true;
+        self.selection_retired = false;
         self.reconcile_pending = Some(QueueReconcileJob {
             ids,
             generation: self.reconcile_projection.generation(),
@@ -546,6 +561,15 @@ impl QueueBrowser {
         }
         true
     }
+    pub(super) fn retire_reconcile(&mut self, job: &QueueReconcileJob, revisions: QueryRevisions) {
+        if self.reconcile_current(job, revisions) {
+            self.busy = false;
+            self.selection_retired = true;
+            self.reconcile_projection.cancel();
+            self.reconcile_pending = None;
+        }
+    }
+
     pub(super) fn take_reconcile_job(&mut self) -> Option<QueueReconcileJob> {
         if self.worker.is_some() {
             return None;
@@ -614,6 +638,7 @@ impl QueueBrowser {
         self.busy = false;
         self.positions_stale = false;
         self.selection_error = None;
+        self.selection_retired = false;
         self.rows.pin(self.active().map(|row| row.offset));
     }
     pub(super) fn take_job(&mut self) -> Option<QueueJob> {
@@ -667,6 +692,102 @@ mod tests {
         model::{LibraryRow, Page, Query, QueueRow},
         response::QueryRevisions,
     };
+
+    #[test]
+    fn obsolete_pages_wait_for_retry_or_freshness_and_physical_completion() {
+        use rivu_protocol::response::{QueryError, QueryResponse, ViewResponse};
+        for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+            for explicit in [false, true] {
+                let mut queue = queue(7);
+                let (old, generation) = queue.demand_page(0..2, 20).unwrap();
+                queue.accept_page(
+                    &old,
+                    generation,
+                    QueryResponse {
+                        revisions: Default::default(),
+                        result: Err(error.clone()),
+                    },
+                    || "wrong response".into(),
+                );
+                assert!(queue.rows.retired());
+                assert!(queue.rows.error(0).is_none());
+                for _ in 0..3 {
+                    assert!(!queue.sync(revisions(7), 200_000));
+                    assert!(queue.demand_page(0..2, 20).is_none());
+                }
+                let current = if explicit {
+                    queue.retry_page(revisions(7), 200_000);
+                    revisions(7)
+                } else {
+                    queue.sync(revisions(8), 200_000);
+                    revisions(8)
+                };
+                assert!(queue.demand_page(0..2, 20).is_none());
+                queue.retire_page_worker();
+                let (next, next_generation) = queue.demand_page(0..2, 20).unwrap();
+                queue.accept_page(
+                    &old,
+                    generation,
+                    QueryResponse {
+                        revisions: current,
+                        result: Err(error.clone()),
+                    },
+                    || "wrong response".into(),
+                );
+                assert!(!queue.rows.retired());
+                queue.accept_page(
+                    &next,
+                    next_generation,
+                    QueryResponse {
+                        revisions: current,
+                        result: Ok(ViewResponse::QueuePage(Page {
+                            total: 1,
+                            rows: vec![row(1, 0)],
+                        })),
+                    },
+                    || "wrong response".into(),
+                );
+                queue.retire_page_worker();
+                assert_eq!(queue.rows.get(0).unwrap().id, 1);
+                assert!(queue.demand_page(0..1, 20).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn retired_reconciliation_keeps_identity_but_releases_only_at_completion() {
+        for explicit in [false, true] {
+            let mut queue = queue(7);
+            queue.select(identity(1, 3), false);
+            queue.sync(revisions(8), 20);
+            let old = queue.take_reconcile_job().unwrap();
+            queue.retire_reconcile(&old, revisions(8));
+            assert!(!queue.busy);
+            assert!(!queue.ready());
+            assert!(queue.selection_error.is_none());
+            assert!(queue.selected.contains_key(&1));
+            for _ in 0..3 {
+                queue.sync(revisions(8), 20);
+                assert!(queue.take_reconcile_job().is_none());
+            }
+            let current = if explicit {
+                assert!(queue.retry_selection(revisions(8), 20));
+                revisions(8)
+            } else {
+                queue.sync(revisions(9), 20);
+                revisions(9)
+            };
+            assert!(queue.take_reconcile_job().is_none());
+            queue.release_reconcile_worker(old.generation);
+            let next = queue.take_reconcile_job().unwrap();
+            queue.retire_reconcile(&old, current);
+            assert!(!queue.selection_retired);
+            assert!(queue.finish_reconcile(&next, current, Ok(vec![identity(1, 4)])));
+            queue.release_reconcile_worker(next.generation);
+            assert!(queue.ready());
+            assert_eq!(queue.active(), Some(identity(1, 4)));
+        }
+    }
 
     #[test]
     fn selection_releases_high_water_capacity_without_losing_owners() {
@@ -809,39 +930,70 @@ mod tests {
     }
 
     #[test]
-    fn queue_page_rejects_stale_bitrate_and_accepts_current_payload_unchanged() {
-        let mut queue = queue(7);
-        let mut latest = revisions(7);
-        latest.bitrate = 1;
-        queue.sync(latest, 200_000);
-        let (query, generation) = queue.demand_page(0..2, 20).unwrap();
-        let response = |revisions, row| rivu_protocol::response::QueryResponse {
-            revisions,
-            result: Ok(rivu_protocol::response::ViewResponse::QueuePage(Page {
-                total: 200_000,
-                rows: vec![row],
-            })),
-        };
-        queue.accept_page(
-            &query,
-            generation,
-            response(revisions(7), row(10, 0)),
-            || unreachable!(),
-        );
-        assert!(queue.rows.get(0).is_none());
-        let mut current = row(10, 0);
-        current.track.bitrate_bps = Some(192_000);
-        current.track.bitrate_exact = true;
-        queue.retire_page_worker();
-        queue.accept_page(
-            &query,
-            generation,
-            response(latest, current),
-            || unreachable!(),
-        );
-        let loaded = queue.rows.get(0).unwrap();
-        assert_eq!(loaded.track.bitrate_bps, Some(192_000));
-        assert!(loaded.track.bitrate_exact);
+    fn stale_bitrate_page_parks_until_retry_or_new_revision_then_accepts_current_payload() {
+        for explicit in [false, true] {
+            let mut queue = queue(7);
+            let mut latest = revisions(7);
+            latest.bitrate = 1;
+            queue.sync(latest, 200_000);
+            let (query, generation) = queue.demand_page(0..2, 20).unwrap();
+            let response = |revisions, row| rivu_protocol::response::QueryResponse {
+                revisions,
+                result: Ok(rivu_protocol::response::ViewResponse::QueuePage(Page {
+                    total: 200_000,
+                    rows: vec![row],
+                })),
+            };
+            queue.accept_page(
+                &query,
+                generation,
+                response(revisions(7), row(10, 0)),
+                || unreachable!(),
+            );
+            assert!(queue.rows.get(0).is_none());
+            assert!(queue.rows.error(0).is_none());
+            queue.retire_page_worker();
+            for _ in 0..3 {
+                assert!(!queue.sync(latest, 200_000));
+                assert!(queue.demand_page(0..2, 20).is_none());
+            }
+            if explicit {
+                queue.retry_page(latest, 200_000);
+            } else {
+                latest.bitrate += 1;
+                assert!(queue.sync(latest, 200_000));
+            }
+            let (next_query, next_generation) = queue.demand_page(0..2, 20).unwrap();
+            queue.accept_page(
+                &query,
+                generation,
+                response(latest, row(10, 0)),
+                || unreachable!(),
+            );
+            assert!(
+                queue.rows.get(0).is_none(),
+                "old completion cannot fill replacement demand"
+            );
+            let mut current = row(10, 0);
+            current.track.bitrate_bps = Some(192_000);
+            current.track.bitrate_exact = true;
+            queue.accept_page(
+                &next_query,
+                next_generation,
+                response(latest, current),
+                || unreachable!(),
+            );
+            queue.retire_page_worker();
+            queue.accept_page(
+                &query,
+                generation,
+                response(revisions(7), row(10, 0)),
+                || unreachable!(),
+            );
+            let loaded = queue.rows.get(0).unwrap();
+            assert_eq!(loaded.track.bitrate_bps, Some(192_000));
+            assert!(loaded.track.bitrate_exact);
+        }
     }
 
     #[test]

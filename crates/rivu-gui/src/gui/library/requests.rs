@@ -5,7 +5,7 @@ use crate::gui::library;
 use crate::test_support::ConfigFixture;
 use rivu_protocol::{
     model::Query,
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -80,6 +80,12 @@ impl Library {
     ) -> DirectoryRequest {
         if self.library.sync_projection(revisions) {
             self.requests.cancel_directory_demand();
+        }
+        if self.library.tree().status(&branch) == library::BranchStatus::Retired {
+            return DirectoryRequest {
+                published: false,
+                read: None,
+            };
         }
         let offset = offset / page_size * page_size;
         if self.requests.directory_workers.get(&branch).is_some_and(
@@ -203,14 +209,22 @@ impl Library {
         revisions: QueryRevisions,
         response: QueryResponse,
     ) -> Option<String> {
-        if !self.directory_read_current(read, revisions)
-            || !self.library.projection.accepts(
-                &read.owner_query,
-                read.owner_generation,
-                response.revisions,
-            )
-        {
+        if !self.directory_read_current(read, revisions) {
             self.library.cancel_directory(&read.branch, read.generation);
+            return None;
+        }
+        if matches!(
+            &response.result,
+            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+        ) || (matches!(
+            &response.result,
+            Ok(ViewResponse::DirectoryPage(_) | ViewResponse::LibraryPage(_))
+        ) && !self.library.projection.accepts(
+            &read.owner_query,
+            read.owner_generation,
+            response.revisions,
+        )) {
+            self.library.retire_directory(&read.branch, read.generation);
             return None;
         }
         let page = match response.result {
@@ -331,14 +345,19 @@ impl Library {
         {
             return None;
         }
-        if read.query.stamp(response.revisions) != read.query.stamp(revisions) {
-            self.library.fail_root_counts(read.generation, read.offset);
+        if matches!(&response.result, Ok(ViewResponse::LibraryRootCounts(_)))
+            && read.query.stamp(response.revisions) != read.query.stamp(revisions)
+        {
+            self.library.retire_root_counts(read.generation);
             return None;
         }
         match response.result {
             Ok(ViewResponse::LibraryRootCounts(counts)) => {
                 self.library
                     .accept_root_counts(read.generation, read.offset, counts)
+            }
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                self.library.retire_root_counts(read.generation);
             }
             Err(error) => {
                 self.library.fail_root_counts(read.generation, read.offset);
@@ -387,6 +406,178 @@ mod tests {
         };
         let owner = cx.new(|cx| Library::new(context, cx));
         owner.update(cx, |owner, cx| run(owner, cx));
+    }
+
+    #[gpui::test]
+    fn obsolete_directory_demand_parks_quietly_until_retry_or_fresh_authority(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            for explicit in [false, true] {
+                for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                    browser.library = Default::default();
+                    browser.requests = Default::default();
+                    let roots = vec!["/music".into()];
+                    let branch = root_branches(browser, &roots).remove(0);
+                    browser.library.expand_directory(&branch, true);
+                    let revisions = QueryRevisions::default();
+                    let old = browser
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .read
+                        .unwrap();
+                    assert!(
+                        browser
+                            .publish_directory_read(
+                                &old,
+                                revisions,
+                                QueryResponse {
+                                    revisions,
+                                    result: Err(error.clone())
+                                }
+                            )
+                            .is_none()
+                    );
+                    assert_eq!(
+                        browser.library.tree().status(&branch),
+                        library::BranchStatus::Retired
+                    );
+                    assert!(browser.requests.directory_workers.contains_key(&branch));
+                    for _ in 0..3 {
+                        assert!(
+                            browser
+                                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                                .read
+                                .is_none()
+                        );
+                    }
+                    let current = if explicit {
+                        browser.library.retry_directory(&branch);
+                        revisions
+                    } else {
+                        QueryRevisions {
+                            library: 1,
+                            ..revisions
+                        }
+                    };
+                    assert!(
+                        browser
+                            .prepare_directory_read(branch.clone(), 0, 20, &roots, current)
+                            .read
+                            .is_none()
+                    );
+                    assert!(browser.requests.directory_workers.contains_key(&branch));
+                    browser.complete_directory_read(
+                        &old,
+                        current,
+                        track_response(revisions, false),
+                    );
+                    let (next_branch, offset) = browser.next_directory_demand(true).unwrap();
+                    let next = browser
+                        .prepare_directory_read(next_branch, offset, 20, &roots, current)
+                        .read
+                        .unwrap();
+                    browser.publish_directory_read(
+                        &old,
+                        current,
+                        QueryResponse {
+                            revisions,
+                            result: Err(error.clone()),
+                        },
+                    );
+                    assert!(
+                        browser
+                            .library
+                            .tree()
+                            .request_pending(&branch, next.generation)
+                    );
+                    assert!(
+                        browser
+                            .complete_directory_read(&next, current, track_response(current, false))
+                            .is_none()
+                    );
+                    assert!(browser.library.tree().cached_row(&branch, 0).is_some());
+                    assert!(browser.requests.directory_workers.is_empty());
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn obsolete_root_counts_keep_worker_until_completion_and_resume_on_retry_or_revision(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            for explicit in [false, true] {
+                for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+                    browser.library = Default::default();
+                    browser.requests = Default::default();
+                    let roots = vec!["/music".into()];
+                    let revisions = QueryRevisions::default();
+                    let old = browser.prepare_root_count_read(&roots, 0).unwrap();
+                    assert!(
+                        browser
+                            .publish_root_count_read(
+                                &old,
+                                &roots,
+                                revisions,
+                                QueryResponse {
+                                    revisions,
+                                    result: Err(error.clone())
+                                }
+                            )
+                            .is_none()
+                    );
+                    assert!(browser.library.root_counts_retired());
+                    assert!(!browser.library.root_count_failed(&roots[0]));
+                    for _ in 0..3 {
+                        assert!(browser.prepare_root_count_read(&roots, 0).is_none());
+                    }
+                    let current = if explicit {
+                        browser.library.retry_root_counts();
+                        revisions
+                    } else {
+                        QueryRevisions {
+                            structure: 1,
+                            ..revisions
+                        }
+                    };
+                    assert!(
+                        browser
+                            .prepare_root_count_read(&roots, current.structure)
+                            .is_none()
+                    );
+                    browser.retire_root_count_read(&old);
+                    let next = browser
+                        .prepare_root_count_read(&roots, current.structure)
+                        .unwrap();
+                    browser.publish_root_count_read(
+                        &old,
+                        &roots,
+                        current,
+                        QueryResponse {
+                            revisions,
+                            result: Err(error.clone()),
+                        },
+                    );
+                    assert!(!browser.library.root_counts_retired());
+                    browser.complete_root_count_read(
+                        next,
+                        &roots,
+                        current,
+                        QueryResponse {
+                            revisions: current,
+                            result: Ok(ViewResponse::LibraryRootCounts(vec![
+                                rivu_protocol::model::LibraryRootCount {
+                                    path: roots[0].clone(),
+                                    total: 3,
+                                },
+                            ])),
+                        },
+                    );
+                    assert_eq!(browser.library.root_count(&roots[0]), Some(3));
+                }
+            }
+        });
     }
 
     #[gpui::test]

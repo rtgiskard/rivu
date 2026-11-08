@@ -117,6 +117,7 @@ pub(in crate::gui) enum BranchStatus {
     Ready,
     Empty,
     Error,
+    Retired,
 }
 
 struct Branch {
@@ -128,6 +129,7 @@ struct Branch {
     layout_len: usize,
     expanded: bool,
     pending: Option<(usize, u64)>,
+    retired: bool,
     // Only expanded children need positional anchors. They remain renderable
     // when their parent's payload page is evicted.
     children: BTreeMap<usize, TreeBranch>,
@@ -144,6 +146,7 @@ impl Default for Branch {
             layout_len: 1,
             expanded: false,
             pending: None,
+            retired: false,
             children: BTreeMap::new(),
             stale_children: HashSet::new(),
         }
@@ -303,6 +306,9 @@ impl DirectoryTree {
     }
 
     pub(in crate::gui) fn retry(&mut self, key: &TreeBranch) {
+        if let Some(branch) = self.branches.get_mut(key) {
+            branch.retired = false;
+        }
         self.pages
             .retain(|(candidate, _), page| candidate != key || !page.failed);
         self.reclaim_branches();
@@ -320,6 +326,14 @@ impl DirectoryTree {
         {
             branch.pending = None;
             self.reclaim_branches();
+        }
+    }
+    pub(super) fn retire_request(&mut self, key: &TreeBranch, generation: u64) {
+        if let Some(branch) = self.branches.get_mut(key)
+            && branch.pending.is_some_and(|(_, token)| token == generation)
+        {
+            branch.pending = None;
+            branch.retired = true;
         }
     }
 
@@ -586,6 +600,9 @@ impl DirectoryTree {
     /// Retire track payloads, never counts, ancestry or selection.
     pub(super) fn invalidate_payloads(&mut self) -> bool {
         let mut changed = false;
+        for branch in self.branches.values_mut() {
+            branch.retired = false;
+        }
         for page in self.pages.values_mut() {
             if !page.stale_tracks
                 && page
@@ -610,6 +627,7 @@ impl DirectoryTree {
         self.focused = None;
         for branch in self.branches.values_mut() {
             branch.pending = None;
+            branch.retired = false;
             branch.total = None;
             branch.layout_len = branch.layout_len.max(1);
             branch.stale_children = branch.children.keys().copied().collect();
@@ -709,6 +727,8 @@ impl DirectoryTree {
         };
         if branch.pending.is_some() {
             BranchStatus::Loading
+        } else if branch.retired {
+            BranchStatus::Retired
         } else if branch.total == Some(0) {
             BranchStatus::Empty
         } else if self
@@ -903,24 +923,30 @@ impl DirectoryTree {
         } else {
             let mut ancestor_failure = None;
             self.visit_stale_ancestors(&segment.branch, |parent, offset| {
+                if self.status(parent) == BranchStatus::Retired {
+                    ancestor_failure = Some((parent.clone(), offset, BranchStatus::Retired));
+                    return;
+                }
                 if self
                     .pages
                     .get(&(parent.clone(), offset))
                     .is_some_and(|page| page.failed)
                 {
-                    ancestor_failure = Some((parent.clone(), offset));
+                    ancestor_failure = Some((parent.clone(), offset, BranchStatus::Error));
                 }
             });
-            if let Some((branch, offset)) = ancestor_failure {
+            if let Some((branch, offset, status)) = ancestor_failure {
                 return Some(TreeItem::Placeholder {
                     branch,
                     offset,
                     depth: segment.depth,
-                    status: BranchStatus::Error,
+                    status,
                 });
             }
             let status = if cached.is_some_and(|page| page.failed) {
                 BranchStatus::Error
+            } else if self.status(&segment.branch) == BranchStatus::Retired {
+                BranchStatus::Retired
             } else if self
                 .branches
                 .get(&segment.branch)
@@ -1050,7 +1076,7 @@ impl DirectoryTree {
                     || self
                         .branches
                         .get(key)
-                        .is_some_and(|branch| branch.pending.is_some())
+                        .is_some_and(|branch| branch.pending.is_some() || branch.retired)
                 {
                     return false;
                 }

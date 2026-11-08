@@ -3,7 +3,7 @@ use super::{Queue, QueueCommit, QueueEvent, QueueIdentity, QueueSelectionRequest
 use gpui::{Context, Window};
 use rivu_protocol::{
     model::{Page, Query},
-    response::ViewResponse,
+    response::{QueryError, ViewResponse},
 };
 use std::{ops::Range, time::Duration};
 
@@ -137,6 +137,9 @@ impl Queue {
                                     this.context.i18n.text("gl-queue-locate-missing").to_owned(),
                                 ));
                             }
+                        }
+                        Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                            this.model.locate.invalidate();
                         }
                         Err(error) => cx.emit(QueueEvent::Error(error.to_string())),
                         _ => {
@@ -285,12 +288,19 @@ impl Queue {
                         },
                     )
                     .await;
-                    if (Query::QueueEntries {
-                        query: job.query.clone(),
-                        queue_ids: Vec::new(),
-                    })
-                    .stamp(response.revisions)
-                        != job.stamp
+                    if matches!(
+                        &response.result,
+                        Err(QueryError::RevisionChanged | QueryError::Cancelled)
+                    ) {
+                        return Ok(None);
+                    }
+                    if matches!(&response.result, Ok(ViewResponse::QueueEntries(_)))
+                        && (Query::QueueEntries {
+                            query: job.query.clone(),
+                            queue_ids: Vec::new(),
+                        })
+                        .stamp(response.revisions)
+                            != job.stamp
                     {
                         return Ok(None);
                     }
@@ -328,9 +338,9 @@ impl Queue {
                             );
                             cx.emit(QueueEvent::Error(error));
                         }
-                        Ok(None) => {
-                            // A newer snapshot will schedule fresh reconciliation.
-                        }
+                        Ok(None) => this
+                            .model
+                            .retire_reconcile(&job, this.state.query_revisions(None)),
                     }
                 }
                 this.dispatch_queue_selection(cx);
@@ -584,15 +594,22 @@ impl Queue {
                             },
                         )
                         .await;
-                        if (Query::QueuePage {
-                            query: job.query.clone(),
-                            offset: 0,
-                            limit: 1,
-                        })
-                        .stamp(response.revisions)
-                            != job.stamp
+                        if matches!(
+                            &response.result,
+                            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+                        ) {
+                            return Ok(None);
+                        }
+                        if matches!(&response.result, Ok(ViewResponse::QueuePage(_)))
+                            && (Query::QueuePage {
+                                query: job.query.clone(),
+                                offset: 0,
+                                limit: 1,
+                            })
+                            .stamp(response.revisions)
+                                != job.stamp
                         {
-                            return Err(i18n.text("gl-queue-changed").into());
+                            return Ok(None);
                         }
                         let ViewResponse::QueuePage(page) =
                             response.result.map_err(|error| error.to_string())?
@@ -658,15 +675,22 @@ impl Queue {
                             },
                         )
                         .await;
-                        if (Query::QueuePage {
-                            query: job.query.clone(),
-                            offset: 0,
-                            limit: 1,
-                        })
-                        .stamp(response.revisions)
-                            != job.stamp
+                        if matches!(
+                            &response.result,
+                            Err(QueryError::RevisionChanged | QueryError::Cancelled)
+                        ) {
+                            return Ok(None);
+                        }
+                        if matches!(&response.result, Ok(ViewResponse::QueuePage(_)))
+                            && (Query::QueuePage {
+                                query: job.query.clone(),
+                                offset: 0,
+                                limit: 1,
+                            })
+                            .stamp(response.revisions)
+                                != job.stamp
                         {
-                            return Err(i18n.text("gl-queue-changed").into());
+                            return Ok(None);
                         }
                         let ViewResponse::QueuePage(Page { rows: page, total }) =
                             response.result.map_err(|error| error.to_string())?
@@ -715,7 +739,10 @@ impl Queue {
                             cx.emit(QueueEvent::SelectionFailed(job.intent));
                             cx.emit(QueueEvent::Error(message));
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            this.model.cancel_manual();
+                            cx.emit(QueueEvent::SelectionFailed(job.intent));
+                        }
                     }
                 }
                 this.dispatch_queue_selection(cx);

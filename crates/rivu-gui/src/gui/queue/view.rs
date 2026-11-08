@@ -213,6 +213,21 @@ impl Queue {
         });
         let tools = rivu_ui::panel_header_actions()
             .child(self.queue_search.clone())
+            .when(self.model.rows.retired(), |actions| {
+                actions.child(
+                    IconButton::new(
+                        ("queue-retired-retry", panel_id),
+                        "󰑐",
+                        self.tr("gl-retry-loading"),
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| this.retry_queue_page(cx),
+                    ),
+                )
+            })
             .child(
                 IconButton::new(
                     ("queue-locate-playing", panel_id),
@@ -250,26 +265,31 @@ impl Queue {
                     .truncate()
                     .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
-            .when(self.model.selection_error.is_some(), |status| {
-                status.child(
-                    IconButton::new(
-                        ("queue-selection-retry", panel_id),
-                        "󰑐",
-                        self.tr("gl-retry-selection"),
+            .when(
+                self.model.selection_error.is_some() || self.model.selection_retired,
+                |status| {
+                    status.child(
+                        IconButton::new(
+                            ("queue-selection-retry", panel_id),
+                            "󰑐",
+                            self.tr("gl-retry-selection"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, _, cx| {
+                                if this.model.selection_error.is_some()
+                                    || this.model.selection_retired
+                                {
+                                    this.refresh_queue(cx);
+                                    cx.notify();
+                                }
+                            },
+                        ),
                     )
-                    .build(
-                        IconButtonStyle::Surface,
-                        IconButtonDensity::Regular,
-                        cx,
-                        |this, _, cx| {
-                            if this.model.selection_error.is_some() {
-                                this.refresh_queue(cx);
-                                cx.notify();
-                            }
-                        },
-                    ),
-                )
-            });
+                },
+            );
         let scroll = self.context.scroll.borrow_mut().list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);
         Self::queue_append_drop_target(panel_surface(("queue-panel", panel_id)), cx)
@@ -305,7 +325,9 @@ impl Queue {
                 ))
             })
             .when(
-                self.model.busy || self.model.selection_error.is_some(),
+                self.model.busy
+                    || self.model.selection_error.is_some()
+                    || self.model.selection_retired,
                 |panel| panel.child(status),
             )
             .when(

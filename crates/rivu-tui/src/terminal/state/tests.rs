@@ -808,11 +808,12 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     assert!(!tui.ui.apply_query(&state, &request, Ok(stale)));
     assert!(tui.ui.queue.pages.is_empty());
     assert!(tui.ui.reads.requested.is_none());
-    assert!(tui.ui.apply_query(
+    assert!(!tui.ui.apply_query(
         &state,
         &request,
-        Err(QueryError::Message("queue unavailable".into()))
+        Err(QueryError::Message("late queue failure".into()))
     ));
+    assert!(tui.ui.message.is_none());
     assert!(tui.ui.query_request(&state).is_none());
     for key in [
         KeyEvent::from(KeyCode::F(5)),
@@ -2828,24 +2829,44 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
 }
 
 #[test]
-fn bitrate_stale_or_future_response_stamps_retire_and_retry() {
+fn bitrate_stale_or_future_response_stamps_park_until_retry_or_new_revision() {
     for baseline in [0, 2] {
-        let mut state = query_snapshot();
-        state.library.bitrate_revision = 1;
-        let mut ui = UiState::default();
-        let request = ui.query_request(&state).unwrap();
-        ui.reads.requested = Some(request.clone());
-        let mut stale = response(&request, 12);
-        stale.revisions.bitrate = baseline;
-        assert!(!ui.apply_query(&state, &request, Ok(stale)));
-        assert!(ui.queue.pages.is_empty());
-        assert!(ui.reads.requested.is_none());
-        assert!(ui.view.failure(&ui.queue, false).is_none());
-        let retry = ui.query_request(&state).unwrap();
-        assert_eq!(retry.demand.stamp, request.demand.stamp);
-        let mut fresh = response(&retry, 12);
-        fresh.revisions.bitrate = state.library.bitrate_revision;
-        assert!(ui.apply_query(&state, &retry, Ok(fresh)));
+        for explicit in [false, true] {
+            let mut state = query_snapshot();
+            state.library.bitrate_revision = 1;
+            let mut ui = UiState::default();
+            let request = ui.query_request(&state).unwrap();
+            let mut stale = response(&request, 12);
+            stale.revisions.bitrate = baseline;
+            assert!(!ui.apply_query(&state, &request, Ok(stale)));
+            assert!(ui.queue.pages.is_empty());
+            assert!(ui.reads.requested.is_none());
+            assert!(ui.message.is_none());
+            for _ in 0..3 {
+                assert!(
+                    ui.query_request(&state).is_none(),
+                    "unchanged stale demand must remain parked"
+                );
+            }
+            if explicit {
+                ui.cancel_query();
+            } else {
+                state.library.bitrate_revision += 1;
+            }
+            let retry = ui.query_request(&state).unwrap();
+            if explicit {
+                assert_eq!(retry.demand.stamp, request.demand.stamp);
+            } else {
+                assert_ne!(retry.demand.stamp, request.demand.stamp);
+            }
+            assert!(!ui.apply_query(&state, &request, Ok(response(&request, 12))));
+            assert_eq!(ui.reads.requested, Some(retry.clone()));
+            let mut fresh = response(&retry, 12);
+            fresh.revisions.bitrate = state.library.bitrate_revision;
+            assert!(ui.apply_query(&state, &retry, Ok(fresh)));
+            assert!(!ui.queue.pages.is_empty());
+            assert!(ui.message.is_none());
+        }
     }
 }
 
@@ -3319,7 +3340,9 @@ fn obsolete_query_errors_park_quietly_until_freshness_changes() {
                 ui.query_request(&state).is_none(),
                 "same stale demand must not spin"
             );
-            assert!(!matches!(ui.details.state, DetailState::Error(_)));
+            if details {
+                assert!(matches!(ui.details.state, DetailState::Retired));
+            }
             state.library.revision += 1;
             if !details {
                 *Arc::make_mut(&mut state.library.playlist_entry_revisions)
@@ -3338,6 +3361,35 @@ fn obsolete_query_errors_park_quietly_until_freshness_changes() {
             }
         }
     }
+}
+
+#[test]
+fn retired_details_explicit_request_reopens_without_accepting_old_completion() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        details_active: true,
+        ..Default::default()
+    };
+    ui.details.target = Some(1);
+    let old = ui.query_request(&state).unwrap();
+    assert!(!ui.apply_query(&state, &old, Err(QueryError::Cancelled)));
+    assert!(matches!(ui.details.state, DetailState::Retired));
+    assert!(ui.query_request(&state).is_none());
+    ui.cancel_query();
+    let next = ui.query_request(&state).unwrap();
+    assert!(matches!(ui.details.state, DetailState::Loading));
+    assert!(!ui.apply_query(&state, &old, Err(QueryError::RevisionChanged)));
+    assert_eq!(ui.reads.requested, Some(next.clone()));
+    assert!(ui.apply_query(
+        &state,
+        &next,
+        Ok(QueryResult {
+            revisions: next.demand.stamp.revisions(),
+            view: ViewResponse::Track(Some(full_track(1))),
+        })
+    ));
+    assert!(matches!(&ui.details.state, DetailState::Ready(track) if track.id == 1));
+    assert!(ui.query_request(&state).is_none());
 }
 
 #[test]
@@ -3624,7 +3676,7 @@ fn iteration_quiet_failed_details_stay_parked_through_unrelated_source_updates()
                     "unchanged quiet details failure must stay parked: source={source}, page_size={page_size}"
                 );
                 assert!(tui.ui.message.is_none());
-                assert!(matches!(tui.ui.details.state, DetailState::Loading));
+                assert!(matches!(tui.ui.details.state, DetailState::Retired));
                 next.library.bitrate_revision += 1;
                 tui.apply_snapshot(next.clone());
                 let fresh = tui

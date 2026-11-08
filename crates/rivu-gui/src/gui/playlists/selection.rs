@@ -7,7 +7,7 @@ use crate::gui::coordination::manual_actions::ManualIntentId;
 use gpui::Context;
 use rivu_protocol::{
     model::{Command, Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
-    response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
+    response::{PlaylistEntryRevision, QueryError, QueryRevisions, ViewResponse},
 };
 use std::collections::HashMap;
 
@@ -138,6 +138,7 @@ struct EntryNavigationRange {
 enum EntryNavigationEffect {
     None,
     Reload,
+    Retired,
     Failed(String),
     Selected {
         target: EntryIdentity,
@@ -155,6 +156,7 @@ pub(in crate::gui) struct EntrySelection {
     navigation_projection: rivu_protocol::query_tracking::QueryTracker,
     pub(in crate::gui) busy: bool,
     pub(in crate::gui) error: Option<String>,
+    pub(in crate::gui) retired: bool,
     navigation: Option<EntryNavigationJob>,
     navigation_target: Option<(EntryNavigationScope, usize)>,
     // Logical cancellation skips queued reads; dispatched reads retain the gate.
@@ -232,7 +234,7 @@ impl EntrySelection {
         self.selected.contains_key(&id)
     }
     pub(in crate::gui) fn ready(&self) -> bool {
-        !self.busy && self.error.is_none()
+        !self.busy && self.error.is_none() && !self.retired
     }
     pub(in crate::gui) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
@@ -241,6 +243,7 @@ impl EntrySelection {
         self.refresh_pending = false;
         self.busy = false;
         self.error = None;
+        self.retired = false;
         // The physical worker owns its gate until completion, including after a switch.
         self.navigation = None;
         self.navigation_target = None;
@@ -370,6 +373,11 @@ impl EntrySelection {
         ids.sort_unstable_by_key(|id| self.selected[id].position);
         ids
     }
+    fn retire(&mut self) {
+        self.cancel();
+        self.retired = true;
+    }
+
     fn fail(&mut self, message: String) {
         self.busy = false;
         self.error = Some(message);
@@ -416,6 +424,7 @@ impl EntrySelection {
         self.reclaim_selection_capacity(self.selected.len());
         self.busy = false;
         self.error = None;
+        self.retired = false;
     }
     fn complete_range(
         &mut self,
@@ -614,9 +623,10 @@ impl EntrySelection {
                 self.busy = range.is_some();
                 EntryNavigationEffect::Selected { target, range }
             }
-            // A stale payload cannot make retained identities ready. The window
-            // must first accept the reload effect for this manual intent.
-            Ok(None) => EntryNavigationEffect::Reload,
+            Ok(None) | Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                self.retire();
+                EntryNavigationEffect::Retired
+            }
             result => {
                 let message = match result {
                     Err(error) => error.to_string(),
@@ -998,6 +1008,14 @@ impl Playlists {
                                     revision,
                                     library,
                                 ) {
+                                    if matches!(
+                                        error,
+                                        QueryError::RevisionChanged | QueryError::Cancelled
+                                    ) {
+                                        this.browser.playlist_selection_mut().retire();
+                                        cx.notify();
+                                        return;
+                                    }
                                     this.entry_job_failed(
                                         playlist_id,
                                         generation,
@@ -1013,7 +1031,8 @@ impl Playlists {
                         let _ = this.update(cx, |this, cx| {
                             this.refresh(cx);
                             if this.entry_job_current(playlist_id, generation, revision, library) {
-                                this.refresh_entry_selection(cx);
+                                this.browser.playlist_selection_mut().retire();
+                                cx.notify();
                             }
                         });
                         return;
@@ -1192,9 +1211,14 @@ impl Playlists {
                         },
                     )
                     .await;
-                    let result = entry_query_result(response, scope, filter.is_some())
-                        .map_err(|error| error.to_string())?;
-                    let Some(ViewResponse::PlaylistEntries(page)) = result else {
+                    let result = match entry_query_result(response, scope, filter.is_some()) {
+                        Err(QueryError::RevisionChanged | QueryError::Cancelled) | Ok(None) => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(error.to_string()),
+                        Ok(Some(result)) => result,
+                    };
+                    let ViewResponse::PlaylistEntries(page) = result else {
                         return Err(i18n.text("gl-playlist-range-changed").into());
                     };
                     if !pages.accept(page) {
@@ -1240,7 +1264,10 @@ impl Playlists {
                             );
                             this.fail_manual_intent(job.intent, cx);
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            this.browser.playlist_selection_mut().retire();
+                            this.fail_manual_intent(job.intent, cx);
+                        }
                     }
                 }
                 this.dispatch_playlist_range(cx);
@@ -1335,6 +1362,7 @@ impl Playlists {
                 if this.manual_intent_current(intent) {
                     match effect {
                         EntryNavigationEffect::None => {}
+                        EntryNavigationEffect::Retired => this.fail_manual_intent(intent, cx),
                         EntryNavigationEffect::Reload => {
                             this.browser
                                 .playlist_selection_mut()
@@ -2708,12 +2736,13 @@ mod tests {
                     Some(scope),
                     response
                 ),
-                EntryNavigationEffect::Reload
+                EntryNavigationEffect::Retired
             );
             assert!(selection.error.is_none());
             assert_eq!(selection.active, Some(identity(0, 0)));
             assert_eq!(selection.len(), 1);
-            assert!(selection.busy);
+            assert!(!selection.busy);
+            assert!(selection.retired);
             assert!(selection.take_navigation().is_none());
             selection.invalidate();
             selection.reconcile(vec![identity(0, 2)]);
@@ -2737,23 +2766,50 @@ mod tests {
                 response.revisions = QueryRevisions::default();
                 response.result = Err(QueryError::RevisionChanged);
             }
-            assert!(matches!(
-                selection.finish_navigation(
-                    false,
-                    "Unexpected playlist navigation response",
-                    job,
-                    Some(scope),
-                    response
-                ),
-                EntryNavigationEffect::Failed(_)
-            ));
-            assert!(selection.error.is_some());
+            let effect = selection.finish_navigation(
+                false,
+                "Unexpected playlist navigation response",
+                job,
+                Some(scope),
+                response,
+            );
+            if unexpected_payload {
+                assert!(matches!(effect, EntryNavigationEffect::Failed(_)));
+                assert!(selection.error.is_some());
+            } else {
+                assert_eq!(effect, EntryNavigationEffect::Retired);
+                assert!(selection.error.is_none());
+                assert!(selection.retired);
+            }
             assert!(!selection.busy);
             assert!(selection.navigation.is_none());
             assert_eq!(selection.active, Some(identity(0, 0)));
             assert!(!navigate(&mut selection, scope, 10, true, false, false));
             assert!(selection.take_navigation().is_none());
         }
+    }
+    #[test]
+    fn retired_selection_waits_for_refresh_and_keeps_physical_range_gate() {
+        let mut selection = EntrySelection::default();
+        selection.select(identity(1, 2), false);
+        selection.range_in_flight = Some(selection.generation);
+        let old = selection.generation;
+        selection.retire();
+        assert!(!selection.ready());
+        assert!(!selection.busy);
+        assert!(selection.error.is_none());
+        assert_eq!(selection.active, Some(identity(1, 2)));
+        assert!(selection.prepare_refresh().is_none());
+        selection.request_refresh();
+        let (_, next, _) = selection.prepare_refresh().unwrap();
+        assert_ne!(old, next);
+        assert!(selection.take_range().is_none());
+        assert_eq!(selection.range_in_flight, Some(old));
+        selection.release_range_worker(old);
+        selection.reconcile(vec![identity(1, 3)]);
+        assert!(!selection.retire_refresh());
+        assert!(selection.ready());
+        assert_eq!(selection.active, Some(identity(1, 3)));
     }
 
     #[test]
