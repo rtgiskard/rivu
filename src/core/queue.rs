@@ -141,12 +141,16 @@ impl Core {
         // Projections carry committed queue structure, not a new selection intent.
         // Even a formerly pending selection may have been saved since this read
         // began. Preserve every surviving occurrence and resolve its current index.
-        if let Some(id) = self.state.queue.current_id
-            && !self.store.queue_existing_ids(&[id])?.is_empty()
-        {
-            let (_, position) = self.store.queue_location(id)?;
-            projection.current_id = Some(id);
-            projection.current_position = Some(position);
+        if let Some(id) = self.state.queue.current_id {
+            let position = if projection.current_id == Some(id) {
+                projection.current_position
+            } else {
+                self.store.queue_location(id)?.map(|(_, position)| position)
+            };
+            if let Some(position) = position {
+                projection.current_id = Some(id);
+                projection.current_position = Some(position);
+            }
         }
         projection.revision = self.state.queue.revision;
         self.state.queue = projection;

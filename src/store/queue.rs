@@ -107,15 +107,17 @@ impl Store {
             .optional()?)
     }
 
-    pub(crate) fn queue_location(&self, id: u64) -> Result<(i64, usize)> {
-        let id = i64::try_from(id).context("Queue entry ID exceeds database range")?;
-        self.conn
+    pub(crate) fn queue_location(&self, id: u64) -> Result<Option<(i64, usize)>> {
+        let Ok(id) = i64::try_from(id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
             .prepare_cached(
                 "SELECT track_id,position FROM playlist_entries WHERE playlist_id=0 AND id=?1",
             )?
             .query_row([id], |row| Ok((row.get(0)?, integer(row, 1)?)))
-            .optional()?
-            .context("Queue entry not found")
+            .optional()?)
     }
 
     pub(crate) fn queue_track_id(&self, id: u64) -> Result<i64> {
@@ -491,7 +493,7 @@ mod tests {
         store.set_queue_current(Some(before[3]))?;
         store.remove_tracks(&[1])?;
         assert_eq!(store.queue_ids()?, [before[1], before[3], before[5]]);
-        assert_eq!(store.queue_location(before[3])?, (3, 1));
+        assert_eq!(store.queue_location(before[3])?, Some((3, 1)));
         assert_eq!(store.queue_projection(0)?.total, 3);
         assert_compact(&store)
     }
@@ -501,7 +503,7 @@ mod tests {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 2, 1, 3])?;
         let ids = store.queue_ids()?;
-        assert_eq!(store.queue_location(ids[2])?, (1, 2));
+        assert_eq!(store.queue_location(ids[2])?, Some((1, 2)));
         assert_eq!(store.queue_id_at(4)?, None);
         assert_eq!(
             store.queue_existing_ids(&[ids[0], ids[0], u64::MAX])?,

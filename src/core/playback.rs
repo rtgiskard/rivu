@@ -379,7 +379,10 @@ impl Core {
         status: PlaybackStatus,
     ) -> Result<()> {
         self.ensure_queue_control_ready()?;
-        let (track_id, position) = self.store.queue_location(queue_id)?;
+        let (track_id, position) = self
+            .store
+            .queue_location(queue_id)?
+            .context("Queue entry not found")?;
         let track = self.track(track_id)?;
         if status != PlaybackStatus::Stopped && !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
