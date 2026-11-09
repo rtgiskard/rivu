@@ -1,7 +1,7 @@
 use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     ops::Range,
     rc::Rc,
     sync::Arc,
@@ -228,7 +228,7 @@ pub(super) struct AlbumBrowser {
     handle: FrontendHandle,
     snapshots: Rc<super::feature::SnapshotSource>,
     i18n: Arc<rivu_presentation::i18n::Localizer>,
-    localized_text: BTreeMap<&'static str, SharedString>,
+    localized_text: Rc<HashMap<String, SharedString>>,
     manager: Arc<ArtworkManager>,
     images: ArtworkImageRegistry,
     default_artwork: Entity<DefaultArtwork>,
@@ -269,28 +269,7 @@ impl AlbumBrowser {
         let handle = context.handle().clone();
         let i18n = context.i18n;
         let scroll_views = context.scroll;
-        let localized_text = [
-            "gl-album-no-tracks",
-            "gl-album-tracks-no-matches",
-            "gl-album-sort-artist",
-            "gl-album-sort-title",
-            "shell-panel-albums",
-            "gl-albums-empty",
-            "gl-albums-no-matches",
-            "gl-back-albums",
-            "gl-current",
-            "gl-enqueue-album",
-            "gl-enqueue-track",
-            "gl-missing",
-            "gl-paused",
-            "gl-play-album",
-            "gl-play-track",
-            "gl-playing",
-            "gl-retry-loading",
-        ]
-        .into_iter()
-        .map(|id| (id, SharedString::from(i18n.text(id).to_owned())))
-        .collect();
+        let localized_text = context.labels;
         let album_search = cx.new(|cx| new_search(&i18n, SearchScope::Albums, cx));
         let tracks_search = cx.new(|cx| new_search(&i18n, SearchScope::Tracks, cx));
         let album_subscription = cx.subscribe(&album_search, |this, _, event, cx| {
@@ -346,7 +325,7 @@ impl AlbumBrowser {
     fn tr(&self, id: &str) -> SharedString {
         self.localized_text
             .get(id)
-            .expect("cached album text")
+            .expect("cached localized GUI text")
             .clone()
     }
 
@@ -1424,6 +1403,131 @@ mod tests {
     use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader};
     use crate::test_support::artwork_track as track;
     use rivu_metadata::artwork::{ArtworkIdentity, ArtworkManager, test_support::tagged_wav};
+
+    #[gpui::test]
+    fn pending_album_tracks_expose_failure_copy_and_retry(cx: &mut gpui::TestAppContext) {
+        use crate::gui::feature::{FeatureContext, SnapshotSource};
+        use crate::test_support::{ConfigFixture, CoreRuntime};
+        use gpui::{prelude::*, *};
+        use rivu_protocol::response::{QueryError, QueryResponse};
+
+        struct LoadingTrack(Entity<super::AlbumBrowser>);
+
+        impl Render for LoadingTrack {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |browser, cx| {
+                    browser.track_loading_row(0, px(24.), cx).w(px(240.))
+                })
+            }
+        }
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            crate::gui::appearance::theme::set_theme(
+                rivu_presentation::theme::Theme::default(),
+                cx,
+            );
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
+            rivu_ui::input::Input::init(cx);
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config)
+        .unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
+        let i18n = std::sync::Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: std::rc::Rc::new(SnapshotSource::new(runtime.handle.clone())),
+            labels: std::rc::Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n: i18n.clone(),
+            scroll: Default::default(),
+        };
+        let default_artwork = cx.new(|cx| super::DefaultArtwork::new(&i18n, cx));
+        let browser = cx.new(|cx| {
+            super::AlbumBrowser::new(
+                1,
+                context,
+                std::sync::Arc::new(ArtworkManager::new(directory.path())),
+                default_artwork,
+                ArtworkImageRegistry::default(),
+                cx,
+            )
+        });
+        let revisions = runtime.handle.gui_snapshot().query_revisions(None);
+        let pending = browser.update(cx, |browser, _| {
+            browser.model.sync(true, revisions, 2);
+            browser.model.select(Some(rivu_protocol::model::AlbumKey {
+                directory: directory.path().join("album"),
+                title: "Album".into(),
+            }));
+            browser.model.prepare().unwrap()
+        });
+        let window = cx.add_window(|_, _| LoadingTrack(browser.clone()));
+        let handle = window.into();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let error = "Album page failed: Unicode 路径\nFull diagnostic";
+        browser.update(cx, |browser, _| {
+            browser.model.timeout(
+                &pending.query,
+                pending.generation,
+                QueryResponse {
+                    revisions,
+                    result: Err(QueryError::Message(error.into())),
+                },
+                revisions,
+            );
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.focus_next(cx);
+        })
+        .unwrap();
+        for retry in [false, true] {
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let keystroke = Keystroke::parse("enter").unwrap();
+                window.dispatch_event(
+                    KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+                window.focus_next(cx);
+            })
+            .unwrap();
+            assert_eq!(
+                browser.read_with(cx, |browser, _| browser.model.tracks().error(0).is_none()),
+                retry,
+            );
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some(error),
+            );
+        }
+        // Retry must leave the expired physical worker in charge of retirement.
+        browser.update(cx, |browser, _| assert!(browser.model.prepare().is_none()));
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    }
 
     #[gpui::test]
     fn positive_cover_completion_survives_shared_cache_pressure(cx: &mut gpui::TestAppContext) {
