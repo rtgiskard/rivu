@@ -626,8 +626,19 @@ impl LibrarySnapshot {
         query: &Query,
         queue_revision: u64,
     ) -> crate::response::QueryRevisions {
-        self.query_revisions(queue_revision, None).for_query(
-            query,
+        self.query_revisions_for_scope(
+            crate::response::QueryRevisionScope::for_query(query),
+            queue_revision,
+        )
+    }
+
+    pub fn query_revisions_for_scope(
+        &self,
+        scope: crate::response::QueryRevisionScope,
+        queue_revision: u64,
+    ) -> crate::response::QueryRevisions {
+        self.query_revisions(queue_revision, None).for_scope(
+            scope,
             &self.playlist_entry_revisions,
             &self.metadata_revisions,
         )

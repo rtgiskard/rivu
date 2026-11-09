@@ -208,7 +208,7 @@ where
                     spawn_query_worker(data_dir, instance_id),
                 ));
             }
-            let next = TuiSnapshot::from_client(&state, tui.as_ref().map(|tui| &tui.snapshot));
+            let next = TuiSnapshot::from_client(state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
                 Some(tui) => {
                     redraw |= !next.same_presentation(&tui.snapshot);

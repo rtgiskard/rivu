@@ -918,6 +918,24 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
             playlist_id: 3,
             entry_id: 7,
         },
+        ReadKind::LibrarySelection(11),
+        ReadKind::Directory(Path::new("/音乐/夜航")),
+        ReadKind::DirectorySelection {
+            track_id: 11,
+            path: Path::new("/音乐/夜航"),
+        },
+        ReadKind::OtherTracks {
+            favorite: Some(true),
+            missing: None,
+            sort: LibrarySort::Album,
+            anchor: None,
+        },
+        ReadKind::OtherTracks {
+            favorite: None,
+            missing: Some(false),
+            sort: LibrarySort::MostPlayed,
+            anchor: Some(11),
+        },
     ] {
         let absent = ReadDemand {
             kind,
@@ -947,7 +965,13 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
         );
         let mut next = state.clone();
         next.library.revision += 1;
-        assert!(absent.matches(&absent_spec, &next));
+        assert_eq!(
+            absent.matches(&absent_spec, &next),
+            matches!(
+                kind,
+                ReadKind::Queue | ReadKind::QueueSelection(_) | ReadKind::PlaylistSelection { .. }
+            )
+        );
         assert_eq!(
             empty.matches(&empty_spec, &next),
             matches!(kind, ReadKind::Queue | ReadKind::QueueSelection(_))

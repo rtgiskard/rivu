@@ -101,6 +101,29 @@ pub struct TrackRevision {
     pub revision: u64,
 }
 
+/// Query-specific identities needed to resolve revisions from the latest state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryRevisionScope {
+    Global,
+    PlaylistEntries(i64),
+    Track(i64),
+}
+
+impl QueryRevisionScope {
+    pub fn for_query(query: &crate::model::Query) -> Self {
+        use crate::model::Query;
+        match query {
+            Query::PlaylistEntries { playlist_id, .. }
+            | Query::PlaylistEntryBatch { playlist_id, .. }
+            | Query::PlaylistEntryLocations { playlist_id, .. } => {
+                Self::PlaylistEntries(*playlist_id)
+            }
+            Query::Track { track_id } => Self::Track(*track_id),
+            _ => Self::Global,
+        }
+    }
+}
+
 /// Query data revisions are captured atomically with the query result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRevisions {
@@ -180,18 +203,24 @@ impl QueryRevisions {
         entries: &std::collections::BTreeMap<i64, u64>,
         metadata: &crate::model::MetadataRevisions,
     ) -> Self {
-        use crate::model::Query;
-        let playlist_id = match query {
-            Query::PlaylistEntries { playlist_id, .. }
-            | Query::PlaylistEntryBatch { playlist_id, .. }
-            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
+        self.for_scope(QueryRevisionScope::for_query(query), entries, metadata)
+    }
+
+    pub fn for_scope(
+        self,
+        scope: QueryRevisionScope,
+        entries: &std::collections::BTreeMap<i64, u64>,
+        metadata: &crate::model::MetadataRevisions,
+    ) -> Self {
+        let playlist_id = match scope {
+            QueryRevisionScope::PlaylistEntries(playlist_id) => Some(playlist_id),
             _ => None,
         };
         let mut revisions = self.with_playlist_scope(playlist_id, entries, metadata);
-        revisions.track = match query {
-            Query::Track { track_id } => Some(TrackRevision {
-                track_id: *track_id,
-                revision: metadata.track_revision(*track_id, self.library),
+        revisions.track = match scope {
+            QueryRevisionScope::Track(track_id) => Some(TrackRevision {
+                track_id,
+                revision: metadata.track_revision(track_id, self.library),
             }),
             _ => None,
         };
