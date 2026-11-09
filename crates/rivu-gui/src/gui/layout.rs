@@ -615,7 +615,6 @@ mod serialized {
                     next_id,
                     locked: true,
                 };
-                layout.validate().map_err(|error| anyhow!(error))?;
                 if layouts.insert(name, Arc::new(layout)).is_some() {
                     return Err(anyhow!("duplicate trimmed layout name"));
                 }
