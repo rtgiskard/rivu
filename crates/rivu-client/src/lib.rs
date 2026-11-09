@@ -104,15 +104,12 @@ pub struct ClientSession {
 }
 
 /// Create a session for a data directory; connect and handshake on its first request.
-pub fn client_session(data_dir: &Path) -> Result<ClientSession> {
+pub fn client_session(data_dir: &Path) -> ClientSession {
     client_session_with_cancel(data_dir, SessionCancellation::default())
 }
 
-pub fn client_session_with_cancel(
-    data_dir: &Path,
-    stop: SessionCancellation,
-) -> Result<ClientSession> {
-    Ok(ClientSession {
+pub fn client_session_with_cancel(data_dir: &Path, stop: SessionCancellation) -> ClientSession {
+    ClientSession {
         data_dir: data_dir.to_owned(),
         stream: None,
         stop,
@@ -123,7 +120,7 @@ pub fn client_session_with_cancel(
         next_query_id: 0,
         #[cfg(test)]
         response_clock: None,
-    })
+    }
 }
 
 impl ClientSession {
@@ -470,19 +467,15 @@ impl ClientSession {
 }
 
 pub fn query(data_dir: &Path, query: Query) -> Result<QueryResponse> {
-    client_session(data_dir)?.query(query)
+    client_session(data_dir).query(query)
 }
 
 pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateResponse> {
-    client_session(data_dir)?.get_state(sections)
+    client_session(data_dir).get_state(sections)
 }
 
 pub fn request_ack(data_dir: &Path, command: impl Into<AppCommand>) -> Result<Ack> {
-    client_session(data_dir)
-        .context(CommandFailure {
-            status: AckStatus::NotAdmitted,
-        })?
-        .request_ack(command)
+    client_session(data_dir).request_ack(command)
 }
 
 #[cfg(test)]
@@ -627,7 +620,7 @@ mod tests {
         let listener =
             UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let clock = Arc::new(ResponseClock::default());
         client.response_clock = Some(clock.clone());
         let server = std::thread::spawn(move || {
@@ -678,7 +671,7 @@ mod tests {
             );
             reply_test_ack(&mut stream, Ack::from_result(Ok(()), 2));
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         client.response_clock = Some(clock);
         let error = client
             .request_ack(Command::CreatePlaylist {
@@ -717,7 +710,7 @@ mod tests {
             // An oversized command fails encoding and the session closes it.
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let error = client.request_ack(Command::Pause).unwrap_err();
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().status,
@@ -762,7 +755,7 @@ mod tests {
     #[test]
     fn cancelled_exchange_releases_partial_bulk_buffers() {
         let directory = socket_test_directory();
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         client.read_buffer.resize(1024 * 1024, 0);
         client.write_buffer.resize(1024 * 1024, 0);
         client.cancel();
@@ -787,7 +780,7 @@ mod tests {
                 // A mismatched Hello must close the connection, not emit a task frame.
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             });
-            let mut client = client_session(directory.path()).unwrap();
+            let mut client = client_session(directory.path());
             client.bind_instance(21).unwrap();
             let error = if cancel {
                 client
@@ -810,7 +803,7 @@ mod tests {
         let listener =
             UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let stop = client.cancellation();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
@@ -842,7 +835,7 @@ mod tests {
         let listener =
             UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let stop = client.cancellation();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
@@ -900,7 +893,7 @@ mod tests {
             watch_started.send(()).unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let stop = client.cancellation();
         let cancellation = std::thread::spawn(move || {
             wait_for_watch.recv().unwrap();
@@ -934,7 +927,7 @@ mod tests {
             started.send(()).unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let stop = client.cancellation();
         let cancellation = std::thread::spawn(move || {
             waiting.recv().unwrap();
@@ -977,7 +970,7 @@ mod tests {
             write_test_response(&mut stream, WireResponse::Watch(StateRevisions::default()));
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let target = rivu_protocol::model::TaskTarget::Scan { id: 7 };
         let error = client.wait_task(target).unwrap_err();
         assert!(
@@ -1022,7 +1015,7 @@ mod tests {
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake(&mut stream);
             });
-            let mut client = client_session(directory.path()).unwrap();
+            let mut client = client_session(directory.path());
             client.get_state(StateSections::default()).unwrap();
             if kind == 1 {
                 assert_eq!(
@@ -1163,7 +1156,7 @@ mod tests {
                 assert_eq!(std::io::Read::read(&mut stream, &mut byte).unwrap(), 0);
             }
         });
-        let mut client = client_session(directory.path()).unwrap();
+        let mut client = client_session(directory.path());
         let first = client.get_state(StateSections::ALL).unwrap();
         client.bind_instance(1).unwrap();
         let mut observed = rivu_protocol::response::ObservedState::new(1);
@@ -1254,7 +1247,7 @@ mod tests {
                 );
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             });
-            let mut client = client_session(directory.path()).unwrap();
+            let mut client = client_session(directory.path());
             assert!(client.wait_task(TaskTarget::Scan { id: 7 }).is_err());
             assert!(client.stream.is_none());
             assert_eq!(client.instance_id(), None);

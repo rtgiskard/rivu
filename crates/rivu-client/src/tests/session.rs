@@ -68,7 +68,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         ));
         reply_test_query(&mut stream, playlist_test_response(7));
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     let query = Query::PlaylistSummaries {
         query: None,
@@ -146,7 +146,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
             },
         );
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     let error = session
         .request_ack(Command::CreatePlaylist {
@@ -177,7 +177,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
     let directory = socket_test_directory();
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let stop = session.cancellation();
     let client = std::thread::spawn(move || {
         session.get_state(StateSections::default()).unwrap();
@@ -220,7 +220,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
             );
         }
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     let error = session
         .request_ack(Command::CreatePlaylist {
@@ -267,7 +267,7 @@ fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation
         complete_test_handshake_for_instance(&mut stream, 2);
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     assert!(
         session
@@ -314,7 +314,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
             },
         );
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     assert!(
         session
             .request_ack(Command::CreatePlaylist {
@@ -362,7 +362,7 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
             }),
         );
     });
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let (complete, completed) = std::sync::mpsc::sync_channel(1);
     let client = std::thread::spawn(move || {
         complete
@@ -390,7 +390,7 @@ fn cancelling_retained_query_disconnects_its_physical_session() {
     let directory = socket_test_directory();
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let stop = session.cancellation();
     let client = std::thread::spawn(move || session.query_retained(Query::LibraryStats));
     let mut stream = listener.accept().unwrap().0;
@@ -455,7 +455,7 @@ fn owner_cancel_sends_identified_control_and_keeps_reply_order_until_physical_co
     });
     let mut owner = QueryEpoch::default();
     let ticket = owner.ticket();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let (finished, completion) = std::sync::mpsc::sync_channel(1);
     let client = std::thread::spawn(move || {
         let first = session

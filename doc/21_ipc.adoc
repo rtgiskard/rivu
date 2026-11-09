@@ -392,6 +392,10 @@ or Watch. Hello can request initial state sections, including none. A non-Hello
 request before binding or a second Hello receives Error, but does not close the
 session. The first successful Hello binds it.
 
+`rivu-client` session construction performs no I/O and cannot fail. The first
+request connects and performs Hello; connection, handshake, instance binding
+and request failures remain distinct from construction.
+
 The Hello response contains a random nonzero `u32` instance ID encoded as four
 little-endian bytes. The ID is generated once per server start. Zero is reserved
 as the invalid instance ID. IDs are equality tokens for detecting server

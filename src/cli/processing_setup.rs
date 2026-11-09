@@ -90,7 +90,7 @@ fn script_result<T: serde::de::DeserializeOwned>(command: &mut Process, stage: &
 }
 
 fn activate(data_dir: &Path, model: SetupModel, prepared: &Prepared) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let mut patch = NeuralPatch::default();
     if !model.native() {
         let worker = prepared

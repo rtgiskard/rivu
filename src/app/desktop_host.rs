@@ -23,7 +23,7 @@ pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>)
     // bootstrapping a replacement. Ordinary launches reuse bootstrap's Hello;
     // only a scan needs another, independently identity-bound session.
     if expected.is_some() || !paths.is_empty() {
-        let mut session = rivu_client::client_session(&data_dir)?;
+        let mut session = rivu_client::client_session(&data_dir);
         session.bind_instance(instance)?;
         if paths.is_empty() {
             session.get_state(rivu_protocol::response::StateSections::default())?;
@@ -96,7 +96,7 @@ mod tests {
         )
         .unwrap();
         assert!(app.can_raise());
-        let mut registration = rivu_client::client_session(directory.path()).unwrap();
+        let mut registration = rivu_client::client_session(directory.path());
         assert!(registration.register_desktop().unwrap().is_success());
         assert!(app.can_raise());
         drop(registration);

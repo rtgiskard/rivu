@@ -14,7 +14,7 @@ pub(crate) struct CoreRuntime {
 impl CoreRuntime {
     pub(crate) fn start(data_dir: &Path, config: &Path) -> Result<Self> {
         let fixture = rivu::test_support::frontend::FrontendFixture::start(data_dir, config)?;
-        let mut session = rivu_client::client_session(data_dir)?;
+        let mut session = rivu_client::client_session(data_dir);
         session.get_state(rivu_protocol::response::StateSections::default())?;
         let instance = session
             .instance_id()

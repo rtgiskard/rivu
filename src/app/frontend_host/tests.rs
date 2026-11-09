@@ -79,7 +79,7 @@ fn ready_service_does_not_validate_unused_frontend_config() {
     .unwrap();
     let _service = FrontendFixture::start(directory.path(), &active_config).unwrap();
     let original_active = std::fs::read(&active_config).unwrap();
-    let mut session = rivu_client::client_session(directory.path()).unwrap();
+    let mut session = rivu_client::client_session(directory.path());
     session.get_state(StateSections::default()).unwrap();
     let expected = session.instance_id().unwrap();
     let unused_config = directory

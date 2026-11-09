@@ -69,11 +69,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
     let stopping = rivu_client::SessionCancellation::default();
     let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
-        let Ok(mut session) = rivu_client::client_session_with_cancel(&data_dir, stop) else {
-            *latest_worker.lock() = Some(Err("TUI state watcher could not initialize".into()));
-            let _ = sender.try_send(());
-            return;
-        };
+        let mut session = rivu_client::client_session_with_cancel(&data_dir, stop);
         let initial = session.get_state(TERMINAL_SECTIONS).and_then(|response| {
             let instance_id = session
                 .instance_id()
@@ -220,11 +216,10 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     let shutdown = rivu_client::SessionCancellation::default();
     let stop = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session = rivu_client::client_session_with_cancel(&data_dir, stop.clone())
-            .and_then(|mut session| {
-                session.bind_instance(instance_id)?;
-                Ok(session)
-            })
+        let mut session = rivu_client::client_session_with_cancel(&data_dir, stop.clone());
+        let mut session = session
+            .bind_instance(instance_id)
+            .map(|()| session)
             .map_err(WorkerFailure::from);
         while let Ok(command) = receiver.recv() {
             if stop.is_cancelled() {
@@ -703,11 +698,10 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
     let shutdown = rivu_client::SessionCancellation::default();
     let stopping = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session = rivu_client::client_session_with_cancel(&data_dir, stopping.clone())
-            .and_then(|mut session| {
-                session.bind_instance(instance_id)?;
-                Ok(session)
-            })
+        let mut session = rivu_client::client_session_with_cancel(&data_dir, stopping.clone());
+        let mut session = session
+            .bind_instance(instance_id)
+            .map(|()| session)
             .map_err(WorkerFailure::from);
         while receiver.recv().is_ok() {
             if stopping.is_cancelled() {

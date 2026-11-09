@@ -72,7 +72,7 @@ pub(super) fn task_json<T: serde::Serialize>(
 }
 
 pub(super) fn run(i18n: &Localizer, data_dir: &Path, action: TaskAction, json: bool) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let reference = match &action {
         TaskAction::Status { id, .. } | TaskAction::Cancel { id, .. } => *id,
     };

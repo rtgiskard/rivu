@@ -416,7 +416,7 @@ pub(super) fn run(
             target_id,
             wait,
         } => {
-            let mut session = rivu_client::client_session(data_dir)?;
+            let mut session = rivu_client::client_session(data_dir);
             let ack = session.request_ack(Command::RelocateTrack {
                 source_id,
                 target_id,

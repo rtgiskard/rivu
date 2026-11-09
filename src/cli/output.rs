@@ -11,7 +11,7 @@ use std::{
 };
 
 pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let state = session.get_state(StateSections {
         queue: true,
         ..StateSections::default()
@@ -61,7 +61,7 @@ pub(super) fn list_library(
     favorite: Option<bool>,
     missing: Option<bool>,
 ) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,
@@ -166,7 +166,7 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
 }
 
 pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,
@@ -208,7 +208,7 @@ pub(super) fn show_playlist(
     playlist_id: i64,
     json: bool,
 ) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,

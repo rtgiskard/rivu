@@ -196,7 +196,7 @@ pub(super) fn run(
 }
 
 fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let mut wait = false;
     let command = match action {
         ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),

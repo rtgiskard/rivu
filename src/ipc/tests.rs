@@ -134,7 +134,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
-    let mut control = client_session(directory.path()).unwrap();
+    let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let initial = control.get_state(StateSections::ALL).unwrap();
     let before = initial.revisions;
@@ -144,7 +144,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
         config_path
     );
     let previous = initial.configuration.unwrap().config.waveform_seek_enabled;
-    let mut watcher = client_session(directory.path()).unwrap();
+    let mut watcher = client_session(directory.path());
     watcher
         .bind_instance(control.instance_id().unwrap())
         .unwrap();
@@ -217,7 +217,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
-    let mut client = client_session(directory.path()).unwrap();
+    let mut client = client_session(directory.path());
     // Fence initial database projection; optional device discovery remains independent.
     client.query(Query::ScanTask { id: 0 }).unwrap();
     for target in [
@@ -302,7 +302,7 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
     let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
-    let mut control = client_session(directory.path()).unwrap();
+    let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
@@ -380,7 +380,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     let app = AppHandle::new(&runtime, directory.path());
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
-    let mut control = client_session(directory.path()).unwrap();
+    let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
@@ -475,7 +475,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     )
     .unwrap();
     assert!(SocketOwner::acquire(directory.path()).is_err());
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let count_query = Query::LibraryRootCounts {
         roots: vec![root.clone(), nested.clone(), empty],
     };
@@ -573,7 +573,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         runtime.test_executor(),
     )
     .unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let summaries = Query::PlaylistSummaries {
         query: None,
         offset: 0,
@@ -1210,7 +1210,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
         runtime.test_executor(),
     )
     .unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let queue_query = |query: &str, after| Query::QueueBatch {
         query: Some(query.into()),
         after,
@@ -1364,7 +1364,7 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
         runtime.test_executor(),
     )
     .unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let initial = session.get_state(StateSections::ALL).unwrap();
     let baseline = initial.configuration.unwrap().config;
     let mut draft = baseline.as_ref().clone();
@@ -1428,7 +1428,7 @@ fn retained_remote_query_retires_after_logical_timeout_without_releasing_its_phy
     let owner = SocketOwner::acquire(directory.path()).unwrap();
     let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(&owner, handle, app.clone(), runtime.test_executor()).unwrap();
-    let mut session = client_session(directory.path()).unwrap();
+    let mut session = client_session(directory.path());
     let (completed, result) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         completed

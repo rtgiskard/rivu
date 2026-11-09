@@ -228,7 +228,7 @@ fn submit_command(
     wait_scan: bool,
     json: bool,
 ) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir);
     let ack = session.request_ack(command)?;
     if !ack.is_success() {
         return output::show_task_ack(i18n, &session, &ack, json);

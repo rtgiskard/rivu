@@ -360,7 +360,7 @@ impl Desktop {
         );
         let i18n = Arc::new(rivu_presentation::i18n::Localizer::new(&config.ui_language));
         let activation = Activation::start(socket, handle.clone(), expected, &tasks.handle)?;
-        let mut registration = rivu_client::client_session(data_dir)?;
+        let mut registration = rivu_client::client_session(data_dir);
         registration.bind_instance(runtime.handle.instance_id())?;
         let ack = registration.register_desktop()?;
         ensure!(
@@ -661,7 +661,7 @@ mod tests {
             // The library must activate the existing singleton without creating
             // another GPUI application or owning service bootstrap.
             let directory = PathBuf::from(directory);
-            let mut session = rivu_client::client_session(&directory).unwrap();
+            let mut session = rivu_client::client_session(&directory);
             session
                 .get_state(rivu_protocol::response::StateSections::default())
                 .unwrap();
@@ -699,7 +699,7 @@ mod tests {
         )
         .unwrap();
         assert!(Activation::bind(directory.path()).is_err());
-        let mut registration = rivu_client::client_session(directory.path()).unwrap();
+        let mut registration = rivu_client::client_session(directory.path());
         assert!(registration.register_desktop().unwrap().is_success());
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact").arg("desktop::tests::independent_gui_activation_uses_existing_service_and_kernel_singleton")

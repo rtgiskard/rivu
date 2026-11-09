@@ -691,7 +691,7 @@ mod lifetime_tests {
             runtime.test_executor(),
         )
         .unwrap();
-        let mut client = rivu_client::client_session(directory.path()).unwrap();
+        let mut client = rivu_client::client_session(directory.path());
         assert!(app.activation_requests.is_empty());
         assert!(
             client

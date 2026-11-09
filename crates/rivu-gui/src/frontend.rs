@@ -319,7 +319,7 @@ pub(crate) struct FrontendHandle {
 impl FrontendRuntime {
     pub(crate) fn connect(data_dir: &Path, expected_instance: u32) -> Result<Self> {
         let stop = SessionCancellation::default();
-        let mut watcher = client_session_with_cancel(data_dir, stop.clone())?;
+        let mut watcher = client_session_with_cancel(data_dir, stop.clone());
         watcher.bind_instance(expected_instance)?;
         let initial = watcher.get_state(StateSections::ALL)?;
         anyhow::ensure!(
@@ -552,7 +552,7 @@ fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Recei
 impl FrontendHandle {
     fn session(&self) -> Result<ClientSession> {
         let mut session =
-            client_session_with_cancel(&self.shared.data_dir, self.shared.stop.clone())?;
+            client_session_with_cancel(&self.shared.data_dir, self.shared.stop.clone());
         session.bind_instance(self.shared.instance_id)?;
         Ok(session)
     }
@@ -1184,8 +1184,7 @@ mod tests {
         let (sender, receiver) = async_channel::bounded(4);
         handle.queries = sender;
         let shared = Arc::clone(&handle.shared);
-        let mut session =
-            client_session_with_cancel(directory.path(), shared.stop.clone()).unwrap();
+        let mut session = client_session_with_cancel(directory.path(), shared.stop.clone());
         session.bind_instance(1).unwrap();
         let worker = thread::spawn(move || query_worker(shared, session, receiver));
 
