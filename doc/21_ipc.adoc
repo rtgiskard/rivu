@@ -458,6 +458,9 @@ Apply and persistence merge them with settings at Core's checkpoint boundary;
 clients must not treat `configuration.config` as a live-control snapshot.
 Runtime `SystemState` contains no configuration payload. Both section schemas
 are versioned positional contracts; lengths and optional fields are in the body.
+Full configuration encoding borrows fields from the shared immutable snapshot;
+decoding owns an independent configuration. The positional adapter remains
+separate from the human-readable configuration schema.
 Processing is an independent selected state section and revision domain. Its
 payload is `processing.task`; requested empty processing explicitly clears the
 task, while an omitted section preserves the client's current task. System wire

@@ -1725,10 +1725,49 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
             rivu_format::config::MaterialPreset::StillWater,
         ),
     );
-    let wire = WireConfig::from(&config);
+    let config = Arc::new(config);
+    let wire = WireConfig::from(Arc::clone(&config));
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!(rivu_format::config::Config::from(decoded), config);
+    assert_eq!(rivu_format::config::Config::from(decoded), *config);
+}
+
+#[test]
+fn shared_configuration_encoding_rejects_oversize_and_recovers() {
+    let config = Arc::new(rivu_format::config::Config {
+        ui_font: "x".repeat(MAX_RESPONSE),
+        ..Default::default()
+    });
+    let mut encoded = Vec::new();
+    let request = WireRequest::Command(WireCommand::from(Command::Configure {
+        config: Arc::clone(&config),
+    }));
+    assert!(encode_request_frame_into(&request, &mut encoded).is_err());
+    assert!(encoded.is_empty());
+    assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
+    let response = WireResponse::State(wire_state(StateResponse {
+        configuration: Some(crate::model::ConfigurationState {
+            config,
+            config_path: "/test/config.toml".into(),
+        }),
+        ..Default::default()
+    }));
+    assert!(encode_response_frame_into(&response, &mut encoded).is_err());
+    assert!(encoded.is_empty());
+    assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
+
+    let config = Arc::new(rivu_format::config::Config::default());
+    let request = WireRequest::Command(WireCommand::from(Command::Configure {
+        config: Arc::clone(&config),
+    }));
+    encode_request_frame_into(&request, &mut encoded).unwrap();
+    let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected command");
+    };
+    let Command::Configure { config: decoded } = Command::try_from(command).unwrap() else {
+        panic!("expected configuration");
+    };
+    assert_eq!(*decoded, *config);
 }
 
 #[test]
@@ -1753,9 +1792,10 @@ fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() 
             spectrogram_history_seconds: 37,
             ..Default::default()
         };
-        let bytes = postcard::to_allocvec(&WireConfig::from(&config)).unwrap();
+        let config = Arc::new(config);
+        let bytes = postcard::to_allocvec(&WireConfig::from(Arc::clone(&config))).unwrap();
         let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(Config::from(decoded), config);
+        assert_eq!(Config::from(decoded), *config);
     }
 }
 

@@ -29,6 +29,19 @@ macro_rules! config_wire_convert {
     };
 }
 
+// Borrow ordinary fields; only binary-specific representations are materialized.
+macro_rules! config_wire_borrow {
+    (library_columns, $value:expr) => {
+        config_wire_convert!(to_wire, library_columns, &$value)
+    };
+    (spectrum_bar_layout, $value:expr) => {
+        WireSpectrumBarLayout::from($value)
+    };
+    ($field:ident, $value:expr) => {
+        &$value
+    };
+}
+
 macro_rules! config_wire_patch_convert {
     ($direction:ident, library_columns, $value:expr) => {
         $value.map(|value| config_wire_convert!($direction, library_columns, value))

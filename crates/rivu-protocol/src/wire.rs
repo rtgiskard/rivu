@@ -1312,7 +1312,7 @@ impl From<Command> for WireCommand {
             Command::DismissScanResult => Self::DismissScanResult,
             Command::CancelScan { id } => Self::CancelScan { id },
             Command::Configure { config } => Self::Configure {
-                config: Box::new(WireConfig::from(config.as_ref())),
+                config: Box::new(WireConfig::from(config)),
             },
             Command::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
@@ -1606,7 +1606,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::DismissScanResult => Self::DismissScanResult,
             WireCommand::CancelScan { id } => Self::CancelScan { id },
             WireCommand::Configure { config } => Self::Configure {
-                config: Arc::new((*config).into()),
+                config: (*config).into(),
             },
             WireCommand::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
@@ -1736,31 +1736,53 @@ impl From<WireSpectrumBarLayout> for rivu_format::config::SpectrumBarLayout {
     }
 }
 
+/// Shared domain storage with an explicit positional binary serialization schema.
+#[derive(Clone, Debug)]
+pub struct WireConfig(Arc<rivu_format::config::Config>);
+
+impl From<Arc<rivu_format::config::Config>> for WireConfig {
+    fn from(value: Arc<rivu_format::config::Config>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<WireConfig> for Arc<rivu_format::config::Config> {
+    fn from(value: WireConfig) -> Self {
+        value.0
+    }
+}
+
+impl From<WireConfig> for rivu_format::config::Config {
+    fn from(value: WireConfig) -> Self {
+        Arc::unwrap_or_clone(value.0)
+    }
+}
+
 macro_rules! declare_config {
     ($( $(#[$attr:meta])* $field:ident: $ty:ty, )*) => {
-        /// Complete positional IPC schema, independent of human-readable Config serde attributes.
-        #[derive(Clone, Debug, Serialize, Deserialize)]
-        pub struct WireConfig {
-            $( $(#[$attr])* $field: $ty, )*
-        }
-
-        impl From<&rivu_format::config::Config> for WireConfig {
-            fn from(value: &rivu_format::config::Config) -> Self {
-                fn clone_field<T: Clone>(value: &T) -> T {
-                    value.clone()
-                }
-
-                Self {
-                    $( $field: config_wire_convert!(to_wire, $field, clone_field(&value.$field)), )*
-                }
+        impl Serialize for WireConfig {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let field_count = [$(stringify!($field)),*].len();
+                let mut state = serializer.serialize_struct("WireConfig", field_count)?;
+                $(state.serialize_field(
+                    stringify!($field),
+                    &config_wire_borrow!($field, self.0.$field),
+                )?;)*
+                state.end()
             }
         }
 
-        impl From<WireConfig> for rivu_format::config::Config {
-            fn from(value: WireConfig) -> Self {
-                Self {
-                    $( $field: config_wire_convert!(from_wire, $field, value.$field), )*
+        impl<'de> Deserialize<'de> for WireConfig {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                struct OwnedConfig {
+                    $( $(#[$attr])* $field: $ty, )*
                 }
+                let value = OwnedConfig::deserialize(deserializer)?;
+                Ok(Self(Arc::new(rivu_format::config::Config {
+                    $( $field: config_wire_convert!(from_wire, $field, value.$field), )*
+                })))
             }
         }
     };
@@ -1777,7 +1799,7 @@ pub struct WireConfigurationState {
 impl From<ConfigurationState> for WireConfigurationState {
     fn from(value: ConfigurationState) -> Self {
         Self {
-            config: WireConfig::from(value.config.as_ref()),
+            config: WireConfig::from(value.config),
             config_path: value.config_path,
         }
     }
@@ -1786,7 +1808,7 @@ impl From<ConfigurationState> for WireConfigurationState {
 impl From<WireConfigurationState> for ConfigurationState {
     fn from(value: WireConfigurationState) -> Self {
         Self {
-            config: Arc::new(value.config.into()),
+            config: value.config.into(),
             config_path: value.config_path,
         }
     }
