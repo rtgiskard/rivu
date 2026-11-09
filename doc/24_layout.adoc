@@ -773,6 +773,9 @@ Visibility, visualization enablement and shutdown gate that demand. The visualiz
 owner separately reconciles panel membership/preferences and dynamic playback or
 waveform state. Removing an inactive panel still retires its resources; Stop,
 Seek and source replacement retain distinct continuity boundaries.
+Processing editor membership and hidden-panel interaction cleanup also follow
+the workspace revision and effective visibility, not each playback publication.
+Configuration, task and acknowledgement reconciliation remains independent.
 
 Business panels have cached view boundaries separate from shell traversal and
 observe their feature owner directly; rendering never calls back into the window

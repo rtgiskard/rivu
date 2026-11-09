@@ -3681,6 +3681,24 @@ mod tests {
     ) {
         use gpui::InputEvent as _;
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        use crate::gui::layout::{Layout, Node, Panel};
+        let mut panels = crate::gui::workspace::WorkspacePanels::default();
+        panels.reconcile(&Layout {
+            root: Some(Node::Tabs {
+                id: 1,
+                panels: vec![Panel {
+                    id: PANEL,
+                    kind: "equalizer".into(),
+                    show_tab_bar: true,
+                    audio_visualizer: None,
+                    artwork: None,
+                }],
+                active: PANEL,
+            }),
+            next_id: PANEL + 1,
+            locked: false,
+        });
+        owner.update(cx, |owner, cx| owner.sync_panels(&panels, true, cx));
         owner.update(cx, |owner, _| owner.command_active = true);
         let position = VisualTestContext::from_window(handle, cx)
             .debug_bounds("eq-node-7-0")
@@ -3722,7 +3740,25 @@ mod tests {
                     .unwrap();
                 assert!((frequency - drag.frequency).abs() <= 0.05);
                 assert!((gain - drag.gain).abs() <= 0.005);
-                editor.cancel_pointer(cx);
+            });
+            // Unchanged demand preserves the gesture; hiding the same layout
+            // still cancels it even though the structural revision is unchanged.
+            owner.update(cx, |owner, cx| owner.sync_panels(&panels, true, cx));
+            assert!(editor.read_with(cx, |editor, _| editor.drag.is_some()));
+            owner.update(cx, |owner, cx| owner.sync_panels(&panels, false, cx));
+            editor.read_with(cx, |editor, _| {
+                assert!(!editor.active);
+                assert!(editor.drag.is_none());
+                assert_eq!(editor.pointer_count.get(), 0);
+            });
+            // Clean inputs retire while hidden and are rebuilt from committed
+            // values when the panel is rendered again.
+            owner.update(cx, |owner, cx| {
+                owner.sync_panels(&panels, true, cx);
+                let _ = owner.equalizer_view(PANEL, window, cx);
+            });
+            editor.update(cx, |editor, cx| {
+                assert!(editor.drag.is_none());
                 for key in [
                     &EqField::Band(0, BandField::FrequencyHz),
                     &EqField::Band(0, BandField::GainDb),

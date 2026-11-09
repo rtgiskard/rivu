@@ -711,6 +711,7 @@ pub(super) struct AudioProcessing {
     page: Page,
     fields: HashMap<FieldKey, Field>,
     panel_inputs: HashMap<u64, HashMap<FieldKey, PanelInput>>,
+    panel_demand: Option<(u64, bool)>,
     choosing_path: Option<PathRequest>,
     chooser_generation: u64,
     error: Option<String>,
@@ -797,6 +798,7 @@ impl AudioProcessing {
             page: Page::Graph,
             fields: HashMap::new(),
             panel_inputs: HashMap::new(),
+            panel_demand: None,
             choosing_path: None,
             chooser_generation: 0,
             error: None,
@@ -956,6 +958,11 @@ impl AudioProcessing {
         visible: bool,
         cx: &mut Context<Self>,
     ) {
+        let demand = (layout.revision, visible);
+        if self.panel_demand == Some(demand) {
+            return;
+        }
+        self.panel_demand = Some(demand);
         self.retain_equalizer_panels(layout, visible, cx);
         self.preset_bounds
             .retain(|id, _| layout.contains_panel(*id));
