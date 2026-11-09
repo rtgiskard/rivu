@@ -854,6 +854,10 @@ in frames, processor/staging charges are:
   allowance is not a multiplier over unrelated storage; changes to RustFFT or
   supported FFT sizes require reevaluating it.
 
+Spectral modes retain one noise spectrum. Stationary and Profile reset preserve
+that fixed spectrum; Adaptive reset fills its existing estimate from the configured
+floor without allocating a recovery copy.
+
 Bypassed graph nodes construct no adapter and incur none of these processor/staging
 charges.
 

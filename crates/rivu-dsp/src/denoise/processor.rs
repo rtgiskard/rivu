@@ -383,7 +383,6 @@ pub struct Denoiser {
     power: Vec<f32>,
     smoothed_power: Vec<f32>,
     noise: Vec<f32>,
-    initial_noise: Vec<f32>,
     local_energy: Vec<f32>,
     minimum: Vec<f32>,
     temporary_minimum: Vec<f32>,
@@ -423,9 +422,9 @@ impl Denoiser {
         if config.mode != DenoiseMode::Off {
             let size = config.fft_size;
             let bins = size / 2 + 1;
-            // Input, overlap, window, weights; channel spectra; seven PSD/gain
+            // Input, overlap, window, weights; channel spectra; six PSD/gain
             // arrays, plus five MCRA arrays only in Adaptive mode.
-            bytes += (2 * size * channels + 2 * size + 7 * bins) * size_of::<f32>();
+            bytes += (2 * size * channels + 2 * size + 6 * bins) * size_of::<f32>();
             bytes += size * channels * size_of::<Complex32>();
             if config.mode == DenoiseMode::Adaptive {
                 bytes += 5 * bins * size_of::<f32>();
@@ -468,7 +467,7 @@ impl Denoiser {
         } else {
             (None, None, 0)
         };
-        let initial_noise = if !spectral {
+        let noise = if !spectral {
             Vec::new()
         } else if config.mode == DenoiseMode::Profile {
             // Caller spare capacity is not part of the validated profile shape
@@ -553,8 +552,7 @@ impl Denoiser {
             weights: vec![0.0; spectral_size],
             power: vec![0.0; bins],
             smoothed_power: vec![0.0; bins],
-            noise: initial_noise.clone(),
-            initial_noise,
+            noise,
             local_energy: vec![0.0; adaptive_bins],
             minimum: vec![0.0; adaptive_bins],
             temporary_minimum: vec![0.0; adaptive_bins],
@@ -1027,7 +1025,11 @@ impl Denoiser {
         self.weights.fill(0.0);
         self.power.fill(0.0);
         self.smoothed_power.fill(0.0);
-        self.noise.copy_from_slice(&self.initial_noise);
+        if self.config.mode == DenoiseMode::Adaptive && !self.noise.is_empty() {
+            let stationary_power =
+                10.0_f32.powf(self.config.stationary_noise_dbfs / 10.0) * self.size as f32 / 2.0;
+            self.noise.fill(stationary_power);
+        }
         self.local_energy.fill(0.0);
         self.minimum.fill(0.0);
         self.temporary_minimum.fill(0.0);
@@ -1054,7 +1056,6 @@ mod tests {
             + processor.power.capacity()
             + processor.smoothed_power.capacity()
             + processor.noise.capacity()
-            + processor.initial_noise.capacity()
             + processor.local_energy.capacity()
             + processor.minimum.capacity()
             + processor.temporary_minimum.capacity()
@@ -1160,12 +1161,14 @@ mod tests {
             let config = DenoiseConfig {
                 mode,
                 fft_size: 256,
+                stationary_noise_dbfs: -37.0,
                 ..Default::default()
             };
             let captured = (mode == DenoiseMode::Profile)
                 .then(|| profile(&noise(1024, 271, 0.03), 48_000, 2, 256));
             let expected = run(config.clone(), 48_000, 2, &input, captured.clone(), 211);
             let mut processor = Denoiser::new(48_000, 2, config, captured).unwrap();
+            let initial_noise = processor.noise.clone();
             for _ in 0..2 {
                 let mut output = Vec::new();
                 for block in input.chunks(74) {
@@ -1176,7 +1179,11 @@ mod tests {
                 processor.finish(&mut output, &mut || false).unwrap();
                 assert_eq!(output, expected);
                 assert!(output.iter().all(|sample| sample.is_finite()));
+                if mode != DenoiseMode::Adaptive {
+                    assert_eq!(processor.noise, initial_noise);
+                }
                 processor.reset();
+                assert_eq!(processor.noise, initial_noise);
             }
         }
     }
@@ -1334,11 +1341,10 @@ mod tests {
                 ..Default::default()
             };
             let mut processor = Denoiser::new(48_000, 1, config, Some(profile)).unwrap();
-            assert_eq!(processor.initial_noise.capacity(), 129);
             assert_eq!(processor.noise.capacity(), 129);
-            assert_eq!(processor.initial_noise, [0.25; 129]);
+            assert_eq!(processor.noise, [0.25; 129]);
             if capacity == 129 {
-                assert_eq!(processor.initial_noise.as_ptr(), original);
+                assert_eq!(processor.noise.as_ptr(), original);
             }
             processor.reset();
             assert_eq!(processor.noise, [0.25; 129]);
