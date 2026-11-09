@@ -410,6 +410,31 @@ impl WindowView {
             }),
             cx.subscribe_in(&self.playback, window, |this, _, event, window, cx| {
                 use playback::PlaybackEvent;
+                let slider = match event {
+                    PlaybackEvent::SliderDown {
+                        dragging, queue_id, ..
+                    } => Some((*dragging, *queue_id)),
+                    PlaybackEvent::SliderKey {
+                        slider, queue_id, ..
+                    } => Some((*slider, *queue_id)),
+                    _ => None,
+                };
+                if let Some((slider, queue_id)) = slider {
+                    let panel = match slider {
+                        Dragging::Seek(panel) | Dragging::Volume(panel) => panel,
+                        Dragging::Split(_) => return,
+                    };
+                    if !this.panel_demand(shell::panels::PanelKind::Transport.key())
+                        || !this.workspace.panels.is_panel_active(panel)
+                        || !this.workspace.panels.panel(panel).is_some_and(|panel| {
+                            panel.kind == shell::panels::PanelKind::Transport.key()
+                        })
+                        || matches!(slider, Dragging::Seek(_))
+                            && (queue_id.is_none() || queue_id != this.state.queue.current_id)
+                    {
+                        return;
+                    }
+                }
                 match event {
                     PlaybackEvent::LocateQueue => {
                         if this.reveal_queue_panel(window, cx) {
@@ -421,11 +446,12 @@ impl WindowView {
                         dragging,
                         position,
                         alt,
+                        queue_id,
                     } => {
                         this.synchronize_interaction(window, cx);
                         let cancellation = this.workspace.interaction.begin_slider(
                             *dragging,
-                            this.state.queue.current_id,
+                            *queue_id,
                             this.state.playback.duration,
                         );
                         if cancellation.docking {
@@ -434,11 +460,15 @@ impl WindowView {
                         this.apply_interaction_cancellation(cancellation, cx);
                         this.drag_position(*position, *alt, cx);
                     }
-                    PlaybackEvent::SliderKey { slider, key } => {
+                    PlaybackEvent::SliderKey {
+                        slider,
+                        key,
+                        queue_id,
+                    } => {
                         // A later pointer release must not overwrite the keyboard command.
                         this.cancel_interaction(window, cx);
                         this.playback.update(cx, |playback, cx| {
-                            playback.slider_key(*slider, *key, cx);
+                            playback.slider_key(*slider, *key, *queue_id, cx);
                         });
                     }
                     PlaybackEvent::Error(error) => this.feature_error(error, cx),
@@ -623,5 +653,83 @@ impl WindowView {
                 cx,
             )
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        gui::layout::persistence::{LayoutPersistence, LoadedLayouts},
+        test_support::{ConfigFixture, CoreRuntime},
+    };
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn stale_or_hidden_playback_controls_cannot_change_volume(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(rivu_ui::input::Input::init);
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.3,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config)
+        .unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
+        let save =
+            LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layout.json")));
+        let handle = runtime.handle.clone();
+        let save_handle = save.handle();
+        let artwork = std::sync::Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
+        let window = cx.add_window(move |window, cx| {
+            let mut app = WindowView::new(
+                handle,
+                save_handle,
+                artwork,
+                Default::default(),
+                std::sync::Arc::new(Localizer::new("en-US")),
+                window,
+                cx,
+            );
+            app.handle.set_wakeup(|| {});
+            app.window_visible = false;
+            app.reconcile_feature_demand(cx);
+            app
+        });
+        let app = window.root(cx).unwrap();
+        let (playback, panel) = app.update(cx, |app, _| {
+            let panel = app
+                .workspace
+                .panels
+                .active_panels()
+                .find(|panel| panel.kind == shell::panels::PanelKind::Transport.key())
+                .unwrap()
+                .id;
+            (app.playback.clone(), panel)
+        });
+        let emit = |cx: &mut TestAppContext, panel| {
+            playback.update(cx, |_, cx| {
+                cx.emit(playback::PlaybackEvent::SliderKey {
+                    slider: Dragging::Volume(panel),
+                    key: rivu_ui::SliderKey::End,
+                    queue_id: None,
+                })
+            });
+            cx.run_until_parked();
+            let ack =
+                futures::executor::block_on(runtime.handle.request_ack(Command::DismissError));
+            assert!(ack.observed_result().is_ok(), "{ack:?}");
+            runtime.handle.gui_snapshot().playback.volume
+        };
+        assert_eq!(emit(cx, panel), 0.3);
+        app.update(cx, |app, _| app.window_visible = true);
+        assert_eq!(emit(cx, u64::MAX), 0.3);
+        assert_eq!(emit(cx, panel), 1.);
     }
 }

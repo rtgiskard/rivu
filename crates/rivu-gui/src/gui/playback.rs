@@ -20,10 +20,12 @@ pub(super) enum PlaybackEvent {
         dragging: Dragging,
         position: Point<Pixels>,
         alt: bool,
+        queue_id: Option<u64>,
     },
     SliderKey {
         slider: Dragging,
         key: SliderKey,
+        queue_id: Option<u64>,
     },
     Error(String),
 }
@@ -32,12 +34,16 @@ fn slider_command(
     slider: Dragging,
     key: SliderKey,
     queue_id: Option<u64>,
+    current_queue_id: Option<u64>,
     playback: &PlaybackState,
 ) -> Option<Command> {
     match slider {
         Dragging::Seek(_) => {
             // Match pointer seeking: a known duration and queue occurrence are required.
             let queue_id = queue_id?;
+            if Some(queue_id) != current_queue_id {
+                return None;
+            }
             let duration = playback
                 .duration
                 .filter(|value| value.is_finite() && *value > 0.)?;
@@ -152,10 +158,18 @@ impl Playback {
         self.send(Command::Volume { value }, cx);
     }
 
-    pub(super) fn slider_key(&mut self, slider: Dragging, key: SliderKey, cx: &mut Context<Self>) {
+    pub(super) fn slider_key(
+        &mut self,
+        slider: Dragging,
+        key: SliderKey,
+        queue_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reconcile(self.context.snapshot(), cx);
         if let Some(command) = slider_command(
             slider,
             key,
+            queue_id,
             self.state.queue.current_id,
             &self.state.playback,
         ) {
@@ -205,6 +219,7 @@ impl Playback {
                 .playback
                 .duration
                 .is_some_and(|value| value.is_finite() && value > 0.);
+        let queue_id = self.state.queue.current_id;
         let seek = Slider::new(
             ("seek", panel_id),
             progress,
@@ -213,7 +228,11 @@ impl Playback {
         .disabled(!seek_enabled)
         .dragging(matches!(self.dragging, Some(Dragging::Seek(id)) if id == panel_id))
         .render(cx, move |_, input, _, cx| {
-            cx.emit(Self::slider_event(Dragging::Seek(panel_id), input));
+            cx.emit(Self::slider_event(
+                Dragging::Seek(panel_id),
+                input,
+                queue_id,
+            ));
         })
         .child(seek_measurement);
         let volume_focus = window
@@ -230,7 +249,7 @@ impl Playback {
         )
         .dragging(volume_dragging)
         .render(cx, move |_, input, _, cx| {
-            cx.emit(Self::slider_event(Dragging::Volume(panel_id), input));
+            cx.emit(Self::slider_event(Dragging::Volume(panel_id), input, None));
         })
         .track_focus(&volume_focus)
         .child(volume_measurement)
@@ -578,16 +597,22 @@ impl Playback {
             .into_any_element()
     }
 
-    fn slider_event(dragging: Dragging, input: SliderInput) -> PlaybackEvent {
+    fn slider_event(
+        dragging: Dragging,
+        input: SliderInput,
+        queue_id: Option<u64>,
+    ) -> PlaybackEvent {
         match input {
             SliderInput::PointerDown { position, alt } => PlaybackEvent::SliderDown {
                 dragging,
                 position,
                 alt,
+                queue_id,
             },
             SliderInput::Key(key) => PlaybackEvent::SliderKey {
                 slider: dragging,
                 key,
+                queue_id,
             },
         }
     }
@@ -610,7 +635,7 @@ mod tests {
             SliderKey::Start,
             SliderKey::End,
         ] {
-            assert!(slider_command(Dragging::Seek(3), key, None, &state).is_none());
+            assert!(slider_command(Dragging::Seek(3), key, None, Some(10), &state).is_none());
             for duration in [
                 None,
                 Some(0.),
@@ -619,9 +644,76 @@ mod tests {
                 Some(f64::NAN),
             ] {
                 state.duration = duration;
-                assert!(slider_command(Dragging::Seek(3), key, Some(10), &state).is_none());
+                assert!(
+                    slider_command(Dragging::Seek(3), key, Some(10), Some(10), &state).is_none()
+                );
             }
             state.duration = Some(42.);
+        }
+    }
+
+    #[test]
+    fn seek_keys_never_retarget_an_old_render_to_a_new_queue_occurrence() {
+        let state = PlaybackState {
+            position: 12.,
+            duration: Some(42.),
+            ..Default::default()
+        };
+        for key in [
+            SliderKey::Decrease,
+            SliderKey::Increase,
+            SliderKey::Start,
+            SliderKey::End,
+        ] {
+            let PlaybackEvent::SliderKey {
+                slider,
+                key,
+                queue_id,
+            } = Playback::slider_event(Dragging::Seek(3), SliderInput::Key(key), Some(10))
+            else {
+                panic!("seek key event");
+            };
+            // Occurrences, not track IDs: a repeated copy of the same song is new.
+            assert!(slider_command(slider, key, queue_id, Some(11), &state).is_none());
+            assert!(slider_command(slider, key, queue_id, None, &state).is_none());
+            let command = slider_command(slider, key, queue_id, Some(10), &state).unwrap();
+            match command {
+                Command::SeekQueue { queue_id, seconds } => {
+                    assert_eq!(queue_id, 10);
+                    assert_eq!(seconds, if key == SliderKey::End { 42. } else { 0. });
+                }
+                Command::SeekRelative { queue_id, delta } => {
+                    assert_eq!(queue_id, 10);
+                    assert_eq!(delta, if key == SliderKey::Increase { 5. } else { -5. });
+                }
+                _ => panic!("seek command"),
+            }
+        }
+    }
+
+    #[test]
+    fn volume_keys_remain_available_without_a_playable_format_or_queue() {
+        let state = PlaybackState {
+            duration: None,
+            volume: 0.5,
+            ..Default::default()
+        };
+        for (key, expected) in [
+            (SliderKey::Start, Command::Volume { value: 0. }),
+            (SliderKey::End, Command::Volume { value: 1. }),
+            (SliderKey::Decrease, Command::AdjustVolume { delta: -0.05 }),
+            (SliderKey::Increase, Command::AdjustVolume { delta: 0.05 }),
+        ] {
+            let actual = slider_command(Dragging::Volume(3), key, None, None, &state).unwrap();
+            match (actual, expected) {
+                (Command::Volume { value }, Command::Volume { value: expected }) => {
+                    assert_eq!(value, expected);
+                }
+                (Command::AdjustVolume { delta }, Command::AdjustVolume { delta: expected }) => {
+                    assert_eq!(delta, expected);
+                }
+                _ => panic!("volume command"),
+            }
         }
     }
 }
