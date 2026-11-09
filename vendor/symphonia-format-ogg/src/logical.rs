@@ -623,8 +623,8 @@ impl LogicalStream {
         let new_part_len = self.part_len + buf.len();
 
         if new_part_len > self.part_buf.len() {
-            // Do not exceed an a certain limit to prevent unbounded memory growth.
-            if new_part_len > LogicalStream::MAX_PACKET_LEN.max(symphonia_metadata::budget::metadata_packet_limit()) {
+            // Do not exceed a certain limit to prevent unbounded memory growth.
+            if new_part_len > LogicalStream::MAX_PACKET_LEN {
                 return decode_error("ogg: packet buffer would exceed max size");
             }
 

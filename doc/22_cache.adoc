@@ -558,6 +558,8 @@ allocation. Their text admission is capped at 1 MiB per encoded item and a 4 MiB
 aggregate charge, with at most 4096 admission operations, eight nesting levels,
 and a 24 MiB encoded-staging allowance. One native source keeps its allowance
 across probing, packet reads, and seeks; nested synchronous parsers share it.
+Ogg metadata packets are limited to 1 MiB when native readers skip visuals;
+audio and codec-setup packets retain their separate container bounds.
 Oversized metadata may be skipped while retaining otherwise usable audio.
 
 Matroska DocType and CodecId are structural identifiers, independent of the
