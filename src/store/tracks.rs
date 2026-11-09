@@ -1081,7 +1081,6 @@ impl Store {
     }
 
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
-        self.track_cache.borrow_mut().entries.clear();
         let tx = self.conn.unchecked_transaction()?;
         let tracks = bounded_metadata_ids(&tx, "SELECT id FROM tracks WHERE missing=1", [])?;
         let history = tx.query_row(
@@ -1103,6 +1102,15 @@ impl Store {
         )?;
         let (removed, playlists, queue) = remove_track_references(&tx, None)?;
         tx.commit()?;
+        let mut cache = self.track_cache.borrow_mut();
+        if let Some(ids) = &tracks {
+            for id in ids {
+                cache.entries.remove(id);
+            }
+        } else {
+            cache.entries.clear();
+        }
+        drop(cache);
         Ok(TrackRemovalImpact {
             removed,
             queue,
@@ -1355,6 +1363,44 @@ mod deletion_tests {
                 (400,30,4,0),(401,30,6,1),(402,30,7,2);",
         )?;
         Ok(store)
+    }
+    #[test]
+    fn missing_cleanup_preserves_unrelated_and_noop_cached_tracks() -> Result<()> {
+        let store = fixture()?;
+        store.track(1)?;
+        store.track(2)?;
+        assert_eq!(store.remove_missing_tracks()?.removed, 0);
+        assert!(store.track_cache.borrow().entries.contains_key(&1));
+        assert!(store.track_cache.borrow().entries.contains_key(&2));
+        store
+            .conn
+            .execute("UPDATE tracks SET missing=1 WHERE id=2", [])?;
+        assert_eq!(store.remove_missing_tracks()?.removed, 1);
+        assert!(store.track_cache.borrow().entries.contains_key(&1));
+        assert!(!store.track_cache.borrow().entries.contains_key(&2));
+        assert!(store.track(2)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_cleanup_overflow_conservatively_clears_cached_tracks() -> Result<()> {
+        let store = fixture()?;
+        store.track(1)?;
+        for id in 100..100 + rivu_protocol::model::MAX_METADATA_SCOPES as i64 + 1 {
+            store.conn.execute(
+                "INSERT INTO tracks(id,path,missing) VALUES(?1,?2,1)",
+                params![id, format!("missing-{id}")],
+            )?;
+        }
+        let impact = store.remove_missing_tracks()?;
+        assert_eq!(
+            impact.removed,
+            rivu_protocol::model::MAX_METADATA_SCOPES + 1
+        );
+        assert!(impact.tracks.is_none());
+        assert!(store.track_cache.borrow().entries.is_empty());
+        assert!(store.track(1)?.is_some());
+        Ok(())
     }
 
     fn queue_rows(store: &Store) -> Result<Vec<(i64, i64, i64)>> {
