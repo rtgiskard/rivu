@@ -636,6 +636,101 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
 }
 
 #[test]
+fn saving_queue_bundle_remains_usable_when_later_scalar_reads_fail() {
+    for (revision, index) in [(7, None), (u64::MAX, Some(0))] {
+        let (directory, mut core) = admission_fixture();
+        core.state.queue.current_id = Some(5);
+        core.save_queue().unwrap();
+        core.refresh_queue_tracks().unwrap();
+        core.state.queue.revision = revision;
+        let before = core.state.queue.total;
+        let path = directory.path().join("external.wav");
+        write_pcm_frames(&path, 1);
+        core.start_external_admission(vec![path], index, index.map(|_| revision))
+            .unwrap();
+        let completion = loop {
+            let event = next_admission_event(&mut core);
+            if matches!(event, crate::core::admission::Event::SavingRetired(_)) {
+                break event;
+            }
+            core.external_admission_event(event);
+        };
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE saved_queue_meta AS SELECT * FROM rivu_meta; DELETE FROM rivu_meta;",
+            )
+            .unwrap();
+        core.external_admission_event(completion);
+        let status = core.scan_results.back().unwrap();
+        assert!(status.library_committed);
+        assert_eq!(status.progress.phase, ScanPhase::Completed);
+        assert!(status.error.is_none());
+        assert!(!core.transport.projection_stale);
+        assert_eq!(core.state.queue.total, before + 1);
+        assert_eq!(core.state.queue.revision, revision.wrapping_add(1));
+        assert_eq!(core.state.queue.current_id, Some(5));
+        assert_eq!(
+            core.state.queue.current_position,
+            Some(before - 1 + usize::from(index.is_some()))
+        );
+        connection
+            .execute_batch(
+                "INSERT INTO rivu_meta SELECT * FROM saved_queue_meta; DROP TABLE saved_queue_meta;",
+            )
+            .unwrap();
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn saving_queue_bundle_preserves_newer_structure_and_already_saved_selection() {
+    for changed_structure in [false, true] {
+        let (directory, mut core) = admission_fixture();
+        core.state.queue.current_id = Some(1);
+        core.save_queue().unwrap();
+        core.refresh_queue_tracks().unwrap();
+        let before = core.state.queue.total;
+        let revision = core.state.queue.revision;
+        let path = directory.path().join("external.wav");
+        write_pcm_frames(&path, 1);
+        core.start_external_admission(vec![path], Some(0), Some(revision))
+            .unwrap();
+        let completion = loop {
+            let event = next_admission_event(&mut core);
+            if matches!(event, crate::core::admission::Event::SavingRetired(_)) {
+                break event;
+            }
+            core.external_admission_event(event);
+        };
+        if changed_structure {
+            core.store.enqueue_tracks(&[2]).unwrap();
+            core.advance_queue_revision();
+        }
+        core.start_with_status(3, QueueHistory::Record, PlaybackStatus::Stopped)
+            .unwrap();
+        assert!(!core.transport.selection_pending);
+        core.external_admission_event(completion);
+        let status = core.scan_results.back().unwrap();
+        assert!(status.library_committed);
+        assert_eq!(status.progress.phase, ScanPhase::Completed);
+        assert_eq!(
+            core.state.queue.total,
+            before + 1 + usize::from(changed_structure)
+        );
+        assert_eq!(
+            core.state.queue.revision,
+            revision.wrapping_add(1 + u64::from(changed_structure))
+        );
+        assert_eq!(core.state.queue.current_id, Some(3));
+        assert_eq!(core.state.queue.current_position, Some(3));
+        assert_eq!(core.state.current_track().unwrap().id, 2);
+        assert!(!core.transport.projection_stale);
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
 fn committed_external_queue_projection_failure_recovers_before_navigation() {
     for index in [None, Some(0)] {
         let (directory, mut core) = admission_fixture();

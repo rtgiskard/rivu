@@ -117,6 +117,7 @@ fn save_external(
     prepared: library::ExternalAdmission,
     index: Option<usize>,
     current_id: Option<u64>,
+    queue_revision: u64,
     mut completion: SavingCompletion,
 ) {
     let saved = completion.saved.as_mut().unwrap();
@@ -133,8 +134,9 @@ fn save_external(
     };
     // Publish the prepared bundle only after all reads finish. A projection
     // panic leaves every missing view dirty without erasing the commit facts.
-    let queue = store.queue_projection(0);
     let dependencies = impacts.dependencies(false);
+    let queue =
+        store.queue_projection(queue_revision.wrapping_add(u64::from(dependencies.queue_revision)));
     let track_total = dependencies
         .refresh_track_total
         .then(|| store.track_count());
@@ -456,6 +458,7 @@ impl Core {
         let path = std::mem::take(&mut task.database_path);
         let index = task.index;
         let current_id = self.state.queue.current_id;
+        let queue_revision = self.state.queue.revision;
         let workers = self.workers.clone();
         // Own completion before scheduling: even an unpolled supervisor or an
         // unexecuted blocking job reports NotAttempted when its closure drops.
@@ -469,7 +472,16 @@ impl Core {
         task.saving_facts = Some(facts_rx);
         task.worker = Some(self.executor.spawn(async move {
             let joined = workers
-                .execute(move || save_external(path, prepared, index, current_id, completion))
+                .execute(move || {
+                    save_external(
+                        path,
+                        prepared,
+                        index,
+                        current_id,
+                        queue_revision,
+                        completion,
+                    )
+                })
                 .await;
             let _ = finished_tx.send(Event::SavingRetired(joined));
         }));
