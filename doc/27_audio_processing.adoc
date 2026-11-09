@@ -771,9 +771,12 @@ The parent is resolved at admission so retargeting a directory alias cannot redi
 the export. The worker writes a temporary sibling only for this explicit export,
 then commits without overwriting an existing destination after cancellation and
 source checks. These checks do not guarantee safety against arbitrary concurrent
-directory replacement. The durable output is float32 RIFF/WAVE with the actual
-speaker mask and samples in ascending WAVE-speaker-bit order. RIFF size overflow
-fails rather than switching to RF64; evaluation exports choose RIFF/RF64 per stem.
+directory replacement. The output is float32 RIFF/WAVE with the actual speaker
+mask and samples in ascending WAVE-speaker-bit order. RIFF size overflow fails
+rather than switching to RF64; evaluation exports choose RIFF/RF64 per stem.
+Publication requests no file or directory storage sync and does not guarantee
+survival of power or operating-system failure; see
+link:91_design_decisions.adoc#DEC-018[file publication policy].
 In-memory results remain session-owned; source files are not modified.
 
 == Ownership and invariants

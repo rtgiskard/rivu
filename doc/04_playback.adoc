@@ -604,7 +604,7 @@ Use the link:27_audio_processing.adoc[Audio processing workflow] for Monitor EQ,
 restoration, speech enhancement, separation, and graph audition. Processing never
 replaces source media. Original returns from audition to source playback; Monitor
 EQ remains in both paths, so keep EQ and level fixed for comparisons. Export a
-retained graph output explicitly for a durable WAV; audition results stay in memory
+retained graph output explicitly for a WAV file; audition results stay in memory
 and are lost when the core exits.
 
 Runtime ownership and backend contracts: link:21_ipc.adoc#core-and-client-boundary[IPC].

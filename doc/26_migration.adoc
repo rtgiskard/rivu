@@ -6,7 +6,7 @@
 
 `rivu-migrate check` inspects database compatibility and validates configuration
 without rewriting either. `apply` upgrades supported databases only after a
-durable SQLite backup; current resources are no-ops and need no backup.
+completed SQLite backup; current resources are no-ops and need no backup.
 
 [[supported-source-formats]]
 The supported database upgrade is format `2` to `4`: it adds `playlists.position`
@@ -153,23 +153,26 @@ A supported database conversion follows this protocol; configuration stays read-
 
 . Acquire data-directory ownership and fix the selected targets.
 . Recheck database structure and readability and strictly validate configuration.
-. Create a unique SQLite backup, sync its contents, publish its final `.bak` name
-  without replacement, and sync its parent directory before permitting a write.
+. Create a unique SQLite backup, close it, and publish its final `.bak` name
+  without replacement before permitting a write.
 . Apply the change, its validation, and authoritative markers in one transaction.
 . Report the outcome and actual backup paths. Do not start the application,
   rewrite configuration, or delete backups.
 
 SQLite's backup API includes committed WAL contents; copying a live database file
 alone is not a consistent backup. Publication proceeds from `.bak.partial` to
-`.bak`, with these reported durability states:
+`.bak`, with these reported completion states:
 
 * `unpublished; may be incomplete`: the retained partial file is not a restore point.
-* `published; directory sync uncertain`: the final name exists, but its directory
-  durability is unconfirmed.
-* `complete; file and directory synced`: database maintenance may start.
+* `published; completion uncertain`: the final name exists, but post-publication
+  bookkeeping did not complete.
+* `complete; no storage sync requested`: database maintenance may start.
 
-Failures retain partial evidence and never trigger restoration. Backup durability
-and the migration transaction are separate boundaries, not a cross-resource commit.
+Files and directories are not explicitly synced. A completed backup is logically
+consistent, not a power-loss durability guarantee; see
+link:91_design_decisions.adoc#DEC-018[file publication policy]. Failures retain
+partial evidence and never trigger restoration. Backup publication and the
+migration transaction are separate boundaries, not a cross-resource commit.
 Backup and transaction/WAL growth need disk space; preflight's capacity estimate
 is advisory and later storage errors still fail. Transformations remain in SQLite,
 without whole-library buffers, scanning, network access or decoder probing.

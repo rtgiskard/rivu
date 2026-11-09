@@ -6,7 +6,7 @@ use rusqlite::{
     backup::{Backup, StepResult},
 };
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::ErrorKind,
     os::unix::{fs::OpenOptionsExt, net::UnixListener},
     path::{Path, PathBuf},
@@ -42,11 +42,11 @@ impl Options {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackupStatus {
-    /// Private partial artifact; copying, closing, syncing, or publication failed.
+    /// Private partial artifact; copying, closing, or publication failed.
     Unpublished,
-    /// Published without replacing another file; directory durability is uncertain.
-    PublishedSyncUncertain,
-    /// SQLite closed and both file data and the published directory entry synced.
+    /// Published without replacement; retained-alias inspection is incomplete.
+    Published,
+    /// SQLite backup finished and closed, published, and retained aliases inspected.
     Complete,
 }
 
@@ -54,8 +54,8 @@ impl BackupStatus {
     pub fn description(self) -> &'static str {
         match self {
             Self::Unpublished => "unpublished; may be incomplete",
-            Self::PublishedSyncUncertain => "published; directory sync uncertain",
-            Self::Complete => "complete; file and directory synced",
+            Self::Published => "published; completion uncertain",
+            Self::Complete => "complete; no storage sync requested",
         }
     }
 }
@@ -256,7 +256,7 @@ fn apply_plan(
     tracing::info!(database = ?plan.path, "Checking storage capacity");
     storage_preflight(plan)?;
     // Back up the complete database before attempting a transactional change.
-    let (path, published, file) = reserve_backup(&plan.path)?;
+    let (path, published) = reserve_backup(&plan.path)?;
     report.backups.push(BackupReport {
         path,
         status: BackupStatus::Unpublished,
@@ -294,7 +294,6 @@ fn apply_plan(
         .close()
         .map_err(|(_, error)| error)
         .context("Closing SQLite backup")?;
-    file.sync_all().context("Syncing SQLite backup")?;
     let mut partial = tempfile::TempPath::try_from_path(&artifact.path)?;
     // Every failure artifact is evidence, not a disposable temporary file.
     partial.disable_cleanup(true);
@@ -302,10 +301,10 @@ fn apply_plan(
         .persist_noclobber(&published)
         .map_err(|error| error.error)
         .context("Publishing SQLite backup without replacement")?;
-    // Publication already happened even if the following directory sync
-    // fails. Keep the real path and never misreport this as a partial file.
+    // Publication already happened even if retained-alias inspection fails.
+    // Keep the real path and never misreport this as a partial file.
     let partial_path = std::mem::replace(&mut artifact.path, published);
-    artifact.status = BackupStatus::PublishedSyncUncertain;
+    artifact.status = BackupStatus::Published;
     // The no-replace link/unlink fallback can leave a complete-content
     // alias behind. Report only aliases that actually remain.
     match fs::symlink_metadata(&partial_path) {
@@ -320,12 +319,11 @@ fn apply_plan(
             });
         }
     }
-    sync_parent(&artifact.path)?;
     artifact.status = BackupStatus::Complete;
     tracing::info!(
         backup = ?artifact.path,
         elapsed = ?started.elapsed(),
-        "Backup complete and synced"
+        "Backup complete"
     );
     let writer = Connection::open_with_flags(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     // FULL makes the migration transaction durable, including WAL.
@@ -393,7 +391,7 @@ fn ensure_storage_capacity(target: &Path, required: u64, available: u64) -> Resu
     Ok(())
 }
 
-fn reserve_backup(target: &Path) -> Result<(PathBuf, PathBuf, File)> {
+fn reserve_backup(target: &Path) -> Result<(PathBuf, PathBuf)> {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     for attempt in 0..100 {
         let mut name = target
@@ -420,7 +418,10 @@ fn reserve_backup(target: &Path) -> Result<(PathBuf, PathBuf, File)> {
             .mode(0o600)
             .open(&path)
         {
-            Ok(file) => return Ok((path, published, file)),
+            Ok(file) => {
+                drop(file);
+                return Ok((path, published));
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error).with_context(|| format!("Creating backup {}", path.display()));
@@ -431,16 +432,6 @@ fn reserve_backup(target: &Path) -> Result<(PathBuf, PathBuf, File)> {
         "Could not reserve a unique timestamped backup for {}",
         target.display()
     )
-}
-
-fn sync_parent(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    File::open(parent)?
-        .sync_all()
-        .with_context(|| format!("Syncing directory {}", parent.display()))
 }
 
 #[cfg(test)]

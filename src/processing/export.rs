@@ -163,7 +163,6 @@ pub(super) fn prepare_streaming_export(
         writer.writer.finalize()?;
     }
     set_wav_channel_mask(temporary.as_file_mut(), spec, mask)?;
-    temporary.as_file().sync_all()?;
     check_cancel(cancel)?;
     Ok((temporary, canonical))
 }

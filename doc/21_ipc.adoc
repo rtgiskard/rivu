@@ -1402,7 +1402,7 @@ can have a failed operation receipt while its valid outputs remain available.
 `ProcessingOutputs` exposes boolean stem availability, not paths. Graph outputs
 identify their ports and optional causal `start_frame` context; PCM remains owned
 by the service and is never serialized into status. Only an explicit export
-receipt carries a durable output path. See
+receipt carries a published output path. See
 link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing] for
 CLI equivalents, terminal states, provisioning, PCM ownership and audition lifetime.
 
@@ -1447,7 +1447,7 @@ but only while its run and playback generation still match.
 captured run state from later edits. `graph_outputs` lists only real cached output
 ports and optional causal `start_frame` context (separation ports 0/1 are
 vocals/accompaniment), not PCM or file paths. Only `graph_exported_path` records a
-successful export's durable path. `graph_nodes` reports per-node execution state
+successful export's published path. `graph_nodes` reports per-node execution state
 and actual neural model IDs/SHA256 hashes.
 Output availability and status retention are separate; a terminal task alone
 does not authorize audition. Shared processing budgets and pinned-audition

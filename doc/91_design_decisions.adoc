@@ -480,6 +480,25 @@ ownership does not confer permission for late task completion to start playback.
 See link:27_audio_processing.adoc#playback-bypass[Playback bypass] for operation,
 selection retirement and failure behavior.
 
+[[DEC-018]]
+=== DEC-018: File publication does not request storage synchronization
+
+Status: implemented, 2026-11-09.
+
+Application-managed file writes do not call `fsync`, `fdatasync`, or their
+file/directory synchronization wrappers. This includes configuration, layouts,
+caches, exports, source-tag replacement and its original-file backup, and
+migration backups. Avoid explicit storage-flush waits; the operating system
+controls writeback. Retain required buffered flushes, format finalization,
+normal I/O error handling, source validation and atomic replacement or
+no-clobber publication.
+
+Successful completion means the write and publication operations succeeded;
+neither the output nor its backup is guaranteed to survive power loss or an
+operating-system failure. Do not expose sync-failure states or retry paths for
+barriers that are not performed. SQLite's internal synchronization policy is
+separate and unchanged; see link:02_library.adoc[Library storage].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

@@ -285,7 +285,8 @@ exhaustion fails rather than evicting it or spilling to disk. At most four froze
 run snapshots support later graph recomputation. Availability is revoked when PCM
 is retired, including in current/history status. The latest 32 terminal statuses
 can outlive retained audio. Export jobs preserve their source handles, occupy no
-audition slot and publish only a durable file and receipt.
+audition slot and publish only a file and receipt; publication does not request
+storage synchronization (link:91_design_decisions.adoc#DEC-018[file publication policy]).
 
 One bounded reclamation worker releases rejected/replaced payloads off Core.
 Workers wait for preceding retirement without blocking Core; charges persist

@@ -412,12 +412,13 @@ Allow space for two complete files in addition to the source. Stop other writers
 first: the lock is advisory. Keep the backup until the result has been checked.
 
 Source-edit results distinguish `unchanged` and `replaced`; a replacement reports
-the independent `backup_path`. Failures distinguish `before_replace` (including
-any retained backup) from `replaced_durability_unknown`: the source was already
-replaced, but the directory sync did not confirm crash durability. Inspect the
-source and reported original backup before retrying or rescanning; failure does
-not authorize replay. With `--json`, structured failures go to stderr and retain
-the outcome, source path and backup evidence.
+the independent `backup_path`. Failures report `before_replace`, including any
+retained backup. Inspect the source and reported original backup before retrying
+or rescanning; failure does not authorize replay. With `--json`, structured
+failures go to stderr and retain the outcome, source path and backup evidence.
+Neither source replacement nor backup publication requests a storage sync;
+successful completion does not promise survival of power or operating-system failure.
+See link:91_design_decisions.adoc#DEC-018[file publication policy].
 
 For tag inspection, edit results (including failures), and offline `library probe`,
 JSON `path` and `backup_path` values are strings when the path is valid UTF-8. Other Unix paths
@@ -702,7 +703,7 @@ external database edits. Queue restoration: link:04_playback.adoc#queue[Playback
 === Independent migration tool
 
 `rivu-migrate check` inspects formats; `apply` performs supported offline upgrades.
-Stop Rivu and external writers before applying. Upgrades keep a durable backup and
+Stop Rivu and external writers before applying. Upgrades keep an independent backup and
 preserve user data and playlist catalog order. Both commands validate current
 resources without rewriting them and do not initialize missing resources.
 
