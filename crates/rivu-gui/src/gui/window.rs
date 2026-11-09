@@ -463,6 +463,12 @@ impl WindowView {
             AudioVisualizerOptions::from(state.system.config.as_ref()),
             rivu_format::config::ArtworkOptions::from(state.system.config.as_ref()),
         );
+        let feature_context = feature::FeatureContext {
+            snapshots: Rc::clone(&snapshots),
+            i18n: Arc::clone(&i18n),
+            labels: Rc::clone(&localized_text),
+            scroll: Rc::clone(&workspace.scroll_views),
+        };
         let error = load_error
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
@@ -479,8 +485,7 @@ impl WindowView {
         let mut subscriptions = Vec::new();
         let settings = cx.new(|cx| {
             settings::Settings::new(
-                Arc::clone(&i18n),
-                handle.clone(),
+                feature_context.clone(),
                 Arc::clone(&artwork_manager),
                 Arc::clone(&state.system.devices),
                 (
@@ -696,12 +701,6 @@ impl WindowView {
             )
         });
         subscriptions.push(cx.observe(&atmosphere, |_, _, cx| cx.notify()));
-        let feature_context = feature::FeatureContext {
-            snapshots: Rc::clone(&snapshots),
-            i18n: Arc::clone(&i18n),
-            labels: Rc::clone(&localized_text),
-            scroll: Rc::clone(&workspace.scroll_views),
-        };
         let mut app = Self {
             i18n: Arc::clone(&i18n),
             localized_text,

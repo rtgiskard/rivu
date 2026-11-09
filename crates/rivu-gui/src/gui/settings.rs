@@ -686,7 +686,7 @@ struct SettingsSubmission {
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
     i18n: Arc<Localizer>,
-    text: HashMap<String, SharedString>,
+    text: Rc<HashMap<String, SharedString>>,
     handle: FrontendHandle,
     artwork_manager: Arc<ArtworkManager>,
     root_stats: library_stats::RootStats,
@@ -732,14 +732,16 @@ impl Settings {
     }
 
     pub(super) fn new(
-        i18n: Arc<Localizer>,
-        handle: FrontendHandle,
+        context: super::feature::FeatureContext,
         artwork_manager: Arc<ArtworkManager>,
         devices: Arc<Vec<String>>,
         runtime_status: (String, String),
         ui_scale: f32,
         cx: &mut Context<Self>,
     ) -> Self {
+        let handle = context.handle().clone();
+        let i18n = context.i18n;
+        let text = context.labels;
         let (ffmpeg_status, mpris_status) = runtime_status;
         let config = handle.config_snapshot();
         let artwork_cache_age = cx.new(|cx| {
@@ -758,10 +760,6 @@ impl Settings {
                 cx.notify();
             }
         });
-        let text = i18n
-            .fixed_texts()
-            .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-            .collect();
         Self {
             text,
             i18n,
@@ -2660,10 +2658,23 @@ mod tests {
         .unwrap();
         let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
         let config = runtime.handle.config_snapshot();
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let text = Rc::new(
+            i18n.fixed_texts()
+                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                .collect(),
+        );
+        let context = super::super::feature::FeatureContext {
+            snapshots: Rc::new(super::super::feature::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            i18n,
+            labels: text,
+            scroll: Default::default(),
+        };
         let settings = cx.new(|cx| {
             Settings::new(
-                Arc::new(Localizer::new("en-US")),
-                runtime.handle.clone(),
+                context,
                 Arc::new(ArtworkManager::new(directory.path())),
                 Arc::new(Vec::new()),
                 ("disabled".into(), "disabled".into()),
