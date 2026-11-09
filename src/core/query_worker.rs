@@ -589,9 +589,6 @@ impl ReadQueries {
                         "Projection ownership changed"
                     );
                 }
-                // Only this accepted snapshot may invalidate the reused reader's
-                // cached values. Recovery must not inherit an older count owner.
-                snapshot.invalidate_caches();
                 let prepared = projections::PreparedProjections::read(&snapshot, demand);
                 snapshot.finish()?;
                 Ok(prepared)
