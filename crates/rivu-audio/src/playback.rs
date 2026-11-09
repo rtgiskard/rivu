@@ -2078,6 +2078,56 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn failed_output_restart_keeps_retired_epoch_snapshot_after_shared_pcm_reset() {
+        for paused in [false, true] {
+            for target in [None, Some(0.125)] {
+                let file = pcm();
+                let (mut playback, _) = test_playback_selected(file.path(), None);
+                let (output, mut render) =
+                    crate::output::test_backend(8_000, false, playback.source.layout());
+                playback
+                    .restart_output_with(Some(0.25), |_, _| Ok(output))
+                    .unwrap();
+                playback.prior_heard = 12.0;
+                playback.fill().unwrap();
+                render(&mut [0.0; 64], 0);
+                render(&mut [0.0; 64], 24);
+                assert_eq!(playback.position(), 0.25 + 32.0 / 8_000.0);
+                playback.pause(paused);
+                playback.output.on_close_for_test(move || {
+                    let mut silent = [1.0; 64];
+                    render(&mut silent, 28);
+                    assert_eq!(silent, [0.0; 64]);
+                });
+                let control = Arc::clone(playback.output.pcm_control_for_test());
+                let epoch = control.state().epoch;
+                playback
+                    .restart_output_with(target, |source, is_paused| {
+                        assert_eq!(is_paused, paused);
+                        assert_eq!(control.state().heard_frame, 64);
+                        // Output::new resets this same control before opening
+                        // the native stream, which may then fail.
+                        control.reset(source.info().sample_rate, source.layout());
+                        bail!("injected native output open failure")
+                    })
+                    .unwrap_err();
+                assert_ne!(control.state().epoch, epoch);
+                assert_eq!(control.state().heard_frame, 0);
+                let expected = crate::AudioSnapshot {
+                    generation: 1,
+                    position_seconds: 0.25 + 64.0 / 8_000.0,
+                    listened_seconds: 12.0 + 64.0 / 8_000.0,
+                };
+                for _ in 0..3 {
+                    assert_eq!(playback.position(), expected.position_seconds);
+                    assert_eq!(playback.heard(), expected.listened_seconds);
+                    assert_eq!(playback.close(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn repeated_paused_cue_seeks_discard_old_pcm_and_preserve_exact_position() {
         let file = pcm();
         let range = PlaybackRange {

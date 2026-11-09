@@ -288,8 +288,11 @@ inapplicable EQ generations/configurations are ignored; retiring playback events
 do not restart transport or advance the queue.
 
 Changing sink or remixing rebuilds output at the final confirmed audible position,
-preserving pause without reopening the decoder. It does not apply a newly saved
-Decoder hint or read-buffer size. PipeWire handles device-rate conversion.
+preserving pause without reopening the decoder. The retired output's final position
+and heard time remain authoritative even if its replacement fails to open; resetting
+analysis for the replacement cannot discard or count those confirmations twice.
+Rebuilding output does not apply a newly saved Decoder hint or read-buffer size.
+PipeWire handles device-rate conversion.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing with channel-level normalization to prevent

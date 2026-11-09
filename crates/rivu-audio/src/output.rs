@@ -249,6 +249,9 @@ pub(super) struct Output {
     source_channels: usize,
     errors: Receiver<OutputError>,
     submitted: u64,
+    // The shared PCM cursor belongs to the next epoch once output is rebuilt.
+    // Retain this epoch's final count after its callback owner has joined.
+    final_heard_frames: Option<u64>,
     #[cfg(test)]
     on_close: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -309,6 +312,7 @@ impl Output {
             source_channels,
             errors,
             submitted: 0,
+            final_heard_frames: None,
             #[cfg(test)]
             on_close: None,
         })
@@ -337,8 +341,7 @@ impl Output {
 
     pub(super) fn refill_delay(&self, eof: bool) -> Duration {
         let frames = if eof {
-            self.submitted
-                .saturating_sub(self.shared.pcm.heard_frame.load(Ordering::Acquire))
+            self.submitted.saturating_sub(self.heard_frames())
         } else {
             (self.producer.occupied_len() / self.source_channels) as u64 / 2
         };
@@ -366,11 +369,16 @@ impl Output {
     }
 
     pub(super) fn drained(&self) -> bool {
-        self.shared.pcm.heard_frame.load(Ordering::Acquire) == self.submitted
+        self.heard_frames() == self.submitted
+    }
+
+    fn heard_frames(&self) -> u64 {
+        self.final_heard_frames
+            .unwrap_or_else(|| self.shared.pcm.heard_frame.load(Ordering::Acquire))
     }
 
     pub(super) fn heard(&self) -> f64 {
-        self.shared.pcm.heard_frame.load(Ordering::Acquire) as f64 / self.rate as f64
+        self.heard_frames() as f64 / self.rate as f64
     }
     pub(super) fn position(&self) -> f64 {
         // The source cursor advances only as scheduled PCM becomes audible.
@@ -405,17 +413,25 @@ impl Output {
         }
     }
     pub(super) fn close(&mut self) -> f64 {
-        self.shared.paused.store(true, Ordering::Release);
-        self.stream.take();
-        #[cfg(test)]
-        if let Some(on_close) = self.on_close.take() {
-            on_close();
+        if self.final_heard_frames.is_none() {
+            self.shared.paused.store(true, Ordering::Release);
+            self.stream.take();
+            #[cfg(test)]
+            if let Some(on_close) = self.on_close.take() {
+                on_close();
+            }
+            self.final_heard_frames = Some(self.shared.pcm.heard_frame.load(Ordering::Acquire));
         }
         self.heard()
     }
 
     pub(super) fn submitted(&self) -> u64 {
         self.submitted
+    }
+
+    #[cfg(test)]
+    pub(super) fn pcm_control_for_test(&self) -> &Arc<PcmControl> {
+        &self.shared.pcm
     }
 
     #[cfg(test)]
@@ -1697,6 +1713,7 @@ mod pcm_tests {
             source_channels: source.len(),
             errors,
             submitted: 0,
+            final_heard_frames: None,
             on_close: None,
         };
         let callback = OutputCallback {
@@ -1808,6 +1825,33 @@ mod pcm_tests {
         callback.render(&mut data, timestamp(22, 40));
         assert_eq!(output.close(), 0.002);
         assert!(!output.drained());
+    }
+
+    #[test]
+    fn retired_output_keeps_final_count_when_shared_pcm_epoch_is_reused() {
+        for frames in [2, 8] {
+            let (mut output, mut callback, pcm) = test_output(1000, false);
+            output.push([[0.5, -0.5]; 8].as_flattened());
+            callback.render(&mut [0.0; 16], timestamp(0, 20));
+            output.on_close_for_test(move || {
+                callback.render(&mut [], timestamp(20 + frames, 40 + frames));
+            });
+            let heard = frames as f64 / 1000.0;
+            assert_eq!(output.close(), heard);
+            let drained = output.drained();
+            let refill_delay = output.refill_delay(true);
+            assert_eq!(drained, frames == 8);
+            pcm.reset(48_000, &[Channel::FrontCenter]);
+            assert_eq!(pcm.state().heard_frame, 0);
+            for next_epoch_frames in [0, 1, 48_000] {
+                pcm.heard_frame.store(next_epoch_frames, Ordering::Release);
+                assert_eq!(output.close(), heard);
+                assert_eq!(output.heard(), heard);
+                assert_eq!(output.position(), heard);
+                assert_eq!(output.drained(), drained);
+                assert_eq!(output.refill_delay(true), refill_delay);
+            }
+        }
     }
 
     #[test]
