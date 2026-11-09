@@ -355,11 +355,10 @@ impl EqualizerEditor {
         if !changed {
             return;
         }
-        let enabled = !self.input_locked();
         for (key, field) in &self.fields {
             field.input.update(cx, |input, cx| {
                 input.set_enabled(
-                    enabled
+                    self.field_input_enabled(key)
                         && (key != &EqField::BandCount || !self.config_locked() && pending == 0),
                     cx,
                 )
@@ -498,9 +497,12 @@ impl EqualizerEditor {
     fn node_geometry_valid(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         let snapshot = self.context.snapshot();
         let config = target_config(&snapshot, self.target);
-        let format_valid =
-            self.owner.upgrade().is_some() && equalizer_format(&snapshot) == self.format;
+        let format_valid = self.owner.upgrade().is_some()
+            && equalizer_format(&snapshot) == equalizer_format(&self.state);
         let valid = !self.config_locked()
+            && self
+                .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
+                .is_some()
             && format_valid
             && config == Some(&self.config)
             && (self.target == EqTarget::Monitor
@@ -568,7 +570,12 @@ impl EqualizerEditor {
     }
 
     fn field(&mut self, key: &EqField, label: &str, value: String, cx: &mut Context<Self>) {
+        let enabled = self.field_input_enabled(key)
+            && (key != &EqField::BandCount || !self.config_locked() && self.pending == 0);
         if let Some(field) = self.fields.get_mut(key) {
+            field
+                .input
+                .update(cx, |input, cx| input.set_enabled(enabled, cx));
             if field.committed != value {
                 field.committed.clone_from(&value);
                 if !field.dirty {
@@ -588,8 +595,6 @@ impl EqualizerEditor {
             label.to_owned().into()
         };
         let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
-        let enabled = !self.input_locked()
-            && (key != &EqField::BandCount || !self.config_locked() && self.pending == 0);
         input.update(cx, |input, cx| {
             input.set_enabled(enabled, cx);
             if matches!(key, EqField::PreampDb | EqField::OutputGainDb) {
@@ -618,30 +623,34 @@ impl EqualizerEditor {
         name: EqField,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(input, move |this, _, event, cx| match event {
-            InputEvent::Changed {
-                user: true,
-                composing,
-            } => {
-                this.cancel_pointer(cx);
-                let valid = this
-                    .fields
-                    .get(&name)
-                    .is_some_and(|field| this.valid_live_draft(&name, field.input.read(cx).text()));
-                if let Some(field) = this.fields.get_mut(&name) {
-                    if !field.dirty {
-                        field.draft_revision = Some(this.revision);
-                    }
-                    field.dirty = true;
-                    field.generation = field.generation.wrapping_add(1);
-                    field.auto_pending = !composing && valid;
-                }
-                this.schedule_live_submission(cx);
-                cx.notify();
-                let _ = this.owner.update(cx, |_, cx| cx.notify());
+        cx.subscribe(input, move |this, _, event, cx| {
+            if !this.field_input_enabled(&name) {
+                return;
             }
-            InputEvent::Submit => this.apply_field(&name, cx),
-            _ => {}
+            match event {
+                InputEvent::Changed {
+                    user: true,
+                    composing,
+                } => {
+                    this.cancel_pointer(cx);
+                    let valid = this.fields.get(&name).is_some_and(|field| {
+                        this.valid_live_draft(&name, field.input.read(cx).text())
+                    });
+                    if let Some(field) = this.fields.get_mut(&name) {
+                        if !field.dirty {
+                            field.draft_revision = Some(this.revision);
+                        }
+                        field.dirty = true;
+                        field.generation = field.generation.wrapping_add(1);
+                        field.auto_pending = !composing && valid;
+                    }
+                    this.schedule_live_submission(cx);
+                    cx.notify();
+                    let _ = this.owner.update(cx, |_, cx| cx.notify());
+                }
+                InputEvent::Submit => this.apply_field(&name, cx),
+                _ => {}
+            }
         })
     }
 
@@ -697,19 +706,24 @@ impl EqualizerEditor {
 
     fn band_numeric_range(&self, key: &EqField) -> Option<(f64, f64, bool)> {
         match key {
-            EqField::Band(_, BandField::FrequencyHz) => Some((
-                1.,
-                self.format.map_or(96_000., |(_, rate, _)| {
+            EqField::Band(_, BandField::FrequencyHz) => {
+                let maximum = self.format.map_or(96_000., |(_, rate, _)| {
                     (f64::from(rate) * 0.499).min(96_000.)
-                }),
-                true,
-            )),
+                });
+                (maximum > 1.).then_some((1., maximum, true))
+            }
             EqField::Band(_, BandField::GainDb) => Some((-24., 24., false)),
             EqField::Band(_, BandField::Q) => Some((0.1, 20., true)),
             EqField::Band(_, BandField::ShelfSlope) => Some((0.1, 1., false)),
             EqField::Band(_, BandField::Stages) => Some((1., 4., false)),
             _ => None,
         }
+    }
+
+    fn field_input_enabled(&self, key: &EqField) -> bool {
+        !self.input_locked()
+            && (!matches!(key, EqField::Band(_, BandField::FrequencyHz))
+                || self.band_numeric_range(key).is_some())
     }
 
     fn remap_band_fields(&mut self, next: &[EqBand], cx: &mut Context<Self>) {
@@ -947,6 +961,15 @@ impl EqualizerEditor {
                     .ok()
                     .filter(|count| *count <= MAX_BANDS)
                     .ok_or_else(|| self.tr("processing-band-count-invalid").to_string())?;
+                // Automatic placement has a 20 Hz floor in the protocol. A
+                // known unusable stream is not the offline/unknown fallback.
+                if count > self.config.bands.len()
+                    && self
+                        .format
+                        .is_some_and(|(_, rate, _)| f64::from(rate) * 0.499 < 20.)
+                {
+                    return Err(self.tr("processing-response-unknown").to_string());
+                }
                 EqualizerEdit::ResizeBands { count }
             }
             EqField::PreampDb | EqField::OutputGainDb => {
@@ -999,7 +1022,7 @@ impl EqualizerEditor {
         Ok(edit)
     }
     fn step_field(&mut self, key: &EqField, step: f64, cx: &mut Context<Self>) {
-        if self.input_locked() {
+        if !self.field_input_enabled(key) {
             return;
         }
         self.cancel_pointer(cx);
@@ -1064,10 +1087,10 @@ impl EqualizerEditor {
         let Some(drag) = &self.field_drag else { return };
         let snapshot = self.context.snapshot();
         if !self.active
-            || self.input_locked()
+            || !self.field_input_enabled(&drag.key)
             || drag.geometry_epoch != self.geometry_epoch
             || drag.geometry != WindowGeometry::current(window, snapshot.system.config.ui_scale)
-            || equalizer_format(&snapshot) != self.format
+            || equalizer_format(&snapshot) != equalizer_format(&self.state)
             || self
                 .fields
                 .get(&drag.key)
@@ -1237,6 +1260,7 @@ impl EqualizerEditor {
         let field = &self.fields[key];
         let label: SharedString = label.into();
         let compact = matches!(key, EqField::PreampDb | EqField::OutputGainDb);
+        let enabled = enabled && self.field_input_enabled(key);
         let (unit, step) = match key {
             EqField::Band(_, BandField::FrequencyHz) => ("Hz", Some(1.)),
             EqField::PreampDb | EqField::OutputGainDb => ("dB", None),
@@ -1300,12 +1324,13 @@ impl EqualizerEditor {
                         rivu_ui::IconButtonDensity::Compact,
                         cx,
                         move |this, _, cx| this.step_field(&key_owned, delta, cx),
-                    ),
+                    )
+                    .debug_selector(move || format!("eq-step-{key_owned}-{suffix}")),
                 );
             }
         }
         control = control.child(numeric.into_div().flex_shrink_0());
-        if !compact && self.band_numeric_range(key).is_none() {
+        if !compact && matches!(key, EqField::Band(_, BandField::Channels)) {
             let key_owned = *key;
             control = control.child(
                 rivu_ui::IconButton::new(
@@ -1332,6 +1357,7 @@ impl EqualizerEditor {
     fn update_response(&mut self) {
         self.response_dirty = false;
         let Some((_, sample_rate, channel_count)) = self.format else {
+            self.maximum_frequency = 20_000.;
             self.response = Arc::new(Vec::new());
             self.response_error = Some(
                 self.context
@@ -1341,7 +1367,11 @@ impl EqualizerEditor {
             );
             return;
         };
-        if sample_rate == 0 || channel_count == 0 {
+        if self
+            .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
+            .is_none()
+            || channel_count == 0
+        {
             self.response = Arc::new(Vec::new());
             self.response_error = Some(
                 self.context
@@ -1356,7 +1386,8 @@ impl EqualizerEditor {
         if self.frequency_limit != self.maximum_frequency {
             self.frequency_limit = self.maximum_frequency;
             for (index, frequency) in self.frequencies.iter_mut().enumerate() {
-                *frequency = 20. * (self.maximum_frequency / 20.).powf(index as f64 / 256.);
+                let minimum = graph_minimum_frequency(self.maximum_frequency);
+                *frequency = minimum * (self.maximum_frequency / minimum).powf(index as f64 / 256.);
             }
         }
         let mut response = vec![0.; self.frequencies.len()];
@@ -1388,7 +1419,8 @@ impl EqualizerEditor {
     }
 
     fn frequency_x(&self, frequency: f64) -> f32 {
-        ((frequency / 20.).ln() / (self.maximum_frequency / 20.).ln()).clamp(0., 1.) as f32
+        let minimum = graph_minimum_frequency(self.maximum_frequency);
+        slider_fraction(frequency, (minimum, self.maximum_frequency, true))
     }
 
     fn graph_has_focus(&self, window: &Window) -> bool {
@@ -1487,6 +1519,10 @@ impl EqualizerEditor {
             .iter()
             .take(MAX_BANDS)
             .enumerate()
+            .filter(|_| {
+                self.band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
+                    .is_some()
+            })
             .map(|(i, b)| {
                 let (frequency, gain) = self
                     .drag
@@ -1829,14 +1865,25 @@ impl EqualizerEditor {
             return;
         }
         let field = match event.keystroke.key.as_str() {
-            "left" => EqBandEdit::FrequencySteps {
-                steps: -1,
-                maximum_hz: self.maximum_frequency,
-            },
-            "right" => EqBandEdit::FrequencySteps {
-                steps: 1,
-                maximum_hz: self.maximum_frequency,
-            },
+            "left" | "right" => {
+                let Some((minimum, maximum, _)) =
+                    self.band_numeric_range(&EqField::Band(index, BandField::FrequencyHz))
+                else {
+                    return;
+                };
+                let steps = if event.keystroke.key == "left" { -1 } else { 1 };
+                if maximum < 20. {
+                    EqBandEdit::FrequencyHz(
+                        (band.frequency_hz * 2.0_f64.powf(f64::from(steps) / 12.))
+                            .clamp(minimum, maximum),
+                    )
+                } else {
+                    EqBandEdit::FrequencySteps {
+                        steps,
+                        maximum_hz: self.maximum_frequency,
+                    }
+                }
+            }
             "up" | "down"
                 if matches!(
                     band.kind,
@@ -1865,6 +1912,7 @@ impl EqualizerEditor {
     }
 
     fn move_node(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let frequency_range = self.band_numeric_range(&EqField::Band(0, BandField::FrequencyHz));
         if let Some(drag) = self.drag.as_mut() {
             if drag.bounds.size.width <= px(0.) || drag.bounds.size.height <= px(0.) {
                 return;
@@ -1877,13 +1925,14 @@ impl EqualizerEditor {
             }
             let previous = (drag.frequency, drag.gain);
             drag.moved = true;
-            drag.frequency = if delta.x == px(0.) {
+            drag.frequency = if delta.x == px(0.) || frequency_range.is_none() {
                 drag.original_frequency
             } else {
-                let original_x =
-                    (drag.original_frequency / 20.).ln() / (self.maximum_frequency / 20.).ln();
+                let minimum = graph_minimum_frequency(self.maximum_frequency);
+                let original_x = (drag.original_frequency / minimum).ln()
+                    / (self.maximum_frequency / minimum).ln();
                 let x = (original_x + (delta.x / drag.bounds.size.width) as f64).clamp(0., 1.);
-                20. * (self.maximum_frequency / 20.).powf(x)
+                minimum * (self.maximum_frequency / minimum).powf(x)
             };
             let kind = self.config.bands[drag.band].kind;
             if matches!(
@@ -1901,12 +1950,17 @@ impl EqualizerEditor {
                     if let Some(field) = self.fields.get(&EqField::Band(drag.band, name))
                         && !field.dirty
                     {
-                        field.input.update(cx, |input, cx| {
-                            input.set_text(
-                                equalizer_number_text(&EqField::Band(drag.band, name), value),
-                                cx,
-                            )
-                        });
+                        let mut text =
+                            equalizer_number_text(&EqField::Band(drag.band, name), value);
+                        if name == BandField::FrequencyHz
+                            && frequency_range.is_some_and(|(minimum, maximum, _)| {
+                                text.parse::<f64>()
+                                    .is_ok_and(|value| !(minimum..=maximum).contains(&value))
+                            })
+                        {
+                            text = value.to_string();
+                        }
+                        field.input.update(cx, |input, cx| input.set_text(text, cx));
                     }
                 }
                 cx.notify();
@@ -2081,7 +2135,8 @@ impl EqualizerEditor {
         if self.response_error.is_none() {
             let mut labels = row().justify_between().gap_1();
             for fraction in [0., 0.25, 0.5, 0.75, 1.] {
-                let frequency = 20. * (self.maximum_frequency / 20.).powf(fraction);
+                let minimum = graph_minimum_frequency(self.maximum_frequency);
+                let frequency = minimum * (self.maximum_frequency / minimum).powf(fraction);
                 labels = labels.child(caption(
                     theme,
                     if frequency >= 1000. {
@@ -2096,10 +2151,18 @@ impl EqualizerEditor {
         if let Some(error) = &self.response_error {
             curve = curve.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
-        if self.format.is_some() {
+        if self.format.is_some()
+            && self
+                .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
+                .is_some()
+        {
             curve = curve.child(caption(
                 theme,
-                format!("20–{:.0} Hz · ±24 dB", self.maximum_frequency),
+                format!(
+                    "{:.0}–{:.0} Hz · ±24 dB",
+                    graph_minimum_frequency(self.maximum_frequency),
+                    self.maximum_frequency
+                ),
             ));
         }
         let mut precision = column().gap_1().min_w_0();
@@ -3240,8 +3303,12 @@ fn slider_number(
     }
 }
 
+fn graph_minimum_frequency(maximum: f64) -> f64 {
+    if maximum > 20. { 20. } else { 1. }
+}
+
 fn graph_frequency_boundary(frequency: f64, maximum: f64) -> Option<&'static str> {
-    if frequency < 20. {
+    if frequency < graph_minimum_frequency(maximum) {
         Some("processing-frequency-below-graph")
     } else if frequency > maximum {
         Some("processing-frequency-above-graph")
@@ -3540,6 +3607,8 @@ mod tests {
     #[test]
     fn band_slider_mapping_round_trips_and_clamps_supported_parameters() {
         for range in [
+            (1., 1.497, true),
+            (1., 96_000., true),
             (1., 23_952., true),
             (-24., 24., false),
             (0.1, 20., true),
@@ -3554,6 +3623,138 @@ mod tests {
             assert!((slider_number(2., range, false) - range.1).abs() < 1e-8);
         }
         assert_eq!(slider_number(0.5, (1., 4., false), true), 3.);
+    }
+
+    #[gpui::test]
+    fn frequency_controls_distinguish_unknown_and_low_stream_rates(cx: &mut TestAppContext) {
+        for rate in [None, Some(0), Some(1), Some(2), Some(3), Some(48_001)] {
+            let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+            // Keep drafts local so the test can inspect endpoint precision even
+            // though this fixture deliberately has no playing audio stream.
+            owner.update(cx, |owner, _| owner.pending = 1);
+            editor.update(cx, |editor, cx| {
+                editor.format = rate.map(|rate| (99, rate, 2));
+                editor.sync_fields(cx);
+                editor.update_response();
+                cx.notify();
+            });
+            draw(cx, handle);
+            let input = editor.read_with(cx, |editor, _| {
+                editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
+                    .input
+                    .clone()
+            });
+            if matches!(rate, Some(0..=2)) {
+                assert!(
+                    VisualTestContext::from_window(handle, cx)
+                        .debug_bounds("eq-slider-band.0.frequency_hz")
+                        .is_none()
+                );
+                assert!(
+                    VisualTestContext::from_window(handle, cx)
+                        .debug_bounds("eq-node-7-0")
+                        .is_none()
+                );
+                enter_number(cx, handle, &input, "1");
+                press(cx, handle, "enter");
+                click(cx, handle, "eq-step-band.0.frequency_hz-more");
+                assert_eq!(
+                    input.read_with(cx, |input, _| input.text().to_owned()),
+                    "80"
+                );
+                editor.read_with(cx, |editor, _| {
+                    assert_eq!(
+                        editor.response_error.as_deref(),
+                        Some(editor.context.i18n.text("processing-response-unknown"))
+                    );
+                    assert!(editor.field_edit(&EqField::BandCount, "4").is_err());
+                    assert!(editor.field_edit(&EqField::BandCount, "2").is_ok());
+                });
+            } else {
+                click(cx, handle, "eq-slider-band.0.frequency_hz");
+                press(cx, handle, "end");
+                let maximum = rate.map_or(96_000., |rate| f64::from(rate) * 0.499);
+                assert_eq!(
+                    input.read_with(cx, |input, _| input.text().parse::<f64>().unwrap()),
+                    maximum
+                );
+                press(cx, handle, "home");
+                assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "1");
+                if rate == Some(3) {
+                    click(cx, handle, "eq-step-band.0.frequency_hz-more");
+                    assert_eq!(
+                        input.read_with(cx, |input, _| input.text().parse::<f64>().unwrap()),
+                        maximum
+                    );
+                }
+                let node = VisualTestContext::from_window(handle, cx)
+                    .debug_bounds("eq-node-7-0")
+                    .unwrap();
+                assert!(f32::from(node.origin.x).is_finite());
+                assert!(f32::from(node.origin.y).is_finite());
+            }
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        }
+    }
+
+    #[gpui::test]
+    fn low_rate_curve_pointer_keeps_preview_in_the_supported_frequency_interval(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, _| {
+            owner.pending = 1;
+            owner.command_active = true;
+        });
+        editor.update(cx, |editor, cx| {
+            editor.format = Some((99, 3, 2));
+            editor.sync_fields(cx);
+            editor.update_response();
+            cx.notify();
+        });
+        draw(cx, handle);
+        let position = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("eq-node-7-0")
+            .unwrap()
+            .center();
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            },
+        );
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseMoveEvent {
+                position: position + point(px(-100.), px(0.)),
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        editor.read_with(cx, |editor, cx| {
+            let frequency = editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
+                .input
+                .read(cx)
+                .text()
+                .parse::<f64>()
+                .unwrap();
+            assert!((1.0..=1.497).contains(&frequency));
+            assert!(editor.frequency_x(frequency).is_finite());
+        });
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: position + point(px(-100.), px(0.)),
+                ..Default::default()
+            },
+        );
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
     #[gpui::test]

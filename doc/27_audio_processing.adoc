@@ -156,6 +156,8 @@ removes tail bands. Existing bands and overall gains are preserved. New bands fi
 logarithmic gaps from 20 Hz to `min(20 kHz, 0.499 × track rate)`, or 20 kHz when
 the rate is unknown. Apply all commits retained-band drafts and gains atomically
 with the resize; shrinking discards removed bands and their drafts.
+When a track rate is known, adding bands requires room for the 20 Hz lower
+bound; otherwise the editor reports an error. Removing bands remains available.
 
 Reset preserves the enabled state but clears bands and both gains; graph EQ also
 returns to IIR. It discards that target's EQ drafts across panels, including
@@ -192,6 +194,10 @@ are 1 Hz–96 kHz; effective bands must also be at or below 0.499 × the stream 
 and address existing channels. Unsupported active settings fail validation rather
 than being retuned or dropped. Disabled/solo-excluded bands keep stored values
 without imposing stream-specific constraints.
+With no current track, frequency editing uses the stored 1 Hz–96 kHz range.
+For a known track rate, the upper bound is `min(96 kHz, 0.499 × rate)`;
+if it is below 1 Hz, frequency controls and curve retuning are unavailable
+without changing stored band values. Other numeric parameters remain editable.
 
 Channel targets are `all`, or selected channels numbered from 1 in GUI text and
 from 0 in JSON (`{"selected":[0,1]}`). Any enabled solo band excludes enabled
