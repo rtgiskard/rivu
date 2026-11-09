@@ -450,23 +450,35 @@ fn details_lines(
             );
             group(&mut lines, "gl-file");
             lines.extend(detail_field(
-                i18n.text("gl-track-kind"),
-                i18n.text(if track.cue.is_some() {
-                    "gl-cue-segment"
-                } else {
-                    "gl-whole-file"
-                }),
-                width,
-                colors,
-            ));
-            lines.push(Line::default());
-            lines.extend(detail_field(
                 i18n.text("gl-file-path"),
                 &track.path.to_string_lossy(),
                 width,
                 colors,
             ));
             lines.push(Line::default());
+            let decoder = match track.decoder_hint {
+                rivu_format::decoder_hint::DecoderHint::Auto => i18n.text("gl-auto"),
+                rivu_format::decoder_hint::DecoderHint::Native => i18n.text("gl-native"),
+                rivu_format::decoder_hint::DecoderHint::Ffmpeg => "FFmpeg",
+            };
+            detail_fields(
+                &mut lines,
+                &[
+                    (
+                        "gl-track-kind",
+                        i18n.text(if track.cue.is_some() {
+                            "gl-cue-segment"
+                        } else {
+                            "gl-whole-file"
+                        })
+                        .to_owned(),
+                    ),
+                    ("gl-decoder-hint", decoder.to_owned()),
+                ],
+                width,
+                i18n,
+                colors,
+            );
             if let Some(cue) = &track.cue {
                 detail_fields(
                     &mut lines,
@@ -494,17 +506,6 @@ fn details_lines(
                 );
                 lines.push(Line::default());
             }
-            let decoder = match track.decoder_hint {
-                rivu_format::decoder_hint::DecoderHint::Auto => i18n.text("gl-auto"),
-                rivu_format::decoder_hint::DecoderHint::Native => i18n.text("gl-native"),
-                rivu_format::decoder_hint::DecoderHint::Ffmpeg => "FFmpeg",
-            };
-            lines.extend(detail_field(
-                i18n.text("gl-decoder-hint"),
-                decoder,
-                width,
-                colors,
-            ));
             group(&mut lines, "terminal-details-history");
             detail_fields(
                 &mut lines,
