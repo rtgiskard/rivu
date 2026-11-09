@@ -135,7 +135,8 @@ Library row input carries the projection that supplied its identity and index;
 admission and selection commit both validate it. A directory click validates
 before changing its own expansion, then binds its selection to the resulting
 projection. Capturing a fresh query stamp when an old callback executes cannot
-make its old coordinates current.
+make its old coordinates current. Duplicate-review paging likewise retains the
+review epoch and page projection instead of rebinding an old offset to a new group.
 
 GUI admission allows two seconds, followed by twelve seconds for response
 presentation. Timeout shows an error, cancels the read, and rejects late payloads;

@@ -350,6 +350,37 @@ impl DuplicateReview {
         true
     }
 
+    fn change_page(
+        &mut self,
+        groups: bool,
+        epoch: u64,
+        generation: u64,
+        offset: usize,
+        revisions: QueryRevisions,
+    ) -> bool {
+        let projection = if groups {
+            &self.groups_projection
+        } else {
+            &self.members_projection
+        };
+        if !self.open
+            || self.epoch != epoch
+            || projection.generation() != generation
+            || self.busy.is_some()
+            || self.confirming
+        {
+            return false;
+        }
+        if groups {
+            self.request_groups(offset, revisions);
+        } else if let Some(fingerprint) = self.fingerprint.clone() {
+            self.request_members(fingerprint, offset, revisions);
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn request_groups(&mut self, offset: usize, revisions: QueryRevisions) {
         if self.groups_offset != offset {
             self.groups = None;
@@ -1804,6 +1835,12 @@ impl Duplicates {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
+        let epoch = self.duplicate_review.epoch;
+        let generation = if groups {
+            self.duplicate_review.groups_projection.generation()
+        } else {
+            self.duplicate_review.members_projection.generation()
+        };
         let heading = caption(
             theme,
             self.context.i18n.format(
@@ -1847,16 +1884,22 @@ impl Duplicates {
                     IconButtonDensity::Regular,
                     cx,
                     move |this, _, cx| {
+                        this.refresh_snapshot(cx);
                         if !enabled
-                            || this.duplicate_review.busy.is_some()
-                            || this.duplicate_review.confirming
+                            || !this.duplicate_review.change_page(
+                                groups,
+                                epoch,
+                                generation,
+                                next,
+                                this.state.query_revisions(None),
+                            )
                         {
                             return;
                         }
                         if groups {
-                            this.request_duplicate_groups(next, cx);
-                        } else if let Some(hash) = this.duplicate_review.fingerprint.clone() {
-                            this.request_duplicate_members(hash, next, cx);
+                            this.start_duplicate_groups(cx);
+                        } else {
+                            this.start_duplicate_members(cx);
                         }
                         cx.notify();
                     },
@@ -1910,6 +1953,53 @@ mod tests {
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
         response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
     };
+
+    #[test]
+    fn retained_pager_cannot_rebind_to_another_group_or_review() {
+        let revisions = QueryRevisions::default();
+        let mut review = review();
+        let epoch = review.epoch;
+        let generation = review.members_projection.generation();
+        assert!(review.select_group("replacement", revisions));
+        assert!(!review.change_page(false, epoch, generation, 8, revisions));
+        assert_eq!(review.fingerprint.as_deref(), Some("replacement"));
+        assert_eq!(review.members_offset, 0);
+
+        let generation = review.members_projection.generation();
+        assert!(review.change_page(false, epoch, generation, 8, revisions));
+        assert_eq!(review.members_offset, 8);
+        assert!(!review.change_page(false, epoch, generation, 16, revisions));
+        assert_eq!(review.members_offset, 8);
+
+        let generation = review.members_projection.generation();
+        review.close();
+        review.open(revisions);
+        assert!(review.select_group("replacement", revisions));
+        assert!(!review.change_page(false, epoch, generation, 8, revisions));
+        assert_eq!(review.members_offset, 0);
+        let current_epoch = review.epoch;
+        let generation = review.members_projection.generation();
+        assert!(review.change_page(false, current_epoch, generation, 8, revisions));
+        assert_eq!(review.members_offset, 8);
+    }
+
+    #[test]
+    fn retained_group_pager_cannot_advance_a_refreshed_projection() {
+        let mut review = review();
+        let revisions = QueryRevisions::default();
+        let epoch = review.epoch;
+        let generation = review.groups_projection.generation();
+        let changed = QueryRevisions {
+            duplicate_groups: 1,
+            ..revisions
+        };
+        review.sync_queries(changed);
+        assert!(!review.change_page(true, epoch, generation, 12, changed));
+        assert_eq!(review.groups_offset, 0);
+        let generation = review.groups_projection.generation();
+        assert!(review.change_page(true, epoch, generation, 12, changed));
+        assert_eq!(review.groups_offset, 12);
+    }
 
     #[test]
     fn obsolete_review_reads_park_quietly_and_reopen_for_retry_or_revision() {
