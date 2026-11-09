@@ -65,7 +65,7 @@ impl Core {
                     || track.fingerprint != result.track.fingerprint
             })
         {
-            self.processing.select_audition(None);
+            self.processing.clear_audition();
         }
         if let Some(track) = track.as_mut()
             && let Some(playback) = self

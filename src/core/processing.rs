@@ -17,8 +17,6 @@ impl Core {
         let mut config = self.preferences.checkpoint();
         config.processing_bypassed = bypassed;
         if let Some(selection) = selected {
-            let pcm = self.processing.audition_pcm.clone();
-            let graph = self.processing.audition_graph.clone();
             if !bypassed {
                 let valid = self
                     .processing
@@ -40,21 +38,17 @@ impl Core {
                         Ok(())
                     });
                 if let Err(error) = valid {
-                    self.processing.select_audition(None);
+                    self.processing.clear_audition();
                     return Err(error.context("Resume target is stale; bypass remains enabled"));
                 }
             }
-            let runner = if bypassed {
-                None
+            let (pcm, runner) = if bypassed {
+                (None, None)
             } else {
-                match graph
-                    .as_ref()
-                    .map(audio::GraphSnapshot::prepare)
-                    .transpose()
-                {
-                    Ok(runner) => runner,
+                match self.processing.resume_audition() {
+                    Ok(source) => source,
                     Err(error) => {
-                        self.processing.select_audition(None);
+                        self.processing.clear_audition();
                         return Err(
                             error.context("Resume target is unavailable; bypass remains enabled")
                         );
@@ -62,24 +56,9 @@ impl Core {
                 }
             };
             // Capacity and persistence failures do not revoke selection.
-            self.audition_pcm_with_config(
-                selection.id,
-                if bypassed { None } else { pcm.clone() },
-                runner,
-                Some(config),
-            )?;
+            self.replace_processing_source(selection.id, pcm, runner, Some(config))?;
             self.processing
-                .select_audition(Some((selection.id, self.transport.generation)));
-            if let (Some(output), Some(mode)) = (selection.output, selection.mode) {
-                self.processing.select_graph_audition(
-                    selection.id,
-                    self.transport.generation,
-                    output,
-                    mode,
-                );
-            }
-            self.processing.audition_pcm = pcm;
-            self.processing.audition_graph = graph;
+                .retain_audition_for_generation(self.transport.generation);
             if !bypassed {
                 self.transport.processing_resume_generation = Some(self.transport.generation);
             }
@@ -166,13 +145,7 @@ impl Core {
             let pcm = output.pcm.clone();
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
-            self.audition_pcm(id, Some(pcm))?;
-            self.processing.select_graph_audition(
-                id,
-                self.transport.generation,
-                node,
-                GraphExecutionMode::Offline,
-            );
+            self.select_cached_processing_audition(id, pcm, Some(node))?;
             return Ok(None);
         }
         let mut config = self.preferences.checkpoint();
@@ -222,7 +195,7 @@ impl Core {
                 }
             })
             .transpose()?;
-        self.audition_pcm_with_graph(id, pcm, Some(runner))
+        self.select_live_processing_audition(id, pcm, runner)
     }
 
     fn establish_graph_source_context(&mut self, track_id: i64) -> Result<()> {
@@ -317,7 +290,7 @@ impl Core {
             self.pending_processing_audition = None;
         }
         if selected {
-            if let Err(error) = self.audition_pcm(id, None) {
+            if let Err(error) = self.restore_original_processing_source(id) {
                 self.stop()?;
                 return Err(error);
             }
@@ -727,7 +700,7 @@ impl Core {
                                 .context("Processing result is no longer retained")?;
                             self.processing_source(source)?;
                             if requested {
-                                self.audition_pcm(id, Some(pcm.clone()))?;
+                                self.select_cached_processing_audition(id, pcm.clone(), None)?;
                             }
                             Ok(())
                         })();
@@ -857,22 +830,62 @@ impl Core {
             ),
             AuditionMode::Mix => unreachable!(),
         };
-        self.audition_pcm(id, pcm).map(|_| None)
-    }
-    fn audition_pcm(&mut self, id: u64, pcm: Option<audio::PcmAudio>) -> Result<()> {
-        self.audition_pcm_with_graph(id, pcm, None)
+        if let Some(pcm) = pcm {
+            self.select_cached_processing_audition(id, pcm, None)?;
+        } else {
+            self.restore_original_processing_source(id)?;
+        }
+        Ok(None)
     }
 
-    fn audition_pcm_with_graph(
+    fn select_cached_processing_audition(
+        &mut self,
+        id: u64,
+        pcm: audio::PcmAudio,
+        output: Option<GraphPort>,
+    ) -> Result<()> {
+        self.replace_processing_source(id, Some(pcm.clone()), None, None)?;
+        self.processing
+            .select_cached_audition(id, self.transport.generation, pcm, output);
+        Ok(())
+    }
+
+    fn select_live_processing_audition(
         &mut self,
         id: u64,
         pcm: Option<audio::PcmAudio>,
-        graph: Option<audio::GraphRunner>,
+        runner: audio::GraphRunner,
     ) -> Result<()> {
-        self.audition_pcm_with_config(id, pcm, graph, None)
+        let status = self.processing.status(id).context("Unknown graph run")?;
+        let output = status
+            .settings
+            .graph_target
+            .context("Missing graph target")?;
+        let mode = status
+            .settings
+            .graph_mode
+            .context("Missing resolved graph mode")?;
+        let snapshot = runner.snapshot();
+        self.replace_processing_source(id, pcm.clone(), Some(runner), None)?;
+        self.processing.select_graph_audition(
+            id,
+            self.transport.generation,
+            pcm,
+            snapshot,
+            output,
+            mode,
+        );
+        Ok(())
     }
 
-    fn audition_pcm_with_config(
+    fn restore_original_processing_source(&mut self, id: u64) -> Result<()> {
+        self.replace_processing_source(id, None, None, None)?;
+        self.processing.clear_audition();
+        Ok(())
+    }
+
+    /// Replace the audio source without deciding which processing result is selected.
+    fn replace_processing_source(
         &mut self,
         id: u64,
         pcm: Option<audio::PcmAudio>,
@@ -931,21 +944,6 @@ impl Core {
         );
         // PCM is immutable; graph admission still validates the original source.
         let expected_identity = graph.as_ref().map(|_| admitted_source.identity());
-        let graph_selection = graph
-            .as_ref()
-            .map(|_| -> Result<_> {
-                Ok((
-                    status
-                        .settings
-                        .graph_target
-                        .context("Missing graph target")?,
-                    status
-                        .settings
-                        .graph_mode
-                        .context("Missing resolved graph mode")?,
-                ))
-            })
-            .transpose()?;
         self.engine.ensure_command_capacity(2)?;
         let previous = config.as_ref().map(|_| self.preferences.checkpoint());
         if let Some(config) = config.as_ref() {
@@ -969,9 +967,6 @@ impl Core {
                     .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;
             }
         }
-        let selected_pcm = pcm.clone();
-        let selected_graph = graph.as_ref().map(audio::GraphRunner::snapshot);
-        let is_graph = graph.is_some();
         let original = pcm.is_none();
         let source_info = if original {
             None
@@ -1032,14 +1027,6 @@ impl Core {
             }
         };
         self.commit_source_replacement(command)?;
-        let selected = (!original || is_graph).then_some((id, self.transport.generation));
-        self.processing.select_audition(selected);
-        self.processing.audition_pcm = selected_pcm;
-        self.processing.audition_graph = selected_graph;
-        if let Some((target, mode)) = graph_selection {
-            self.processing
-                .select_graph_audition(id, self.transport.generation, target, mode);
-        }
         Ok(())
     }
 }

@@ -474,6 +474,12 @@ Core owns explicit bypass intent; neither effect edits nor late task completion
 may override it. Route changes require queue admission and saving before
 acceptance. Resumption validates the source and reconstructs the frozen
 live/hybrid runner rather than deriving a route from current editor settings.
+The retained selection owns its frozen route resources as one record. Bypass
+changes the actual route without clearing and reconstructing that selection;
+successful source replacement updates its generation binding. Selecting a new
+result and returning to Original remain distinct operations. Core retains
+configuration, command admission and source-validation authority; resource
+ownership does not confer permission for late task completion to start playback.
 See link:27_audio_processing.adoc#playback-bypass[Playback bypass] for operation,
 selection retirement and failure behavior.
 

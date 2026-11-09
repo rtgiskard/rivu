@@ -772,7 +772,7 @@ impl Core {
             self.transport.generation = self.transport.generation.wrapping_add(1);
             self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
         }
-        self.processing.select_audition(None);
+        self.processing.clear_audition();
         self.transport.processing_resume_generation = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;

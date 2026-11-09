@@ -211,8 +211,14 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     core.processing.cancel(1).unwrap();
     core.processing_event(event);
     let latest = core.processing_status(1).unwrap();
+    let pcm = core.processing.results()[0]
+        .outputs
+        .vocals
+        .as_ref()
+        .unwrap()
+        .clone();
     core.processing
-        .select_audition(Some((1, core.transport.generation)));
+        .select_cached_audition(1, core.transport.generation, pcm, None);
     core.start_processing(1, ProcessingOperation::Speech, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), latest);
@@ -2254,8 +2260,14 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
             )
             .unwrap();
             complete(&mut core);
+            let (port, output) = core.processing.results()[0]
+                .graph_outputs
+                .iter()
+                .next()
+                .unwrap();
+            let (port, pcm) = (*port, output.pcm.clone());
             core.processing
-                .select_audition(Some((1, core.transport.generation)));
+                .select_cached_audition(1, core.transport.generation, pcm, Some(port));
         }
         let outputs = core.processing_status(1).unwrap().graph_outputs;
         let mut action_run = core.processing_status(1).unwrap().graph_run_id.unwrap();
@@ -2811,8 +2823,14 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
+    let pcm = core.processing.results()[0]
+        .outputs
+        .denoised
+        .as_ref()
+        .unwrap()
+        .clone();
     core.processing
-        .select_audition(Some((1, core.transport.generation)));
+        .select_cached_audition(1, core.transport.generation, pcm, None);
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -2857,7 +2875,53 @@ fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
             .processing_bypassed
     );
     assert!(core.processing.audition_projection().is_none());
-    assert!(core.processing.audition_graph.is_none());
+    assert!(core.processing.resume_audition().is_err());
+}
+
+#[test]
+fn original_clears_cached_and_live_selection_without_revoking_result_capabilities() {
+    for live in [false, true] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        let commands = recording_audio(&mut core);
+        if live {
+            core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+                .unwrap();
+            complete(&mut core);
+        } else {
+            core.start_processing(1, ProcessingOperation::Denoise, None)
+                .unwrap();
+            complete(&mut core);
+            core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+                .unwrap();
+        }
+        assert!(core.processing.audition_projection().is_some());
+        while commands.try_recv().is_ok() {}
+        let generation = core.transport.generation;
+        core.audition_processing(1, AuditionMode::Original, 0.0, 0.0)
+            .unwrap();
+        assert!(core.transport.generation > generation);
+        assert!(core.processing.audition_projection().is_none());
+        assert!(core.processing.resume_audition().is_err());
+        loop {
+            if let AudioCommand::Audition {
+                pcm, generation, ..
+            } = commands.recv_timeout(Duration::from_secs(2)).unwrap()
+                && generation == core.transport.generation
+            {
+                assert!(pcm.is_none());
+                break;
+            }
+        }
+        let retained = core.processing_status(1).unwrap();
+        if live {
+            assert!(retained.graph_actions_available);
+        } else {
+            assert!(retained.outputs.unwrap().denoised);
+        }
+        core.publish();
+        assert!(core.shared.read().processing_selection.is_none());
+    }
 }
 
 #[test]
@@ -2877,7 +2941,7 @@ fn master_bypass_stop_and_next_source_revoke_retained_selection() {
             core.stop().unwrap();
         }
         assert!(core.processing.audition_projection().is_none());
-        assert!(core.processing.audition_graph.is_none());
+        assert!(core.processing.resume_audition().is_err());
         core.processing_bypass(false).unwrap();
         core.publish();
         assert!(core.shared.read().processing_selection.is_none());
@@ -3028,11 +3092,10 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
                 core.processing_status(1).unwrap().settings.graph_boundary,
                 Some(graph_port(3, 0))
             );
-            assert!(core.processing.audition_pcm.is_some());
         }
         let before = core.transport.generation;
         core.processing_bypass(true).unwrap();
-        assert!(core.processing.audition_graph.is_some());
+        assert_eq!(core.processing.audition_projection(), Some(selected));
         while commands.try_recv().is_ok() {}
         core.processing_graph_edit(
             0,
@@ -3046,9 +3109,10 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
         assert_eq!(core.processing.audition_projection(), Some(selected));
         assert!(core.transport.generation > before);
         loop {
-            if let AudioCommand::GraphAudition { runner, .. } =
+            if let AudioCommand::GraphAudition { runner, pcm, .. } =
                 commands.recv_timeout(Duration::from_secs(2)).unwrap()
             {
+                assert_eq!(pcm.is_some(), mode == GraphExecutionMode::Hybrid);
                 assert_eq!(runner.sample_rate(), 48000);
                 break;
             }
@@ -4131,7 +4195,7 @@ fn export_failure_and_cancellation_keep_source_capabilities_until_directory_evic
             None
         );
     }
-    core.processing.select_audition(None);
+    core.processing.clear_audition();
     for index in 0..4 {
         core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
             .unwrap();

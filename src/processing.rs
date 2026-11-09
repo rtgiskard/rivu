@@ -211,6 +211,25 @@ struct ActiveTask {
     cancelled: Arc<Cancellation>,
     worker: JoinHandle<()>,
 }
+struct RetainedAudition {
+    id: u64,
+    generation: u64,
+    resource: AuditionResource,
+}
+
+enum AuditionResource {
+    Cached {
+        pcm: audio::PcmAudio,
+        output: Option<GraphPort>,
+    },
+    Graph {
+        pcm: Option<audio::PcmAudio>,
+        snapshot: audio::GraphSnapshot,
+        output: GraphPort,
+        mode: GraphExecutionMode,
+    },
+}
+
 pub(crate) struct Service {
     pub sender: Sender<Event>,
     pub receiver: Receiver<Event>,
@@ -219,9 +238,7 @@ pub(crate) struct Service {
     current: Option<Arc<ProcessingTaskStatus>>,
     history: std::collections::VecDeque<ProcessingTaskStatus>,
     next_id: u64,
-    audition: Option<(ProcessingAudition, u64)>,
-    pub(crate) audition_pcm: Option<audio::PcmAudio>,
-    pub(crate) audition_graph: Option<audio::GraphSnapshot>,
+    audition: Option<RetainedAudition>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
     #[cfg(test)]
@@ -245,8 +262,6 @@ impl Service {
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
             audition: None,
-            audition_pcm: None,
-            audition_graph: None,
             #[cfg(test)]
             panic_after_processing: false,
             #[cfg(test)]
@@ -508,21 +523,18 @@ impl Service {
         }
     }
 
-    /// Keep the selected audio pinned until Core commits another audio source.
-    pub(crate) fn select_audition(&mut self, selection: Option<(u64, u64)>) {
-        if selection.is_none() {
-            self.audition_pcm = None;
-            self.audition_graph = None;
-        }
-        self.audition = selection.map(|(id, generation)| {
-            (
-                ProcessingAudition {
-                    id,
-                    output: None,
-                    mode: None,
-                },
-                generation,
-            )
+    /// Commit the complete cached selection only after audio source admission.
+    pub(crate) fn select_cached_audition(
+        &mut self,
+        id: u64,
+        generation: u64,
+        pcm: audio::PcmAudio,
+        output: Option<GraphPort>,
+    ) {
+        self.audition = Some(RetainedAudition {
+            id,
+            generation,
+            resource: AuditionResource::Cached { pcm, output },
         });
     }
 
@@ -530,32 +542,73 @@ impl Service {
         &mut self,
         id: u64,
         generation: u64,
+        pcm: Option<audio::PcmAudio>,
+        snapshot: audio::GraphSnapshot,
         output: GraphPort,
         mode: GraphExecutionMode,
     ) {
-        self.audition = Some((
-            ProcessingAudition {
-                id,
-                output: Some(output),
-                mode: Some(mode),
-            },
+        self.audition = Some(RetainedAudition {
+            id,
             generation,
-        ));
+            resource: AuditionResource::Graph {
+                pcm,
+                snapshot,
+                output,
+                mode,
+            },
+        });
+    }
+
+    pub(crate) fn clear_audition(&mut self) {
+        self.audition = None;
+    }
+
+    /// Bypass and resume replace audio without replacing the retained selection.
+    pub(crate) fn retain_audition_for_generation(&mut self, generation: u64) {
+        if let Some(audition) = &mut self.audition {
+            audition.generation = generation;
+        }
+    }
+
+    pub(crate) fn resume_audition(
+        &self,
+    ) -> Result<(Option<audio::PcmAudio>, Option<audio::GraphRunner>)> {
+        let audition = self
+            .audition
+            .as_ref()
+            .context("No retained audition to resume")?;
+        match &audition.resource {
+            AuditionResource::Cached { pcm, .. } => Ok((Some(pcm.clone()), None)),
+            AuditionResource::Graph { pcm, snapshot, .. } => {
+                Ok((pcm.clone(), Some(snapshot.prepare()?)))
+            }
+        }
     }
 
     pub(crate) fn audition_projection(&self) -> Option<ProcessingAudition> {
-        self.audition.map(|(selection, _)| selection)
+        self.audition.as_ref().map(|audition| {
+            let (output, mode) = match &audition.resource {
+                AuditionResource::Cached { output, .. } => {
+                    (*output, output.map(|_| GraphExecutionMode::Offline))
+                }
+                AuditionResource::Graph { output, mode, .. } => (Some(*output), Some(*mode)),
+            };
+            ProcessingAudition {
+                id: audition.id,
+                output,
+                mode,
+            }
+        })
     }
 
     pub(crate) fn audition_id(&self) -> Option<u64> {
-        self.audition.map(|(selection, _)| selection.id)
+        self.audition.as_ref().map(|audition| audition.id)
     }
 
     pub(crate) fn audition_selected(&self, id: u64, generation: u64) -> bool {
         self.audition
-            .is_some_and(|(selection, selected_generation)| {
-                selection.id == id && selected_generation == generation
-            })
+            .as_ref()
+            .is_some_and(|audition| audition.id == id && audition.generation == generation)
     }
 
     /// A successful render/export is committed before optional playback admission.
@@ -888,7 +941,7 @@ impl Service {
             return;
         };
         for result in &mut self.results {
-            if Some(result.status.id) == self.audition.map(|(selection, _)| selection.id) {
+            if Some(result.status.id) == self.audition.as_ref().map(|audition| audition.id) {
                 continue;
             }
             let outputs = std::mem::take(&mut result.outputs);

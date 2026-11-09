@@ -86,7 +86,13 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
         ..Default::default()
     });
     service.accept_result(Box::new(result));
-    service.select_audition(Some((1, 0)));
+    let pcm = service.results()[0]
+        .outputs
+        .vocals
+        .as_ref()
+        .unwrap()
+        .clone();
+    service.select_cached_audition(1, 0, pcm, None);
     (directory, service, track, config)
 }
 
@@ -1435,7 +1441,6 @@ fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
     let (_directory, mut service, track, config) = fixture();
     let result = completed(&mut service, &track, &config);
     service.accept_result(Box::new(result));
-    service.select_audition(Some((1, 0)));
     service.release_unpinned_audio();
     assert!(service.results()[0].outputs.vocals.is_some());
     assert!(service.results()[1].outputs.denoised.is_none());
@@ -1514,7 +1519,7 @@ fn realtime_preparation_never_creates_processing_storage() {
 #[test]
 fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
     let (_directory, mut service, track, config) = fixture();
-    service.select_audition(None);
+    service.clear_audition();
     let before = service.memory_bytes();
     assert!(
         service
