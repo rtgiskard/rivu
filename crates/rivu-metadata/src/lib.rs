@@ -59,29 +59,39 @@ pub(crate) fn detect(file: &mut File) -> Result<Option<FileType>> {
     Ok(probe.file_type())
 }
 
-fn first(tag: &Tag, key: ItemKey) -> Option<String> {
+fn first(tag: &Tag, key: ItemKey) -> Option<&str> {
     tag.get_strings(key)
         .flat_map(|s| s.split('\0'))
         .map(str::trim)
         .find(|s| !s.is_empty())
-        .map(str::to_owned)
 }
 
-fn summarize(tag: &Tag) -> Tags {
+fn fill_missing(result: &mut Tags, tag: &Tag) {
     let numeric = |key| {
         first(tag, key)
             .and_then(|s| s.split('/').next()?.trim().parse().ok())
             .filter(|n| *n > 0)
     };
-    Tags {
-        title: first(tag, ItemKey::TrackTitle),
-        artist: first(tag, ItemKey::TrackArtist),
-        album: first(tag, ItemKey::AlbumTitle),
-        release_date: first(tag, ItemKey::ReleaseDate)
+    if result.title.is_none() {
+        result.title = first(tag, ItemKey::TrackTitle).map(str::to_owned);
+    }
+    if result.artist.is_none() {
+        result.artist = first(tag, ItemKey::TrackArtist).map(str::to_owned);
+    }
+    if result.album.is_none() {
+        result.album = first(tag, ItemKey::AlbumTitle).map(str::to_owned);
+    }
+    if result.release_date.is_none() {
+        result.release_date = first(tag, ItemKey::ReleaseDate)
             .or_else(|| first(tag, ItemKey::RecordingDate))
-            .or_else(|| first(tag, ItemKey::Year)),
-        track_number: numeric(ItemKey::TrackNumber),
-        disc_number: numeric(ItemKey::DiscNumber),
+            .or_else(|| first(tag, ItemKey::Year))
+            .map(str::to_owned);
+    }
+    if result.track_number.is_none() {
+        result.track_number = numeric(ItemKey::TrackNumber);
+    }
+    if result.disc_number.is_none() {
+        result.disc_number = numeric(ItemKey::DiscNumber);
     }
 }
 
@@ -110,16 +120,7 @@ pub fn read_tags(file: &mut File) -> Result<Option<Tags>> {
             .iter()
             .filter(|t| t.tag_type() != parsed.primary_tag_type()),
     ) {
-        let tags = summarize(tag);
-        macro_rules! fill { ($($field:ident),*) => { $(if result.$field.is_none() { result.$field = tags.$field; })* }; }
-        fill!(
-            title,
-            artist,
-            album,
-            release_date,
-            track_number,
-            disc_number
-        );
+        fill_missing(&mut result, tag);
     }
     Ok(Some(result))
 }
