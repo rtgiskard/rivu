@@ -55,6 +55,7 @@ impl Published {
 #[derive(Default)]
 struct ConnectionState {
     disconnected: bool,
+    fatal_error: Option<String>,
     callback: Option<Wakeup>,
 }
 
@@ -111,6 +112,14 @@ impl Shared {
 
     fn error(&self, message: String, fatal: bool) {
         if fatal {
+            let mut connection = self.disconnect.lock();
+            if connection.disconnected {
+                return;
+            }
+            connection
+                .fatal_error
+                .get_or_insert_with(|| message.clone());
+            drop(connection);
             self.stop.cancel();
         }
         {
@@ -430,16 +439,24 @@ impl FrontendRuntime {
             })?);
         Ok(())
     }
-}
 
-impl Drop for FrontendRuntime {
-    fn drop(&mut self) {
+    pub(crate) fn shutdown(&mut self) -> Result<()> {
         self.handle.commands.close();
         self.handle.queries.close();
         self.handle.shared.disconnected();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+        match self.handle.shared.disconnect.lock().fatal_error.take() {
+            Some(error) => Err(anyhow::anyhow!(error)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for FrontendRuntime {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -831,6 +848,51 @@ mod tests {
             library: Some(library),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn fatal_disconnect_survives_notification_dismissal_and_worker_retirement() {
+        let (directory, runtime) = fixture();
+        let mut frontend =
+            FrontendRuntime::connect(directory.path(), runtime.handle.instance_id()).unwrap();
+        frontend.handle.shared.error("connection lost".into(), true);
+        frontend.handle.shared.dismiss_error();
+        frontend.handle.shared.error("late failure".into(), true);
+        assert_eq!(
+            frontend.shutdown().unwrap_err().to_string(),
+            "connection lost"
+        );
+    }
+
+    #[test]
+    fn local_and_core_shutdown_do_not_promote_notifications_to_exit_errors() {
+        for core_shutdown in [false, true] {
+            let (directory, runtime) = fixture();
+            let mut frontend =
+                FrontendRuntime::connect(directory.path(), runtime.handle.instance_id()).unwrap();
+            frontend
+                .handle
+                .shared
+                .error("command rejected".into(), false);
+            if core_shutdown {
+                let mut system = frontend
+                    .handle
+                    .shared
+                    .published
+                    .read()
+                    .observed
+                    .snapshot()
+                    .system
+                    .clone();
+                system.shutting_down = true;
+                assert!(frontend.handle.shared.merge(StateResponse {
+                    system: Some(system),
+                    ..Default::default()
+                }));
+                frontend.handle.shared.error("late disconnect".into(), true);
+            }
+            frontend.shutdown().unwrap();
+        }
     }
 
     #[test]

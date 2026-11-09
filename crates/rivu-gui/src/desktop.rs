@@ -549,13 +549,14 @@ impl Desktop {
         if let Some(signals) = app.signals.take() {
             async_io::block_on(signals.cancel());
         }
+        let connection = app._runtime.shutdown();
         let error = app
             .gui
             .as_mut()
             .expect("graphical application")
             .error
             .take();
-        error.map_or(layout_save, Err)
+        error.map_or(connection.and(layout_save), Err)
     }
 }
 impl Drop for Desktop {

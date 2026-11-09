@@ -402,6 +402,12 @@ as the invalid instance ID. IDs are equality tokens for detecting server
 identity changes; they are not ordered identifiers, authentication credentials,
 or globally unique identifiers.
 
+The GUI retains fatal connection failures independently of dismissible window
+notifications. After closing the window and retiring its IPC workers, it returns
+the failure to the launcher as an unsuccessful exit. Closing the window locally
+or receiving a normal Core shutdown remains a successful exit; neither path
+replays commands or restarts the service.
+
 The TUI uses independent retained command, query, and Watch sessions. The Watch
 Hello supplies initial state and pins the instance; the loading screen still
 accepts `q`. Other sessions must bind to that instance. Command/query reconnection
