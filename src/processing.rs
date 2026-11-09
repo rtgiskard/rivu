@@ -164,7 +164,6 @@ pub(crate) struct ProcessingResult {
     pub status: ProcessingTaskStatus,
     pub outputs: AudioOutputs,
     pub graph_outputs: BTreeMap<GraphPort, GraphAudioOutput>,
-    pub mix: Option<audio::PcmAudio>,
     pub pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
     pub runner: Option<audio::GraphRunner>,
 }
@@ -640,17 +639,6 @@ impl Service {
             .take()
     }
 
-    pub(crate) fn retain_mix(&mut self, id: u64, pcm: audio::PcmAudio) {
-        let retired = if let Some(result) = self.results.iter_mut().find(|r| r.status.id == id) {
-            result.mix.replace(pcm)
-        } else {
-            Some(pcm)
-        };
-        if let Some(pcm) = retired {
-            self.retire_pcm(pcm);
-        }
-    }
-
     pub(crate) fn stop_live_audition(&mut self, id: u64) {
         let Some(mut status) = self.status(id).cloned() else {
             return;
@@ -946,7 +934,6 @@ impl Service {
             }
             let outputs = std::mem::take(&mut result.outputs);
             let graph_outputs = std::mem::take(&mut result.graph_outputs);
-            let mix = result.mix.take();
             let runner = result.runner.take();
             result.status.outputs = None;
             result.status.graph_outputs.clear();
@@ -954,10 +941,9 @@ impl Service {
                 || outputs.vocals.is_some()
                 || outputs.accompaniment.is_some()
                 || !graph_outputs.is_empty()
-                || mix.is_some()
                 || runner.is_some()
             {
-                reclaimer.release_audio(outputs, graph_outputs, mix, runner);
+                reclaimer.release_audio(outputs, graph_outputs, runner);
             }
         }
         self.refresh_availability();

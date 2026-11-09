@@ -279,8 +279,8 @@ fn native_and_mix_worker_panics_commit_failure_finish_waits_and_release_admissio
         assert!(core.processing.active_id().is_none());
         assert_eq!(terminal_wait(&mut core, 1), *status);
         if mixing {
-            let result = &core.processing.results()[0];
-            assert!(result.mix.is_none());
+            assert!(core.processing.audition_id().is_none());
+            assert!(core.processing_status(1).unwrap().outputs.unwrap().vocals);
         } else {
             assert!(core.processing.results().is_empty());
         }
@@ -1236,7 +1236,6 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Failed
     );
-    assert!(core.processing.results()[0].mix.is_none());
     assert!(core.processing.audition_id().is_none());
     assert_eq!(core.transport.generation, generation);
     core.processing.shutdown();
@@ -1257,8 +1256,8 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
         crate::processing::Event::MixFinished { .. }
     ));
     core.processing_event(event);
-    let mixed = core.processing.results()[0].mix.as_ref().unwrap();
-    let actual = pcm_samples(mixed);
+    let (mixed, _) = core.processing.resume_audition().unwrap();
+    let actual = pcm_samples(mixed.as_ref().unwrap());
     assert_eq!(actual.len(), original.len());
     let gain = 1.0 + 10.0_f32.powf(-6.0 / 20.0);
     for (actual, source) in actual.iter().zip(&original) {
@@ -1266,6 +1265,11 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     }
     assert!(actual.iter().any(|sample| sample.abs() > 1.0));
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
+    core.processing_bypass(true).unwrap();
+    assert_eq!(core.processing.audition_id(), Some(1));
+    core.processing_bypass(false).unwrap();
+    let (resumed, _) = core.processing.resume_audition().unwrap();
+    assert_eq!(pcm_samples(resumed.as_ref().unwrap()), actual);
 }
 
 #[test]
@@ -3406,10 +3410,11 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
 }
 
 #[test]
-fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
+fn playback_bypass_revokes_late_mix_selection_and_retires_completed_audio() {
     let (directory, mut core) = fixture();
-    let original = source(directory.path());
+    source(directory.path());
     prepare_mix(&mut core);
+    let retained_bytes = core.processing.memory_bytes();
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
@@ -3429,14 +3434,10 @@ fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
         core.processing_status(1).unwrap().phase,
         ProcessingPhase::Complete
     );
-    let pcm = pcm_samples(core.processing.results()[0].mix.as_ref().unwrap());
-    assert_eq!(
-        pcm,
-        original
-            .iter()
-            .map(|sample| sample * 2.0)
-            .collect::<Vec<_>>()
-    );
+    core.processing.shutdown();
+    assert_eq!(core.processing.memory_bytes(), retained_bytes);
+    let outputs = core.processing_status(1).unwrap().outputs.unwrap();
+    assert!(outputs.vocals && outputs.accompaniment);
 }
 
 #[test]
@@ -3524,7 +3525,8 @@ fn processing_and_audition_create_no_implicit_files() {
         .unwrap();
     let event = mix_completion(&mut core);
     core.processing_event(event);
-    assert!(core.processing.results().back().unwrap().mix.is_some());
+    assert_eq!(core.processing.audition_id(), Some(id));
+    assert!(core.processing.resume_audition().unwrap().0.is_some());
     assert_eq!(tree(), before);
     assert_eq!(
         std::fs::read(directory.path().join("1.wav")).unwrap(),
@@ -3744,7 +3746,6 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
             ProcessingPhase::Failed,
             "{change}"
         );
-        assert!(core.processing.results()[0].mix.is_none());
         core.processing.shutdown();
         assert_eq!(core.processing.memory_bytes(), retained_bytes);
         assert!(core.processing.audition_id().is_none());
@@ -3791,7 +3792,6 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     assert_eq!(core.transport.generation, generation);
     assert!(commands.try_recv().is_err());
     assert!(core.processing.audition_id().is_none());
-    assert!(core.processing.results()[0].mix.is_none());
     core.processing.shutdown();
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
     let status = core.processing_status(1).unwrap();

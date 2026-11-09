@@ -19,7 +19,6 @@ enum Work {
     ReleaseAudio {
         outputs: AudioOutputs,
         graph_outputs: BTreeMap<GraphPort, GraphAudioOutput>,
-        mix: Option<audio::PcmAudio>,
         runner: Option<audio::GraphRunner>,
     },
     #[cfg(test)]
@@ -50,9 +49,8 @@ impl Reclaimer {
                         Work::ReleaseAudio {
                             outputs,
                             graph_outputs,
-                            mix,
                             runner,
-                        } => drop((outputs, graph_outputs, mix, runner)),
+                        } => drop((outputs, graph_outputs, runner)),
                         #[cfg(test)]
                         Work::Hold { resume, events } => {
                             while !events.is_closed() {
@@ -96,13 +94,11 @@ impl Reclaimer {
         &self,
         outputs: AudioOutputs,
         graph_outputs: BTreeMap<GraphPort, GraphAudioOutput>,
-        mix: Option<audio::PcmAudio>,
         runner: Option<audio::GraphRunner>,
     ) {
         self.send(Work::ReleaseAudio {
             outputs,
             graph_outputs,
-            mix,
             runner,
         });
     }

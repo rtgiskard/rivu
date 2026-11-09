@@ -699,17 +699,17 @@ impl Core {
                                 .find(|r| r.status.id == id)
                                 .context("Processing result is no longer retained")?;
                             self.processing_source(source)?;
-                            if requested {
-                                self.select_cached_processing_audition(id, pcm.clone(), None)?;
-                            }
                             Ok(())
                         })();
-                        if outcome.is_ok() {
-                            self.processing.retain_mix(id, pcm);
-                        } else {
-                            self.processing.retire_pcm(pcm);
+                        match outcome {
+                            Ok(()) if requested => {
+                                self.select_cached_processing_audition(id, pcm, None)
+                            }
+                            outcome => {
+                                self.processing.retire_pcm(pcm);
+                                outcome
+                            }
                         }
-                        outcome
                     }
                     Ok(pcm) => {
                         self.processing.retire_pcm(pcm);
@@ -844,7 +844,10 @@ impl Core {
         pcm: audio::PcmAudio,
         output: Option<GraphPort>,
     ) -> Result<()> {
-        self.replace_processing_source(id, Some(pcm.clone()), None, None)?;
+        if let Err(error) = self.replace_processing_source(id, Some(pcm.clone()), None, None) {
+            self.processing.retire_pcm(pcm);
+            return Err(error);
+        }
         self.processing
             .select_cached_audition(id, self.transport.generation, pcm, output);
         Ok(())

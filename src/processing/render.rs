@@ -103,7 +103,6 @@ pub(super) fn run_cached_export(
         status,
         outputs: AudioOutputs::default(),
         graph_outputs: BTreeMap::new(),
-        mix: None,
         pending_export,
         runner: None,
     })
@@ -200,7 +199,6 @@ pub(super) fn run(
             status,
             outputs: AudioOutputs::default(),
             graph_outputs: BTreeMap::new(),
-            mix: None,
             pending_export: None,
             runner,
         });
@@ -380,7 +378,6 @@ pub(super) fn run(
         status,
         outputs,
         graph_outputs,
-        mix: None,
         pending_export,
         runner,
     })

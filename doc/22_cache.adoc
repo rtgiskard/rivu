@@ -288,6 +288,10 @@ can outlive retained audio. Export jobs preserve their source handles, occupy no
 audition slot and publish only a file and receipt; publication does not request
 storage synchronization (link:91_design_decisions.adoc#DEC-018[file publication policy]).
 
+Standalone stem mixes belong to the selected audition, not a second result cache.
+Completed mixes whose selection was revoked retire off Core; retained stems remain
+available for another mix.
+
 One bounded reclamation worker releases rejected/replaced payloads off Core.
 Workers wait for preceding retirement without blocking Core; charges persist
 while playback, exports or aliases still own the PCM. Export publication rechecks
