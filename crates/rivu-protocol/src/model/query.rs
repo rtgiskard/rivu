@@ -323,13 +323,8 @@ impl Query {
                 }
             }
             Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
-            Self::QueuePage { query, .. }
-            | Self::QueueBatch { query, .. }
-            | Self::QueueEntries { query, .. } => {
+            Self::QueuePage { .. } | Self::QueueBatch { .. } | Self::QueueEntries { .. } => {
                 stamp.queue = revisions.queue;
-                if query.is_some() {
-                    stamp.library = revisions.library;
-                }
             }
             Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
             Self::DuplicateMembers { .. } | Self::DuplicateMemberSelection { .. } => {

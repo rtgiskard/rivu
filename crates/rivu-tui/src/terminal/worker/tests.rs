@@ -955,7 +955,10 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
         let mut next = state.clone();
         next.library.revision += 1;
         assert!(absent.matches(&absent_spec, &next));
-        assert!(!empty.matches(&empty_spec, &next));
+        assert_eq!(
+            empty.matches(&empty_spec, &next),
+            matches!(kind, ReadKind::Queue | ReadKind::QueueSelection(_))
+        );
     }
 }
 

@@ -414,11 +414,10 @@ impl QueueBrowser {
     pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
         let query = self.query();
         let identity_changed = !self.page_projection.matches_identity(&query);
-        let content_changed = self.page_projection.stamp().is_none_or(|stamp| {
-            let previous = stamp.revisions();
-            previous.queue != revisions.queue
-                || (self.query.is_some() && previous.library != revisions.library)
-        });
+        let content_changed = self
+            .page_projection
+            .stamp()
+            .is_none_or(|stamp| stamp.revisions().queue != revisions.queue);
         let changed = self.page_projection.sync(&query, revisions);
         self.projection.sync(&query, revisions);
         if changed {
@@ -1003,7 +1002,11 @@ mod tests {
     fn hidden_filtered_bitrate_reload_keeps_count_and_demand_without_starting_worker() {
         let mut queue = queue(7);
         queue.change_search(Some("needle".into()));
-        queue.sync(revisions(7), 200_000);
+        let baseline = QueryRevisions {
+            library: 7,
+            ..revisions(7)
+        };
+        queue.sync(baseline, 200_000);
         queue.rows.demand(40..50, 20);
         queue.rows.begin(40, 20);
         queue.rows.accept(Page {
@@ -1011,7 +1014,7 @@ mod tests {
             rows: vec![row(10, 40)],
         });
         queue.select(identity(10, 40), false);
-        let mut latest = revisions(7);
+        let mut latest = baseline;
         latest.bitrate = 1;
         queue.sync(latest, 200_000);
         assert_eq!(queue.rows.total(), Some(100));
@@ -1178,8 +1181,10 @@ mod tests {
             library: 1,
             ..revisions(7)
         };
-        assert!(!queue.locate.current(filtered, changed_library, Some(11)));
-        queue.locate.resolve(filtered, changed_library, 3);
+        assert!(queue.locate.current(filtered, changed_library, Some(11)));
+        let changed_queue = revisions(8);
+        assert!(!queue.locate.current(filtered, changed_queue, Some(11)));
+        queue.locate.resolve(filtered, changed_queue, 3);
         assert!(queue.locate.reveal.is_none());
         queue.locate.release_worker(old);
         let job = queue.locate.take_job().unwrap();
@@ -1405,49 +1410,42 @@ mod tests {
 
     #[test]
     fn filtered_refresh_preserves_viewport_and_reloads_empty_results() {
-        for refreshed in [
-            QueryRevisions {
-                library: 1,
-                ..revisions(7)
-            },
-            revisions(8),
-        ] {
-            for total in [0, 100] {
-                let mut queue = queue(7);
-                queue.query = Some("Track".into());
-                queue.sync(revisions(7), 200_000);
-                queue.rows.begin(80, 20);
-                queue.rows.accept(Page {
-                    total,
-                    rows: if total == 0 {
-                        vec![]
-                    } else {
-                        (80..100)
-                            .map(|position| row(position as u64, position))
-                            .collect()
-                    },
-                });
-                if total > 0 {
-                    queue.rows.demand(80..90, 20);
-                }
-                assert!(queue.sync(refreshed, 200_000));
-                assert_eq!(queue.rows.total(), None);
-                if total == 0 {
-                    let (query, generation) = queue.demand_page(queue.rows.visible(), 20).unwrap();
-                    assert!(queue.page_projection.accepts(&query, generation, refreshed));
-                    queue.page_worker = false;
-                    queue.rows.accept(Page {
-                        total: 1,
-                        rows: vec![row(10, 0)],
-                    });
-                    assert_eq!(queue.rows.total(), Some(1));
-                    assert_eq!(queue.rows.get(0).unwrap().id, 10);
+        let refreshed = revisions(8);
+        for total in [0, 100] {
+            let mut queue = queue(7);
+            queue.query = Some("Track".into());
+            queue.sync(revisions(7), 200_000);
+            queue.rows.begin(80, 20);
+            queue.rows.accept(Page {
+                total,
+                rows: if total == 0 {
+                    vec![]
                 } else {
-                    assert_eq!(queue.rows.len(), 100);
-                    assert_eq!(queue.rows.visible(), 80..90);
-                    assert!(queue.rows.get(80).is_none());
-                    assert_eq!(queue.rows.demand(queue.rows.visible(), 20), Some(80));
-                }
+                    (80..100)
+                        .map(|position| row(position as u64, position))
+                        .collect()
+                },
+            });
+            if total > 0 {
+                queue.rows.demand(80..90, 20);
+            }
+            assert!(queue.sync(refreshed, 200_000));
+            assert_eq!(queue.rows.total(), None);
+            if total == 0 {
+                let (query, generation) = queue.demand_page(queue.rows.visible(), 20).unwrap();
+                assert!(queue.page_projection.accepts(&query, generation, refreshed));
+                queue.page_worker = false;
+                queue.rows.accept(Page {
+                    total: 1,
+                    rows: vec![row(10, 0)],
+                });
+                assert_eq!(queue.rows.total(), Some(1));
+                assert_eq!(queue.rows.get(0).unwrap().id, 10);
+            } else {
+                assert_eq!(queue.rows.len(), 100);
+                assert_eq!(queue.rows.visible(), 80..90);
+                assert!(queue.rows.get(80).is_none());
+                assert_eq!(queue.rows.demand(queue.rows.visible(), 20), Some(80));
             }
         }
     }

@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_occurrence_lookup_stamps_include_match_metadata() {
+    fn occurrence_lookup_stamps_follow_their_own_match_metadata() {
         let before = crate::response::QueryRevisions {
             library: 1,
             queue: 1,
@@ -1086,16 +1086,37 @@ mod tests {
             ..before
         };
         for query in [None, Some("needle".into())] {
-            let queue = Query::QueueEntries {
-                query: query.clone(),
-                queue_ids: vec![1],
-            };
             let playlist = Query::PlaylistEntryLocations {
                 playlist_id: 1,
                 query: query.clone(),
                 entry_ids: vec![1],
             };
-            assert_eq!(queue.stamp(before) == queue.stamp(after), query.is_none());
+            for queue in [
+                Query::QueuePage {
+                    query: query.clone(),
+                    offset: 0,
+                    limit: 2,
+                },
+                Query::QueueBatch {
+                    query: query.clone(),
+                    after: None,
+                    limit: 2,
+                    expected: None,
+                },
+                Query::QueueEntries {
+                    query: query.clone(),
+                    queue_ids: vec![1],
+                },
+            ] {
+                assert_eq!(queue.stamp(before), queue.stamp(after));
+                assert_ne!(
+                    queue.stamp(before),
+                    queue.stamp(crate::response::QueryRevisions {
+                        queue: before.queue + 1,
+                        ..before
+                    })
+                );
+            }
             assert_eq!(
                 playlist.stamp(before) == playlist.stamp(after),
                 query.is_none()

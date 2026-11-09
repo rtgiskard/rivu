@@ -750,10 +750,10 @@ Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
 token. Unfiltered compact entry locations use only their content token; filtered
 locations also use scoped metadata, with the same library fallback as full rows.
-Queue queries use queue content and, while filtered, library content. Duplicate
-groups use `duplicate_groups`; members use library, `duplicate_members`, and queue
-content. Playlist reference changes advance member facts, while playlist names
-and order do not.
+Queue queries use queue content, including while filtered; unrelated Library
+changes do not invalidate them. Duplicate groups use `duplicate_groups`; members
+use library, `duplicate_members`, and queue content. Playlist reference changes
+advance member facts, while playlist names and order do not.
 
 Task-status queries select no query-data revision domains. Their empty stamp does
 not make status immutable: query the exact task again or use `WaitTask` for its
@@ -813,8 +813,8 @@ from 1 through 256 and reject zero or larger values.
 To traverse consistently, capture the first batch's query revisions and supply
 them as `expected` on later requests. The same query-owned stamp validates
 track batches (library), playlist-summary batches (catalog only), queue batches
-(queue, plus library while filtered), and playlist-entry batches (scoped metadata
-plus scoped content/lifetime, with the library fallback described above).
+(queue content), and playlist-entry batches (scoped metadata plus scoped
+content/lifetime, with the library fallback described above).
 Queue and playlist-entry batches return `BatchContinuation` values. Pass the
 complete previous `next` unchanged as `after`; do not construct one from a page's
 filtered rank or substitute rank for its original position/id. A continuation's
@@ -846,8 +846,8 @@ is `{id, track_id, position, offset, track}`: `position` identifies its original
 zero-based occurrence order, while `offset` is its rank among query matches.
 `QueueBatch {query, after, limit, expected}` uses a
 `{cursor: {position,id}, offset, scope}` continuation. Its `offset` is the next
-matching rank, never the SQL keyset position. Queue content validates unfiltered
-batches; filtered batches additionally use library content per `Query::stamp`.
+matching rank, never the SQL keyset position. Queue content validates both
+unfiltered and filtered batches; bitrate-bearing payloads also select bitrate.
 Playback-only selection changes do not interrupt traversal.
 `QueueEntries {query, queue_ids}` resolves at most 256 occurrence IDs,
 omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.

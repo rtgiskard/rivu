@@ -918,6 +918,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn filtered_queue_reads_and_continuations_follow_only_queue_inputs() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let queue_id = core.store.queued_track(4).unwrap().unwrap();
+        core.command(Command::RemoveQueue { queue_id }).unwrap();
+        core.publish();
+        let path = directory.path().join("library.db");
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = None;
+        let page_query = Query::QueuePage {
+            query: Some("track".into()),
+            offset: 0,
+            limit: 10,
+        };
+        for (queue_changed, command) in [
+            (
+                false,
+                Command::EditTrack {
+                    track_id: 4,
+                    title: Some("Unqueued edit".into()),
+                    artist: None,
+                    album: None,
+                    decoder_hint: None,
+                },
+            ),
+            (
+                false,
+                Command::EditTrack {
+                    track_id: 1,
+                    title: None,
+                    artist: None,
+                    album: None,
+                    decoder_hint: Some(rivu_format::decoder_hint::DecoderHint::Native),
+                },
+            ),
+            (
+                true,
+                Command::EditTrack {
+                    track_id: 2,
+                    title: Some("Outside filter".into()),
+                    artist: None,
+                    album: None,
+                    decoder_hint: None,
+                },
+            ),
+            (
+                true,
+                Command::SetFavorite {
+                    track_ids: vec![1],
+                    favorite: true,
+                },
+            ),
+            (true, Command::Enqueue { track_ids: vec![3] }),
+        ] {
+            let before = core.shared.read().clone();
+            let ViewResponse::QueuePage(page) =
+                execute_read(&core, &path, &mut reader, &fence, page_query.clone())
+                    .result
+                    .unwrap()
+            else {
+                panic!("expected queue page")
+            };
+            let ViewResponse::QueueBatch(first) = execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                Query::QueueBatch {
+                    query: Some("track".into()),
+                    after: None,
+                    limit: 1,
+                    expected: None,
+                },
+            )
+            .result
+            .unwrap() else {
+                panic!("expected queue batch")
+            };
+            let after = Some(first.next.expect("multiple matching occurrences"));
+            let continuation = Query::QueueBatch {
+                query: Some("track".into()),
+                after,
+                limit: 10,
+                expected: None,
+            };
+            let assert_unchanged = |response: QueryResponse| match response.result.unwrap() {
+                ViewResponse::QueuePage(current) => assert_eq!(current, page),
+                ViewResponse::QueueEntries(current) => assert_eq!(current, page.rows),
+                ViewResponse::QueueBatch(current) => {
+                    assert_eq!(current.rows, page.rows[1..]);
+                    assert!(current.next.is_none());
+                }
+                other => panic!("unexpected response: {other:?}"),
+            };
+            core.command(command).unwrap();
+            core.publish();
+            for query in [
+                page_query.clone(),
+                Query::QueueEntries {
+                    query: Some("track".into()),
+                    queue_ids: page.rows.iter().map(|row| row.id).collect(),
+                },
+                Query::QueueBatch {
+                    query: Some("track".into()),
+                    after,
+                    limit: 10,
+                    expected: Some(before.query_revisions_for(&continuation)),
+                },
+            ] {
+                let (reply, _receiver) = oneshot::channel();
+                let stale = ReadRequest {
+                    state: ReadState::capture(&before, &query),
+                    query: query.clone(),
+                    ticket: None,
+                    reply,
+                };
+                let response =
+                    ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale);
+                let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
+                if queue_changed {
+                    assert!(matches!(response.result, Err(QueryError::RevisionChanged)));
+                    if matches!(query, Query::QueueBatch { .. }) {
+                        assert!(matches!(current.result, Err(QueryError::RevisionChanged)));
+                    } else {
+                        assert!(current.result.is_ok());
+                    }
+                } else {
+                    assert_unchanged(response);
+                    assert_unchanged(current);
+                }
+            }
+            // Without an expected baseline, the cursor itself still fences real changes.
+            let continued = execute_read(&core, &path, &mut reader, &fence, continuation);
+            if queue_changed {
+                assert!(matches!(continued.result, Err(QueryError::RevisionChanged)));
+            } else {
+                assert_unchanged(continued);
+            }
+        }
+    }
+
     fn favorite_query() -> Query {
         Query::LibraryPage {
             query: None,

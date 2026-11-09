@@ -60,7 +60,7 @@ impl CatalogChanges {
             clear_track_cache: self.library,
             clear_filtered_track_count: self.library,
             clear_catalog_counts: self.library || self.structure,
-            clear_queue_count: self.library || self.queue,
+            clear_queue_count: self.queue,
             clear_playlist_count: self.library || playlist_created,
             clear_album_counts: self.albums,
             clear_duplicate_group_count: self.duplicate_groups,
