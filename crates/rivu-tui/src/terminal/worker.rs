@@ -614,20 +614,7 @@ impl ReadSpec {
     }
 
     pub(super) fn query(&self) -> Query {
-        let mut query = self.query.clone();
-        match &mut query {
-            Query::QueuePage { offset, limit, .. }
-            | Query::LibraryPage { offset, limit, .. }
-            | Query::DirectoryPage { offset, limit, .. }
-            | Query::OtherTracksPage { offset, limit, .. }
-            | Query::PlaylistSummaries { offset, limit, .. }
-            | Query::PlaylistEntries { offset, limit, .. } => {
-                *offset = self.offset;
-                *limit = self.limit;
-            }
-            _ => {}
-        }
-        query
+        self.query.clone()
     }
 }
 

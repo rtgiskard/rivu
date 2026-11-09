@@ -257,6 +257,10 @@ titles use a single-summary demand independent of entry batch size. Entry payloa
 refreshes, navigation, and search-locate cancellation do not retry an unchanged
 failed title; a new title revision or reopening the view permits a retry.
 
+Terminal redraw decisions exclude duplicate-group/member revisions, which have
+no terminal view. Immutable page demands send their stored Query unchanged;
+its pagination coordinates also locate the accepted rows.
+
 Pages retain intrinsic column widths and fit them to the viewport on each draw;
 Recent counts and time labels remain live. The TUI retains one help layout and
 one Details layout, invalidated by width, language, key context, theme, or Details

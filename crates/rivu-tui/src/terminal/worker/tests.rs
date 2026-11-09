@@ -29,17 +29,19 @@ fn queue_request(
     offset: usize,
     revisions: QueryRevisions,
 ) -> QueryRequest {
-    let query = ReadKind::Queue.into_query(offset, 20);
-    let submission = tracker.submit(&query, revisions);
+    let mut state = TuiSnapshot::default();
+    state.queue.revision = revisions.queue;
+    state.library.bitrate_revision = revisions.bitrate;
+    let demand = ReadDemand {
+        kind: ReadKind::Queue,
+        filter: None,
+        offset,
+        limit: 20,
+    }
+    .own(&state);
+    let submission = tracker.submit(demand.protocol_query(), revisions);
     QueryRequest {
-        demand: Arc::new(ReadSpec {
-            offset,
-            limit: 20,
-            stamp: query.stamp(revisions),
-            query,
-            target: ReadTarget::Queue,
-            filter: None,
-        }),
+        demand: Arc::new(demand),
         submission,
     }
 }
@@ -340,10 +342,13 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         .unwrap();
     for offset in 1..100 {
         worker.request(QueryRequest {
-            demand: Arc::new(ReadSpec {
-                offset,
-                ..request.demand.as_ref().clone()
-            }),
+            demand: Arc::new(
+                ReadDemand {
+                    offset,
+                    ..request.demand.borrowed()
+                }
+                .own(&state),
+            ),
             submission: request.submission,
         });
     }
@@ -472,13 +477,7 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
     let stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.request(QueryRequest {
-        demand: Arc::new(ReadSpec {
-            offset: 99,
-            ..request.demand.as_ref().clone()
-        }),
-        submission: request.submission,
-    });
+    worker.request(queue_request(&mut tracker, 99, QueryRevisions::default()));
     let pending = Arc::clone(&worker.pending);
     let results = Arc::clone(&worker.latest);
     drop(worker);
@@ -772,13 +771,7 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request.clone());
     active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.request(QueryRequest {
-        demand: Arc::new(ReadSpec {
-            offset: 20,
-            ..request.demand.as_ref().clone()
-        }),
-        submission: request.submission,
-    });
+    worker.request(queue_request(&mut tracker, 20, QueryRevisions::default()));
     release.send(()).unwrap();
     worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();

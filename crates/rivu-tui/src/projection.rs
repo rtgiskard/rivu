@@ -102,9 +102,6 @@ impl TuiSnapshot {
             && self.library.album_revision == previous.library.album_revision
             && self.library.playlist_revision == previous.library.playlist_revision
             && self.library.bitrate_revision == previous.library.bitrate_revision
-            && self.library.duplicate_groups_revision == previous.library.duplicate_groups_revision
-            && self.library.duplicate_members_revision
-                == previous.library.duplicate_members_revision
             && self.library.playlist_entry_revisions == previous.library.playlist_entry_revisions
             && Arc::ptr_eq(
                 &self.library.metadata_revisions,
@@ -163,6 +160,8 @@ mod tests {
         client.system.revision += 1;
         client.system.selected_device = Some("another device".into());
         Arc::make_mut(&mut client.configuration.config).volume = 0.25;
+        client.library.duplicate_groups_revision += 1;
+        client.library.duplicate_members_revision += 1;
         let ignored = TuiSnapshot::from_client(&client, Some(&initial));
         assert!(ignored.same_presentation(&initial));
 
