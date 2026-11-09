@@ -195,7 +195,7 @@ impl AudioProcessing {
             let inspector = self.graph_inspector(panel, window, cx);
             self.processing_scroll(panel, "processing-inspector", inspector)
         } else {
-            let graph = self.graph_canvas_workspace(panel, cx);
+            let graph = self.graph_canvas_workspace(panel, window, cx);
             if wide && parameters_visible {
                 let inspector = self.graph_inspector(panel, window, cx);
                 let inspector = self.processing_scroll(panel, "processing-inspector", inspector);
@@ -381,8 +381,7 @@ impl AudioProcessing {
                             return;
                         }
                         this.cancel_pointer(cx);
-                        this.graph_editor.pan = [24., 24.];
-                        this.graph_editor.zoom = 1.;
+                        this.graph_editor.view = GraphView::default();
                         cx.notify();
                     }
                 }),
@@ -486,14 +485,19 @@ impl AudioProcessing {
             .child(inspection)
     }
 
-    fn graph_canvas_workspace(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn graph_canvas_workspace(
+        &mut self,
+        panel: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let busy = self.graph_busy();
         let mut view = column().size_full().min_h_0().gap_2().child(
             div()
                 .flex_1()
                 .min_h_0()
-                .child(self.routing_canvas(panel, cx)),
+                .child(self.routing_canvas(panel, window, cx)),
         );
         if let Some(port) = self.graph_editor.connecting {
             view = view.child(
@@ -1075,7 +1079,7 @@ impl AudioProcessing {
                         && geometry == measured_geometry
                         && let Some(value) = Slider::value_at(bounds, event.position)
                     {
-                        this.graph_zoom_to(0.35 + value * 1.65, [250., 160.], cx);
+                        this.graph_zoom_to(0.35 + f64::from(value) * 1.65, [250., 160.], cx);
                     }
                     window.prevent_default();
                     cx.notify();
@@ -1145,7 +1149,7 @@ impl AudioProcessing {
         let ui_scale = self.state.system.config.ui_scale;
         Slider::new(
             ("graph-zoom", panel),
-            (self.graph_editor.zoom - 0.35) / 1.65,
+            ((self.graph_editor.view.zoom - 0.35) / 1.65) as f32,
             self.tr("processing-workspace-zoom"),
         )
         .dragging(state.zoom_drag.is_some())
@@ -1174,13 +1178,13 @@ impl AudioProcessing {
                         window,
                         this.state.system.config.ui_scale,
                     ));
-                    0.35 + value * 1.65
+                    0.35 + f64::from(value) * 1.65
                 }
                 SliderInput::Key(key) => match key {
                     SliderKey::Start => 0.35,
                     SliderKey::End => 2.,
-                    SliderKey::Decrease => this.graph_editor.zoom - 0.05,
-                    SliderKey::Increase => this.graph_editor.zoom + 0.05,
+                    SliderKey::Decrease => (this.graph_editor.view.zoom - 0.05).max(0.35),
+                    SliderKey::Increase => (this.graph_editor.view.zoom + 0.05).clamp(0.35, 2.),
                 },
             };
             this.graph_zoom_to(zoom, [250., 160.], cx);
@@ -1191,7 +1195,7 @@ impl AudioProcessing {
         .flex_shrink_0()
         .tooltip(rivu_ui::text_tooltip(format!(
             "{:.0}%",
-            self.graph_editor.zoom * 100.
+            self.graph_editor.view.zoom * 100.
         )))
         .child(
             canvas(
@@ -1219,12 +1223,9 @@ impl AudioProcessing {
             return;
         };
         let size = [f32::from(bounds.size.width), f32::from(bounds.size.height)];
-        if let Some((pan, zoom)) =
-            fitted_view(&self.state.system.config.processing_graph, size, nodes)
-        {
+        if let Some(view) = fitted_view(&self.state.system.config.processing_graph, size, nodes) {
             self.cancel_pointer(cx);
-            self.graph_editor.pan = pan;
-            self.graph_editor.zoom = zoom;
+            self.graph_editor.view = view;
             cx.notify();
         }
     }
@@ -1243,17 +1244,29 @@ fn fitted_view(
     graph: &ProcessingGraph,
     size: [f32; 2],
     nodes: Option<(u64, u64)>,
-) -> Option<([f32; 2], f32)> {
+) -> Option<GraphView> {
     if size[0] <= 48. || size[1] <= 48. {
         return None;
     }
-    let mut extent: Option<([f32; 2], [f32; 2])> = None;
+    let size = size.map(f64::from);
+    let origin = graph
+        .nodes
+        .iter()
+        .find(|node| nodes.is_none_or(|(a, b)| node.id == a || node.id == b))?
+        .position
+        .map(f64::from);
+    let mut extent: Option<([f64; 2], [f64; 2])> = None;
     for node in &graph.nodes {
         if nodes.is_some_and(|(a, b)| node.id != a && node.id != b) {
             continue;
         }
-        let min = node.position;
-        let max = [min[0] + NODE_WIDTH, min[1] + node_height(&node.kind)];
+        // Rebase before adding card dimensions: adding 220 to f32::MAX even
+        // in f64 would erase the entire width and incorrectly fit at infinity.
+        let min = std::array::from_fn(|axis| f64::from(node.position[axis]) - origin[axis]);
+        let max = [
+            min[0] + f64::from(NODE_WIDTH),
+            min[1] + f64::from(node_height(&node.kind)),
+        ];
         extent = Some(match extent {
             None => (min, max),
             Some((a, b)) => (
@@ -1266,13 +1279,13 @@ fn fitted_view(
     let zoom = ((size[0] - 48.) / (max[0] - min[0]))
         .min((size[1] - 48.) / (max[1] - min[1]))
         .min(1.);
-    Some((
-        [
-            (size[0] - (max[0] - min[0]) * zoom) * 0.5 - min[0] * zoom,
-            (size[1] - (max[1] - min[1]) * zoom) * 0.5 - min[1] * zoom,
-        ],
+    Some(GraphView {
+        origin,
+        pan: std::array::from_fn(|axis| {
+            (size[axis] - (max[axis] - min[axis]) * zoom) * 0.5 - min[axis] * zoom
+        }),
         zoom,
-    ))
+    })
 }
 
 #[cfg(test)]
@@ -1298,6 +1311,7 @@ mod tests {
         zoom_focus: FocusHandle,
         resize_focus: FocusHandle,
         inspector: bool,
+        canvas: bool,
         before_key: Rc<Cell<Option<ControlTransition>>>,
     }
 
@@ -1336,6 +1350,15 @@ mod tests {
                             .h(px(80.))
                             .track_focus(&self.resize_focus),
                     )
+                    .when(self.canvas, |view| {
+                        view.child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .child(this.routing_canvas(PANEL, window, cx)),
+                        )
+                    })
             })
         }
     }
@@ -1414,6 +1437,7 @@ mod tests {
                 zoom_focus,
                 resize_focus,
                 inspector,
+                canvas: false,
                 before_key: Default::default(),
             }
         });
@@ -1429,6 +1453,138 @@ mod tests {
             window.draw(cx).clear(cx);
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn fit_extreme_origin_renders_scaled_cards_and_preserves_pan_and_node_drag_contracts(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, owner, handle, _, _) = fixture(cx, false);
+        cx.update_window(handle, |root, _, cx| {
+            root.downcast::<ControlsWindow>()
+                .unwrap()
+                .update(cx, |this, cx| {
+                    this.canvas = true;
+                    cx.notify();
+                });
+        })
+        .unwrap();
+        draw(cx, handle);
+        owner.update(cx, |this, cx| {
+            let graph = &mut Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config)
+                .processing_graph;
+            for node in &mut graph.nodes {
+                node.position = [f32::MAX, f32::MAX];
+            }
+            graph.validate().unwrap();
+            this.command_active = false;
+            this.graph_fit(PANEL, None, cx);
+        });
+        draw(cx, handle);
+        let fitted = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-card-7-4")
+            .unwrap();
+        assert!((f32::from(fitted.size.width) - NODE_WIDTH).abs() < 0.1);
+        owner.update(cx, |this, cx| {
+            let anchor = this
+                .graph_editor
+                .view
+                .screen([f64::from(f32::MAX); 2], [0.; 2])
+                .map(|v| v as f32);
+            this.graph_zoom_to(1.2, anchor, cx);
+        });
+        draw(cx, handle);
+        let zoomed = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-card-7-4")
+            .unwrap();
+        assert!((f32::from(zoomed.size.width) - NODE_WIDTH * 1.2).abs() < 0.1);
+        assert!((f32::from(zoomed.origin.x - fitted.origin.x)).abs() < 0.1);
+        assert!((f32::from(zoomed.origin.y - fitted.origin.y)).abs() < 0.1);
+        let start = zoomed.origin + point(px(16.), px(16.));
+        let end = start + point(px(48.), px(-24.));
+        cx.update_window(handle, |_, window, cx| {
+            owner.update(cx, |this, cx| {
+                this.graph_start_pointer(
+                    PANEL,
+                    None,
+                    &MouseDownEvent {
+                        button: MouseButton::Middle,
+                        position: start,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                this.graph_move_pointer(end, window, cx);
+                let before = this
+                    .graph_editor
+                    .view
+                    .screen([f64::from(f32::MAX); 2], [0.; 2]);
+                let preview = this.graph_view().screen([f64::from(f32::MAX); 2], [0.; 2]);
+                assert_eq!(preview, [before[0] + 48., before[1] - 24.]);
+            });
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Middle,
+                    position: end,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        draw(cx, handle);
+        let panned = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-card-7-4")
+            .unwrap();
+        assert!((f32::from(panned.origin.x - zoomed.origin.x) - 48.).abs() < 0.1);
+        assert!((f32::from(panned.origin.y - zoomed.origin.y) + 24.).abs() < 0.1);
+        cx.update_window(handle, |_, window, cx| {
+            owner.update(cx, |this, cx| {
+                assert!(this.graph_editor.pointer.is_none());
+                this.graph_start_pointer(
+                    PANEL,
+                    Some(4),
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: end,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                this.graph_move_pointer(end + point(px(32.), px(24.)), window, cx);
+                assert_eq!(
+                    this.graph_editor.pointer.as_ref().unwrap().preview,
+                    [f64::from(f32::MAX); 2]
+                );
+            });
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: end + point(px(32.), px(24.)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        owner.read_with(cx, |this, _| {
+            assert!(this.graph_editor.pointer.is_none());
+            assert!(this.graph_editor.pending.is_none());
+            assert_eq!(
+                this.state
+                    .system
+                    .config
+                    .processing_graph
+                    .node(4)
+                    .unwrap()
+                    .position,
+                [f32::MAX; 2]
+            );
+        });
     }
 
     fn dispatch_key(window: &mut Window, cx: &mut App, key: &str) {
@@ -1478,12 +1634,12 @@ mod tests {
             for _ in 0..80 {
                 dispatch_key(window, cx, "right");
             }
-            assert_eq!(owner.read(cx).graph_editor.zoom, 2.);
+            assert_eq!(owner.read(cx).graph_editor.view.zoom, 2.);
             dispatch_key(window, cx, "home");
             for _ in 0..80 {
                 dispatch_key(window, cx, "left");
             }
-            assert_eq!(owner.read(cx).graph_editor.zoom, 0.35);
+            assert_eq!(owner.read(cx).graph_editor.view.zoom, 0.35);
             window.focus(&resize_focus, cx);
             for _ in 0..80 {
                 dispatch_key(window, cx, "left");
@@ -1521,7 +1677,7 @@ mod tests {
                     dispatch_key(window, cx, key);
                     assert!(before_key.get().is_none());
                     owner.read_with(cx, |this, _| {
-                        assert_eq!(this.graph_editor.zoom, 1.);
+                        assert_eq!(this.graph_editor.view.zoom, 1.);
                         assert_eq!(this.graph_editor.workbenches[&PANEL].inspector_width, 25.);
                     });
                 })
@@ -1538,7 +1694,7 @@ mod tests {
             );
             window.focus(&zoom_focus, cx);
             dispatch_key(window, cx, "end");
-            assert_eq!(owner.read(cx).graph_editor.zoom, 2.);
+            assert_eq!(owner.read(cx).graph_editor.view.zoom, 2.);
         })
         .unwrap();
     }
@@ -1608,18 +1764,154 @@ mod tests {
         graph.nodes[0].position = [-4000., -1500.];
         graph.nodes[1].position = [8000., 3500.];
         let size = [640., 320.];
-        let (pan, zoom) = fitted_view(&graph, size, None).unwrap();
+        let view = fitted_view(&graph, size, None).unwrap();
         for node in &graph.nodes {
-            let left = pan[0] + node.position[0] * zoom;
-            let top = pan[1] + node.position[1] * zoom;
+            let [left, top] = view.screen(node.position.map(f64::from), [0.; 2]);
             assert!(left >= 0. && top >= 0.);
-            assert!(left + NODE_WIDTH * zoom <= size[0]);
-            assert!(top + node_height(&node.kind) * zoom <= size[1]);
+            assert!(left + f64::from(NODE_WIDTH) * view.zoom <= f64::from(size[0]));
+            assert!(top + f64::from(node_height(&node.kind)) * view.zoom <= f64::from(size[1]));
         }
         let id = graph.nodes[0].id;
-        let (pan, zoom) = fitted_view(&graph, size, Some((id, id))).unwrap();
-        let center = pan[0] + (graph.nodes[0].position[0] + NODE_WIDTH * 0.5) * zoom;
-        assert!((center - size[0] * 0.5).abs() < 0.01);
+        let view = fitted_view(&graph, size, Some((id, id))).unwrap();
+        let center = view.screen(
+            graph.nodes[0].position.map(f64::from),
+            [f64::from(NODE_WIDTH) * 0.5, 0.],
+        )[0];
+        assert!((center - f64::from(size[0]) * 0.5).abs() < 0.01);
         assert!(fitted_view(&graph, [40., 40.], None).is_none());
+    }
+
+    #[test]
+    fn fit_coincident_extreme_nodes_preserves_card_and_port_geometry_after_zoom() {
+        let mut graph = ProcessingGraph::default();
+        for node in &mut graph.nodes {
+            node.position = [f32::MAX, -f32::MAX];
+        }
+        graph.validate().unwrap();
+        let size = [640., 320.];
+        let mut view = fitted_view(&graph, size, None).unwrap();
+        assert_eq!(view.zoom, 1.);
+        let position = graph.nodes[0].position.map(f64::from);
+        let height = graph
+            .nodes
+            .iter()
+            .map(|node| node_height(&node.kind))
+            .fold(0., f32::max);
+        let local_center = [f64::from(NODE_WIDTH) * 0.5, f64::from(height) * 0.5];
+        let anchor = [320., 160.];
+        assert_eq!(view.screen(position, local_center), anchor);
+        view.zoom_to(1.2, anchor);
+        assert_eq!(view.screen(position, local_center), anchor);
+        let left = view.screen(position, [0.; 2]);
+        let port = view.screen(
+            position,
+            [f64::from(NODE_WIDTH), f64::from(HEADER + PORT_ROW * 0.5)],
+        );
+        assert!((left[0] - (320. - f64::from(NODE_WIDTH) * 0.6)).abs() < 1e-10);
+        assert!((port[0] - left[0] - f64::from(NODE_WIDTH) * 1.2).abs() < 1e-10);
+        assert!((port[1] - left[1] - f64::from(HEADER + PORT_ROW * 0.5) * 1.2).abs() < 1e-10);
+        assert_eq!(
+            view.placement(anchor, local_center),
+            graph.nodes[0].position
+        );
+        // A sub-ULP drag must preview the same f32 position it can persist.
+        assert_eq!(view.dragged(position, [32., -24.]), position);
+    }
+
+    #[test]
+    fn fit_extreme_span_supports_relative_zoom_drag_and_absolute_anchor_zoom() {
+        let mut graph = ProcessingGraph::default();
+        graph.nodes[0].position = [-f32::MAX, -f32::MAX];
+        graph.nodes[1].position = [f32::MAX, f32::MAX];
+        let mut view = fitted_view(&graph, [640., 320.], None).unwrap();
+        let position = graph.nodes[1].position.map(f64::from);
+        let anchor = view.screen(position, [0.; 2]);
+        let fit_zoom = view.zoom;
+        view.zoom_to(fit_zoom * 1.2, anchor);
+        assert!((view.zoom / fit_zoom - 1.2).abs() < 1e-12);
+        assert_eq!(view.screen(position, [0.; 2]), anchor);
+        let dragged = view.dragged(position, [-32., -24.]);
+        let screen = view.screen(dragged, [0.; 2]);
+        assert!((screen[0] - anchor[0] + 32.).abs() < 0.001);
+        assert!((screen[1] - anchor[1] + 24.).abs() < 0.001);
+        graph.nodes[1].position = graph_stored_position(dragged);
+        graph.validate().unwrap();
+        view.zoom_to(1.2, anchor);
+        assert_eq!(view.screen(position, [0.; 2]), anchor);
+        let edge = view.screen(position, [f64::from(NODE_WIDTH), f64::from(HEADER)]);
+        assert!((edge[0] - anchor[0] - f64::from(NODE_WIDTH) * 1.2).abs() < 1e-10);
+        assert!((edge[1] - anchor[1] - f64::from(HEADER) * 1.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ordinary_zoom_keeps_anchor_and_add_placement_in_world_coordinates() {
+        let mut view = GraphView {
+            origin: [2000., -1500.],
+            ..GraphView::default()
+        };
+        let position = [1234., 512.];
+        let anchor = [250., 160.];
+        let before = view.screen(position, [0.; 2]);
+        view.zoom_to(1.2, anchor);
+        let after = view.screen(position, [0.; 2]);
+        for axis in 0..2 {
+            assert!(
+                (after[axis] - (anchor[axis] + (before[axis] - anchor[axis]) * 1.2)).abs() < 1e-10
+            );
+        }
+        let local = [f64::from(NODE_WIDTH) * 0.5, 38.];
+        let placed = view.placement(anchor, local).map(f64::from);
+        let center = view.screen(placed, local);
+        assert!((center[0] - anchor[0]).abs() < 0.001);
+        assert!((center[1] - anchor[1]).abs() < 0.001);
+        let dragged = view.dragged(position, [48., -24.]);
+        assert_eq!(dragged, [1274., 492.]);
+    }
+
+    #[test]
+    fn edge_clipping_preserves_visible_cubic_and_extreme_cross_canvas_segments() {
+        let clip = [[0., 0.], [640., 320.]];
+        let ordinary = [[20., 40.], [80., 40.], [160., 100.], [220., 100.]];
+        let mut segments = Vec::new();
+        clipped_graph_curve(ordinary, clip, &mut |curve| segments.push(curve));
+        assert_eq!(segments, [ordinary]);
+        segments.clear();
+        let extent = f64::from(f32::MAX) * 2.;
+        clipped_graph_curve(
+            [
+                [-extent, 160.],
+                [-extent * 0.5, 160.],
+                [extent * 0.5, 160.],
+                [extent, 160.],
+            ],
+            clip,
+            &mut |curve| segments.push(curve),
+        );
+        assert!(!segments.is_empty());
+        assert!(segments.first().unwrap()[0][0] <= 0.25);
+        assert!(segments.last().unwrap()[3][0] >= 639.75);
+        for curve in segments {
+            for point in curve {
+                assert!((0. ..=640.).contains(&point[0]));
+                assert_eq!(point[1], 160.);
+            }
+        }
+    }
+
+    #[test]
+    fn fit_keeps_valid_extreme_coordinate_spans_finite_and_visible() {
+        let mut graph = ProcessingGraph::default();
+        graph.nodes[0].position = [-f32::MAX, -f32::MAX];
+        graph.nodes[1].position = [f32::MAX, f32::MAX];
+        graph.validate().unwrap();
+        let size = [640., 320.];
+        let view = fitted_view(&graph, size, None).unwrap();
+        assert!(view.zoom > 0. && view.zoom < 0.35);
+        for node in &graph.nodes {
+            let screen = view.screen(node.position.map(f64::from), [0.; 2]);
+            for axis in 0..2 {
+                assert!((0. ..=f64::from(size[axis])).contains(&screen[axis]));
+            }
+        }
     }
 }

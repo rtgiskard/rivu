@@ -96,6 +96,12 @@ covers 35%–200%. Reset view restores pan/zoom without editing nodes; Fit graph
 includes offscreen nodes, and Locate selected centers the selection. Connections
 lists explicit endpoint pairs and locates/highlights a selected wire; disconnect
 is a separate action. The toolbar's info icon provides shortcut help.
+Fit may use a smaller zoom for very wide graphs; relative zoom preserves its
+pointer anchor without jumping to the slider minimum. Viewport transforms use
+rebased double-precision coordinates, preserving local card geometry even near
+the finite limits of persisted single-precision positions. Nodes and connections
+are culled or clipped in screen space before conversion to GUI pixels. Drag previews and
+new-node placement use the same representable positions that an edit can commit.
 
 Wide panels have a resizable, collapsible inspector beside the canvas; narrow
 panels switch between canvas and parameters. A focused separator supports

@@ -19,6 +19,8 @@ const NODE_WIDTH: f32 = 220.;
 const HEADER: f32 = 36.;
 const PORT_ROW: f32 = 28.;
 const HISTORY_LIMIT: usize = 64;
+// The smallest nonzero scale that can reach GPUI's f32 pixel boundary.
+const MIN_GRAPH_ZOOM: f64 = f32::from_bits(1) as f64;
 
 #[derive(Clone, Copy)]
 enum HistoryAction {
@@ -38,12 +40,116 @@ struct PendingEdit {
     select_after: Option<u64>,
 }
 
+/// World coordinates remain f64 until the final pixel/configuration boundary.
+/// Keeping a world origin separate from its screen offset preserves card-sized
+/// differences even when every persisted node is near the end of the f32 range.
+#[derive(Clone, Copy, Debug)]
+struct GraphView {
+    origin: [f64; 2],
+    pan: [f64; 2],
+    zoom: f64,
+}
+
+impl Default for GraphView {
+    fn default() -> Self {
+        Self {
+            origin: [0.; 2],
+            pan: [24.; 2],
+            zoom: 1.,
+        }
+    }
+}
+
+impl GraphView {
+    fn screen(self, position: [f64; 2], local: [f64; 2]) -> [f64; 2] {
+        std::array::from_fn(|axis| {
+            (position[axis] - self.origin[axis]) * self.zoom
+                + self.pan[axis]
+                + local[axis] * self.zoom
+        })
+    }
+
+    fn placement(self, screen: [f64; 2], local: [f64; 2]) -> [f32; 2] {
+        graph_stored_position(std::array::from_fn(|axis| {
+            self.origin[axis] + (screen[axis] - self.pan[axis]) / self.zoom - local[axis]
+        }))
+    }
+
+    fn zoom_to(&mut self, zoom: f64, anchor: [f64; 2]) {
+        let zoom = zoom.clamp(MIN_GRAPH_ZOOM, 2.);
+        // Use the nearest representable world point to the anchor as the new
+        // origin before scaling. Otherwise a zoom from a tiny fitted scale can
+        // turn two cancelling screen terms into enormous translations again.
+        let origin = self.placement(anchor, [0.; 2]).map(f64::from);
+        self.pan = self.screen(origin, [0.; 2]);
+        self.origin = origin;
+        let ratio = zoom / self.zoom;
+        self.pan =
+            std::array::from_fn(|axis| anchor[axis] + (self.pan[axis] - anchor[axis]) * ratio);
+        self.zoom = zoom;
+    }
+
+    fn dragged(self, origin: [f64; 2], delta: [f64; 2]) -> [f64; 2] {
+        graph_stored_position(std::array::from_fn(|axis| {
+            origin[axis] + delta[axis] / self.zoom
+        }))
+        .map(f64::from)
+    }
+}
+
+fn graph_stored_position(position: [f64; 2]) -> [f32; 2] {
+    // Preserve the full persisted range. Previews and placements use exactly
+    // representable f32 positions, rather than casts that can overflow.
+    position.map(|coordinate| coordinate.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32)
+}
+
+/// Clip in screen-space f64 before handing coordinates to GPUI. Subdivision
+/// preserves the cubic, unlike clamping its far-away endpoints to the canvas.
+fn clipped_graph_curve(
+    curve: [[f64; 2]; 4],
+    clip: [[f64; 2]; 2],
+    emit: &mut impl FnMut([[f64; 2]; 4]),
+) {
+    let min: [f64; 2] =
+        std::array::from_fn(|axis| curve.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min));
+    let max: [f64; 2] = std::array::from_fn(|axis| {
+        curve
+            .iter()
+            .map(|p| p[axis])
+            .fold(f64::NEG_INFINITY, f64::max)
+    });
+    if (0..2).any(|axis| max[axis] < clip[0][axis] || min[axis] > clip[1][axis]) {
+        return;
+    }
+    if (0..2).all(|axis| min[axis] >= clip[0][axis] && max[axis] <= clip[1][axis]) {
+        emit(curve);
+        return;
+    }
+    if (max[0] - min[0]).max(max[1] - min[1]) <= 0.25 {
+        // A boundary fragment is at most a quarter pixel; its projection has
+        // the same subpixel error and keeps every emitted control point inside.
+        emit(
+            curve.map(|p| std::array::from_fn(|axis| p[axis].clamp(clip[0][axis], clip[1][axis]))),
+        );
+        return;
+    }
+    let midpoint = |a: [f64; 2], b: [f64; 2]| std::array::from_fn(|axis| (a[axis] + b[axis]) * 0.5);
+    let a = midpoint(curve[0], curve[1]);
+    let b = midpoint(curve[1], curve[2]);
+    let c = midpoint(curve[2], curve[3]);
+    let d = midpoint(a, b);
+    let e = midpoint(b, c);
+    let middle = midpoint(d, e);
+    clipped_graph_curve([curve[0], a, d, middle], clip, emit);
+    clipped_graph_curve([middle, e, c, curve[3]], clip, emit);
+}
+
 pub(super) struct GraphPointer {
     pub(super) panel: u64,
     start: Point<Pixels>,
-    origin: [f32; 2],
+    origin: [f64; 2],
     node: Option<u64>,
-    preview: [f32; 2],
+    preview: [f64; 2],
     bounds: Bounds<Pixels>,
     geometry: WindowGeometry,
     epoch: u64,
@@ -57,8 +163,7 @@ pub(super) struct GraphEditorState {
     connecting: Option<GraphPort>,
     highlight_connection: Option<GraphPort>,
     target_port: u16,
-    pan: [f32; 2],
-    zoom: f32,
+    view: GraphView,
     mode: GraphExecutionMode,
     revision: Option<u64>,
     fields_revision: Option<(u64, u64)>,
@@ -84,8 +189,7 @@ impl Default for GraphEditorState {
             connecting: None,
             highlight_connection: None,
             target_port: 0,
-            pan: [24., 24.],
-            zoom: 1.,
+            view: GraphView::default(),
             mode: GraphExecutionMode::Auto,
             revision: None,
             undo: VecDeque::new(),
@@ -532,12 +636,13 @@ impl AudioProcessing {
             .and_then(|b| b.get())
             .map(|(bounds, _)| [f32::from(bounds.size.width), f32::from(bounds.size.height)])
             .unwrap_or([600., 380.]);
-        let position = [
-            (viewport[0] * 0.5 - self.graph_editor.pan[0]) / self.graph_editor.zoom
-                - NODE_WIDTH * 0.5,
-            (viewport[1] * 0.5 - self.graph_editor.pan[1]) / self.graph_editor.zoom
-                - node_height(&kind) * 0.5,
-        ];
+        let position = self.graph_editor.view.placement(
+            viewport.map(|coordinate| f64::from(coordinate) * 0.5),
+            [
+                f64::from(NODE_WIDTH) * 0.5,
+                f64::from(node_height(&kind)) * 0.5,
+            ],
+        );
         self.graph_edit(GraphEdit::Add { kind, position }, cx);
     }
 
@@ -604,22 +709,26 @@ impl AudioProcessing {
         }
     }
 
-    fn graph_position(&self, node: &GraphNode) -> [f32; 2] {
+    fn graph_position(&self, node: &GraphNode) -> [f64; 2] {
         self.graph_editor
             .pointer
             .as_ref()
             .filter(|p| p.node == Some(node.id))
             .map(|p| p.preview)
-            .unwrap_or(node.position)
+            .unwrap_or_else(|| node.position.map(f64::from))
     }
 
-    fn graph_pan(&self) -> [f32; 2] {
-        self.graph_editor
+    fn graph_view(&self) -> GraphView {
+        let mut view = self.graph_editor.view;
+        if let Some(pointer) = self
+            .graph_editor
             .pointer
             .as_ref()
             .filter(|p| p.node.is_none())
-            .map(|p| p.preview)
-            .unwrap_or(self.graph_editor.pan)
+        {
+            view.pan = pointer.preview;
+        }
+        view
     }
 
     fn graph_start_pointer(
@@ -657,9 +766,9 @@ impl AudioProcessing {
             else {
                 return;
             };
-            node.position
+            node.position.map(f64::from)
         } else {
-            self.graph_editor.pan
+            self.graph_editor.view.pan
         };
         let subscriptions = [
             cx.observe_window_activation(window, |this, window, cx| {
@@ -706,15 +815,15 @@ impl AudioProcessing {
             self.cancel_pointer(cx);
             return;
         }
-        let scale = if pointer.node.is_some() {
-            self.graph_editor.zoom
-        } else {
-            1.
-        };
-        pointer.preview = [
-            pointer.origin[0] + f32::from(position.x - pointer.start.x) / scale,
-            pointer.origin[1] + f32::from(position.y - pointer.start.y) / scale,
+        let delta = [
+            f64::from(f32::from(position.x)) - f64::from(f32::from(pointer.start.x)),
+            f64::from(f32::from(position.y)) - f64::from(f32::from(pointer.start.y)),
         ];
+        pointer.preview = if pointer.node.is_some() {
+            self.graph_editor.view.dragged(pointer.origin, delta)
+        } else {
+            std::array::from_fn(|axis| pointer.origin[axis] + delta[axis])
+        };
         cx.notify();
     }
 
@@ -761,13 +870,13 @@ impl AudioProcessing {
                                     this.graph_edit(
                                         GraphEdit::Move {
                                             id,
-                                            position: pointer.preview,
+                                            position: graph_stored_position(pointer.preview),
                                         },
                                         cx,
                                     );
                                 }
                             } else {
-                                this.graph_editor.pan = pointer.preview;
+                                this.graph_editor.view.pan = pointer.preview;
                             }
                         }
                         cx.notify();
@@ -784,17 +893,16 @@ impl AudioProcessing {
 
     fn graph_zoom(&mut self, factor: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
         self.cancel_pointer(cx);
-        self.graph_zoom_to(self.graph_editor.zoom * factor, anchor, cx);
+        let old = self.graph_editor.view.zoom;
+        // Fit can legitimately be below the ordinary interactive minimum. Keep
+        // relative zoom relative instead of jumping straight back to 35%.
+        let minimum = if old < 0.35 { MIN_GRAPH_ZOOM } else { 0.35 };
+        let next = (old * f64::from(factor)).clamp(minimum, 2.);
+        self.graph_zoom_to(next, anchor, cx);
     }
 
-    fn graph_zoom_to(&mut self, zoom: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
-        let old = self.graph_editor.zoom;
-        let next = zoom.clamp(0.35, 2.);
-        for (i, coordinate) in anchor.into_iter().enumerate() {
-            self.graph_editor.pan[i] =
-                coordinate - (coordinate - self.graph_editor.pan[i]) * next / old;
-        }
-        self.graph_editor.zoom = next;
+    fn graph_zoom_to(&mut self, zoom: f64, anchor: [f32; 2], cx: &mut Context<Self>) {
+        self.graph_editor.view.zoom_to(zoom, anchor.map(f64::from));
         cx.notify();
     }
 
@@ -820,8 +928,7 @@ impl AudioProcessing {
                 "-" => self.graph_zoom(1. / 1.2, [250., 160.], cx),
                 "home" => {
                     self.cancel_pointer(cx);
-                    self.graph_editor.pan = [24., 24.];
-                    self.graph_editor.zoom = 1.;
+                    self.graph_editor.view = GraphView::default();
                     cx.notify();
                 }
                 "left" | "right" | "up" | "down" => {
@@ -834,8 +941,8 @@ impl AudioProcessing {
                     };
                     if modifiers.alt {
                         self.cancel_pointer(cx);
-                        self.graph_editor.pan[0] += delta[0];
-                        self.graph_editor.pan[1] += delta[1];
+                        self.graph_editor.view.pan[0] += f64::from(delta[0]);
+                        self.graph_editor.view.pan[1] += f64::from(delta[1]);
                         cx.notify();
                     } else if let Some(node) = self
                         .state
@@ -864,7 +971,12 @@ impl AudioProcessing {
         cx.stop_propagation();
     }
 
-    fn routing_canvas(&mut self, panel: u64, cx: &mut Context<Self>) -> AnyElement {
+    fn routing_canvas(
+        &mut self,
+        panel: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let focus = self
             .graph_editor
             .workbenches
@@ -877,8 +989,8 @@ impl AudioProcessing {
         let graph = &self.state.system.config.processing_graph;
         let edges = graph.edges.clone();
         let highlighted = self.graph_editor.highlight_connection;
-        let pan = self.graph_pan();
-        let zoom = self.graph_editor.zoom;
+        let view = self.graph_view();
+        let scaled = |length: f32| px((f64::from(length) * view.zoom) as f32);
         let measured = self
             .graph_editor
             .bounds
@@ -890,19 +1002,38 @@ impl AudioProcessing {
         let scale = self.state.system.config.ui_scale;
         let weak = cx.entity().downgrade();
         let owner = weak.clone();
+        // Cull against this render's window, not the shared last measurement.
+        // The full viewport conservatively contains any visible canvas region
+        // and is available on the first frame and immediately after resizing.
+        let size = window.viewport_size();
+        let viewport = [
+            f64::from(f32::from(size.width)),
+            f64::from(f32::from(size.height)),
+        ];
         let mut nodes = Vec::with_capacity(graph.nodes.len());
         let mut positions = HashMap::new();
         for node in &graph.nodes {
             let id = node.id;
             let p = self.graph_position(node);
             positions.insert(id, p);
+            let screen = view.screen(p, [0.; 2]);
+            let dimensions = [
+                f64::from(NODE_WIDTH) * view.zoom,
+                f64::from(node_height(&node.kind)) * view.zoom,
+            ];
+            if (0..2)
+                .any(|axis| screen[axis] > viewport[axis] || screen[axis] + dimensions[axis] < 0.)
+            {
+                continue;
+            }
             let mut card = div()
                 .id(SharedString::from(format!("graph-card-{panel}-{id}")))
+                .debug_selector(move || format!("graph-card-{panel}-{id}"))
                 .absolute()
-                .left(px(pan[0] + p[0] * zoom))
-                .top(px(pan[1] + p[1] * zoom))
-                .w(px(NODE_WIDTH * zoom))
-                .h(px(node_height(&node.kind) * zoom))
+                .left(px(screen[0] as f32))
+                .top(px(screen[1] as f32))
+                .w(scaled(NODE_WIDTH))
+                .h(scaled(node_height(&node.kind)))
                 .bg(rgb(theme.panel))
                 .border_1()
                 .border_color(rgb(if self.graph_editor.selected == Some(id) {
@@ -937,12 +1068,12 @@ impl AudioProcessing {
                         .left_0()
                         .top_0()
                         .w_full()
-                        .h(px(HEADER * zoom))
-                        .px(px(8. * zoom))
+                        .h(scaled(HEADER))
+                        .px(scaled(8.))
                         .flex()
                         .items_center()
                         .truncate()
-                        .text_size(px(12. * zoom))
+                        .text_size(scaled(12.))
                         .child(format!("{} #{id}", self.tr(node_label(&node.kind)))),
                 );
             for output in [false, true] {
@@ -967,14 +1098,14 @@ impl AudioProcessing {
                             "graph-port-{panel}-{id}-{output}-{port}"
                         )))
                         .absolute()
-                        .top(px((HEADER + PORT_ROW * port as f32) * zoom))
-                        .h(px(PORT_ROW * zoom))
-                        .max_w(px(NODE_WIDTH * zoom / 2.))
-                        .px(px(4. * zoom))
+                        .top(scaled(HEADER + PORT_ROW * port as f32))
+                        .h(scaled(PORT_ROW))
+                        .max_w(scaled(NODE_WIDTH / 2.))
+                        .px(scaled(4.))
                         .flex()
                         .items_center()
-                        .gap(px(3. * zoom))
-                        .text_size(px(11. * zoom))
+                        .gap(scaled(3.))
+                        .text_size(scaled(11.))
                         .text_color(rgb(if active { theme.accent } else { theme.text }))
                         .when(output, |v| v.right_0().justify_end())
                         .when(!output, |v| v.left_0())
@@ -1055,8 +1186,8 @@ impl AudioProcessing {
                     this.graph_zoom((delta[1] * 0.006).exp(), anchor, cx);
                 } else {
                     this.cancel_pointer(cx);
-                    this.graph_editor.pan[0] += delta[0];
-                    this.graph_editor.pan[1] += delta[1];
+                    this.graph_editor.view.pan[0] += f64::from(delta[0]);
+                    this.graph_editor.view.pan[1] += f64::from(delta[1]);
                     cx.notify();
                 }
                 cx.stop_propagation();
@@ -1081,18 +1212,24 @@ impl AudioProcessing {
                     move |bounds, _, window, _| {
                         Self::graph_pointer_handlers(weak.clone(), panel, window);
                         let mut grid = PathBuilder::stroke(px(1.));
-                        let spacing = 32. * zoom;
-                        let mut x = pan[0].rem_euclid(spacing);
-                        while x < f32::from(bounds.size.width) {
-                            grid.move_to(point(bounds.left() + px(x), bounds.top()));
-                            grid.line_to(point(bounds.left() + px(x), bounds.bottom()));
-                            x += spacing;
-                        }
-                        let mut y = pan[1].rem_euclid(spacing);
-                        while y < f32::from(bounds.size.height) {
-                            grid.move_to(point(bounds.left(), bounds.top() + px(y)));
-                            grid.line_to(point(bounds.right(), bounds.top() + px(y)));
-                            y += spacing;
+                        let spacing = 32. * view.zoom;
+                        // Subpixel grid lines cannot be resolved and would make
+                        // Fit over a large span iterate effectively forever.
+                        if spacing >= 8. {
+                            let mut x = (view.pan[0] - view.origin[0].rem_euclid(32.) * view.zoom)
+                                .rem_euclid(spacing);
+                            while x < f64::from(f32::from(bounds.size.width)) {
+                                grid.move_to(point(bounds.left() + px(x as f32), bounds.top()));
+                                grid.line_to(point(bounds.left() + px(x as f32), bounds.bottom()));
+                                x += spacing;
+                            }
+                            let mut y = (view.pan[1] - view.origin[1].rem_euclid(32.) * view.zoom)
+                                .rem_euclid(spacing);
+                            while y < f64::from(f32::from(bounds.size.height)) {
+                                grid.move_to(point(bounds.left(), bounds.top() + px(y as f32)));
+                                grid.line_to(point(bounds.right(), bounds.top() + px(y as f32)));
+                                y += spacing;
+                            }
                         }
                         if let Ok(path) = grid.build() {
                             window.paint_path(path, rgb(theme.border));
@@ -1103,32 +1240,46 @@ impl AudioProcessing {
                             else {
                                 continue;
                             };
-                            let a = bounds.origin
-                                + point(
-                                    px(pan[0] + (from[0] + NODE_WIDTH) * zoom),
-                                    px(pan[1]
-                                        + (from[1]
-                                            + HEADER
-                                            + PORT_ROW * (edge.from.port as f32 + 0.5))
-                                            * zoom),
-                                );
-                            let b = bounds.origin
-                                + point(
-                                    px(pan[0] + to[0] * zoom),
-                                    px(pan[1]
-                                        + (to[1]
-                                            + HEADER
-                                            + PORT_ROW * (edge.to.port as f32 + 0.5))
-                                            * zoom),
-                                );
-                            let reach = px((f32::from(b.x - a.x).abs() * 0.5).max(40.));
+                            let a = view.screen(
+                                *from,
+                                [
+                                    f64::from(NODE_WIDTH),
+                                    f64::from(HEADER)
+                                        + f64::from(PORT_ROW) * (f64::from(edge.from.port) + 0.5),
+                                ],
+                            );
+                            let b = view.screen(
+                                *to,
+                                [
+                                    0.,
+                                    f64::from(HEADER)
+                                        + f64::from(PORT_ROW) * (f64::from(edge.to.port) + 0.5),
+                                ],
+                            );
+                            let reach = ((b[0] - a[0]).abs() * 0.5).max(40.);
                             let selected = highlighted == Some(edge.to);
                             let mut path = PathBuilder::stroke(px(if selected { 4. } else { 2. }));
-                            path.move_to(a);
-                            path.cubic_bezier_to(
-                                b,
-                                a + point(reach, px(0.)),
-                                b - point(reach, px(0.)),
+                            let clip = [
+                                [-4.; 2],
+                                [
+                                    f64::from(f32::from(bounds.size.width)) + 4.,
+                                    f64::from(f32::from(bounds.size.height)) + 4.,
+                                ],
+                            ];
+                            clipped_graph_curve(
+                                [a, [a[0] + reach, a[1]], [b[0] - reach, b[1]], b],
+                                clip,
+                                &mut |curve| {
+                                    let pixel = |p: [f64; 2]| {
+                                        bounds.origin + point(px(p[0] as f32), px(p[1] as f32))
+                                    };
+                                    path.move_to(pixel(curve[0]));
+                                    path.cubic_bezier_to(
+                                        pixel(curve[3]),
+                                        pixel(curve[1]),
+                                        pixel(curve[2]),
+                                    );
+                                },
                             );
                             if let Ok(path) = path.build() {
                                 window.paint_path(
@@ -1229,11 +1380,11 @@ mod tests {
     }
 
     impl Render for GraphWindow {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             column().size_full().child(self.input.clone()).child(
                 div().w_full().h(px(500.)).child(
                     self.processing
-                        .update(cx, |this, cx| this.routing_canvas(PANEL, cx)),
+                        .update(cx, |this, cx| this.routing_canvas(PANEL, window, cx)),
                 ),
             )
         }
