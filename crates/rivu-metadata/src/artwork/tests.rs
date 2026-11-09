@@ -2,54 +2,6 @@ use super::fixtures::*;
 use super::*;
 use std::fs::File;
 
-mod leases;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum FileEvent {
-    Published,
-    ReuseOpened,
-    CleanupLocked,
-}
-
-type FileHook = Box<dyn FnOnce(&Path)>;
-
-thread_local! {
-    static NEXT_FILE_EVENT: std::cell::RefCell<Option<(FileEvent, FileHook)>> =
-        std::cell::RefCell::new(None);
-}
-
-pub(super) fn file_event(event: FileEvent, path: &Path) {
-    let hook = NEXT_FILE_EVENT.with(|next| {
-        let mut next = next.borrow_mut();
-        if next
-            .as_ref()
-            .is_some_and(|(expected, _)| *expected == event)
-        {
-            next.take().map(|(_, hook)| hook)
-        } else {
-            None
-        }
-    });
-    if let Some(hook) = hook {
-        hook(path);
-    }
-}
-
-struct FileEventGuard;
-
-impl Drop for FileEventGuard {
-    fn drop(&mut self) {
-        NEXT_FILE_EVENT.with(|next| next.borrow_mut().take());
-    }
-}
-
-fn on_file_event(event: FileEvent, hook: impl FnOnce(&Path) + 'static) -> FileEventGuard {
-    NEXT_FILE_EVENT.with(|next| {
-        assert!(next.borrow_mut().replace((event, Box::new(hook))).is_none());
-    });
-    FileEventGuard
-}
-
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -277,7 +229,7 @@ fn startup_and_negative_lookups_never_export_default_artwork() {
 }
 
 #[test]
-fn default_export_is_singleflight_and_protected_without_track_lookups() {
+fn default_export_is_singleflight_without_track_lookups() {
     let directory = tempfile::tempdir().unwrap();
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
     let barrier = std::sync::Barrier::new(4);
@@ -299,14 +251,7 @@ fn default_export_is_singleflight_and_protected_without_track_lookups() {
     let path = file_path(held[0].uri());
     assert!(managed_filename(path.file_name().unwrap()));
     assert_eq!(manager.cached_default(), Some(held[0].clone()));
-    age_file(&path);
-    let report = manager.maintain(Duration::ZERO, true).unwrap();
-    assert_eq!(
-        (report.files, report.protected_files, report.removed_files),
-        (1, 1, 0)
-    );
-    assert_eq!(fs::read(&path).unwrap(), DEFAULT_IMAGE);
-    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    assert_eq!(fs::read(path).unwrap(), DEFAULT_IMAGE);
 }
 
 #[test]
@@ -1086,16 +1031,16 @@ fn held_results_can_exceed_target_and_idle_results_are_evicted() {
 }
 
 #[test]
-fn manual_cleanup_respects_age_residency_and_reloads_evicted_content() {
+fn manual_cleanup_respects_age_and_regenerates_after_manager_restart() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
     let selected = source_fixture(source);
     let held = manager.load(selected.source()).unwrap();
-    let protected = file_path(held.uri());
-    age_file(&protected);
-    let cache = protected.parent().unwrap();
+    let original = file_path(held.uri());
+    age_file(&original);
+    let cache = original.parent().unwrap();
     let expired = cache.join(format!("{}.png", "1".repeat(30)));
     let fresh = cache.join(format!("{}.png", "2".repeat(30)));
     fs::write(&expired, b"old").unwrap();
@@ -1109,14 +1054,7 @@ fn manual_cleanup_respects_age_residency_and_reloads_evicted_content() {
     let report = manager.maintain(age, false).unwrap();
     assert_eq!(report.files, 3);
     assert_eq!(report.bytes, DEFAULT_IMAGE.len() as u64 + 8);
-    assert_eq!(
-        (
-            report.expired_files,
-            report.protected_files,
-            report.removed_files
-        ),
-        (2, 1, 0)
-    );
+    assert_eq!((report.expired_files, report.removed_files), (2, 0));
     let report = manager.maintain(age, true).unwrap();
     assert_eq!(
         (
@@ -1124,33 +1062,23 @@ fn manual_cleanup_respects_age_residency_and_reloads_evicted_content() {
             report.removed_bytes,
             report.failed_files
         ),
-        (1, 3, 0)
+        (2, DEFAULT_IMAGE.len() as u64 + 3, 0)
     );
-    assert!(protected.is_file());
+    assert!(!original.exists());
     assert!(fresh.is_file());
     assert!(unmanaged.is_file());
     assert!(!expired.exists());
+    assert_eq!(manager.cached(selected.source()), Some(held.clone()));
     drop(held);
-    for id in 2..130 {
-        let mut other = selected.clone();
-        other.id = id;
-        other.path = directory.path().join("missing");
-        manager.load(other.source());
-    }
-    let report = manager.maintain(age, true).unwrap();
-    assert_eq!(
-        (report.removed_files, report.removed_bytes),
-        (1, DEFAULT_IMAGE.len() as u64)
-    );
-    assert!(!protected.exists());
-    assert!(manager.cached_result(selected.source()).is_none());
-    let reloaded = manager.load(selected.source()).unwrap();
-    assert_eq!(file_path(reloaded.uri()), protected);
-    assert_eq!(fs::read(protected).unwrap(), DEFAULT_IMAGE);
+    drop(manager);
+    let restarted = ArtworkManager::new(directory.path());
+    let reloaded = restarted.load(selected.source()).unwrap();
+    assert_eq!(file_path(reloaded.uri()), original);
+    assert_eq!(fs::read(original).unwrap(), DEFAULT_IMAGE);
 }
 
 #[test]
-fn thumbnail_cleanup_does_not_pin_to_resident_originals() {
+fn cleanup_removes_resident_originals_and_all_thumbnail_tiers() {
     let directory = tempfile::tempdir().unwrap();
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
     let original = manager.export_default().unwrap();
@@ -1161,11 +1089,14 @@ fn thumbnail_cleanup_does_not_pin_to_resident_originals() {
     for thumbnail in &thumbnails {
         fs::write(thumbnail, b"thumbnail").unwrap();
     }
+    age_file(&source);
+    for thumbnail in &thumbnails {
+        age_file(thumbnail);
+    }
     let report = manager.maintain(Duration::ZERO, true).unwrap();
     assert_eq!(report.files, 7);
-    assert_eq!(report.protected_files, 1);
-    assert_eq!(report.removed_files, 6);
-    assert!(source.is_file());
+    assert_eq!(report.removed_files, 7);
+    assert!(!source.exists());
     assert!(thumbnails.iter().all(|path| !path.exists()));
 }
 
@@ -1230,45 +1161,6 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
     for path in excluded {
         assert_eq!(fs::read(path).unwrap(), b"keep");
     }
-}
-
-#[test]
-fn foreign_cleanup_preserves_original_before_lookup_registration() {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("track.wav");
-    tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path());
-    let cleaner = ArtworkManager::new(directory.path());
-    let selected = source_fixture(source);
-    let (started, loading) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        let manager = &manager;
-        let selected = &selected;
-        let loader = scope.spawn(move || {
-            manager.load_with(selected.source(), || {
-                let image = manager.source_uri(&selected.path, manager.max_image_bytes);
-                started.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(5)).unwrap();
-                image
-            })
-        });
-        // Drop before the scope joins if an assertion unwinds.
-        let release_before_join = release;
-        loading.recv_timeout(Duration::from_secs(5)).unwrap();
-        let report = cleaner.maintain(Duration::ZERO, true).unwrap();
-        assert_eq!(
-            (
-                report.expired_files,
-                report.protected_files,
-                report.removed_files
-            ),
-            (1, 1, 0)
-        );
-        release_before_join.send(()).unwrap();
-        let loaded = loader.join().unwrap().unwrap();
-        assert_eq!(fs::read(loaded.path()).unwrap(), DEFAULT_IMAGE);
-    });
 }
 
 #[test]

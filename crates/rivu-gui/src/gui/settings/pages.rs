@@ -101,7 +101,12 @@ impl Settings {
                                     ),
                                 ),
                         ),
-                ),
+                )
+                .child(status_message(
+                    colors,
+                    self.tr("settings-cache-cleanup-warning"),
+                    StatusKind::Info,
+                )),
         );
         content = column()
             .gap_2()
@@ -160,16 +165,6 @@ impl Settings {
                         &[
                             ("files", report.expired_files.to_string().into()),
                             ("bytes", report.expired_bytes.to_string().into()),
-                        ],
-                    ),
-                ))
-                .child(caption(
-                    colors,
-                    self.i18n.format(
-                        "settings-cache-protected",
-                        &[
-                            ("files", report.protected_files.to_string().into()),
-                            ("bytes", report.protected_bytes.to_string().into()),
                         ],
                     ),
                 ))

@@ -155,9 +155,9 @@ See link:21_ipc.adoc[PCM transport] and link:22_cache.adoc[resource lifecycles].
 === DEC-008: Keep GUI cache ownership until cold-path measurements justify change
 
 Status: decode cache and scheduling design retained after review, 2026-11-06;
-their redesign remains unapproved. Shared-disk URI lease protection is corrected
-for independent processes, 2026-11-08. Material preference authority is covered
-by <<DEC-015>>.
+their redesign remains unapproved. Explicit shared-disk cleanup is simplified
+to permit removal of in-use files, superseding inode-lock protection,
+2026-11-09. Material preference authority is covered by <<DEC-015>>.
 
 Keep disposable content-addressed thumbnails, the reusable decode seat and
 acknowledged pixel retirement. Window animation demand, per-panel rotation and
@@ -174,14 +174,11 @@ and equivalent failure/retirement evidence. Per-image budgets do not establish a
 window-wide decoded/GPU cap. See link:22_cache.adoc[Artwork retention] and
 link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation].
 
-Shared original-file URI protection spans the independent Core and desktop
-processes. Each resident original or returned URI retains a shared inode lock;
-cleanup needs a nonblocking exclusive lock and path/inode revalidation. This
-keeps lookup/decode scheduling process-local while making deletion safe across
-processes, with file-descriptor and lock lifetime tied to the existing owners.
-Lock acquisition and publication stay on blocking paths, not property getters or
-render reads. Thumbnails remain disposable. See the
-link:22_cache.adoc#artwork-uri-leases[shared URI lease contract].
+Infrequent, user-initiated artwork cleanup may delete in-use files, avoiding
+cross-process file-lock coordination. Keep process-local shared ownership without
+adding automatic cache invalidation or recovery. See
+link:01_config.adoc#artwork-cache-maintenance[maintenance effects and recovery] and
+link:22_cache.adoc#artwork-uri-leases[URI ownership].
 
 Atlas-key invalidation does not retire physical tiles still needed by replayable
 scenes. The renderer owns that lifetime without changing the sprite ABI or replacing

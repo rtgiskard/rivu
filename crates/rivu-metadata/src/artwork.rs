@@ -9,10 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     io::{self, Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
@@ -34,12 +31,9 @@ struct ArtworkFile {
     uri: String,
     path: Arc<Path>,
     max_image_bytes: usize,
-    // The original inode is shared-locked before its name becomes visible and
-    // stays locked across cache residency and every clone of a published lease.
-    _lease: fs::File,
 }
 
-/// Holds a published file and protects its URI until it is released.
+/// Shared encoded artwork identity and its process-local lookup ownership.
 #[derive(Clone)]
 pub struct Artwork {
     file: Arc<ArtworkFile>,
@@ -83,8 +77,6 @@ pub struct ArtworkCacheReport {
     pub bytes: u64,
     pub expired_files: u64,
     pub expired_bytes: u64,
-    pub protected_files: u64,
-    pub protected_bytes: u64,
     pub removed_files: u64,
     pub removed_bytes: u64,
     pub failed_files: u64,
@@ -443,41 +435,6 @@ impl ArtworkManager {
         }
         report.expired_files += 1;
         report.expired_bytes += metadata.len();
-        // Every manager/process uses the original inode as the lease authority.
-        // Thumbnails hold no shared lock and remain independently disposable.
-        let file = match open_cached_image(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-            Err(error) => {
-                report.failure(path, error);
-                return;
-            }
-        };
-        match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                report.protected_files += 1;
-                report.protected_bytes += metadata.len();
-                return;
-            }
-            Err(error) => {
-                report.failure(path, error);
-                return;
-            }
-        }
-        #[cfg(test)]
-        tests::file_event(tests::FileEvent::CleanupLocked, path);
-        // Another cleaner can have removed the opened inode before we locked
-        // it. Never unlink a replacement now published at the same name.
-        match same_image(path, &file, &metadata) {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-            Err(error) => {
-                report.failure(path, error);
-                return;
-            }
-        }
         if clean {
             match fs::remove_file(path) {
                 Ok(()) => {
@@ -594,11 +551,7 @@ fn directory_image_priority(path: &Path) -> Option<u8> {
     }
 }
 
-fn artwork_file(
-    path: PathBuf,
-    file: fs::File,
-    max_image_bytes: usize,
-) -> io::Result<Arc<ArtworkFile>> {
+fn artwork_file(path: PathBuf, max_image_bytes: usize) -> io::Result<Arc<ArtworkFile>> {
     let uri = url::Url::from_file_path(&path)
         .map(String::from)
         .map_err(|_| io::Error::other("Artwork path cannot be represented as a file URI"))?;
@@ -606,7 +559,6 @@ fn artwork_file(
         uri,
         path: Arc::from(path),
         max_image_bytes,
-        _lease: file,
     }))
 }
 
@@ -634,20 +586,6 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn flock(file: &fs::File, operation: libc::c_int) -> io::Result<()> {
-    loop {
-        // SAFETY: the borrowed descriptor remains open for the syscall. flock
-        // retains no pointer; closing the last descriptor releases the lock.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
 }
 
 fn open_cached_image(path: &Path) -> io::Result<fs::File> {
@@ -694,20 +632,12 @@ fn write_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<A
             ) => {}
         Err(error) => return Err(error),
     }
-    // Lock before atomic publication: there is no visible-but-unregistered
-    // interval in which a foreign cleaner can unlink the new original. The
-    // cache is disposable (no fsync), and a race winner still needs comparison.
+    // Publish only complete files. The cache is disposable (no fsync), and a
+    // concurrent publication winner still needs content comparison.
     let mut temporary = tempfile::NamedTempFile::new_in(path.parent().expect("image parent"))?;
-    flock(temporary.as_file(), libc::LOCK_SH)?;
     temporary.write_all(data)?;
     match temporary.persist_noclobber(&path) {
-        Ok(file) => {
-            #[cfg(test)]
-            tests::file_event(tests::FileEvent::Published, &path);
-            artwork_file(path, file, max_image_bytes)
-        }
-        // One final acquisition is enough: continual foreign churn may fail a
-        // best-effort load, but never yields a lease for an unlinked inode.
+        Ok(_) => artwork_file(path, max_image_bytes),
         Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
             reuse_image(&path, data, max_image_bytes)
         }
@@ -722,11 +652,6 @@ fn reuse_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<A
         return Err(mismatch());
     }
     let file = open_cached_image(path)?;
-    #[cfg(test)]
-    tests::file_event(tests::FileEvent::ReuseOpened, path);
-    // Blocking acquisition belongs only to background loads. Cleanup never
-    // waits for this shared lock, and getters only clone its in-memory owner.
-    flock(&file, libc::LOCK_SH)?;
     if !same_image(path, &file, &metadata)? {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -751,7 +676,7 @@ fn reuse_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<A
     if offset != data.len() {
         return Err(mismatch());
     }
-    artwork_file(path.to_owned(), file, max_image_bytes)
+    artwork_file(path.to_owned(), max_image_bytes)
 }
 
 #[cfg(any(test, feature = "test-support"))]

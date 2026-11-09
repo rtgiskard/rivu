@@ -576,7 +576,7 @@ reclaim installed pixels.
 |===
 
 [[artwork-uri-leases]]
-=== Process-local lookup and shared URI leases
+=== Process-local lookup and URI ownership
 
 Core's manager serves MPRIS; the desktop manager serves its windows. A reopened
 desktop process starts a fresh lookup cache, independently of visualization
@@ -660,9 +660,7 @@ Tier names have no processing-version suffix, so future processing changes requi
 explicit invalidation. Thumbnail reads have a separate 8 MiB cap and still require
 source admission under the encoded policy. Thumbnails remain disposable while a
 source lookup is resident: displayed pixels do not depend on those files.
-The MPRIS default export is protected once exported, including against cleanup
-from a different process; it becomes eligible after its owning manager and leases
-are released.
+The exported MPRIS default PNG is disposable like other encoded originals.
 
 Only explicit link:01_config.adoc#artwork-cache-maintenance[Settings maintenance]
 enumerates and cleans files. It recognizes originals and thumbnails in one level
@@ -670,19 +668,13 @@ of two-character lowercase-hex buckets, excluding cache-root files, unknown name
 symlinks, and nested directories. Statistics and cleanup use modification age,
 not access age; reuse never refreshes timestamps.
 
-Resident lookup results protect their originals, including idle results and active
-old versions, by retaining a shared file lock on each published original inode.
-URI leases retain that protection independently of manager lifetime. Cleanup takes
-a nonblocking exclusive lock and verifies the path still names the locked inode
-before unlinking; another process's active URI is protected without sharing lookup
-state. Publication acquires protection before exposing the original. File descriptors
-and locks retire with their owners or process exit; cache-only reads neither probe
-the filesystem nor acquire new locks.
-
-Release makes lookup results evictable; eviction does not delete files. Cleanup
-skips busy originals rather than waiting, does not exclude unrelated probes, never
-touches audio sources, and reports inspection/deletion failures. Age-based cleanup
-is not a disk-capacity guarantee.
+Cleanup may delete in-use files without invalidating process-local lookup or
+display caches, so retained paths can become stale. Artwork handles share identity,
+admission policy and logical lookup ownership in memory, not file descriptors or
+filesystem locks. Cache-only reads perform no filesystem work; eviction never
+deletes files. Cleanup never touches audio sources, reports inspection/deletion
+failures, and provides no disk-capacity guarantee. Recovery guidance is in
+link:01_config.adoc#artwork-cache-maintenance[Settings maintenance].
 
 === Cached panel drawing
 

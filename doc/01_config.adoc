@@ -535,12 +535,14 @@ Settings nor starting Rivu scans this directory. These actions run immediately
 in the background, do not require Apply, and are not undone by Discard.
 
 The report shows file counts and encoded bytes for total usage, expired
-candidates, protected files, successful removals, and failures. Cleanup totals
-describe usage before deletion. Age is based on file modification time, not
-recent playback; reusing a file does not update its age. Resident lookup results
-protect their files, including results still used by GUI or MPRIS. Protected
-files are skipped even when expired; the bundled icon and audio files are never
-removed. A removed cover is regenerated on demand.
+candidates, successful removals, and failures. Cleanup totals describe usage
+before deletion. Age is based on file modification time, not recent playback;
+reusing a file does not update its age. Cleanup can remove expired originals and
+thumbnails even while GUI or MPRIS consumers retain them. It never removes audio
+sources or the bundled GUI icon.
+
+If cleanup affects cover display, restart Rivu including its background Core
+service; reopening only the GUI may not restore MPRIS covers.
 
 Usage and cleanup include generated thumbnails, which can be regenerated without
 removing the original cover. Maintenance handles only managed cache files; it
