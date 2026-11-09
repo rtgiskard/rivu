@@ -111,7 +111,18 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             return Ok(());
         }
         Action::Status => {
-            let response = rivu_client::get_state(&data_dir, StateSections::ALL)?;
+            let sections = if args.json {
+                StateSections::ALL
+            } else {
+                StateSections {
+                    playback: true,
+                    queue: true,
+                    library: true,
+                    system: true,
+                    ..Default::default()
+                }
+            };
+            let response = rivu_client::get_state(&data_dir, sections)?;
             return show_state(&i18n, &response, args.json);
         }
         Action::Task(action) => return tasks::run(&i18n, &data_dir, action, args.json),
