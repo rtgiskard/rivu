@@ -26,8 +26,6 @@ pub(super) struct RootStats {
 struct Read {
     worker: u64,
     query: Query,
-    owner_query: Query,
-    generation: u64,
     ticket: QueryTicket,
     offset: usize,
 }
@@ -41,13 +39,19 @@ fn revisions(library: u64) -> QueryRevisions {
 
 impl RootStats {
     fn sync(&mut self, roots: &[PathBuf], revision: u64) -> bool {
+        if self.owner.stamp().is_some() && self.roots == roots && self.revision == revision {
+            return false;
+        }
         let query = Query::LibraryRootStats {
             roots: roots.to_vec(),
         };
         if !self.owner.sync(&query, revisions(revision)) {
             return false;
         }
-        self.roots = roots.to_vec();
+        let Query::LibraryRootStats { roots } = query else {
+            unreachable!()
+        };
+        self.roots = roots;
         self.revision = revision;
         self.restart();
         true
@@ -84,28 +88,20 @@ impl RootStats {
                 roots: self.roots[self.next..(self.next + MAX_QUERY_ROWS).min(self.roots.len())]
                     .to_vec(),
             },
-            owner_query: Query::LibraryRootStats {
-                roots: self.roots.clone(),
-            },
-            generation: self.owner.generation(),
             ticket: self.owner.ticket(),
             offset: self.next,
         })
     }
 
-    fn current(&self, read: &Read) -> bool {
-        self.owner
-            .accepts(&read.owner_query, read.generation, revisions(self.revision))
-    }
-
     fn fail(&mut self, read: &Read, error: String) {
-        if self.current(read) {
+        if read.ticket.is_current() {
             self.error = Some(error);
         }
     }
 
     fn complete(&mut self, read: Read, response: QueryResponse) {
-        if !self.in_flight.finish(read.worker) || !self.current(&read) || self.error.is_some() {
+        if !self.in_flight.finish(read.worker) || !read.ticket.is_current() || self.error.is_some()
+        {
             return;
         }
         if matches!(
