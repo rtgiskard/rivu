@@ -635,6 +635,35 @@ fn release_unreachable_pcm(
     release_unreachable_source(graph, target, boundaries, stop_at, input)
 }
 
+fn model_output_retention(
+    graph: &ProcessingGraph,
+    target: GraphPort,
+    boundaries: &BTreeMap<GraphPort, GraphPcm>,
+    node: u64,
+    operation: ProcessingOperation,
+) -> Result<ModelOutputRetention> {
+    let mut needed = std::collections::BTreeSet::new();
+    reachable_boundaries(
+        graph,
+        target,
+        boundaries,
+        &mut needed,
+        &mut std::collections::BTreeSet::new(),
+        Some(node),
+    )?;
+    let first = needed.contains(&GraphPort { node, port: 0 });
+    if operation == ProcessingOperation::Speech {
+        ensure!(first, "Speech output is not required by graph target");
+        return Ok(ModelOutputRetention::Speech);
+    }
+    match (first, needed.contains(&GraphPort { node, port: 1 })) {
+        (true, true) => Ok(ModelOutputRetention::BothStems),
+        (true, false) => Ok(ModelOutputRetention::Vocals),
+        (false, true) => Ok(ModelOutputRetention::Accompaniment),
+        (false, false) => bail!("Separation output is not required by graph target"),
+    }
+}
+
 pub(super) fn prepare_models(
     execution: &ExecutionGraph<'_>,
     status: &mut ProcessingTaskStatus,
@@ -790,10 +819,12 @@ pub(super) fn execute(
                     // traversals stop at its outputs before inference allocates
                     // them; a bypass alias still retains its own PCM storage.
                     release_unreachable_pcm(graph, target, &mut boundaries, Some(id), &mut input)?;
+                    let retain = model_output_retention(graph, target, &boundaries, id, operation)?;
                     let outcome = neural::run(
                         ModelRequest {
                             task_id: status.id,
                             operation,
+                            retain,
                             input: &upstream.pcm,
                             config,
                             budget: Arc::clone(&budget),
@@ -810,18 +841,21 @@ pub(super) fn execute(
                     entry.model_id = outcome.provenance.id;
                     entry.model_sha256 = outcome.provenance.sha256;
                     let result = outcome.result?;
-                    let outputs = if operation == ProcessingOperation::Speech {
-                        vec![result.denoised.context("Missing speech output")?]
-                    } else {
-                        vec![
-                            result.vocals.context("Missing vocal output")?,
-                            result
-                                .accompaniment
-                                .context("Missing accompaniment output")?,
-                        ]
-                    };
-                    for (port, pcm) in outputs.into_iter().enumerate() {
+                    let retained = retain.streams();
+                    for (index, pcm) in [result.denoised, result.vocals, result.accompaniment]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if !retained[index] {
+                            continue;
+                        }
+                        let pcm = pcm.context("Missing requested model output")?;
                         validate_output(&pcm, rate, &layout, upstream.pcm.frames(), cancel)?;
+                        let port = if operation == ProcessingOperation::Speech {
+                            0
+                        } else {
+                            index - 1
+                        };
                         boundaries.insert(
                             GraphPort {
                                 node: id,

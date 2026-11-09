@@ -127,10 +127,29 @@ pub(crate) struct AudioOutputs {
     pub accompaniment: Option<audio::PcmAudio>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModelOutputRetention {
+    Speech,
+    Vocals,
+    Accompaniment,
+    BothStems,
+}
+impl ModelOutputRetention {
+    fn streams(self) -> [bool; 3] {
+        match self {
+            Self::Speech => [true, false, false],
+            Self::Vocals => [false, true, false],
+            Self::Accompaniment => [false, false, true],
+            Self::BothStems => [false, true, true],
+        }
+    }
+}
+
 /// Model inputs are independent from the enclosing processing operation/graph.
 pub(super) struct ModelRequest<'a> {
     pub task_id: u64,
     pub operation: ProcessingOperation,
+    pub retain: ModelOutputRetention,
     pub input: &'a audio::PcmAudio,
     pub config: &'a rivu_format::config::NeuralConfig,
     pub budget: Arc<audio::PcmBudget>,

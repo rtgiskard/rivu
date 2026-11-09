@@ -505,6 +505,206 @@ fn completed_graph(
 }
 
 #[test]
+fn graph_models_retain_only_remaining_target_stems_with_bounded_pcm() {
+    let (directory, old, track, _) = fixture();
+    drop(old);
+    let data: Vec<f32> = (0..4096 * 2).map(|i| PCM[i % PCM.len()]).collect();
+    let mut source = hound::WavWriter::create(
+        &track.path,
+        hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for &sample in &data {
+        source.write_sample(sample).unwrap();
+    }
+    source.finalize().unwrap();
+    let probe_budget = audio::PcmBudget::new(MEMORY_LIMIT);
+    let mut probe = audio::PcmBuilder::new(
+        48_000,
+        Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]),
+        probe_budget,
+    )
+    .unwrap();
+    probe.push(&data).unwrap();
+    let source_bytes = probe.finish().unwrap().retained_bytes();
+    let manifest = directory.path().join("retention.json");
+    fs::write(
+        &manifest,
+        br#"{"id":"retention-fixture","sha256":"retention-hash"}"#,
+    )
+    .unwrap();
+    let worker = directory.path().join("retention.py");
+    fs::write(
+        &worker,
+        r#"import json, signal, struct, sys
+signal.alarm(10)
+def read():
+    kind, size = struct.unpack('<BI', sys.stdin.buffer.read(5))
+    payload = sys.stdin.buffer.read(size)
+    assert len(payload) == size
+    return kind, payload
+def send(kind, payload):
+    sys.stdout.buffer.write(struct.pack('<BI', kind, len(payload)) + payload)
+kind, payload = read()
+assert kind == 0
+request = json.loads(payload)
+speech = request['operation'] == 'speech'
+while True:
+    kind, payload = read()
+    if kind == 2:
+        break
+    assert kind == 1
+    if speech:
+        send(17, payload)
+    else:
+        values = struct.unpack('<%df' % (len(payload) // 4), payload)
+        for stream, gain in [(19, -0.5), (18, 0.25)]:
+            send(stream, struct.pack('<%df' % len(values), *(gain * x for x in values)))
+    sys.stdout.buffer.flush()
+assert sys.stdin.buffer.read() == b''
+send(0, json.dumps(dict(version=request['version'], task_id=request['task_id'], type='complete',
+    sample_rate=request['sample_rate'], channels=request['channels'], frames=request['frames'],
+    outputs=dict(speech=True) if speech else dict(vocals=True, accompaniment=True),
+    model=dict(id='retention-fixture', sha256='retention-hash'))).encode())
+sys.stdout.buffer.flush()
+"#,
+    )
+    .unwrap();
+    let neural = rivu_format::config::NeuralConfig {
+        speech_interpreter: "python3".into(),
+        separation_interpreter: "python3".into(),
+        worker,
+        speech_manifest: Some(manifest.clone()),
+        separation_manifest: Some(manifest),
+        ..Default::default()
+    };
+    for case in [
+        "standalone",
+        "vocals",
+        "accompaniment",
+        "speech-chain",
+        "fanout",
+        "speech-fanout",
+    ] {
+        let fanout = case.ends_with("fanout");
+        let speech = case.starts_with("speech-");
+        let mut config = graph_config(vec![GraphNodeKind::Separate {
+            config: neural.clone(),
+        }]);
+        if case == "standalone" {
+            Arc::get_mut(&mut config).unwrap().neural = neural.clone();
+            let mut service = Service::with_memory_limit(source_bytes * 3);
+            let id = service
+                .start(track.clone(), config, ProcessingOperation::Separate, None)
+                .unwrap();
+            let result = loop {
+                match next_event(&mut service) {
+                    Event::Progress { .. } | Event::Model { .. } => {}
+                    Event::Finished { result, .. } => {
+                        service.finish_task(id).unwrap();
+                        break result.unwrap();
+                    }
+                    _ => panic!("unexpected standalone separation event"),
+                }
+            };
+            for (pcm, gain) in [
+                (result.outputs.vocals.as_ref().unwrap(), 0.25),
+                (result.outputs.accompaniment.as_ref().unwrap(), -0.5),
+            ] {
+                assert_eq!(
+                    samples(pcm),
+                    data.iter().map(|sample| sample * gain).collect::<Vec<_>>()
+                );
+            }
+            assert!(result.outputs.denoised.is_none());
+            assert_eq!(service.memory_bytes(), source_bytes * 2);
+            assert_eq!(result.status.model_id.as_deref(), Some("retention-fixture"));
+            assert_eq!(
+                result.status.model_sha256.as_deref(),
+                Some("retention-hash")
+            );
+            continue;
+        }
+        let graph = &mut Arc::get_mut(&mut config).unwrap().processing_graph;
+        graph.edges.truncate(1);
+        let mut first = GraphPort {
+            node: 3,
+            port: u16::from(case == "accompaniment"),
+        };
+        if speech {
+            graph.nodes.push(GraphNode {
+                id: 4,
+                kind: GraphNodeKind::Speech {
+                    config: neural.clone(),
+                },
+                position: [0.0; 2],
+            });
+            graph.edges.push(GraphEdge {
+                from: first,
+                to: GraphPort { node: 4, port: 0 },
+            });
+            first = GraphPort { node: 4, port: 0 };
+        }
+        if fanout {
+            graph.nodes.push(GraphNode {
+                id: 5,
+                kind: GraphNodeKind::Mix {
+                    gains_db: vec![0.0; 2],
+                    muted: vec![false; 2],
+                    solo: vec![false; 2],
+                },
+                position: [0.0; 2],
+            });
+            graph.edges.push(GraphEdge {
+                from: first,
+                to: GraphPort { node: 5, port: 0 },
+            });
+            graph.edges.push(GraphEdge {
+                from: GraphPort { node: 3, port: 1 },
+                to: GraphPort { node: 5, port: 1 },
+            });
+            first = GraphPort { node: 5, port: 0 };
+        }
+        graph.edges.push(GraphEdge {
+            from: first,
+            to: GraphPort { node: 2, port: 0 },
+        });
+        graph.next_id = 6;
+        // Single-stem runs cannot fit source + both stems, even transiently.
+        let mut service = Service::with_memory_limit(source_bytes * if fanout { 3 } else { 2 });
+        let result = completed_graph(&mut service, &track, config).unwrap();
+        let pcm = &result.graph_outputs[&GraphPort { node: 2, port: 0 }].pcm;
+        let gain = if fanout {
+            -0.25
+        } else if case == "accompaniment" {
+            -0.5
+        } else {
+            0.25
+        };
+        assert_eq!(
+            samples(pcm),
+            data.iter().map(|sample| sample * gain).collect::<Vec<_>>(),
+            "{case}"
+        );
+        assert_eq!(service.memory_bytes(), source_bytes, "{case}");
+        for node in result
+            .status
+            .graph_nodes
+            .iter()
+            .filter(|node| node.node == 3 || (speech && node.node == 4))
+        {
+            assert_eq!(node.model_id.as_deref(), Some("retention-fixture"));
+            assert_eq!(node.model_sha256.as_deref(), Some("retention-hash"));
+        }
+    }
+}
+
+#[test]
 fn graph_model_failure_keeps_each_nodes_provenance_and_original_operation() {
     let (directory, mut service, track, _) = fixture();
     let mut source = hound::WavWriter::create(

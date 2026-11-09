@@ -1,7 +1,7 @@
 use super::export::prepare_export;
 use super::{
-    AudioOutputs, CachedGraphOutput, Event, ModelRequest, ProcessingResult, SourceStamp, graph,
-    neural,
+    AudioOutputs, CachedGraphOutput, Event, ModelOutputRetention, ModelRequest, ProcessingResult,
+    SourceStamp, graph, neural,
 };
 use crate::config::Config;
 use anyhow::{Context, Result, ensure};
@@ -307,6 +307,11 @@ pub(super) fn run(
                 ModelRequest {
                     task_id: status.id,
                     operation: status.operation,
+                    retain: if status.operation == ProcessingOperation::Speech {
+                        ModelOutputRetention::Speech
+                    } else {
+                        ModelOutputRetention::BothStems
+                    },
                     input: &input,
                     config: &config.neural,
                     budget: Arc::clone(&budget),

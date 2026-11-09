@@ -4,8 +4,8 @@
 //! Payloads are at most 64 KiB; PCM is interleaved little-endian float32, not WAV.
 use super::render::{ProgressReporter, check_cancel};
 use super::{
-    AudioOutputs, Cancellation, ModelOutcome, ModelProvenance, ModelRequest, WORKER_EVENT_VERSION,
-    WORKER_REQUEST_VERSION,
+    AudioOutputs, Cancellation, ModelOutcome, ModelOutputRetention, ModelProvenance, ModelRequest,
+    WORKER_EVENT_VERSION, WORKER_REQUEST_VERSION,
 };
 use anyhow::{Context, Result, bail, ensure};
 use rivu_audio as audio;
@@ -324,6 +324,7 @@ fn run_model(
     let ModelRequest {
         task_id,
         operation,
+        retain,
         input,
         config,
         budget,
@@ -333,6 +334,13 @@ fn run_model(
     let cancel = cancellation.flag();
     check_cancel(cancel)?;
     let speech = operation == ProcessingOperation::Speech;
+    ensure!(
+        (speech && retain == ModelOutputRetention::Speech)
+            || (operation == ProcessingOperation::Separate
+                && retain != ModelOutputRetention::Speech),
+        "Model output retention does not match operation"
+    );
+    let retained = retain.streams();
     #[cfg(feature = "onnx")]
     let manifest = match backend {
         PreparedBackend::Native(prepared) => {
@@ -550,22 +558,33 @@ fn run_model(
                                 count <= input.frames().saturating_sub(frames[index]),
                                 "Neural output exceeds source length"
                             );
-                            decoded.clear();
-                            decoded.extend(
-                                payload
-                                    .as_chunks::<4>()
-                                    .0
-                                    .iter()
-                                    .map(|bytes| f32::from_le_bytes(*bytes)),
-                            );
-                            if builders[index].is_none() {
-                                builders[index] = Some(audio::PcmBuilder::new(
-                                    input.sample_rate(),
-                                    Arc::clone(input.layout()),
-                                    Arc::clone(&budget),
-                                )?);
+                            if retained[index] {
+                                decoded.clear();
+                                decoded.extend(
+                                    payload
+                                        .as_chunks::<4>()
+                                        .0
+                                        .iter()
+                                        .map(|bytes| f32::from_le_bytes(*bytes)),
+                                );
+                                if builders[index].is_none() {
+                                    builders[index] = Some(audio::PcmBuilder::new(
+                                        input.sample_rate(),
+                                        Arc::clone(input.layout()),
+                                        Arc::clone(&budget),
+                                    )?);
+                                }
+                                builders[index].as_mut().unwrap().push(&decoded)?;
+                            } else {
+                                ensure!(
+                                    payload
+                                        .as_chunks::<4>()
+                                        .0
+                                        .iter()
+                                        .all(|bytes| { f32::from_le_bytes(*bytes).is_finite() }),
+                                    "Nonfinite neural output"
+                                );
                             }
-                            builders[index].as_mut().unwrap().push(&decoded)?;
                             frames[index] += count;
                         }
                         Ok(())
@@ -1078,12 +1097,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn subprocess_retains_only_requested_stems_with_a_single_stem_budget() {
+        for retain in [
+            ModelOutputRetention::Vocals,
+            ModelOutputRetention::Accompaniment,
+            ModelOutputRetention::BothStems,
+        ] {
+            subprocess_fixture_retaining(
+                ProcessingOperation::Separate,
+                2,
+                4096,
+                "retained-success",
+                None,
+                retain,
+            );
+        }
+    }
+
+    #[test]
+    fn subprocess_validates_discarded_stem_and_completion() {
+        for failure in [
+            "nonfinite",
+            "infinity",
+            "unaligned",
+            "empty",
+            "wrong-stream",
+            "excess",
+            "truncated",
+            "missing-completion",
+            "completion-outputs",
+            "completion-frames",
+            "missing-provenance",
+            "after-completion",
+        ] {
+            subprocess_fixture_retaining(
+                ProcessingOperation::Separate,
+                2,
+                4096,
+                &format!("discard-{failure}"),
+                None,
+                ModelOutputRetention::Vocals,
+            );
+        }
+    }
+
     fn subprocess_fixture(
         operation: ProcessingOperation,
         channels: u16,
         frames: usize,
         outcome: &str,
         layout: Option<Arc<[audio::Channel]>>,
+    ) {
+        subprocess_fixture_retaining(
+            operation,
+            channels,
+            frames,
+            outcome,
+            layout,
+            if operation == ProcessingOperation::Speech {
+                ModelOutputRetention::Speech
+            } else {
+                ModelOutputRetention::BothStems
+            },
+        );
+    }
+
+    fn subprocess_fixture_retaining(
+        operation: ProcessingOperation,
+        channels: u16,
+        frames: usize,
+        outcome: &str,
+        layout: Option<Arc<[audio::Channel]>>,
+        retain: ModelOutputRetention,
     ) {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("pcm_worker.py");
@@ -1137,6 +1223,9 @@ if speech and request['parameters']['wet_mix'] == 0:
         model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7 if outcome == 'dry-nonzero' else 0)
+send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
+    completed=0, total=request['frames'], model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+sys.stdout.buffer.flush()
 pcm = bytearray()
 while True:
     kind, payload = read_frame()
@@ -1148,6 +1237,21 @@ while True:
     values = struct.unpack('<%df' % (len(payload) // 4), payload)
     for kind, name, gain in streams:
         data = struct.pack('<%df' % len(values), *(gain * x for x in values))
+        if name == 'accompaniment':
+            if outcome == 'discard-nonfinite':
+                data = struct.pack('<f', float('nan')) + data[4:]
+            elif outcome == 'discard-infinity':
+                data = struct.pack('<f', float('inf')) + data[4:]
+            elif outcome == 'discard-unaligned':
+                data = data[:-1]
+            elif outcome == 'discard-empty':
+                send(kind, b'')
+            elif outcome == 'discard-wrong-stream':
+                kind = 17
+            elif outcome == 'discard-excess':
+                data += bytes(channels * 4)
+            elif outcome == 'discard-truncated':
+                data = data[:-channels * 4]
         for offset in range(0, len(data), 4096):
             send(kind, data[offset:offset + 4096])
     send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
@@ -1162,10 +1266,19 @@ if outcome == 'failure-after-pcm':
         code='inference', message='fixture failure after PCM')).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7)
-send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
-    sample_rate=request['sample_rate'], channels=channels, frames=request['frames'],
-    outputs={{name: True for _, name, _ in streams}},
-    model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+if outcome != 'discard-missing-completion':
+    outputs = {{name: True for _, name, _ in streams}}
+    if outcome == 'discard-completion-outputs':
+        outputs.pop('accompaniment')
+    model = dict(id='stdlib-fixture', sha256='fixture-hash')
+    if outcome == 'discard-missing-provenance':
+        model.pop('sha256')
+    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
+        sample_rate=request['sample_rate'], channels=channels,
+        frames=request['frames'] + (1 if outcome == 'discard-completion-frames' else 0),
+        outputs=outputs, model=model)).encode())
+    if outcome == 'discard-after-completion':
+        send(19, bytes(channels * 4))
 sys.stdout.buffer.flush()
 if outcome == 'complete-then-nonzero':
     raise SystemExit(7)
@@ -1203,7 +1316,7 @@ if outcome == 'complete-then-nonzero':
             },
             ..Default::default()
         };
-        let budget = audio::PcmBudget::new(64 * 1024 * 1024);
+        let mut budget = audio::PcmBudget::new(64 * 1024 * 1024);
         let expected: Vec<f32> = (0..frames * usize::from(channels))
             .map(|i| {
                 if outcome.starts_with("dry-") && i == 0 {
@@ -1220,9 +1333,22 @@ if outcome == 'complete-then-nonzero':
                 Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight])
             }
         });
-        let mut builder = audio::PcmBuilder::new(48_000, layout, Arc::clone(&budget)).unwrap();
-        builder.push(&expected).unwrap();
-        let input = builder.finish().unwrap();
+        let build_input = |budget: &Arc<audio::PcmBudget>| {
+            let mut builder =
+                audio::PcmBuilder::new(48_000, Arc::clone(&layout), Arc::clone(budget)).unwrap();
+            builder.push(&expected).unwrap();
+            builder.finish().unwrap()
+        };
+        let mut input = build_input(&budget);
+        if outcome == "retained-success" {
+            // Admit only the source and the requested stems, including directory
+            // charges. Building the omitted stem and dropping it later cannot fit.
+            let count = retain.streams().into_iter().filter(|&keep| keep).count() as u64;
+            let limit = input.retained_bytes() * (1 + count);
+            drop(input);
+            budget = audio::PcmBudget::new(limit);
+            input = build_input(&budget);
+        }
         let source_bytes = budget.used_bytes();
         let (tx, rx) = async_channel::bounded(8);
         let mut progress = ProgressReporter::new(&tx, 7);
@@ -1240,6 +1366,7 @@ if outcome == 'complete-then-nonzero':
                 ModelRequest {
                     task_id: 7,
                     operation,
+                    retain,
                     input: &input,
                     config: &config,
                     budget: Arc::clone(&budget),
@@ -1298,13 +1425,29 @@ if outcome == 'complete-then-nonzero':
                 ..
             }
         ));
-        if !matches!(outcome, "success" | "dry-success") {
+        if !matches!(outcome, "success" | "dry-success" | "retained-success") {
             let error = match result {
                 Ok(_) => panic!("failed worker must not publish PCM"),
                 Err(error) => format!("{error:#}"),
             };
             if outcome == "failure-after-pcm" {
                 assert!(error.contains("fixture failure after PCM"), "{error}");
+            }
+            if let Some(failure) = outcome.strip_prefix("discard-") {
+                let expected = match failure {
+                    "nonfinite" | "infinity" => "Nonfinite neural output",
+                    "unaligned" | "empty" => "Unaligned neural PCM frame",
+                    "wrong-stream" => "Unexpected neural PCM stream",
+                    "excess" => "Neural output exceeds source length",
+                    "truncated" => "Missing or truncated neural output: accompaniment",
+                    "missing-completion" => "Neural worker exited without completion",
+                    "completion-outputs" => "Neural completion outputs mismatch",
+                    "completion-frames" => "Neural completion alignment mismatch",
+                    "missing-provenance" => "Missing model hash",
+                    "after-completion" => "Neural data after completion",
+                    _ => unreachable!(),
+                };
+                assert!(error.contains(expected), "{error}");
             }
             assert_eq!(budget.used_bytes(), source_bytes);
             assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
@@ -1322,11 +1465,15 @@ if outcome == 'complete-then-nonzero':
         }
         assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
         assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
-        let speech = operation == ProcessingOperation::Speech;
+        if outcome == "retained-success" {
+            let count = retain.streams().into_iter().filter(|&keep| keep).count() as u64;
+            assert_eq!(budget.used_bytes(), source_bytes * (1 + count));
+        }
+        let retained = retain.streams();
         for (pcm, present, gain) in [
-            (outputs.denoised, speech, 1.0),
-            (outputs.vocals, !speech, 1.0),
-            (outputs.accompaniment, !speech, -1.0),
+            (outputs.denoised, retained[0], 1.0),
+            (outputs.vocals, retained[1], 1.0),
+            (outputs.accompaniment, retained[2], -1.0),
         ] {
             assert_eq!(pcm.is_some(), present);
             if let Some(pcm) = pcm {

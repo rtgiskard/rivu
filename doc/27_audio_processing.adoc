@@ -598,6 +598,10 @@ spill. Decoder/DSP state, model weights, ONNX Runtime and Python workspace are
 additional costs; the budget is not a process-RSS limit.
 Outputs preserve the ordered speaker layout, sample rate and immutable frame
 count through processing, mixing and audition; channel count alone is not a layout.
+Graph model nodes retain only output ports needed by the selected target and
+its remaining dependencies. Unneeded separation streams are still fully received
+and validated, but do not accumulate retained PCM. Standalone separation retains
+both stems for audition and mixing; graph fan-out retains both when required.
 
 A successfully admitted non-export run releases unselected PCM/prepared runners
 before worker allocation; selected audition audio remains pinned. Up to four
