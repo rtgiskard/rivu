@@ -230,6 +230,7 @@ impl Library {
                 let focused_index = this.focused
                     .then(|| this.library.tree().selected_index())
                     .flatten();
+                let render_scope = std::rc::Rc::new(this.library_row_scope());
                 range
                     .filter_map(|index| {
                         let item = this.library.tree().item(index)?;
@@ -284,6 +285,8 @@ impl Library {
                                 return Some(placeholder.into_any_element());
                             }
                         };
+                        let row_scope = render_scope.clone();
+                        let menu_scope = row_scope.clone();
                         let entry = &visible.row;
                         let (node, title, detail, path) = match entry {
                             DirectoryRow::OtherTracks => (
@@ -503,13 +506,14 @@ impl Library {
                                 view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
                             })
                             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                if !this.library_row_scope_valid(&menu_scope) { cx.stop_propagation(); return; }
                                 cx.emit(LibraryEvent::Focus);
                                 if this.library_range_pending() { cx.stop_propagation(); return; }
                                 let selected = match &menu_node {
                                     LibraryNode::Track(id) => this.library.selected().contains(id),
                                     LibraryNode::Directory(_) | LibraryNode::OtherTracks => this.library.selected_nodes().contains(&menu_node),
                                 };
-                                if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
+                                if !selected { this.select_library_row(menu_node.clone(), index, false, false, (*menu_scope).clone(), cx); }
                                 let nodes = this.library.drag_nodes(&menu_node);
                                 let track_ids = this.library_drag_track_ids(&nodes);
                                 let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
@@ -591,6 +595,7 @@ impl Library {
                         })
                         .on_click(cx.listener(
                             move |this, event: &gpui::ClickEvent, _, cx| {
+                                if !this.library_row_scope_valid(&row_scope) { return; }
                                 this.library.cancel_navigation();
                                 cx.emit(LibraryEvent::Focus);
                                 match id.clone() {
@@ -601,6 +606,7 @@ impl Library {
                                             index,
                                             modifiers.shift,
                                             modifiers.control,
+                                            (*row_scope).clone(),
                                             cx,
                                         );
                                         if event.click_count() == 2 {
@@ -626,6 +632,7 @@ impl Library {
                                             index,
                                             modifiers.shift,
                                             multi,
+                                            this.library_row_scope(),
                                             cx,
                                         );
                                     }

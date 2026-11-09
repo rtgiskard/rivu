@@ -131,6 +131,12 @@ logical locate demand and any queued locate intent. A cancelled locate retains
 its physical slot until completion, but that completion cannot reveal ancestors
 or restart a discarded request.
 
+Library row input carries the projection that supplied its identity and index;
+admission and selection commit both validate it. A directory click validates
+before changing its own expansion, then binds its selection to the resulting
+projection. Capturing a fresh query stamp when an old callback executes cannot
+make its old coordinates current.
+
 GUI admission allows two seconds, followed by twelve seconds for response
 presentation. Timeout shows an error, cancels the read, and rejects late payloads;
 explicit retry still waits for physical retirement. Retained IPC exchanges have

@@ -542,6 +542,7 @@ impl Library {
                 shift: false,
                 multi: false,
                 scroll: true,
+                scope: self.library_row_scope(),
             },
             cx,
         );

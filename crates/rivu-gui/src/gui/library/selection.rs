@@ -40,12 +40,14 @@ impl SelectionError {
     }
 }
 
+#[derive(Clone)]
 pub(in crate::gui) struct LibraryRowRequest {
     pub(in crate::gui) node: LibraryNode,
     pub(in crate::gui) index: usize,
     pub(in crate::gui) shift: bool,
     pub(in crate::gui) multi: bool,
     pub(in crate::gui) scroll: bool,
+    pub(in crate::gui) scope: Scope,
 }
 
 pub(in crate::gui) struct LibraryCommit {
@@ -81,7 +83,7 @@ enum Projection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Scope {
+pub(in crate::gui) struct Scope {
     stamp: QueryStamp,
     projection: Projection,
 }
@@ -386,6 +388,10 @@ enum RangeStep {
 }
 
 impl LibraryBrowser {
+    fn admits_row(&self, scope: &Scope, index: usize, revisions: QueryRevisions) -> bool {
+        scope.matches(self, revisions) && index < scope.total()
+    }
+
     fn publish_selection(&mut self, commit: LibraryCommit) -> LibraryNode {
         self.range_selection.target = None;
         self.range_selection.intent = None;
@@ -633,12 +639,21 @@ impl Library {
         self.library.range_pending()
     }
 
+    pub(super) fn library_row_scope(&self) -> Scope {
+        Scope::capture(&self.library, self.state.query_revisions(None))
+    }
+
+    pub(super) fn library_row_scope_valid(&self, scope: &Scope) -> bool {
+        scope.matches(&self.library, self.state.query_revisions(None))
+    }
+
     pub(in crate::gui) fn select_library_row(
         &mut self,
         node: LibraryNode,
         index: usize,
         shift: bool,
         multi: bool,
+        scope: Scope,
         cx: &mut Context<Self>,
     ) {
         cx.emit(LibraryEvent::Select(LibraryRowRequest {
@@ -647,6 +662,7 @@ impl Library {
             shift,
             multi,
             scroll: false,
+            scope,
         }));
     }
 
@@ -663,12 +679,17 @@ impl Library {
             shift,
             multi,
             scroll,
+            scope,
         } = request;
         let revisions = self.state.query_revisions(None);
+        if !self.library.admits_row(&scope, index, revisions) {
+            self.fail_selection(id, cx);
+            return;
+        }
         if !shift {
             self.library.range_selection.target = Some(index);
             let commit = LibraryCommit {
-                scope: Scope::capture(&self.library, revisions),
+                scope,
                 endpoint: node,
                 index,
                 selected: None,
@@ -699,10 +720,11 @@ impl Library {
     }
 
     pub(in crate::gui) fn library_commit_valid(&self, commit: &LibraryCommit) -> bool {
-        commit
-            .scope
-            .matches(&self.library, self.state.query_revisions(None))
-            && commit.index < commit.scope.total()
+        self.library.admits_row(
+            &commit.scope,
+            commit.index,
+            self.state.query_revisions(None),
+        )
     }
 
     pub(in crate::gui) fn commit_library_selection(
@@ -986,6 +1008,91 @@ mod tests {
                     .collect(),
             },
         );
+    }
+    #[test]
+    fn retained_row_click_rejects_rebuilt_coordinates_with_same_row_count() {
+        let (mut library, branch, roots) = grouped(4, 4);
+        let revisions = revisions(7, 3);
+        let rendered = Scope::capture(&library, revisions);
+        assert!(library.admits_row(&rendered, 2, revisions));
+        publish_row(&mut library, LibraryNode::Track(0), 1);
+        library.expand_directory(&branch, false);
+        library.expand_directory(&branch, true);
+        assert_eq!(library.tree.row_count(), rendered.total());
+        assert!(!library.admits_row(&rendered, 2, revisions));
+        assert_eq!(library.selected(), &HashSet::from([0]));
+        let fresh = Scope::capture(&library, revisions);
+        assert!(library.admits_row(&fresh, 2, revisions));
+        publish_row(&mut library, LibraryNode::Track(0), 1);
+        library
+            .start_range_selection(&LibraryNode::Track(2), 3, false, revisions, 4)
+            .unwrap();
+        loop {
+            match library.advance_range(revisions, &roots).unwrap() {
+                RangeStep::Query { token, slice } => {
+                    let Query::LibraryRootPage {
+                        path,
+                        offset,
+                        limit,
+                        ..
+                    } = library.range_query(token, &slice)
+                    else {
+                        panic!("grouped selection recursively pages a root");
+                    };
+                    assert_eq!(path, branch.path());
+                    assert!(offset < 3 && offset + limit <= 3);
+                    library
+                        .complete_range(
+                            token,
+                            &slice,
+                            QueryResponse {
+                                revisions,
+                                result: Ok(ViewResponse::LibraryPage(Page {
+                                    total: 4,
+                                    rows: (offset..offset + limit)
+                                        .map(|id| row(id as i64))
+                                        .collect(),
+                                })),
+                            },
+                            revisions,
+                        )
+                        .unwrap();
+                }
+                RangeStep::Selected(commit) => {
+                    assert!(library.admits_row(&commit.scope, commit.index, revisions));
+                    library.publish_selection(commit);
+                    break;
+                }
+                RangeStep::Idle => panic!("fresh shift range must converge"),
+            }
+        }
+        assert_eq!(library.selected(), &HashSet::from([0, 1, 2]));
+        assert_eq!(library.tree.selected_index(), Some(3));
+    }
+
+    #[test]
+    fn directory_click_rebases_own_expansion_but_rejects_later_changes() {
+        let (mut library, branch, _) = grouped(4, 4);
+        let revisions = revisions(7, 3);
+        let rendered = Scope::capture(&library, revisions);
+        assert!(library.admits_row(&rendered, 0, revisions));
+        library.expand_directory(&branch, false);
+        assert!(!library.admits_row(&rendered, 0, revisions));
+        let admitted = Scope::capture(&library, revisions);
+        let endpoint = LibraryNode::Directory(Arc::from(branch.path()));
+        assert!(library.admits_row(&admitted, 0, revisions));
+        library.publish_selection(LibraryCommit {
+            scope: admitted.clone(),
+            endpoint: endpoint.clone(),
+            index: 0,
+            selected: None,
+            multi: false,
+            scroll: false,
+        });
+        assert!(library.selected_nodes().contains(&endpoint));
+        assert_eq!(library.tree.selected_index(), Some(0));
+        library.expand_directory(&branch, true);
+        assert!(!library.admits_row(&admitted, 0, revisions));
     }
 
     #[test]

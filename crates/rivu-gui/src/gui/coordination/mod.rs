@@ -127,13 +127,7 @@ impl WindowView {
                 match event {
                     LibraryEvent::Select(request) => {
                         let intent = this.begin_manual_intent(cx);
-                        let request = library::selection::LibraryRowRequest {
-                            node: request.node.clone(),
-                            index: request.index,
-                            shift: request.shift,
-                            multi: request.multi,
-                            scroll: request.scroll,
-                        };
+                        let request = request.clone();
                         this.library.update(cx, |owner, cx| {
                             owner.prepare_library_row(intent, request, cx)
                         });
