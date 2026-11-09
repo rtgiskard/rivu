@@ -968,7 +968,8 @@ The Python benchmark and corpus evaluator report two distinct wall times.
 startup and captured pipes. `evaluation_wall_seconds` ends after output reads,
 artifact writes, scoring and record construction. In the repeated benchmark it
 starts before each run's request creation; fixed reference/input/backing reads,
-hashes and input scoring happen once outside the runs. Each worker result must
+hashes, reference metric preparation and input scoring happen once outside the runs.
+Each worker result must
 identify that same input. In the corpus evaluator it starts before each sample's
 reference/input/backing reads and request creation, including those reads and hashes.
 Both exclude record append, progress printing, aggregate summaries and final report
@@ -986,6 +987,11 @@ that same loaded noisy-clean pair.
 The processing benchmark and corpus evaluator retain the worker's input-duration
 contract; sharing identity capture does not impose the standalone quality tool's
 12,000,000-frame admission bound.
+Each processing benchmark retains prepared reference statistics across repeats;
+the corpus evaluator shares them between baseline and output scoring for one case.
+Preparation owns only summaries and weak-frame indices, borrowing unchanged PCM;
+it does not cache by path. Per-output boundary checks still use that run's core
+duration. Reduced scoring work is not model-inference speedup.
 Scoring accumulates float64 conversion and residual scratch in bounded blocks.
 Loaded full-track PCM, model workspace and outputs remain separate costs: bounded
 metric scratch does not make the evaluation parent process duration-independent

@@ -16,29 +16,46 @@ def db_ratio(numerator, denominator):
     return 10 * (math.log10(numerator) - math.log10(denominator))
 
 
+class PreparedProjection:
+    """Centered reference statistics owned by one scoring caller.
+
+    The caller keeps the referenced samples unchanged for this object's lifetime.
+    """
+
+    def __init__(self, reference):
+        import numpy as np
+        self.reference = reference
+        self.mean = float(np.mean(reference, dtype="float64"))
+        self.energy = 0.0
+        for start in range(0, len(reference), 65536):
+            ref = reference[start:start+65536].astype("float64") - self.mean
+            self.energy += float(np.dot(ref, ref))
+
+    def score(self, estimate):
+        import numpy as np
+        if not self.energy:
+            return None, None
+        reference = self.reference
+        est_mean = float(np.mean(estimate, dtype="float64"))
+        product = 0.0
+        for start in range(0, len(reference), 65536):
+            ref = reference[start:start+65536].astype("float64") - self.mean
+            est = estimate[start:start+65536].astype("float64") - est_mean
+            product += float(np.dot(ref, est))
+        gain = product/self.energy
+        target_energy = residual_energy = 0.0
+        for start in range(0, len(reference), 65536):
+            ref = reference[start:start+65536].astype("float64") - self.mean
+            est = estimate[start:start+65536].astype("float64") - est_mean
+            target = gain*ref
+            residual = est-target
+            target_energy += float(np.dot(target, target))
+            residual_energy += float(np.dot(residual, residual))
+        return db_ratio(target_energy, residual_energy), gain
+
+
 def projection_metrics(reference, estimate):
-    import numpy as np
-    block_size = 65536
-    ref_mean = float(np.mean(reference, dtype="float64"))
-    est_mean = float(np.mean(estimate, dtype="float64"))
-    energy = product = 0.0
-    for start in range(0, len(reference), block_size):
-        ref = reference[start:start+block_size].astype("float64") - ref_mean
-        est = estimate[start:start+block_size].astype("float64") - est_mean
-        energy += float(np.dot(ref, ref))
-        product += float(np.dot(ref, est))
-    if not energy:
-        return None, None
-    gain = product/energy
-    target_energy = residual_energy = 0.0
-    for start in range(0, len(reference), block_size):
-        ref = reference[start:start+block_size].astype("float64") - ref_mean
-        est = estimate[start:start+block_size].astype("float64") - est_mean
-        target = gain*ref
-        residual = est-target
-        target_energy += float(np.dot(target, target))
-        residual_energy += float(np.dot(residual, residual))
-    return db_ratio(target_energy, residual_energy), gain
+    return PreparedProjection(reference).score(estimate)
 
 def reconstruction_metrics(mixture, target, complement):
     """Accumulate exact mixture-minus-stems residuals with bounded scratch."""

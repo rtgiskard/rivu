@@ -20,13 +20,13 @@ import soundfile as sf
 if __package__:
     from . import benchmark, evaluate
     from ..audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
-    from ..audio_quality.metric_core import score_difference, score_summary
+    from ..audio_quality.metric_core import projection_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
 else:
     import benchmark
     import evaluate
     from audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
-    from audio_quality.metric_core import score_difference, score_summary
+    from audio_quality.metric_core import projection_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
 
 
@@ -34,7 +34,7 @@ class MetricSemanticsTests(unittest.TestCase):
     def scores(self, reference, estimate):
         ref = np.asarray(reference, dtype="float64")
         est = np.asarray(estimate, dtype="float64")
-        processing = benchmark.metrics(ref[:, None], est[:, None], 8000)
+        processing = benchmark.PreparedReference(ref[:, None], 8000).score(est[:, None])
         paired = quality.channel_metrics(ref, est)
         self.assertEqual(processing["absolute_snr_db"], paired["snr_db"])
         self.assertEqual(processing["si_sdr_db"][0], paired["si_sdr_db"])
@@ -74,7 +74,7 @@ class MetricSemanticsTests(unittest.TestCase):
     def test_stereo_side_rms_uses_normalized_mid_side_convention(self):
         reference = np.tile([[0.75, -0.25], [-0.75, 0.25]], (80, 1))
         estimate = reference*0.5
-        measured = benchmark.metrics(reference, estimate, 8000)
+        measured = benchmark.PreparedReference(reference, 8000).score(estimate)
         self.assertEqual(measured["reference_side_rms"], 0.5)
         self.assertEqual(measured["output_side_rms"], 0.25)
         self.assertEqual(measured["reference_side_rms"], quality.stereo_metrics(reference)["side_rms"])
@@ -85,7 +85,7 @@ class MetricSemanticsTests(unittest.TestCase):
         time = np.arange(count, dtype="float64")
         reference = np.column_stack((np.sin(time/17), np.cos(time/31)))
         estimate = reference*0.8 + np.column_stack((np.sin(time/7), np.cos(time/11)))*0.03
-        measured = benchmark.metrics(reference, estimate, 8000, core_seconds=1)
+        measured = benchmark.PreparedReference(reference, 8000).score(estimate, core_seconds=1)
         error = estimate-reference
         self.assertAlmostEqual(measured["absolute_snr_db"], 10*np.log10(np.sum(reference**2)/np.sum(error**2)), places=11)
         # Dense and blocked reductions differ in summation order; use relative
@@ -104,6 +104,40 @@ class MetricSemanticsTests(unittest.TestCase):
         self.assertEqual(rms, np.sqrt(np.mean(residual**2)))
         self.assertEqual(peak, np.max(np.abs(residual)))
 
+    def test_prepared_reference_preserves_weak_frames_and_per_output_boundaries(self):
+        rate = 1000
+        width = rate//50
+        levels = np.tile([0, 1e-8, 0.001, 0.04, 0.04, 0.05, 0.06, 0.5, 1], 15)
+        mono = np.repeat(levels, width) * np.tile([-1, 1], len(levels)*width//2)
+        reference = np.column_stack((mono, -mono*0.5))
+        # An incomplete, loud tail must not participate in weak-frame selection.
+        reference = np.concatenate((reference, np.full((7, 2), 100.0)))
+        prepared = benchmark.PreparedReference(reference, rate)
+        energies = np.mean(reference[:len(mono)].reshape(-1, width, 2)**2, axis=(1, 2))
+        active = energies > max(float(energies.max())*1e-3, 1e-14)
+        weak = active & (energies <= np.quantile(energies[active], 0.2))
+        target = reference[:len(mono)].reshape(-1, width, 2)[weak]
+        for core, estimate in ((1, reference*0.7 + 0.003), (2, reference*0.9 - 0.007)):
+            measured = prepared.score(estimate, core_seconds=core)
+            output = estimate[:len(mono)].reshape(-1, width, 2)[weak]
+            residual = output-target
+            self.assertAlmostEqual(measured["weak_active_frame_snr_db"],
+                                   10*np.log10(np.sum(target**2)/np.sum(residual**2)), places=11)
+            np.testing.assert_allclose(measured["weak_active_frame_reference_gain"],
+                                       np.sum((target+residual)*target)/np.sum(target**2),
+                                       rtol=1e-12, atol=1e-14)
+            error = estimate-reference
+            expected_jumps = [np.max(np.abs(error[i]-error[i-1]))
+                              for i in range(core*rate, len(reference), core*rate)]
+            np.testing.assert_array_equal(measured["outer_boundary_error_jumps"], expected_jumps)
+            for prefix, audio in (("reference", reference), ("output", estimate)):
+                left, right = audio.T
+                expected = np.dot(left, right)/(np.sqrt(np.dot(left, left))*np.sqrt(np.dot(right, right)))
+                np.testing.assert_allclose(measured[prefix+"_lr_coherence"], expected,
+                                           rtol=1e-12, atol=1e-14)
+        with self.assertRaisesRegex(ValueError, "channel or frame mismatch"):
+            prepared.score(reference[:-1])
+
     def test_projection_and_reconstruction_never_cast_whole_track(self):
         class BoundedCast(np.ndarray):
             def astype(self, *args, **kwargs):
@@ -112,7 +146,7 @@ class MetricSemanticsTests(unittest.TestCase):
                 return super().astype(*args, **kwargs)
         reference = np.arange(2*65536+37, dtype="float32").view(BoundedCast)
         estimate = reference*0.5
-        score, gain = benchmark.projection_metrics(reference, estimate)
+        score, gain = projection_metrics(reference, estimate)
         self.assertEqual(score, "infinity")
         self.assertEqual(gain, 0.5)
         self.assertEqual(benchmark.reconstruction_metrics(reference, estimate, estimate), (0.0, 0.0))
@@ -792,13 +826,14 @@ class BenchmarkRepeatTests(unittest.TestCase):
                     patch("builtins.print"):
                 benchmark.main()
             report = json.loads(report_path.read_text())
-            self.assertEqual(report["input_quality"], benchmark.metrics(reference, noisy, rate))
+            prepared = benchmark.PreparedReference(reference, rate)
+            self.assertEqual(report["input_quality"], prepared.score(noisy))
             self.assertEqual(len({current["output_dir"] for current in requests}), 3)
             for current in requests:
                 self.assertEqual({key:value for key,value in current.items() if key != "output_dir"},
                                  {key:value for key,value in request.items() if key != "output_dir"})
             for run, output in zip(report["runs"], outputs):
-                self.assertEqual(run["reference_quality"], benchmark.metrics(reference, output, rate))
+                self.assertEqual(run["reference_quality"], prepared.score(output))
             self.assertEqual(report["runs"][0]["reference_quality"]["rms_error"], 0)
             self.assertGreater(report["runs"][1]["reference_quality"]["rms_error"], 0)
             self.assertGreater(report["runs"][2]["reference_quality"]["rms_error"],

@@ -32,13 +32,13 @@ import subprocess
 import sys
 import time
 if __package__:
-    from .benchmark import metrics, TIMING_BOUNDARIES, timing_summary
+    from .benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from .runtime.worker import EVENT_VERSION, digest, read_json
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
-    from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
+    from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from runtime.worker import EVENT_VERSION, digest, read_json
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
@@ -136,7 +136,7 @@ def main():
     output=args.output_dir.resolve()
     report={"command":sys.argv,"model_manifest_sha256":digest(model),"runs":[],
             "timing_boundaries":{**TIMING_BOUNDARIES,
-                "evaluation_wall_seconds":"Before each case's source/reference/backing reads and identity checks through completed run scoring, including request creation, worker subprocess, artifact reads/writes and intelligibility metrics. Excludes corpus/model setup, appending the record, progress printing, aggregate summaries and final report serialization/write."},
+                "evaluation_wall_seconds":"Before each case's source/reference/backing reads and identity checks through completed run scoring, including reference metric preparation, request creation, worker subprocess, artifact reads/writes and intelligibility metrics. Excludes corpus/model setup, appending the record, progress printing, aggregate summaries and final report serialization/write."},
             "human_listening":"not performed; objective results do not establish listening approval"}
     if operation=="speech":
         import importlib.metadata
@@ -158,6 +158,7 @@ def main():
         elif args.kind == "paired":
             for kind, audio in (("clean", reference_pcm), ("noisy", input_pcm)):
                 _require_prepared_identity(audio, source_identity[kind]["float"], name + "/" + kind)
+        prepared = PreparedReference(reference_audio, rate)
         request={"version":1,"task_id":name,"operation":operation,"input_path":str(source.resolve()),
                  "output_dir":str(output/name),"model_manifest":str(model),"device":"cpu","threads":args.threads,
                  "parameters":{"overlap":0.75} if operation=="separate" else {"wet_mix":1.0,"attenuation_limit_db":80}}
@@ -183,8 +184,8 @@ def main():
         record={"name":name,"diagnostic_only":diagnostic,"input_path":str(source),"reference_path":str(reference),
                 "input_sha256":input_pcm.identity["sha256"],
                 "reference_sha256":reference_pcm.identity["sha256"],"corpus_manifest_sha256":digest(provenance),"worker":result,
-                "worker_subprocess_wall_seconds":worker_seconds,"input_quality":metrics(reference_audio,input_audio,rate,core),
-                "output_quality":metrics(reference_audio,estimate,rate,core)}
+                "worker_subprocess_wall_seconds":worker_seconds,"input_quality":prepared.score(input_audio,core),
+                "output_quality":prepared.score(estimate,core)}
         if args.kind == "music":
             record["corpus_source"]={key:source_identity[key] for key in ("source", "sha256")}
         record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
@@ -193,7 +194,7 @@ def main():
             require_alignment(reference_pcm, estimated_pcm, "backing output")
             estimated_accompaniment = estimated_pcm.data
             record["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
-            record["accompaniment_quality"] = metrics(backing_pcm.data,estimated_accompaniment,rate,core)
+            record["accompaniment_quality"] = PreparedReference(backing_pcm.data,rate).score(estimated_accompaniment,core)
             record["mixture_reconstruction_max_abs"]=reconstruction_metrics(input_audio, estimate, estimated_accompaniment)[1]
         if operation=="speech":
             record["intelligibility"]={}
