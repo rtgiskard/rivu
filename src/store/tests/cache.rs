@@ -477,13 +477,16 @@ fn reader_playlist_counts_invalidate_only_the_changed_lifetime_token() {
     let a = writer.create_playlist_with_tracks("A", &[track]).unwrap();
     let b = writer.create_playlist_with_tracks("B", &[track]).unwrap();
     let reader = Store::open_reader(&path).unwrap();
+    let metadata = std::sync::Arc::new(rivu_protocol::model::MetadataRevisions::default());
+    let initial = std::collections::BTreeMap::from([(a, 11), (b, 12)]);
+    reader.invalidate_playlist_count_revisions(&initial, &initial, &metadata, 0);
     let count = |id| reader.playlist_entries_page(id, None, 0, 0).unwrap().total;
     assert_eq!(count(a), 1);
     assert_eq!(count(b), 1);
     let original = std::collections::BTreeMap::from([(a, 11), (b, 12)]);
     let changed = std::collections::BTreeMap::from([(a, 11), (b, 13)]);
     writer.add_playlist(b, &[track]).unwrap();
-    reader.invalidate_playlist_count_revisions(&original, &changed);
+    reader.invalidate_playlist_count_revisions(&original, &changed, &metadata, 0);
     let before = statement_activity(&reader);
     assert_eq!(count(a), 1);
     assert_eq!(
@@ -499,7 +502,7 @@ fn reader_playlist_counts_invalidate_only_the_changed_lifetime_token() {
         .execute("DELETE FROM playlists WHERE id=?1", [a])
         .unwrap();
     let deleted = std::collections::BTreeMap::from([(b, 13)]);
-    reader.invalidate_playlist_count_revisions(&changed, &deleted);
+    reader.invalidate_playlist_count_revisions(&changed, &deleted, &metadata, 0);
     assert!(reader.playlist_entries_page(a, None, 0, 0).is_err());
     writer
         .conn
@@ -509,9 +512,62 @@ fn reader_playlist_counts_invalidate_only_the_changed_lifetime_token() {
         )
         .unwrap();
     let recreated = std::collections::BTreeMap::from([(a, 14), (b, 13)]);
-    reader.invalidate_playlist_count_revisions(&deleted, &recreated);
+    reader.invalidate_playlist_count_revisions(&deleted, &recreated, &metadata, 0);
     assert_eq!(count(a), 0);
     assert_eq!(count(b), 2);
+}
+
+#[test]
+fn reader_playlist_search_counts_follow_metadata_and_fallback_revisions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("playlist-search-counts.db");
+    let writer = Store::open(&path).unwrap();
+    writer
+        .apply_scan(&scan(vec![rec("/music/a.wav", "a", "needle", 10.0)]))
+        .unwrap();
+    let track = all_tracks(&writer).remove(0).id;
+    let playlist = writer.create_playlist_with_tracks("A", &[track]).unwrap();
+    let reader = Store::open_reader(&path).unwrap();
+    let versions = std::collections::BTreeMap::from([(playlist, 1)]);
+    let mut library = rivu_protocol::model::LibrarySnapshot::default();
+    reader.invalidate_playlist_count_revisions(
+        &versions,
+        &versions,
+        &library.metadata_revisions,
+        library.revision,
+    );
+    let count = || {
+        reader
+            .playlist_entries_page(playlist, Some("needle"), 0, 0)
+            .unwrap()
+            .total
+    };
+    assert_eq!(count(), 1);
+    for (step, expected) in [(0, 0), (1, 1), (2, 0), (3, 1)] {
+        writer
+            .conn
+            .execute(
+                "UPDATE tracks SET raw_title=?1 WHERE id=?2",
+                params![if expected == 1 { "needle" } else { "changed" }, track],
+            )
+            .unwrap();
+        match step {
+            0 => library.change_metadata(Some(&[track]), Some(&[playlist])),
+            1 => library.change_metadata(None, None),
+            2 => {
+                let overflowing = vec![track; rivu_protocol::model::MAX_METADATA_SCOPES + 1];
+                library.change_metadata(Some(&overflowing), Some(&[]));
+            }
+            _ => library.revision += 1,
+        }
+        reader.invalidate_playlist_count_revisions(
+            &versions,
+            &versions,
+            &library.metadata_revisions,
+            library.revision,
+        );
+        assert_eq!(count(), expected, "metadata transition {step}");
+    }
 }
 
 #[test]

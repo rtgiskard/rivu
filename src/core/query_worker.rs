@@ -4,6 +4,7 @@ struct ReadState {
     config: Arc<Config>,
     revisions: QueryRevisions,
     playlist_entry_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
+    metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
 }
 
 impl ReadState {
@@ -12,6 +13,7 @@ impl ReadState {
             config: Arc::clone(&state.configuration.config),
             revisions: state.query_revisions_for(query),
             playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+            metadata_revisions: Arc::clone(&state.library.metadata_revisions),
         }
     }
 }
@@ -339,6 +341,7 @@ pub(super) fn read_snapshot(
         config: Arc::clone(config),
         revisions: state.query_revisions_for(query),
         playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
+        metadata_revisions: Arc::clone(&state.library.metadata_revisions),
     }
     .read(store, query, maintenance)
 }
@@ -736,17 +739,14 @@ impl ReadQueries {
                     connection.library_revision = revisions.library;
                     connection.duplicate_groups_revision = revisions.duplicate_groups;
                     connection.scalar_revisions = scalar_revisions;
-                    if !Arc::ptr_eq(
+                    snapshot.invalidate_playlist_count_revisions(
                         &connection.scalar_playlist_revisions,
                         &request.state.playlist_entry_revisions,
-                    ) {
-                        snapshot.invalidate_playlist_count_revisions(
-                            &connection.scalar_playlist_revisions,
-                            &request.state.playlist_entry_revisions,
-                        );
-                        connection.scalar_playlist_revisions =
-                            Arc::clone(&request.state.playlist_entry_revisions);
-                    }
+                        &request.state.metadata_revisions,
+                        revisions.library,
+                    );
+                    connection.scalar_playlist_revisions =
+                        Arc::clone(&request.state.playlist_entry_revisions);
                     // Later writes cannot change this accepted WAL snapshot/version.
                     request.state.read(&snapshot, &request.query, false)
                 }))

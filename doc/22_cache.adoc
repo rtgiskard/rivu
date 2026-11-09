@@ -75,10 +75,12 @@ Filtered Library keeps only its latest scope, including the unfiltered full-libr
 total, within that shared limit. Keys include filters and collection identity, not
 page boundaries. Counts survive snapshots only while
 their data-domain revisions remain valid; publication must validate ownership
-before advancing it. Playlist counts follow each playlist's lifetime; Queue counts
-follow Queue content, including searchable metadata. Unrelated Library changes
-preserve Queue counts. Unrelated changes and bitrate-only updates preserve library
-totals; affected metadata searches invalidate them.
+before advancing it. Reader playlist counts follow each playlist's content,
+lifetime and scoped metadata, falling back to Library revisions when scoped
+facts are unavailable. Queue counts follow Queue content, including searchable
+metadata. Unrelated Library changes preserve scoped playlist and Queue counts.
+Unrelated changes and bitrate-only updates preserve library totals; affected
+metadata searches invalidate them.
 
 Writable counts also detect independent SQLite commits and bypass reuse inside
 writer transactions, preventing rollback leakage. There is no polling timer or

@@ -252,7 +252,7 @@ impl Store {
         if dependencies.clear_queue_count {
             self.invalidate_scalar_count_domains(&[CountDomain::Queue]);
         }
-        if dependencies.clear_playlist_count {
+        if dependencies.clear_playlist_count && !self.revision_owned_counts {
             self.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
         }
         if dependencies.clear_album_counts {

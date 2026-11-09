@@ -88,6 +88,7 @@ pub(crate) enum CountDomain {
 pub(super) struct ScalarCounts {
     changes: u64,
     external_revision: i64,
+    playlist_metadata: Option<(std::sync::Arc<rivu_protocol::model::MetadataRevisions>, u64)>,
     entries: Vec<ScalarCount>,
 }
 
@@ -199,8 +200,24 @@ impl Store {
         &self,
         previous: &std::collections::BTreeMap<i64, u64>,
         current: &std::collections::BTreeMap<i64, u64>,
+        metadata: &std::sync::Arc<rivu_protocol::model::MetadataRevisions>,
+        library: u64,
     ) {
-        self.scalar_counts.borrow_mut().entries.retain(|entry| {
+        let mut cache = self.scalar_counts.borrow_mut();
+        if std::ptr::eq(previous, current)
+            && cache
+                .playlist_metadata
+                .as_ref()
+                .is_some_and(|(old, old_library)| {
+                    std::sync::Arc::ptr_eq(old, metadata) && *old_library == library
+                })
+        {
+            return;
+        }
+        let old_metadata = cache
+            .playlist_metadata
+            .replace((std::sync::Arc::clone(metadata), library));
+        cache.entries.retain(|entry| {
             if entry.domain != CountDomain::PlaylistEntries {
                 return true;
             }
@@ -210,6 +227,10 @@ impl Store {
             previous
                 .get(identity)
                 .is_some_and(|revision| current.get(identity) == Some(revision))
+                && old_metadata.as_ref().is_some_and(|(old, old_library)| {
+                    old.playlist_revision(*identity, *old_library)
+                        == metadata.playlist_revision(*identity, library)
+                })
         });
     }
 
