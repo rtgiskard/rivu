@@ -1008,6 +1008,9 @@ pub(super) fn execute_native(
         let layout = Arc::clone(&renderer.format().layout);
         let channels = renderer.format().channels();
         let estimated_frames = renderer.format().estimated_frames();
+        // Each decode consumes and drops its source before the next pass opens.
+        // Without Profile passes the original decoder is the final output source.
+        let mut renderer = Some(renderer);
         let mut profiles = BTreeMap::new();
         for (index, &id) in order.iter().enumerate() {
             active_node = None;
@@ -1054,7 +1057,10 @@ pub(super) fn execute_native(
                 )?;
                 let source_frames = engine.decode(
                     upstream,
-                    reopen()?,
+                    match renderer.take() {
+                        Some(renderer) => renderer,
+                        None => reopen()?,
+                    },
                     Some(finish),
                     cancel,
                     |position, samples, _| {
@@ -1085,6 +1091,10 @@ pub(super) fn execute_native(
         let index = engine.compile(graph, target, &BTreeMap::new(), &profiles, cancel)?;
         let latency = engine.nodes[index].latency;
         drop(profiles);
+        let renderer = match renderer.take() {
+            Some(renderer) => renderer,
+            None => reopen()?,
+        };
         let destination = status
             .settings
             .graph_export_path

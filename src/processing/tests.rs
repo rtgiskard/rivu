@@ -1903,20 +1903,19 @@ fn native_file_exports_match_retained_timeline_without_pcm_budget() {
             }],
         ];
         if frames == 4093 {
-            cases.push(vec![
-                fir,
-                GraphNodeKind::Denoise {
-                    config: DenoiseConfig {
-                        mode: DenoiseMode::Profile,
-                        fft_size: 256,
-                        ..Default::default()
-                    },
-                    profile: Some(NoiseSelection {
-                        start_seconds: 0.01,
-                        end_seconds: 0.04,
-                    }),
+            let profile = GraphNodeKind::Denoise {
+                config: DenoiseConfig {
+                    mode: DenoiseMode::Profile,
+                    fft_size: 256,
+                    ..Default::default()
                 },
-            ]);
+                profile: Some(NoiseSelection {
+                    start_seconds: 0.01,
+                    end_seconds: 0.04,
+                }),
+            };
+            cases.push(vec![fir.clone(), profile.clone()]);
+            cases.push(vec![fir, profile.clone(), profile]);
         }
         for (case, kinds) in cases.into_iter().enumerate() {
             let config = graph_config(kinds);

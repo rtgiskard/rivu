@@ -632,6 +632,9 @@ also checks cancellation and opened-source identity at EOF; retained PCM and
 DSP-owned buffers keep their own lifetimes.
 
 Profile capture reads the required prefix, including upstream context/latency.
+The initially opened decoder serves the first capture; each consumed decoder
+retires before the next capture or output pass opens another, with the same
+source-stamp and format checks. No unused output decoder spans capture passes.
 An early stop validates cancellation/opened source without pretending it is EOF
 or flushing tails. Actual decoded frames determine EOF even for unknown-duration
 streams; real EOF flushes DSP context. File output discards causal preroll and
