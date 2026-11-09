@@ -698,7 +698,6 @@ impl Service {
         config: Arc<Config>,
         request: GraphRequest,
     ) -> Result<u64> {
-        config.processing_graph.ancestors(request.target)?;
         self.start_request(
             track,
             config,
@@ -740,6 +739,9 @@ impl Service {
             .map(|destination| self.export_destination(destination))
             .transpose()?;
         config.validate()?;
+        let graph_order = target
+            .map(|target| config.processing_graph.ancestors(target))
+            .transpose()?;
         if let Some(selection) = profile {
             ensure!(
                 selection.start_seconds.is_finite()
@@ -794,10 +796,8 @@ impl Service {
             graph_actions_available: false,
             graph_outputs: Vec::new(),
             graph_exported_path: None,
-            graph_nodes: if let Some(target) = target {
-                config
-                    .processing_graph
-                    .ancestors(target)?
+            graph_nodes: if let Some(order) = graph_order {
+                order
                     .into_iter()
                     .map(|node| GraphNodeStatus {
                         node,

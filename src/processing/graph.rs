@@ -3,12 +3,40 @@ use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
 use anyhow::bail;
 use rivu_dsp::denoise::{DenoiseMode, NoiseProfile, ProfileCollector};
+use rivu_format::config::processing_graph::ValidatedGraph;
 use std::collections::BTreeMap;
 
 const BLOCK: usize = 256;
 
+pub(super) struct ExecutionGraph<'a> {
+    graph: &'a ProcessingGraph,
+    target: GraphPort,
+    order: Vec<u64>,
+}
+
+impl<'a> ExecutionGraph<'a> {
+    pub(super) fn new(validated: &ValidatedGraph<'a>, target: GraphPort) -> Result<Self> {
+        Ok(Self {
+            graph: validated.graph(),
+            target,
+            order: validated.ancestors(target)?,
+        })
+    }
+
+    pub(super) fn native_only(&self) -> bool {
+        self.order.iter().all(|&id| {
+            self.graph.node(id).is_ok_and(|node| {
+                !matches!(
+                    node.kind,
+                    GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
+                )
+            })
+        })
+    }
+}
+
 pub(super) fn prepare(
-    graph: &ProcessingGraph,
+    validated: &ValidatedGraph<'_>,
     target: GraphPort,
     mode: GraphExecutionMode,
     sample_rate: u32,
@@ -20,6 +48,7 @@ pub(super) fn prepare(
     Option<audio::GraphRunner>,
 )> {
     check_cancel(cancel)?;
+    let graph = validated.graph();
     if mode == GraphExecutionMode::Offline {
         return Ok((mode, None, None));
     }
@@ -27,7 +56,7 @@ pub(super) fn prepare(
         mode,
         GraphExecutionMode::Auto | GraphExecutionMode::Realtime
     ) {
-        match audio::GraphRunner::plan(graph, target, None, sample_rate, channels)
+        match audio::GraphRunner::plan_validated(validated, target, None, sample_rate, channels)
             .and_then(audio::GraphPlan::prepare)
         {
             Ok(runner) => {
@@ -38,7 +67,7 @@ pub(super) fn prepare(
             Err(_) => {}
         }
     }
-    let order = graph.ancestors(target)?;
+    let order = validated.ancestors(target)?;
     for (index, &id) in order.iter().enumerate() {
         check_cancel(cancel)?;
         let kind = &graph.node(id)?.kind;
@@ -60,9 +89,13 @@ pub(super) fn prepare(
                 node: id,
                 port: port as u16,
             };
-            if let Ok(plan) =
-                audio::GraphRunner::plan(graph, target, Some(boundary), sample_rate, channels)
-            {
+            if let Ok(plan) = audio::GraphRunner::plan_validated(
+                validated,
+                target,
+                Some(boundary),
+                sample_rate,
+                channels,
+            ) {
                 check_cancel(cancel)?;
                 if let Ok(runner) = plan.prepare() {
                     check_cancel(cancel)?;
@@ -603,33 +636,19 @@ fn release_unreachable_pcm(
 }
 
 pub(super) fn prepare_models(
+    execution: &ExecutionGraph<'_>,
     status: &mut ProcessingTaskStatus,
     sample_rate: u32,
     layout: &[audio::Channel],
     cancel: &AtomicBool,
     tx: &Sender<Event>,
 ) -> Result<BTreeMap<u64, neural::PreparedModel>> {
-    let target = status
-        .settings
-        .graph_boundary
-        .or(status.settings.graph_target)
-        .context("Missing graph target")?;
-    let order = status
-        .settings
-        .graph
-        .as_ref()
-        .context("Missing graph snapshot")?
-        .ancestors(target)?;
+    let graph = execution.graph;
     let mut models = BTreeMap::new();
-    for id in order {
+    for &id in &execution.order {
         check_cancel(cancel)?;
         let mut provenance = ModelProvenance::default();
         let model = {
-            let graph = status
-                .settings
-                .graph
-                .as_ref()
-                .context("Missing graph snapshot")?;
             let (operation, config) = match &graph.node(id)?.kind {
                 GraphNodeKind::Speech { config } => (ProcessingOperation::Speech, config),
                 GraphNodeKind::Separate { config } => (ProcessingOperation::Separate, config),
@@ -666,6 +685,7 @@ pub(super) fn prepare_models(
 }
 
 pub(super) fn execute(
+    execution: &ExecutionGraph<'_>,
     input: audio::PcmAudio,
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
@@ -675,17 +695,9 @@ pub(super) fn execute(
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
     let cancel = cancellation.flag();
     let tx = progress.sender;
-    let graph = status
-        .settings
-        .graph
-        .clone()
-        .context("Missing immutable graph snapshot")?;
-    let target = status
-        .settings
-        .graph_boundary
-        .or(status.settings.graph_target)
-        .context("Missing graph target")?;
-    let order = graph.ancestors(target)?;
+    let graph = execution.graph;
+    let target = execution.target;
+    let order = &execution.order;
     let rate = input.sample_rate();
     let layout = Arc::clone(input.layout());
     let frames = input.frames();
@@ -729,8 +741,8 @@ pub(super) fn execute(
                     let mut engine =
                         Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
                     let upstream = engine.compile(
-                        &graph,
-                        input_port(&graph, id)?,
+                        graph,
+                        input_port(graph, id)?,
                         &boundaries,
                         &profiles,
                         cancel,
@@ -767,8 +779,8 @@ pub(super) fn execute(
                     let mut engine =
                         Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
                     let upstream = engine.compile(
-                        &graph,
-                        input_port(&graph, id)?,
+                        graph,
+                        input_port(graph, id)?,
                         &boundaries,
                         &profiles,
                         cancel,
@@ -777,7 +789,7 @@ pub(super) fn execute(
                     // This model now owns its materialized input. Future graph
                     // traversals stop at its outputs before inference allocates
                     // them; a bypass alias still retains its own PCM storage.
-                    release_unreachable_pcm(&graph, target, &mut boundaries, Some(id), &mut input)?;
+                    release_unreachable_pcm(graph, target, &mut boundaries, Some(id), &mut input)?;
                     let outcome = neural::run(
                         ModelRequest {
                             task_id: status.id,
@@ -837,12 +849,12 @@ pub(super) fn execute(
         ) {
             // Boundaries terminate every future PCM traversal, but profile
             // validation still uses the immutable original format and length.
-            release_unreachable_pcm(&graph, target, &mut boundaries, None, &mut input)?;
+            release_unreachable_pcm(graph, target, &mut boundaries, None, &mut input)?;
         }
     }
     let outcome = (|| {
         let mut engine = Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
-        let index = engine.compile(&graph, target, &boundaries, &profiles, cancel)?;
+        let index = engine.compile(graph, target, &boundaries, &profiles, cancel)?;
         // The engine owns only boundaries reachable from this target; obsolete model
         // ancestors are released before allocating the final retained output.
         drop(boundaries);
@@ -861,7 +873,7 @@ fn publish(
     output: GraphPcm,
     frames: u64,
     target: GraphPort,
-    order: Vec<u64>,
+    order: &[u64],
     status: &mut ProcessingTaskStatus,
     tx: &Sender<Event>,
 ) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
@@ -895,7 +907,7 @@ fn publish(
             .checked_add(context.start_frame.unsigned_abs())
             .context("Hybrid graph latency overflow")?;
     }
-    for id in order {
+    for &id in order {
         node_event(status, id, ProcessingPhase::Complete, None, tx);
     }
     if status.settings.graph_mode == Some(GraphExecutionMode::Hybrid) {
@@ -909,27 +921,6 @@ fn publish(
         target,
         GraphAudioOutput { pcm, context },
     )]))
-}
-
-pub(super) fn native_only(status: &ProcessingTaskStatus) -> Result<bool> {
-    let graph = status
-        .settings
-        .graph
-        .as_ref()
-        .context("Missing graph snapshot")?;
-    let target = status
-        .settings
-        .graph_boundary
-        .or(status.settings.graph_target)
-        .context("Missing graph target")?;
-    Ok(graph.ancestors(target)?.into_iter().all(|id| {
-        graph.node(id).is_ok_and(|node| {
-            !matches!(
-                node.kind,
-                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
-            )
-        })
-    }))
 }
 
 pub(super) struct NativeGraphOutput {
@@ -964,6 +955,7 @@ fn causal_export_block(
 }
 
 pub(super) fn execute_native(
+    execution: Option<&ExecutionGraph<'_>>,
     renderer: audio::SourceRenderer,
     mut reopen: impl FnMut() -> Result<audio::SourceRenderer>,
     budget: Arc<audio::PcmBudget>,
@@ -973,7 +965,9 @@ pub(super) fn execute_native(
 ) -> Result<NativeGraphOutput> {
     let tx = progress.sender;
     let standalone = status.operation == ProcessingOperation::Denoise;
-    let (graph, target) = if standalone {
+    let standalone_graph;
+    let standalone_execution;
+    let execution = if standalone {
         let source = GraphPort { node: 1, port: 0 };
         let target = GraphPort { node: 3, port: 0 };
         let graph = ProcessingGraph {
@@ -999,22 +993,15 @@ pub(super) fn execute_native(
                 to: target,
             }],
         };
-        (graph, target)
+        standalone_graph = graph;
+        standalone_execution = ExecutionGraph::new(&standalone_graph.validated()?, target)?;
+        &standalone_execution
     } else {
-        (
-            status
-                .settings
-                .graph
-                .clone()
-                .context("Missing immutable graph snapshot")?,
-            status
-                .settings
-                .graph_boundary
-                .or(status.settings.graph_target)
-                .context("Missing graph target")?,
-        )
+        execution.context("Missing admitted graph execution")?
     };
-    let order = graph.ancestors(target)?;
+    let graph = execution.graph;
+    let target = execution.target;
+    let order = &execution.order;
     let mut active_node = None;
     let outcome = (|| {
         let rate = renderer.format().sample_rate;
@@ -1048,8 +1035,8 @@ pub(super) fn execute_native(
                 );
                 let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
                 let upstream = engine.compile(
-                    &graph,
-                    input_port(&graph, id)?,
+                    graph,
+                    input_port(graph, id)?,
                     &BTreeMap::new(),
                     &profiles,
                     cancel,
@@ -1095,7 +1082,7 @@ pub(super) fn execute_native(
         // profile collection and validation instead belong to their own node.
         active_node = Some(target.node);
         let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
-        let index = engine.compile(&graph, target, &BTreeMap::new(), &profiles, cancel)?;
+        let index = engine.compile(graph, target, &BTreeMap::new(), &profiles, cancel)?;
         let latency = engine.nodes[index].latency;
         drop(profiles);
         let destination = status
@@ -1183,7 +1170,7 @@ pub(super) fn execute_native(
             };
             (frames, Some(output), None)
         };
-        for &id in &order {
+        for &id in order {
             active_node = Some(id);
             if let GraphNodeKind::Denoise {
                 profile: Some(selection),
@@ -1212,7 +1199,7 @@ pub(super) fn execute_native(
             publish(output, frames, target, order, status, tx)?
         } else {
             status.graph_outputs.clear();
-            for id in order {
+            for &id in order {
                 node_event(status, id, ProcessingPhase::Complete, None, tx);
             }
             BTreeMap::new()
@@ -2536,7 +2523,7 @@ mod tests {
         let target = GraphPort { node: 2, port: 0 };
         let flag = AtomicBool::new(false);
         let (mode, boundary, runner) = prepare(
-            &ProcessingGraph::default(),
+            &ProcessingGraph::default().validated().unwrap(),
             target,
             GraphExecutionMode::Auto,
             48000,
@@ -2552,7 +2539,7 @@ mod tests {
         }]);
         assert!(
             prepare(
-                &graph,
+                &graph.validated().unwrap(),
                 target,
                 GraphExecutionMode::Realtime,
                 48000,
@@ -2561,8 +2548,15 @@ mod tests {
             )
             .is_err()
         );
-        let (mode, boundary, runner) =
-            prepare(&graph, target, GraphExecutionMode::Auto, 48000, 2, &flag).unwrap();
+        let (mode, boundary, runner) = prepare(
+            &graph.validated().unwrap(),
+            target,
+            GraphExecutionMode::Auto,
+            48000,
+            2,
+            &flag,
+        )
+        .unwrap();
         assert_eq!(mode, GraphExecutionMode::Offline);
         assert!(boundary.is_none());
         assert!(runner.is_none());
@@ -2575,14 +2569,21 @@ mod tests {
                 implementation: EqImplementation::Iir,
             },
         ]);
-        let (mode, boundary, runner) =
-            prepare(&graph, target, GraphExecutionMode::Auto, 48000, 2, &flag).unwrap();
+        let (mode, boundary, runner) = prepare(
+            &graph.validated().unwrap(),
+            target,
+            GraphExecutionMode::Auto,
+            48000,
+            2,
+            &flag,
+        )
+        .unwrap();
         assert_eq!(mode, GraphExecutionMode::Hybrid);
         assert_eq!(boundary, Some(GraphPort { node: 3, port: 0 }));
         assert!(runner.is_some());
         assert!(
             prepare(
-                &graph,
+                &graph.validated().unwrap(),
                 target,
                 GraphExecutionMode::Auto,
                 48000,
@@ -2608,7 +2609,7 @@ mod tests {
         let target = GraphPort { node: 2, port: 0 };
         let cancel = AtomicBool::new(false);
         let error = prepare(
-            &graph,
+            &graph.validated().unwrap(),
             target,
             GraphExecutionMode::Realtime,
             48000,
@@ -2618,8 +2619,15 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("arithmetic work budget"));
         for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
-            let (mode, boundary, runner) =
-                prepare(&graph, target, requested, 48000, 2, &cancel).unwrap();
+            let (mode, boundary, runner) = prepare(
+                &graph.validated().unwrap(),
+                target,
+                requested,
+                48000,
+                2,
+                &cancel,
+            )
+            .unwrap();
             assert_eq!(mode, GraphExecutionMode::Hybrid);
             assert_eq!(boundary, Some(GraphPort { node: 3, port: 0 }));
             let mut runner = runner.unwrap();
@@ -2650,7 +2658,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         assert!(
             prepare(
-                &graph,
+                &graph.validated().unwrap(),
                 target,
                 GraphExecutionMode::Realtime,
                 48000,
@@ -2662,8 +2670,15 @@ mod tests {
             .contains("offline profile capture")
         );
         for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
-            let (mode, boundary, runner) =
-                prepare(&graph, target, requested, 48000, 2, &cancel).unwrap();
+            let (mode, boundary, runner) = prepare(
+                &graph.validated().unwrap(),
+                target,
+                requested,
+                48000,
+                2,
+                &cancel,
+            )
+            .unwrap();
             assert_eq!(mode, GraphExecutionMode::Hybrid);
             assert_eq!(boundary, Some(GraphPort { node: 3, port: 0 }));
             let mut runner = runner.unwrap();
@@ -2772,7 +2787,7 @@ mod tests {
         });
         for requested in [GraphExecutionMode::Auto, GraphExecutionMode::Hybrid] {
             let (mode, boundary, runner) = prepare(
-                &graph,
+                &graph.validated().unwrap(),
                 GraphPort { node: 2, port: 0 },
                 requested,
                 48000,

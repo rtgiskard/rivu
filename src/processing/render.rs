@@ -143,17 +143,20 @@ pub(super) fn run(
     status.sample_rate = Some(native.sample_rate);
     status.channels = Some(native.channels());
     let mut runner = None;
+    check_cancel(cancel)?;
+    // Keep one immutable borrow and its full-graph validation for this worker run.
+    let frozen_graph = status.settings.graph.take();
+    let validated = frozen_graph
+        .as_ref()
+        .map(|graph| graph.validated())
+        .transpose()?;
     if let Some(mode) = status
         .settings
         .graph_requested_mode
         .filter(|mode| *mode != GraphExecutionMode::Offline)
     {
         let (actual, boundary, prepared) = graph::prepare(
-            status
-                .settings
-                .graph
-                .as_ref()
-                .context("Missing graph snapshot")?,
+            validated.as_ref().context("Missing graph snapshot")?,
             status
                 .settings
                 .graph_target
@@ -189,6 +192,8 @@ pub(super) fn run(
             node.phase = ProcessingPhase::Processing;
         }
         status.phase = ProcessingPhase::Complete;
+        drop(validated);
+        status.settings.graph = frozen_graph;
         return Ok(ProcessingResult {
             track,
             stamp,
@@ -200,6 +205,18 @@ pub(super) fn run(
             runner,
         });
     }
+    let execution = if status.operation == ProcessingOperation::Graph {
+        Some(graph::ExecutionGraph::new(
+            validated.as_ref().context("Missing graph snapshot")?,
+            status
+                .settings
+                .graph_boundary
+                .or(status.settings.graph_target)
+                .context("Missing graph target")?,
+        )?)
+    } else {
+        None
+    };
     let model = if matches!(
         status.operation,
         ProcessingOperation::Speech | ProcessingOperation::Separate
@@ -223,10 +240,18 @@ pub(super) fn run(
     } else {
         None
     };
-    let native_graph =
-        status.operation == ProcessingOperation::Graph && graph::native_only(&status)?;
-    let models = if status.operation == ProcessingOperation::Graph && !native_graph {
-        graph::prepare_models(&mut status, native.sample_rate, &native.layout, cancel, tx)?
+    let native_graph = execution
+        .as_ref()
+        .is_some_and(graph::ExecutionGraph::native_only);
+    let models = if let Some(execution) = execution.as_ref().filter(|_| !native_graph) {
+        graph::prepare_models(
+            execution,
+            &mut status,
+            native.sample_rate,
+            &native.layout,
+            cancel,
+            tx,
+        )?
     } else {
         BTreeMap::new()
     };
@@ -235,6 +260,7 @@ pub(super) fn run(
     let mut pending_export = None;
     let outputs = if status.operation == ProcessingOperation::Denoise {
         let native_output = graph::execute_native(
+            None,
             renderer,
             &open_source,
             Arc::clone(&budget),
@@ -249,6 +275,7 @@ pub(super) fn run(
         }
     } else if native_graph {
         let native_output = graph::execute_native(
+            execution.as_ref(),
             renderer,
             &open_source,
             Arc::clone(&budget),
@@ -266,6 +293,9 @@ pub(super) fn run(
         status.frames = Some(input.frames());
         if status.operation == ProcessingOperation::Graph {
             graph_outputs = graph::execute(
+                execution
+                    .as_ref()
+                    .context("Missing admitted graph execution")?,
                 input,
                 Arc::clone(&budget),
                 &mut status,
@@ -341,6 +371,9 @@ pub(super) fn run(
         });
     }
     check_cancel(cancel)?;
+    drop(execution);
+    drop(validated);
+    status.settings.graph = frozen_graph;
     Ok(ProcessingResult {
         track,
         stamp,

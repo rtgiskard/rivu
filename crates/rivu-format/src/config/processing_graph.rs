@@ -188,6 +188,52 @@ pub enum GraphEdit {
         graph: ProcessingGraph,
     },
 }
+/// Full-graph validation and topology tied to an immutable graph borrow.
+pub struct ValidatedGraph<'a> {
+    graph: &'a ProcessingGraph,
+    order: Vec<u64>,
+}
+
+impl<'a> ValidatedGraph<'a> {
+    pub fn graph(&self) -> &'a ProcessingGraph {
+        self.graph
+    }
+
+    /// Source-first closure, reusing full-graph validation and topology.
+    pub fn ancestors(&self, target: GraphPort) -> Result<Vec<u64>> {
+        let graph = self.graph;
+        ensure!(
+            (target.port as usize) < graph.node(target.node)?.kind.outputs(),
+            "Invalid target output port"
+        );
+        let mut needed = BTreeSet::from([target.node]);
+        for &id in self.order.iter().rev() {
+            if needed.contains(&id) {
+                let node = graph.node(id)?;
+                for port in 0..node.kind.inputs() {
+                    let edge = graph
+                        .edges
+                        .iter()
+                        .find(|e| {
+                            e.to == GraphPort {
+                                node: id,
+                                port: port as u16,
+                            }
+                        })
+                        .context("Required graph input is disconnected")?;
+                    needed.insert(edge.from.node);
+                }
+            }
+        }
+        Ok(self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| needed.contains(id))
+            .collect())
+    }
+}
+
 impl ProcessingGraph {
     /// Audio identity ignores layout, optimistic edit revision and allocation history.
     pub fn audio_eq(&self, other: &Self) -> bool {
@@ -209,6 +255,13 @@ impl ProcessingGraph {
     }
     pub fn validate(&self) -> Result<()> {
         self.validated_order().map(|_| ())
+    }
+
+    pub fn validated(&self) -> Result<ValidatedGraph<'_>> {
+        Ok(ValidatedGraph {
+            graph: self,
+            order: self.validated_order()?,
+        })
     }
 
     fn validated_order(&self) -> Result<Vec<u64>> {
@@ -286,31 +339,7 @@ impl ProcessingGraph {
     }
     /// Source-first closure only. Disconnected required inputs fail at execution admission.
     pub fn ancestors(&self, target: GraphPort) -> Result<Vec<u64>> {
-        let order = self.validated_order()?;
-        ensure!(
-            (target.port as usize) < self.node(target.node)?.kind.outputs(),
-            "Invalid target output port"
-        );
-        let mut needed = BTreeSet::from([target.node]);
-        for &id in order.iter().rev() {
-            if needed.contains(&id) {
-                let node = self.node(id)?;
-                for port in 0..node.kind.inputs() {
-                    let edge = self
-                        .edges
-                        .iter()
-                        .find(|e| {
-                            e.to == GraphPort {
-                                node: id,
-                                port: port as u16,
-                            }
-                        })
-                        .context("Required graph input is disconnected")?;
-                    needed.insert(edge.from.node);
-                }
-            }
-        }
-        Ok(order.into_iter().filter(|id| needed.contains(id)).collect())
+        self.validated()?.ancestors(target)
     }
     pub fn edit(&mut self, expected_revision: u64, edit: GraphEdit) -> Result<()> {
         ensure!(

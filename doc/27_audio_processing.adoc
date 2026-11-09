@@ -618,6 +618,12 @@ Model ancestors and Hybrid boundaries retain their PCM requirements. Export
 checks the cached render's source stamp against the current source, never
 relabeling old samples as a new source version.
 
+Workers share full-graph validation and topology through an immutable graph borrow
+for one run. Candidate planning still checks each boundary's dominance, format,
+capabilities and budgets; only structural proof and execution-prefix order are
+reused. Public planning validates all stored nodes, including controls outside the
+selected output. Editing a graph requires a new proof, not revision-based cache reuse.
+
 For fixed graph/format, native streaming export's output memory is independent
 of duration; decoder, DSP/profile, delays and existing caches remain costs.
 Synchronous native processing borrows format-checked decoder blocks until the

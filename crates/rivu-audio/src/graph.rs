@@ -11,7 +11,7 @@ use crate::processor::{NativeNodePlan, NativeProcessor};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::denoise::{BlockDenoiser, DenoiseMode};
 use rivu_format::config::processing_graph::{
-    EqImplementation, GraphNodeKind, GraphPort, ProcessingGraph,
+    EqImplementation, GraphNodeKind, GraphPort, ProcessingGraph, ValidatedGraph,
 };
 
 pub const GRAPH_BLOCK_FRAMES: usize = 256;
@@ -290,7 +290,19 @@ impl GraphRunner {
         sample_rate: u32,
         channels: usize,
     ) -> Result<GraphPlan<'_>> {
-        graph.validate()?;
+        Self::plan_validated(&graph.validated()?, target, boundary, sample_rate, channels)
+    }
+
+    /// Admit a candidate using a full-graph validation proof for this immutable borrow.
+    /// Boundary dominance, format, capability, and resource admission remain per candidate.
+    pub fn plan_validated<'a>(
+        validated: &ValidatedGraph<'a>,
+        target: GraphPort,
+        boundary: Option<GraphPort>,
+        sample_rate: u32,
+        channels: usize,
+    ) -> Result<GraphPlan<'a>> {
+        let graph = validated.graph();
         ensure!(
             sample_rate > 0 && channels > 0 && channels <= MAX_GRAPH_CHANNELS,
             "realtime graph requires a nonzero sample rate and 1..={MAX_GRAPH_CHANNELS} channels"
@@ -1505,6 +1517,23 @@ mod tests {
         runner.process_interleaved(&mut input).unwrap();
         assert_eq!(input, [1.5, -1.5]);
     }
+    #[test]
+    fn planning_validates_disabled_controls_outside_the_selected_suffix() {
+        let mut graph = branch_graph();
+        graph.nodes[1].kind = GraphNodeKind::Equalizer {
+            config: EqualizerConfig {
+                enabled: false,
+                preamp_db: f64::NAN,
+                ..Default::default()
+            },
+            implementation: EqImplementation::Iir,
+        };
+        // Neither an unrelated preview nor an exact cached cut may hide invalid controls.
+        for (target, boundary) in [(port(3, 0), None), (port(5, 0), Some(port(4, 0)))] {
+            assert!(GraphRunner::plan(&graph, target, boundary, 48_000, 1).is_err());
+        }
+    }
+
     #[test]
     fn preview_uses_only_ancestors_and_cached_boundary_is_exact() {
         let graph = branch_graph();
