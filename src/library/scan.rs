@@ -1,7 +1,7 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use super::source::{
     CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack, SourceError,
-    prepare_sources,
+    prepare_source_batch, prepare_sources,
 };
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, anyhow, bail};
@@ -213,32 +213,30 @@ where
     let total = paths.len();
     let mut result = ScanResult::default();
     let mut scratch = vec![0; HASH_CHUNK_BYTES];
-    let mut sources = HashMap::new();
     let mut processed = 0;
     progress(ScanPhase::ReadingMetadata, 0, Some(total), 0, None);
     for chunk in paths.chunks(SOURCE_BATCH_SIZE) {
         cancellation.check()?;
-        prepare_sources(
+        let outcomes = prepare_source_batch(
             workers,
             chunk.to_vec(),
             &mut known_sources,
-            &mut sources,
             ffmpeg_enabled,
             (cancellation, None),
             &mut scratch,
         )
         .await?;
-        for path in chunk {
+        for (path, outcome) in chunk.iter().zip(outcomes) {
             cancellation.check()?;
-            match sources
-                .remove(path)
-                .context("Registered source was not prepared")?
-            {
-                Ok(record) => result.records.push(record),
-                Err(SourceError {
-                    not_found: true, ..
-                }) => result.roots.push(path.clone()),
-                Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
+            match outcome {
+                Ok(record) => result.records.push(Arc::new(record)),
+                Err((
+                    _,
+                    SourceError {
+                        not_found: true, ..
+                    },
+                )) => result.roots.push(path.clone()),
+                Err((_, error)) => result.push_error(|| format!("{}: {error}", path.display())),
             }
             processed += 1;
             progress(

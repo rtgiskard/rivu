@@ -1,6 +1,6 @@
 use super::paths::{is_audio_path, logical_path};
 use super::scan::MAX_REPORTED_SCAN_ERRORS;
-use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
+use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_source_batch};
 use super::{KnownFile, ScanCancellation};
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result};
@@ -125,9 +125,10 @@ where
         result.rejected = requested;
         return Ok(result);
     }
-    let mut sources = HashMap::new();
-    let mut scratch = vec![0; HASH_CHUNK_BYTES];
     let total = unique.len();
+    drop(identities);
+    let mut records = Vec::with_capacity(total);
+    let mut scratch = vec![0; HASH_CHUNK_BYTES];
     let mut unique = unique.into_iter();
     loop {
         cancellation.check()?;
@@ -137,39 +138,30 @@ where
         }
         progress(rivu_protocol::model::ScanProgress {
             phase: rivu_protocol::model::ScanPhase::ReadingMetadata,
-            processed: sources.len(),
+            processed: records.len(),
             total: Some(total),
             errors: result.errors.len(),
             path: batch.first().cloned(),
         });
-        prepare_sources(
+        for outcome in prepare_source_batch(
             workers,
             batch,
             &mut known_sources,
-            &mut sources,
             ffmpeg_enabled,
             (cancellation, None),
             &mut scratch,
         )
-        .await?;
-    }
-    cancellation.check()?;
-    // Restore first-request order without cloning probe metadata or fingerprints.
-    let mut outcomes: Vec<_> = (0..identities.len()).map(|_| None).collect();
-    for (path, outcome) in sources {
-        let index = identities[&path];
-        outcomes[index] = Some(outcome.map_err(|error| format!("{}: {error}", path.display())));
-    }
-    let mut records = Vec::with_capacity(outcomes.len());
-    for outcome in outcomes {
-        match outcome.context("External file preparation omitted a source")? {
-            Ok(record) => {
-                records.push(Some(result.records.len()));
-                result.records.push(std::sync::Arc::unwrap_or_clone(record));
-            }
-            Err(error) => {
-                records.push(None);
-                result.report(error);
+        .await?
+        {
+            match outcome {
+                Ok(record) => {
+                    records.push(Some(result.records.len()));
+                    result.records.push(record);
+                }
+                Err((path, error)) => {
+                    records.push(None);
+                    result.report(format!("{}: {error}", path.display()));
+                }
             }
         }
     }
@@ -360,6 +352,111 @@ mod tests {
         assert_eq!(result.occurrences.len(), files.len() * 2);
         assert_eq!(result.rejected, MAX_REPORTED_SCAN_ERRORS + 10);
         assert_eq!(result.errors.len(), MAX_REPORTED_SCAN_ERRORS);
+    }
+
+    #[test]
+    fn source_batches_preserve_order_across_open_probe_failures_and_duplicates() {
+        let workers = &BlockingExecutor::new(4);
+        let directory = tempfile::tempdir().unwrap();
+        let files: Vec<_> = (0..SOURCE_BATCH_SIZE + 3)
+            .map(|index| {
+                let path = directory.path().join(format!("{index}.wav"));
+                wav(&path);
+                path
+            })
+            .collect();
+        let missing = directory.path().join("missing.wav");
+        let broken = directory.path().join("broken.wav");
+        std::fs::write(&broken, b"not encoded audio").unwrap();
+        let mut paths = vec![missing.clone(), files[3].clone(), broken.clone()];
+        paths.extend(files.clone());
+        paths.extend([
+            broken.clone(),
+            files[0].clone(),
+            missing.clone(),
+            files[SOURCE_BATCH_SIZE + 1].clone(),
+        ]);
+        let expected: Vec<_> = paths
+            .iter()
+            .filter(|path| **path != missing && **path != broken)
+            .cloned()
+            .collect();
+        let result = futures::executor::block_on(prepare_external_admission(
+            workers,
+            paths,
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            false,
+            &ScanCancellation::default(),
+            |_| {},
+        ))
+        .unwrap();
+        let queued: Vec<_> = result
+            .occurrences
+            .iter()
+            .map(|&index| result.records[index].path.clone())
+            .collect();
+        assert_eq!(queued, expected);
+        let mut first_requests = vec![&files[3]];
+        first_requests.extend(files.iter().filter(|path| **path != files[3]));
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| &record.path)
+                .collect::<Vec<_>>(),
+            first_requests
+        );
+        assert_eq!(result.rejected, 4);
+        assert_eq!(result.errors.len(), 2);
+        assert!(result.errors[0].contains("missing.wav"));
+        assert!(result.errors[1].contains("broken.wav"));
+    }
+
+    #[test]
+    fn failed_lookup_batch_does_not_discard_later_sources_or_retry_duplicate_identities() {
+        let workers = &BlockingExecutor::new(4);
+        let directory = tempfile::tempdir().unwrap();
+        let files: Vec<_> = (0..SOURCE_BATCH_SIZE + 3)
+            .map(|index| {
+                let path = directory.path().join(format!("{index}.wav"));
+                wav(&path);
+                path
+            })
+            .collect();
+        let mut paths = files.clone();
+        paths.push(files[0].clone());
+        paths.extend_from_slice(&files[SOURCE_BATCH_SIZE..]);
+        let mut fail_lookup = true;
+        let result = futures::executor::block_on(prepare_external_admission(
+            workers,
+            paths,
+            |paths| {
+                std::future::ready(if std::mem::take(&mut fail_lookup) {
+                    Err(anyhow::anyhow!("source cache unavailable"))
+                } else {
+                    Ok(vec![None; paths.len()])
+                })
+            },
+            false,
+            &ScanCancellation::default(),
+            |_| {},
+        ))
+        .unwrap();
+        let queued: Vec<_> = result
+            .occurrences
+            .iter()
+            .map(|&index| &result.records[index].path)
+            .collect();
+        assert_eq!(
+            queued,
+            files[SOURCE_BATCH_SIZE..]
+                .iter()
+                .chain(&files[SOURCE_BATCH_SIZE..])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.records.len(), 3);
+        assert_eq!(result.rejected, SOURCE_BATCH_SIZE + 1);
+        assert_eq!(result.errors.len(), SOURCE_BATCH_SIZE);
     }
 
     #[test]

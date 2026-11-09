@@ -392,157 +392,206 @@ where
         if batch.is_empty() {
             return Ok(());
         }
-        let token = cancellation.clone();
-        let admitted = workers
-            .execute(move || {
-                let mut admitted = Vec::with_capacity(batch.len());
-                for path in batch {
-                    token.check()?;
-                    let opened = (|| {
-                        path.to_str().context("Audio source path is not UTF-8")?;
-                        let file = open_regular_file(&path)?;
-                        let metadata = file.metadata()?;
-                        Ok::<_, anyhow::Error>((file, metadata))
-                    })();
-                    admitted.push((path, opened));
+        for outcome in prepare_source_batch(
+            workers,
+            batch,
+            known_sources,
+            ffmpeg_enabled,
+            (cancellation, budget),
+            scratch,
+        )
+        .await?
+        {
+            match outcome {
+                Ok(record) => {
+                    sources.insert(record.path.clone(), Ok(Arc::new(record)));
                 }
-                token.check()?;
-                Ok::<_, anyhow::Error>(admitted)
-            })
-            .await
-            .context("Scan source admission worker failed")??;
-        cancellation.check()?;
-        let mut opened = Vec::with_capacity(admitted.len());
-        let mut lookup_paths = Vec::with_capacity(admitted.len());
-        for (path, admission) in admitted {
-            match admission {
-                Ok((file, metadata)) => {
-                    lookup_paths.push(path.clone());
-                    opened.push((path, file, metadata));
+                Err((path, error)) => {
+                    sources.insert(path, Err(error));
                 }
-                Err(error) => {
-                    if budget.is_some()
-                        && error
-                            .downcast_ref::<std::io::Error>()
-                            .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
-                    {
-                        return Err(error.context("Import source is not a regular file"));
-                    }
-                    let not_found = error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-                    sources.insert(
-                        path,
-                        Err(SourceError {
-                            message: format!("{error:#}"),
-                            not_found,
-                        }),
-                    );
-                }
-            }
-        }
-        if opened.is_empty() {
-            continue;
-        }
-        // No blocking slot is held across this Core request. Keep the admitted fds.
-        let known = match known_sources(lookup_paths).await {
-            Ok(known) => known,
-            Err(error) => {
-                let error = SourceError {
-                    message: format!("{error:#}"),
-                    not_found: false,
-                };
-                for (path, _, _) in opened {
-                    sources.insert(
-                        path,
-                        Err(SourceError {
-                            message: error.message.clone(),
-                            not_found: error.not_found,
-                        }),
-                    );
-                }
-                continue;
-            }
-        };
-        anyhow::ensure!(
-            known.len() == opened.len(),
-            "Scan source lookup batch length mismatch"
-        );
-        let mut pending: std::collections::VecDeque<_> = opened
-            .into_iter()
-            .zip(known)
-            .map(|((path, file, metadata), known)| PendingSource {
-                path,
-                file,
-                identity: source_identity_from_metadata(&metadata),
-                size: metadata.len(),
-                modified_ns: cache_modified_ns(metadata.modified().ok()),
-                known,
-                initialized: false,
-                media: None,
-                fingerprint: None,
-                hasher: None,
-                hashed: 0,
-            })
-            .collect();
-        while !pending.is_empty() {
-            cancellation.check()?;
-            let token = cancellation.clone();
-            let mut buffer = std::mem::take(scratch);
-            let retained_budget = budget.cloned();
-            let (remaining, completed, buffer) = workers
-                .execute(move || {
-                    let mut completed = Vec::new();
-                    for _ in 0..SOURCE_STEPS_PER_TURN {
-                        token.check()?;
-                        let Some(source) = pending.front_mut() else {
-                            break;
-                        };
-                        match source.step(
-                            ffmpeg_enabled,
-                            &token,
-                            &mut buffer,
-                            retained_budget.as_ref(),
-                        ) {
-                            Ok(Some(record)) => {
-                                pending.pop_front();
-                                completed.push((record.path.clone(), Ok(record)));
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                token.check()?;
-                                if super::import_budget::ImportBudget::is_limit(&error) {
-                                    return Err(error);
-                                }
-                                let source = pending.pop_front().expect("front source is present");
-                                if let (Some(budget), Some(media)) =
-                                    (retained_budget.as_ref(), &source.media)
-                                {
-                                    budget.release(media_retained_bytes(media));
-                                }
-                                completed.push((
-                                    source.path,
-                                    Err(SourceError {
-                                        message: format!("{error:#}"),
-                                        not_found: false,
-                                    }),
-                                ));
-                            }
-                        }
-                    }
-                    token.check()?;
-                    Ok::<_, anyhow::Error>((pending, completed, buffer))
-                })
-                .await
-                .context("Scan source batch worker failed")??;
-            *scratch = buffer;
-            pending = remaining;
-            cancellation.check()?;
-            for (path, record) in completed {
-                sources.insert(path, record.map(Arc::new));
             }
         }
     }
+}
+
+/// Prepare at most one source batch in request order. The map-based scan path
+/// adds shared ownership only when retaining sources for ordinary/CUE reuse.
+pub(super) async fn prepare_source_batch<Fut>(
+    workers: &BlockingExecutor,
+    paths: Vec<PathBuf>,
+    known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
+    ffmpeg_enabled: bool,
+    (cancellation, budget): (
+        &ScanCancellation,
+        Option<&super::import_budget::ImportBudget>,
+    ),
+    scratch: &mut Vec<u8>,
+) -> Result<Vec<std::result::Result<ScanRecord, (PathBuf, SourceError)>>>
+where
+    Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
+{
+    debug_assert!(paths.len() <= SOURCE_BATCH_SIZE);
+    cancellation.check()?;
+    let token = cancellation.clone();
+    let admitted = workers
+        .execute(move || {
+            let mut admitted = Vec::with_capacity(paths.len());
+            for path in paths {
+                token.check()?;
+                let opened = (|| {
+                    path.to_str().context("Audio source path is not UTF-8")?;
+                    let file = open_regular_file(&path)?;
+                    let metadata = file.metadata()?;
+                    Ok::<_, anyhow::Error>((file, metadata))
+                })();
+                admitted.push((path, opened));
+            }
+            token.check()?;
+            Ok::<_, anyhow::Error>(admitted)
+        })
+        .await
+        .context("Scan source admission worker failed")??;
+    cancellation.check()?;
+    let mut opened = Vec::with_capacity(admitted.len());
+    let mut lookup_paths = Vec::with_capacity(admitted.len());
+    for (path, admission) in admitted {
+        match admission {
+            Ok((file, metadata)) => {
+                lookup_paths.push(path.clone());
+                opened.push(Ok((path, file, metadata)));
+            }
+            Err(error) => {
+                if budget.is_some()
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
+                {
+                    return Err(error.context("Import source is not a regular file"));
+                }
+                let not_found = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                opened.push(Err((
+                    path,
+                    SourceError {
+                        message: format!("{error:#}"),
+                        not_found,
+                    },
+                )));
+            }
+        }
+    }
+    // No blocking slot is held across this Core request. Keep the admitted fds.
+    let lookup_count = lookup_paths.len();
+    let known = if lookup_paths.is_empty() {
+        Ok(Vec::new())
+    } else {
+        known_sources(lookup_paths).await
+    };
+    let mut known = match known {
+        Ok(known) => {
+            anyhow::ensure!(
+                known.len() == lookup_count,
+                "Scan source lookup batch length mismatch"
+            );
+            Ok(known.into_iter())
+        }
+        Err(error) => Err(format!("{error:#}")),
+    };
+    let mut pending: std::collections::VecDeque<_> = opened
+        .into_iter()
+        .map(|admission| {
+            admission.and_then(|(path, file, metadata)| match &mut known {
+                Ok(known) => Ok(PendingSource {
+                    path,
+                    file,
+                    identity: source_identity_from_metadata(&metadata),
+                    size: metadata.len(),
+                    modified_ns: cache_modified_ns(metadata.modified().ok()),
+                    known: known.next().expect("source lookup length is checked"),
+                    initialized: false,
+                    media: None,
+                    fingerprint: None,
+                    hasher: None,
+                    hashed: 0,
+                }),
+                Err(error) => Err((
+                    path,
+                    SourceError {
+                        message: error.clone(),
+                        not_found: false,
+                    },
+                )),
+            })
+        })
+        .collect();
+    let mut outcomes = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        cancellation.check()?;
+        let token = cancellation.clone();
+        let mut buffer = std::mem::take(scratch);
+        let retained_budget = budget.cloned();
+        let (remaining, completed, buffer) = workers
+            .execute(move || {
+                let mut completed = Vec::new();
+                for _ in 0..SOURCE_STEPS_PER_TURN {
+                    token.check()?;
+                    let source = match pending.front_mut() {
+                        None => break,
+                        Some(Ok(source)) => source,
+                        Some(Err(_)) => {
+                            if let Some(Err(error)) = pending.pop_front() {
+                                completed.push(Err(error));
+                            }
+                            continue;
+                        }
+                    };
+                    match source.step(
+                        ffmpeg_enabled,
+                        &token,
+                        &mut buffer,
+                        retained_budget.as_ref(),
+                    ) {
+                        Ok(Some(record)) => {
+                            pending.pop_front();
+                            completed.push(Ok(record));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            token.check()?;
+                            if super::import_budget::ImportBudget::is_limit(&error) {
+                                return Err(error);
+                            }
+                            let Ok(source) = pending.pop_front().expect("front source is present")
+                            else {
+                                unreachable!("front source was admitted");
+                            };
+                            if let (Some(budget), Some(media)) =
+                                (retained_budget.as_ref(), &source.media)
+                            {
+                                budget.release(media_retained_bytes(media));
+                            }
+                            completed.push(Err((
+                                source.path,
+                                SourceError {
+                                    message: format!("{error:#}"),
+                                    not_found: false,
+                                },
+                            )));
+                        }
+                    }
+                }
+                token.check()?;
+                Ok::<_, anyhow::Error>((pending, completed, buffer))
+            })
+            .await
+            .context("Scan source batch worker failed")??;
+        *scratch = buffer;
+        pending = remaining;
+        cancellation.check()?;
+        outcomes.extend(completed);
+    }
+    Ok(outcomes)
 }
 
 pub(super) fn hash_chunk(
