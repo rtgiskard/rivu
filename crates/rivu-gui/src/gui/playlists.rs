@@ -715,6 +715,7 @@ impl PlaylistDrag {
 pub(super) struct PlaylistTarget {
     id: i64,
     name: String,
+    focus: FocusHandle,
 }
 
 #[derive(Clone)]
@@ -760,6 +761,30 @@ impl Playlists {
         cx.notify();
     }
 
+    fn playlist_action_callback(
+        action: &PlaylistAction,
+        callback: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static {
+        let (target, deleting) = match action {
+            PlaylistAction::Menu(target, _) => (target, false),
+            PlaylistAction::Delete(target) => (target, true),
+        };
+        let focus = target.focus.clone();
+        let id = target.id;
+        move |this, window, cx| {
+            let current = this.playlist_action.as_ref().is_some_and(|action| {
+                let (target, current_deleting) = match action {
+                    PlaylistAction::Menu(target, _) => (target, false),
+                    PlaylistAction::Delete(target) => (target, true),
+                };
+                target.focus == focus && target.id == id && deleting == current_deleting
+            });
+            if current {
+                callback(this, window, cx);
+            }
+        }
+    }
+
     pub(super) fn playlist_action_overlay(
         &self,
         window: &Window,
@@ -769,6 +794,7 @@ impl Playlists {
         let Some(action) = self.playlist_action.clone() else {
             return div().into_any_element();
         };
+        let rendered_action = self.playlist_action.as_ref().unwrap();
         if let PlaylistAction::Menu(target, position) = action {
             let id = target.id;
             let has_tracks = self.state.current_track().is_some();
@@ -780,39 +806,45 @@ impl Playlists {
                 .copied();
             let rename = target.clone();
             let delete = target.clone();
+            let dismiss = Self::playlist_action_callback(rendered_action, |this, window, cx| {
+                this.dismiss_playlist_action(window, cx);
+                cx.stop_propagation();
+            });
             let menu = rivu_ui::Popover::menu(theme, "playlist-row-menu", window)
                 .map(|surface| self.menu_surface(surface))
-                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                    this.dismiss_playlist_action(window, cx);
-                    cx.stop_propagation();
+                .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
+                    dismiss(this, window, cx);
                 }))
-                .child(rivu_ui::menu_item(
-                    "playlist-row-play",
-                    self.tr("li-replace-queue"),
-                    cx,
-                    move |this, window, cx| {
-                        let name = match this.playlist_action.take() {
-                            Some(PlaylistAction::Menu(target, _)) => target.name,
-                            _ => return,
-                        };
-                        this.focus_layout(window, cx);
-                        this.request_queue_replace(
-                            super::coordination::queue_replace::QueueReplacement::Playlist {
-                                id,
-                                name,
-                            },
-                            cx,
-                        );
-                    },
-                ))
+                .child(
+                    rivu_ui::menu_item(
+                        "playlist-row-play",
+                        self.tr("li-replace-queue"),
+                        cx,
+                        Self::playlist_action_callback(rendered_action, move |this, window, cx| {
+                            let Some(PlaylistAction::Menu(target, _)) = this.playlist_action.take()
+                            else {
+                                return;
+                            };
+                            this.focus_layout(window, cx);
+                            this.request_queue_replace(
+                                super::coordination::queue_replace::QueueReplacement::Playlist {
+                                    id: target.id,
+                                    name: target.name,
+                                },
+                                cx,
+                            );
+                        }),
+                    )
+                    .debug_selector(|| "playlist-row-play".into()),
+                )
                 .child(rivu_ui::menu_item(
                     "playlist-row-queue",
                     self.tr("li-queue"),
                     cx,
-                    move |this, window, cx| {
+                    Self::playlist_action_callback(rendered_action, move |this, window, cx| {
                         this.dismiss_playlist_action(window, cx);
                         this.append_playlist_to_queue(id, cx);
-                    },
+                    }),
                 ))
                 .child(rivu_ui::menu_separator(theme))
                 .child(rivu_ui::disabled_control(
@@ -821,7 +853,7 @@ impl Playlists {
                         "playlist-row-add",
                         self.tr("gl-add-current"),
                         cx,
-                        move |this, window, cx| {
+                        Self::playlist_action_callback(rendered_action, move |this, window, cx| {
                             let Some(track_id) = this.state.current_track().map(|track| track.id)
                             else {
                                 return;
@@ -834,7 +866,7 @@ impl Playlists {
                                 },
                                 cx,
                             );
-                        },
+                        }),
                     ),
                     !has_tracks,
                 ))
@@ -844,7 +876,7 @@ impl Playlists {
                         "playlist-row-deduplicate",
                         self.tr("shell-remove-duplicates"),
                         cx,
-                        move |this, window, cx| {
+                        Self::playlist_action_callback(rendered_action, move |this, window, cx| {
                             let Some(revision) = entry_revision else {
                                 return;
                             };
@@ -856,7 +888,7 @@ impl Playlists {
                                 },
                                 cx,
                             );
-                        },
+                        }),
                     ),
                     entry_revision.is_none(),
                 ))
@@ -864,7 +896,7 @@ impl Playlists {
                     "playlist-row-rename",
                     self.tr("gl-rename"),
                     cx,
-                    move |this, window, cx| {
+                    Self::playlist_action_callback(rendered_action, move |this, window, cx| {
                         this.playlist_action = None;
                         this.begin_playlist_name(
                             editor::PlaylistNameAction::Rename {
@@ -874,7 +906,7 @@ impl Playlists {
                             window,
                             cx,
                         );
-                    },
+                    }),
                 ))
                 .child(rivu_ui::danger_menu_item(
                     theme,
@@ -882,11 +914,12 @@ impl Playlists {
                         "playlist-row-delete",
                         self.tr("gl-delete"),
                         cx,
-                        move |this, _, cx| {
+                        Self::playlist_action_callback(rendered_action, move |this, _, cx| {
                             this.playlist_action = Some(PlaylistAction::Delete(delete.clone()));
                             cx.notify();
-                        },
-                    ),
+                        }),
+                    )
+                    .debug_selector(|| "playlist-row-delete".into()),
                 ));
             return gpui::anchored()
                 .position(position)
@@ -923,7 +956,10 @@ impl Playlists {
                                     IconButtonStyle::Surface,
                                     IconButtonDensity::Regular,
                                     cx,
-                                    |this, window, cx| this.dismiss_playlist_action(window, cx),
+                                    Self::playlist_action_callback(
+                                        rendered_action,
+                                        |this, window, cx| this.dismiss_playlist_action(window, cx),
+                                    ),
                                 ),
                             )
                             .child(danger_control(
@@ -937,14 +973,21 @@ impl Playlists {
                                     IconButtonStyle::Surface,
                                     IconButtonDensity::Regular,
                                     cx,
-                                    move |this, window, cx| {
-                                        this.dismiss_playlist_action(window, cx);
-                                        if this.browser.playlists().selected() == Some(id) {
-                                            this.browser.remove_playlist_selection();
-                                        }
-                                        this.send(Command::DeletePlaylist { playlist_id: id }, cx);
-                                    },
-                                ),
+                                    Self::playlist_action_callback(
+                                        rendered_action,
+                                        move |this, window, cx| {
+                                            this.dismiss_playlist_action(window, cx);
+                                            if this.browser.playlists().selected() == Some(id) {
+                                                this.browser.remove_playlist_selection();
+                                            }
+                                            this.send(
+                                                Command::DeletePlaylist { playlist_id: id },
+                                                cx,
+                                            );
+                                        },
+                                    ),
+                                )
+                                .debug_selector(|| "playlist-action-confirm".into()),
                             )),
                     ),
             )
@@ -1277,6 +1320,7 @@ impl Playlists {
                                             PlaylistTarget {
                                                 id,
                                                 name: menu_name.to_string(),
+                                                focus: cx.focus_handle(),
                                             },
                                             window.mouse_position(),
                                         ));
@@ -1303,6 +1347,7 @@ impl Playlists {
                                     PlaylistTarget {
                                         id,
                                         name: context_name.to_string(),
+                                        focus: cx.focus_handle(),
                                     },
                                     event.position,
                                 ));
@@ -2561,6 +2606,200 @@ mod content_menu_keyboard_tests {
         assert_eq!(entries.rows[0].track_id, 1);
     }
 
+    fn open_row_menu(app: &Entity<WindowView>, id: i64, cx: &mut TestAppContext) {
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists.playlist_action = Some(PlaylistAction::Menu(
+                    PlaylistTarget {
+                        id,
+                        name: format!("Target {id}"),
+                        focus: cx.focus_handle(),
+                    },
+                    gpui::point(px(10.), px(10.)),
+                ));
+                cx.notify();
+            });
+            cx.notify();
+        });
+    }
+
+    fn replace_and_click_row(
+        app: &Entity<WindowView>,
+        handle: AnyWindowHandle,
+        id: i64,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut TestAppContext,
+    ) {
+        // Test mode draws dirty windows at effect flush. Replace and dispatch
+        // atomically so both mouse events still traverse the previous frame.
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.playlists.update(cx, |playlists, cx| {
+                    playlists.playlist_action = Some(PlaylistAction::Menu(
+                        PlaylistTarget {
+                            id,
+                            name: format!("Target {id}"),
+                            focus: cx.focus_handle(),
+                        },
+                        gpui::point(px(10.), px(10.)),
+                    ));
+                    cx.notify();
+                });
+                cx.notify();
+            });
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+    }
+
+    fn click_row(
+        handle: AnyWindowHandle,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn playlist_old_play_mouse_frame_cannot_consume_replacement_menu(cx: &mut TestAppContext) {
+        let (_directory, _runtime, _save, app, handle) = fixture(cx);
+        open_row_menu(&app, 1, cx);
+        draw(handle, cx);
+        let play = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-row-play")
+            .unwrap()
+            .center();
+        replace_and_click_row(&app, handle, 2, play, cx);
+        app.read_with(cx, |app, cx| {
+            assert!(matches!(&app.playlists.read(cx).playlist_action,
+                Some(PlaylistAction::Menu(target, _)) if target.id == 2 && target.name == "Target 2"));
+        });
+        replace_and_click_row(&app, handle, 2, gpui::point(px(900.), px(650.)), cx);
+        assert!(app.read_with(cx, |app, cx| {
+            app.playlists.read(cx).playlist_action.is_some()
+        }));
+        draw(handle, cx);
+        let play = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-row-play")
+            .unwrap()
+            .center();
+        click_row(handle, play, cx);
+        assert!(app.read_with(cx, |app, cx| {
+            app.playlists.read(cx).playlist_action.is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn playlist_old_delete_confirmation_cannot_delete_reopened_target(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        open_row_menu(&app, 1, cx);
+        draw(handle, cx);
+        let delete = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-row-delete")
+            .unwrap()
+            .center();
+        click_row(handle, delete, cx);
+        draw(handle, cx);
+        let confirm = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-action-confirm")
+            .unwrap()
+            .center();
+        // Reopening the same ID is a different instance, not a continuation.
+        replace_and_click_row(&app, handle, 1, confirm, cx);
+        assert!(app.read_with(cx, |app, cx| matches!(
+            app.playlists.read(cx).playlist_action,
+            Some(PlaylistAction::Menu(..))
+        )));
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
+        let ViewResponse::PlaylistSummaries(page) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 100,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("playlist summaries")
+        };
+        assert_eq!(page.total, 72);
+        draw(handle, cx);
+        let delete = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-row-delete")
+            .unwrap()
+            .center();
+        click_row(handle, delete, cx);
+        draw(handle, cx);
+        let confirm = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-action-confirm")
+            .unwrap()
+            .center();
+        click_row(handle, confirm, cx);
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
+        let ViewResponse::PlaylistSummaries(page) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 100,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("playlist summaries")
+        };
+        assert_eq!(page.total, 71);
+        assert!(page.rows.iter().all(|row| row.id != 1));
+    }
+
     #[gpui::test]
     fn playlist_add_current_without_a_track_is_skipped_by_menu_keyboard(cx: &mut TestAppContext) {
         let (_directory, _runtime, _save, app, handle) = fixture(cx);
@@ -2571,6 +2810,7 @@ mod content_menu_keyboard_tests {
                     PlaylistTarget {
                         id: 1,
                         name: "Target".into(),
+                        focus: cx.focus_handle(),
                     },
                     gpui::point(px(10.), px(10.)),
                 ));
@@ -2623,6 +2863,7 @@ mod content_menu_keyboard_tests {
                     PlaylistTarget {
                         id: 1,
                         name: "Target".into(),
+                        focus: cx.focus_handle(),
                     },
                     gpui::point(px(10.), px(10.)),
                 ));

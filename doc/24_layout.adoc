@@ -388,7 +388,9 @@ link:02_library.adoc#paged-views[Paged views].
 
 Settings root-removal controls retain the configured path and edit session, not
 the rendered vector index. Hidden or reopened Settings cannot accept that old
-input.
+input. Content and playlist action menus bind rendered callbacks, including
+dismissal and destructive confirmation, to their menu instance and page; replacing
+a menu does not transfer its old controls to the replacement source.
 
 Scroll offsets belong to panel instances in the current tree, not to their
 visibility in a frame. Inactive tabs retain their viewport state but cannot

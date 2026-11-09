@@ -11,7 +11,7 @@ use rivu_protocol::model::{Command, Query};
 use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 use std::{collections::HashSet, path::PathBuf};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoveTarget {
     Selection,
     LibraryRoot,
@@ -722,6 +722,26 @@ impl WindowView {
         }
     }
 
+    // Rendered controls belong to both this menu instance and this page. Async
+    // collection completion deliberately uses content_action directly instead.
+    fn content_menu_callback(
+        state: &ContentMenu,
+        callback: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static {
+        let focus = state.playlist_targets.focus.clone();
+        let page = state.keyboard_page();
+        let remove_target = state.confirm_remove;
+        move |this, window, cx| {
+            if this.content_menu.as_ref().is_some_and(|menu| {
+                menu.playlist_targets.focus == focus
+                    && menu.keyboard_page() == page
+                    && menu.confirm_remove == remove_target
+            }) {
+                callback(this, window, cx);
+            }
+        }
+    }
+
     pub(in crate::gui) fn content_menu_overlay(
         &self,
         window: &Window,
@@ -731,12 +751,15 @@ impl WindowView {
         let Some(state) = self.content_menu.as_ref() else {
             return div().into_any_element();
         };
+        let dismiss = Self::content_menu_callback(state, |this, _, cx| {
+            this.replace_content_menu(None, cx);
+            cx.stop_propagation();
+            cx.notify();
+        });
         let mut menu = Popover::menu(theme, "content-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.replace_content_menu(None, cx);
-                cx.stop_propagation();
-                cx.notify();
+            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
+                dismiss(this, window, cx);
             }));
         if state.loading {
             menu = menu.child(caption(theme, self.tr("shell-loading")));
@@ -759,10 +782,10 @@ impl WindowView {
                     "content-cancel-remove",
                     self.tr("action-cancel"),
                     cx,
-                    |this, _, cx| {
+                    Self::content_menu_callback(state, |this, _, cx| {
                         this.replace_content_menu(None, cx);
                         cx.notify();
-                    },
+                    }),
                 ))
                 .child(rivu_ui::danger_menu_item(
                     theme,
@@ -770,8 +793,11 @@ impl WindowView {
                         "content-confirm-remove",
                         self.tr(label),
                         cx,
-                        move |this, _, cx| this.content_action(action, cx),
-                    ),
+                        Self::content_menu_callback(state, move |this, _, cx| {
+                            this.content_action(action, cx)
+                        }),
+                    )
+                    .debug_selector(|| "content-confirm-remove".into()),
                 ));
         } else if state.playlists {
             menu = menu.child(rivu_ui::menu_title(theme, self.tr("li-playlist")));
@@ -780,12 +806,12 @@ impl WindowView {
                     "content-new-playlist",
                     self.tr("playlist-create"),
                     cx,
-                    |this, window, cx| {
+                    Self::content_menu_callback(state, |this, window, cx| {
                         this.content_action(
                             ContentAction::CreatePlaylist(window.window_handle()),
                             cx,
                         );
-                    },
+                    }),
                 ));
             }
             let count = self.playlists.read(cx).catalog_len();
@@ -902,9 +928,9 @@ impl WindowView {
                     "content-back",
                     self.tr("shell-back"),
                     cx,
-                    |this, _, cx| {
+                    Self::content_menu_callback(state, |this, _, cx| {
                         this.set_content_menu_playlists(false, cx);
-                    },
+                    }),
                 ));
         } else {
             if state.play.is_some() {
@@ -912,24 +938,31 @@ impl WindowView {
                     "content-play",
                     self.tr("playback-play"),
                     cx,
-                    |this, _, cx| this.content_action(ContentAction::Play, cx),
+                    Self::content_menu_callback(state, |this, _, cx| {
+                        this.content_action(ContentAction::Play, cx)
+                    }),
                 ));
             }
             menu = menu
-                .child(menu_item(
-                    "content-queue",
-                    self.tr("li-queue"),
-                    cx,
-                    |this, _, cx| this.content_action(ContentAction::Queue, cx),
-                ))
+                .child(
+                    menu_item(
+                        "content-queue",
+                        self.tr("li-queue"),
+                        cx,
+                        Self::content_menu_callback(state, |this, _, cx| {
+                            this.content_action(ContentAction::Queue, cx)
+                        }),
+                    )
+                    .debug_selector(|| "content-queue".into()),
+                )
                 .child(
                     menu_item(
                         "content-playlist",
                         self.tr("li-playlist"),
                         cx,
-                        |this, _, cx| {
+                        Self::content_menu_callback(state, |this, _, cx| {
                             this.set_content_menu_playlists(true, cx);
-                        },
+                        }),
                     )
                     .track_focus(&state.playlist_trigger)
                     .tab_stop(true),
@@ -940,7 +973,9 @@ impl WindowView {
                     "content-remove",
                     self.tr(state.remove_label),
                     cx,
-                    |this, _, cx| this.content_action(ContentAction::Remove, cx),
+                    Self::content_menu_callback(state, |this, _, cx| {
+                        this.content_action(ContentAction::Remove, cx)
+                    }),
                 ));
             }
             if state.tracks_only {
@@ -953,7 +988,9 @@ impl WindowView {
                             "content-favorite",
                             self.tr("li-favorite"),
                             cx,
-                            |this, _, cx| this.content_action(ContentAction::Favorite(true), cx),
+                            Self::content_menu_callback(state, |this, _, cx| {
+                                this.content_action(ContentAction::Favorite(true), cx)
+                            }),
                         ),
                         !can_favorite,
                     ))
@@ -963,7 +1000,9 @@ impl WindowView {
                             "content-unfavorite",
                             self.tr("li-unfavorite"),
                             cx,
-                            |this, _, cx| this.content_action(ContentAction::Favorite(false), cx),
+                            Self::content_menu_callback(state, |this, _, cx| {
+                                this.content_action(ContentAction::Favorite(false), cx)
+                            }),
                         ),
                         !can_unfavorite,
                     ));
@@ -973,13 +1012,14 @@ impl WindowView {
                     "content-remove",
                     self.tr(state.remove_label),
                     cx,
-                    |this, _, cx| {
+                    Self::content_menu_callback(state, |this, _, cx| {
                         if let Some(menu) = &mut this.content_menu {
                             menu.confirm_remove = Some(RemoveTarget::Selection);
                         }
                         cx.notify();
-                    },
-                );
+                    }),
+                )
+                .debug_selector(|| "content-remove".into());
                 menu = menu
                     .child(rivu_ui::menu_separator(theme))
                     .child(rivu_ui::danger_menu_item(theme, item));
@@ -993,12 +1033,12 @@ impl WindowView {
                             "content-remove-root",
                             self.tr("li-remove-root"),
                             cx,
-                            |this, _, cx| {
+                            Self::content_menu_callback(state, |this, _, cx| {
                                 if let Some(menu) = &mut this.content_menu {
                                     menu.confirm_remove = Some(RemoveTarget::LibraryRoot);
                                 }
                                 cx.notify();
-                            },
+                            }),
                         ),
                     ));
             }
@@ -1197,6 +1237,253 @@ mod tests {
         };
         assert_eq!(page.total, page.rows.len());
         page.rows.into_iter().map(|row| row.favorite).collect()
+    }
+
+    struct MenuWindow(Entity<WindowView>);
+
+    impl Render for MenuWindow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().relative().size_full().child(
+                self.0
+                    .update(cx, |app, cx| app.content_menu_overlay(window, cx)),
+            )
+        }
+    }
+
+    fn overlay_fixture(cx: &mut TestAppContext) -> Fixture {
+        let fixture = fixture(cx);
+        let app = fixture.app.clone();
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.replace_root(cx, |_, cx| {
+                cx.observe(&app, |_, _, cx| cx.notify()).detach();
+                MenuWindow(app)
+            });
+        })
+        .unwrap();
+        fixture
+    }
+
+    fn dispatch_menu_click(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    fn change_and_click_menu(
+        fixture: &Fixture,
+        position: Point<Pixels>,
+        change: impl FnOnce(&mut WindowView, &mut Context<WindowView>),
+        cx: &mut TestAppContext,
+    ) {
+        // GPUI test mode draws dirty windows at effect flush. Keep mutation and
+        // input within this update so the event actually uses the old frame.
+        cx.update_window(fixture.window, |_, window, cx| {
+            fixture.app.update(cx, change);
+            dispatch_menu_click(window, cx, position);
+        })
+        .unwrap();
+    }
+
+    fn draw_menu(fixture: &Fixture, cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+    }
+
+    fn click_menu(fixture: &Fixture, position: Point<Pixels>, cx: &mut TestAppContext) {
+        cx.update_window(fixture.window, |_, window, cx| {
+            dispatch_menu_click(window, cx, position);
+        })
+        .unwrap();
+    }
+
+    fn menu_point(
+        fixture: &Fixture,
+        selector: &'static str,
+        cx: &mut TestAppContext,
+    ) -> Point<Pixels> {
+        VisualTestContext::from_window(fixture.window, cx)
+            .debug_bounds(selector)
+            .expect("rendered menu control")
+            .center()
+    }
+
+    fn open_removable(fixture: &Fixture, cx: &mut TestAppContext) {
+        fixture.app.update(cx, |app, cx| {
+            app.open_object_menu(
+                ContentMenuRequest {
+                    source: TrackSource::Tracks(vec![fixture.member]),
+                    position: point(px(10.), px(10.)),
+                    play: None,
+                },
+                ContentGuard::None,
+                Some(Command::RemoveTracks {
+                    track_ids: vec![fixture.member],
+                }),
+                None,
+                None,
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn replaced_content_menu_rejects_old_mouse_frame_and_accepts_fresh_queue(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = overlay_fixture(cx);
+        fixture
+            .app
+            .update(cx, |app, cx| open_album(app, &fixture.album, cx));
+        draw_menu(&fixture, cx);
+        let queue = menu_point(&fixture, "content-queue", cx);
+        change_and_click_menu(
+            &fixture,
+            queue,
+            |app, cx| open_album(app, &fixture.other, cx),
+            cx,
+        );
+        fixture.app.read_with(cx, |app, _| {
+            assert!(matches!(&app.content_menu.as_ref().unwrap().source,
+                TrackSource::Album { key, .. } if key == &fixture.other));
+        });
+        change_and_click_menu(
+            &fixture,
+            point(px(900.), px(650.)),
+            |app, cx| {
+                open_album(app, &fixture.other, cx);
+            },
+            cx,
+        );
+        assert!(
+            fixture
+                .app
+                .read_with(cx, |app, _| app.content_menu.is_some())
+        );
+        draw_menu(&fixture, cx);
+        let queue = menu_point(&fixture, "content-queue", cx);
+        click_menu(&fixture, queue, cx);
+        assert!(
+            fixture
+                .app
+                .read_with(cx, |app, _| app.content_menu.is_none())
+        );
+        let ack = futures::executor::block_on(
+            fixture
+                .runtime
+                .handle
+                .request_ack(Command::Volume { value: 0.0 }),
+        )
+        .ack;
+        assert!(ack.is_success());
+        let ViewResponse::QueuePage(page) = fixture
+            .runtime
+            .handle
+            .query(Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("queue page")
+        };
+        assert_eq!(page.total, 1, "only the fresh menu's album is queued");
+    }
+
+    #[gpui::test]
+    fn replaced_content_confirmation_rejects_old_mouse_and_fresh_remove_still_works(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = overlay_fixture(cx);
+        open_removable(&fixture, cx);
+        draw_menu(&fixture, cx);
+        let remove = menu_point(&fixture, "content-remove", cx);
+        click_menu(&fixture, remove, cx);
+        draw_menu(&fixture, cx);
+        let confirm = menu_point(&fixture, "content-confirm-remove", cx);
+        // Even within one instance, Selection and LibraryRoot are distinct
+        // confirmation pages. Keep the Selection frame while changing target.
+        change_and_click_menu(
+            &fixture,
+            confirm,
+            |app, cx| {
+                app.content_menu.as_mut().unwrap().confirm_remove = Some(RemoveTarget::LibraryRoot);
+                cx.notify();
+            },
+            cx,
+        );
+        assert!(fixture.app.read_with(cx, |app, _| {
+            app.content_menu.as_ref().unwrap().confirm_remove == Some(RemoveTarget::LibraryRoot)
+        }));
+        assert_eq!(favorites(&fixture.runtime, &fixture.album).len(), 3);
+        change_and_click_menu(
+            &fixture,
+            confirm,
+            |app, cx| {
+                app.open_object_menu(
+                    ContentMenuRequest {
+                        source: TrackSource::Tracks(vec![fixture.member]),
+                        position: point(px(10.), px(10.)),
+                        play: None,
+                    },
+                    ContentGuard::None,
+                    Some(Command::RemoveTracks {
+                        track_ids: vec![fixture.member],
+                    }),
+                    None,
+                    None,
+                    cx,
+                );
+            },
+            cx,
+        );
+        fixture.app.read_with(cx, |app, _| {
+            assert!(app.content_menu.as_ref().unwrap().confirm_remove.is_none());
+        });
+        assert_eq!(favorites(&fixture.runtime, &fixture.album).len(), 3);
+        draw_menu(&fixture, cx);
+        let remove = menu_point(&fixture, "content-remove", cx);
+        let queue = menu_point(&fixture, "content-queue", cx);
+        cx.update_window(fixture.window, |_, window, cx| {
+            dispatch_menu_click(window, cx, remove);
+            // The retained main-page frame cannot enqueue from confirmation.
+            dispatch_menu_click(window, cx, queue);
+        })
+        .unwrap();
+        assert!(fixture.app.read_with(cx, |app, _| {
+            app.content_menu.as_ref().unwrap().confirm_remove.is_some()
+        }));
+        draw_menu(&fixture, cx);
+        let confirm = menu_point(&fixture, "content-confirm-remove", cx);
+        click_menu(&fixture, confirm, cx);
+        assert!(
+            fixture
+                .app
+                .read_with(cx, |app, _| app.content_menu.is_none())
+        );
+        assert_eq!(favorites(&fixture.runtime, &fixture.album).len(), 2);
     }
 
     #[gpui::test]
