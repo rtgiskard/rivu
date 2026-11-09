@@ -109,6 +109,14 @@ or killing only a frontend leaves the service alive. Accepted shutdown
 acknowledgements drain before transport retirement. Window/display resource release is described in
 link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
 
+The TUI owns raw mode, the alternate screen and cursor visibility through a
+guard established immediately after enabling raw mode. Partial initialization
+failure and Rust panic unwinding attempt the same cleanup as normal exit, with
+each restoration step attempted even if another fails. Normal exit reports a
+cleanup failure unless an earlier run error takes precedence; unwinding keeps
+the original panic. Process abort and uncatchable termination cannot run this
+cleanup.
+
 [[realtime-pcm-transport]]
 ==== Realtime PCM transport
 

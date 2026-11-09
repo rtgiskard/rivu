@@ -45,21 +45,10 @@ pub fn run(
 ) -> Result<()> {
     let termination = TerminalTermination::new().context("register terminal shutdown signals")?;
     let i18n = Arc::new(Localizer::for_terminal(language));
-    enable_raw_mode().context("enable terminal raw mode")?;
-    let mut stdout = io::stdout();
-    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
-        restore_terminal_without_screen(&mut stdout);
-        return Err(error.into());
-    }
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            let mut stdout = io::stdout();
-            restore_terminal_without_screen(&mut stdout);
-            return Err(error.into());
-        }
-    };
+    let mut restore = TerminalRestoreGuard::new()?;
+    execute!(restore.stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
     let result = run_loop(
         data_dir,
         &mut terminal,
@@ -74,29 +63,55 @@ pub fn run(
             }
         },
     );
-    let cleanup = restore_terminal(&mut terminal);
+    drop(terminal);
+    let cleanup = restore.restore();
     match result {
         Err(error) => Err(error),
         Ok(()) => cleanup,
     }
 }
 
-fn restore_terminal_without_screen(stdout: &mut Stdout) {
-    let _ = disable_raw_mode();
-    let _ = execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show);
+/// Own terminal modes before any fallible screen initialization can run.
+struct TerminalRestoreGuard {
+    stdout: Stdout,
+    active: bool,
 }
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+
+impl TerminalRestoreGuard {
+    fn new() -> Result<Self> {
+        let stdout = io::stdout();
+        enable_raw_mode().context("enable terminal raw mode")?;
+        Ok(Self {
+            stdout,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        self.active = false;
+        restore_terminal(&mut self.stdout)
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.restore();
+        }
+    }
+}
+
+fn restore_terminal(stdout: &mut Stdout) -> Result<()> {
     let mut first = None;
     if let Err(error) = disable_raw_mode().context("restore terminal raw mode") {
         first = Some(error);
     }
-    if let Err(error) =
-        execute!(terminal.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")
+    if let Err(error) = execute!(stdout, LeaveAlternateScreen).context("leave alternate screen")
         && first.is_none()
     {
         first = Some(error);
     }
-    if let Err(error) = terminal.show_cursor().context("restore cursor")
+    if let Err(error) = execute!(stdout, crossterm::cursor::Show).context("restore cursor")
         && first.is_none()
     {
         first = Some(error);
@@ -349,6 +364,9 @@ where
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod restore_tests;
 
 #[cfg(test)]
 mod startup_tests {
