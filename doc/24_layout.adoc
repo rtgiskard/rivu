@@ -386,6 +386,10 @@ link:22_cache.adoc#query-projection-retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
 link:02_library.adoc#paged-views[Paged views].
 
+Settings root-removal controls retain the configured path and edit session, not
+the rendered vector index. Hidden or reopened Settings cannot accept that old
+input.
+
 Scroll offsets belong to panel instances in the current tree, not to their
 visibility in a frame. Inactive tabs retain their viewport state but cannot
 receive pointer or page-key input. Structural edits release state for removed

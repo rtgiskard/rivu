@@ -224,16 +224,19 @@ impl Settings {
         let colors = palette(cx);
         let mut paths = column()
             .id("settings-library-roots-list")
+            .debug_selector(|| "settings-library-roots-list".into())
             .max_h_40()
             .pl_3()
             .overflow_y_scroll()
             .gap_1();
+        let session = self.model.session();
         for (index, path) in self.model.draft.library_roots.iter().enumerate() {
             let stats = self.root_stats_label(path);
             let stats_hint: SharedString = self
                 .root_stats_error()
                 .map(|error| SharedString::from(error.to_owned()))
                 .unwrap_or_else(|| self.tr("settings-library-root-stats-hint"));
+            let root = path.clone();
             let path: SharedString = path.to_string_lossy().into_owned().into();
             paths = paths.child(
                 row()
@@ -273,6 +276,22 @@ impl Settings {
                             rivu_ui::IconButtonDensity::Regular,
                             cx,
                             move |this, _, cx| {
+                                if !this.active
+                                    || this.page != SettingsPage::Library
+                                    || this.model.target() != Target::Global
+                                    || this.model.session() != session
+                                {
+                                    return;
+                                }
+                                let Some(index) = this
+                                    .model
+                                    .draft
+                                    .library_roots
+                                    .iter()
+                                    .position(|path| path == &root)
+                                else {
+                                    return;
+                                };
                                 this.model.draft.library_roots.remove(index);
                                 this.model.edited();
                                 this.sync_library_stats(cx);
@@ -1494,5 +1513,147 @@ impl Settings {
                 )),
         };
         column().gap_3().child(scope).child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, Entity, InputEvent as _, Render, TestAppContext, VisualTestContext};
+
+    struct RootsWindow(Entity<Settings>);
+
+    impl Render for RootsWindow {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(gpui::px(600.))
+                .child(self.0.update(cx, |settings, cx| settings.library_roots(cx)))
+        }
+    }
+
+    fn click(window: &mut gpui::Window, position: gpui::Point<gpui::Pixels>, cx: &mut gpui::App) {
+        window.dispatch_event(
+            gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    fn positions(
+        handle: gpui::AnyWindowHandle,
+        count: usize,
+        cx: &mut TestAppContext,
+    ) -> Vec<gpui::Point<gpui::Pixels>> {
+        let bounds = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("settings-library-roots-list")
+            .unwrap();
+        let gap = gpui::px(4.);
+        let height = (bounds.size.height - gap * (count - 1) as f32) / count as f32;
+        (0..count)
+            .map(|index| {
+                gpui::point(
+                    bounds.right() - gpui::px(8.),
+                    bounds.top() + (height + gap) * index as f32 + height * 0.5,
+                )
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn retained_root_buttons_remove_only_their_original_paths(cx: &mut TestAppContext) {
+        let (directory, _runtime, settings) = super::super::tests::fixture(cx);
+        let roots = ["a", "b", "c"].map(|name| directory.path().join(name));
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| RootsWindow(settings)
+        });
+        let handle = window.into();
+        for (count, clicks, remaining) in [
+            (2, [1, 1], vec![roots[0].clone()]),
+            (3, [1, 1], vec![roots[0].clone(), roots[2].clone()]),
+            (3, [0, 1], vec![roots[2].clone()]),
+        ] {
+            settings.update(cx, |settings, _| {
+                settings.page = SettingsPage::Library;
+                settings.model.draft.library_roots = roots[..count].to_vec();
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.set_rem_size(gpui::px(16.));
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            let positions = positions(handle, count, cx);
+            cx.update_window(handle, |_, window, cx| {
+                // Both inputs use the painted frame, even after the first edit.
+                for index in clicks {
+                    click(window, positions[index], cx);
+                }
+            })
+            .unwrap();
+            settings.read_with(cx, |settings, _| {
+                assert_eq!(settings.model.draft.library_roots, remaining);
+            });
+        }
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        let fresh = positions(handle, 1, cx)[0];
+        cx.update_window(handle, |_, window, cx| click(window, fresh, cx))
+            .unwrap();
+        settings.read_with(cx, |settings, _| {
+            assert!(settings.model.draft.library_roots.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn retained_root_button_cannot_edit_hidden_or_reopened_settings(cx: &mut TestAppContext) {
+        let (directory, runtime, settings) = super::super::tests::fixture(cx);
+        let roots = vec![directory.path().join("music")];
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| RootsWindow(settings)
+        });
+        let handle = window.into();
+        for transition in ["hidden", "page", "session"] {
+            settings.update(cx, |settings, _| {
+                settings.active = true;
+                settings.page = SettingsPage::Library;
+                settings.model.draft.library_roots = roots.clone();
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.set_rem_size(gpui::px(16.));
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            let position = positions(handle, 1, cx)[0];
+            cx.update_window(handle, |_, window, cx| {
+                settings.update(cx, |settings, _| match transition {
+                    "hidden" => settings.active = false,
+                    "page" => settings.page = SettingsPage::Interface,
+                    "session" => {
+                        settings.model.reset(&runtime.handle.config_snapshot());
+                        settings.model.draft.library_roots = roots.clone();
+                    }
+                    _ => unreachable!(),
+                });
+                click(window, position, cx);
+            })
+            .unwrap();
+            settings.read_with(cx, |settings, _| {
+                assert_eq!(settings.model.draft.library_roots, roots);
+            });
+        }
     }
 }
