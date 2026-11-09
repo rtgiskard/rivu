@@ -1071,7 +1071,8 @@ fn config_from_document<S: AsRef<str>>(
     if config.ui_font.is_empty() {
         config.ui_font = DEFAULT_UI_FONT.to_owned();
     }
-    config.validate()?;
+    config.library_roots = config.validate_settings()?;
+    config.processing_graph.validate()?;
     Ok(config)
 }
 

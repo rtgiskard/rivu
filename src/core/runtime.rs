@@ -236,14 +236,11 @@ impl CoreRuntime {
     fn start_inner(
         data_dir: &Path,
         config_path: &Path,
-        mut config: Config,
+        config: Config,
         logging: Option<rivu_utils::logging::Control>,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Result<Self> {
-        let roots = config.validate_settings()?;
-        config.processing_graph.validate()?;
-        config.library_roots = roots;
         // An existing file establishes an effective, normalized baseline without
         // rewriting user formatting or materializing omitted defaults at startup.
         let saved_config = config_path.try_exists()?.then(|| config.clone());

@@ -419,12 +419,16 @@ fn explicit_versions_gate_current_fields_and_syntax_errors_keep_the_parse_cause(
 
 #[test]
 fn grouped_round_trip_uses_shared_defaults_validation_and_normalization() {
-    let text = "schema_version = 2\n[interface]\nlanguage = 'ZH_cn'\nfont = ''\n[playback]\nrepeat = 'one'\nvolume_percent = 25\n";
+    let text = "schema_version = 2\n[library]\nroots = ['/Music/Z/../Z', '/Music/A/./']\n[interface]\nlanguage = 'ZH_cn'\nfont = ''\n[playback]\nrepeat = 'one'\nvolume_percent = 25\n";
     let config = from_toml(text).unwrap();
     assert_eq!(config.ui_language, "zh-CN");
     assert_eq!(config.ui_font, Config::default().ui_font);
     assert_eq!(config.repeat, RepeatMode::One);
     assert_eq!(config.volume, 0.25);
+    assert_eq!(
+        config.library_roots,
+        vec![PathBuf::from("/Music/Z"), PathBuf::from("/Music/A")]
+    );
     let saved = to_toml(&config).unwrap();
     assert_eq!(from_toml(&saved).unwrap(), config);
     let empty_font = Config {
