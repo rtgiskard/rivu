@@ -20,13 +20,38 @@ pub(super) enum WorkbenchChoice {
     Fft(NodeField, &'static str),
 }
 
+/// Last-frame controls cannot borrow a replacement panel's input authority.
+#[derive(Clone)]
+pub(super) struct WorkbenchInput {
+    panel: u64,
+    bounds: MeasuredGraph,
+    input_epoch: u64,
+    geometry_epoch: u64,
+}
+
+impl WorkbenchInput {
+    pub(super) fn current(&self, owner: &AudioProcessing) -> bool {
+        owner.page == Page::Graph
+            && self.geometry_epoch == owner.geometry_epoch
+            && owner
+                .graph_editor
+                .workbenches
+                .get(&self.panel)
+                .is_some_and(|state| {
+                    state.input_epoch == self.input_epoch
+                        && Rc::ptr_eq(&state.zoom_bounds, &self.bounds)
+                })
+    }
+}
+
 pub(super) struct WorkbenchPanel {
     wide: bool,
     parameters: bool,
     inspector_open: bool,
     inspector_width: f32,
     resize: Option<(Pixels, f32, WindowGeometry)>,
-    zoom_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    input_epoch: u64,
+    zoom_bounds: MeasuredGraph,
     zoom_drag: Option<WindowGeometry>,
     connections: bool,
     menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 3]>>,
@@ -41,6 +66,7 @@ impl Default for WorkbenchPanel {
             inspector_open: true,
             inspector_width: 25.,
             resize: None,
+            input_epoch: 0,
             connections: false,
             zoom_bounds: Rc::new(Cell::new(None)),
             zoom_drag: None,
@@ -99,11 +125,19 @@ impl AudioProcessing {
         cx: &Context<Self>,
     ) -> AnyElement {
         let owner = cx.entity().downgrade();
+        let target = self
+            .graph_editor
+            .workbenches
+            .get(&panel)
+            .map(|_| self.workbench_input(panel));
         canvas(
             move |bounds, window, cx| {
                 let wide = bounds.size.width >= window.rem_size() * 64.;
                 let _ = owner.update(cx, |this, cx| {
-                    let state = this.graph_editor.workbenches.entry(panel).or_default();
+                    if !target.as_ref().is_some_and(|target| target.current(this)) {
+                        return;
+                    }
+                    let state = this.graph_editor.workbenches.get_mut(&panel).unwrap();
                     if state.wide != wide {
                         state.wide = wide;
                         this.cancel_pointer(cx);
@@ -184,6 +218,7 @@ impl AudioProcessing {
             }
         };
         let resize_owner = cx.entity().downgrade();
+        let resize_target = self.workbench_input(panel);
         let mut view = column()
             .size_full()
             .min_h_0()
@@ -192,7 +227,11 @@ impl AudioProcessing {
                 canvas(
                     |_, _, _| {},
                     move |_, _, window, _| {
-                        Self::inspector_resize_handlers(resize_owner.clone(), panel, window);
+                        Self::inspector_resize_handlers(
+                            resize_owner.clone(),
+                            resize_target.clone(),
+                            window,
+                        );
                     },
                 )
                 .absolute()
@@ -245,6 +284,7 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let busy = self.graph_busy();
         let drafts = self.graph_dirty_count(cx) > 0;
+        let target = self.workbench_input(panel);
         let mut editing = row()
             .flex_shrink_0()
             .max_w_full()
@@ -264,6 +304,7 @@ impl AudioProcessing {
             (false, "󰕌", "processing-graph-undo"),
             (true, "󰑎", "processing-graph-redo"),
         ] {
+            let target = target.clone();
             let empty = if redo {
                 self.graph_editor.redo.is_empty()
             } else {
@@ -280,7 +321,11 @@ impl AudioProcessing {
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Compact,
                     cx,
-                    move |this, _, cx| this.graph_history(redo, cx),
+                    move |this, _, cx| {
+                        if target.current(this) {
+                            this.graph_history(redo, cx);
+                        }
+                    },
                 ),
             );
         }
@@ -296,12 +341,14 @@ impl AudioProcessing {
                     "󰘖",
                     self.tr("processing-workspace-fit"),
                 )
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
-                    move |this, _, cx| this.graph_fit(panel, None, cx),
-                ),
+                .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                    let target = target.clone();
+                    move |this, _, cx| {
+                        if target.current(this) {
+                            this.graph_fit(panel, None, cx);
+                        }
+                    }
+                }),
             )
             .child(
                 IconButton::new(
@@ -310,16 +357,16 @@ impl AudioProcessing {
                     self.tr("processing-workspace-locate"),
                 )
                 .enabled(selected)
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
+                .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                    let target = target.clone();
                     move |this, _, cx| {
-                        if let Some(id) = this.graph_editor.selected {
+                        if target.current(this)
+                            && let Some(id) = this.graph_editor.selected
+                        {
                             this.graph_fit(panel, Some((id, id)), cx);
                         }
-                    },
-                ),
+                    }
+                }),
             )
             .child(
                 IconButton::new(
@@ -327,17 +374,18 @@ impl AudioProcessing {
                     "󰑐",
                     self.tr("processing-graph-reset-view"),
                 )
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
-                    |this, _, cx| {
+                .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                    let target = target.clone();
+                    move |this, _, cx| {
+                        if !target.current(this) {
+                            return;
+                        }
                         this.cancel_pointer(cx);
                         this.graph_editor.pan = [24., 24.];
                         this.graph_editor.zoom = 1.;
                         cx.notify();
-                    },
-                ),
+                    }
+                }),
             )
             .child(
                 rivu_ui::icon("", cx)
@@ -360,17 +408,19 @@ impl AudioProcessing {
                     self.tr("processing-graph-connections"),
                 )
                 .toggled(self.graph_editor.workbenches[&panel].connections)
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
+                .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                    let target = target.clone();
                     move |this, _, cx| {
+                        if !target.current(this) {
+                            return;
+                        }
                         this.cancel_pointer(cx);
-                        let state = this.graph_editor.workbenches.entry(panel).or_default();
+                        let state = this.graph_editor.workbenches.get_mut(&panel).unwrap();
                         state.connections = !state.connections;
+                        state.input_epoch = state.input_epoch.wrapping_add(1);
                         cx.notify();
-                    },
-                ),
+                    }
+                }),
             )
             .child(
                 IconButton::new(
@@ -384,21 +434,23 @@ impl AudioProcessing {
                 )
                 .enabled(selected)
                 .toggled(parameters_visible)
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
+                .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                    let target = target.clone();
                     move |this, _, cx| {
+                        if !target.current(this) {
+                            return;
+                        }
                         this.cancel_pointer(cx);
-                        let state = this.graph_editor.workbenches.entry(panel).or_default();
+                        let state = this.graph_editor.workbenches.get_mut(&panel).unwrap();
                         if state.wide {
                             state.inspector_open = !state.inspector_open;
                         } else {
                             state.parameters = !state.parameters;
                         }
+                        state.input_epoch = state.input_epoch.wrapping_add(1);
                         cx.notify();
-                    },
-                ),
+                    }
+                }),
             );
         if !self.graph_editor.workbenches[&panel].wide && parameters_visible {
             inspection = inspection.child(
@@ -407,12 +459,13 @@ impl AudioProcessing {
                     self.tr("processing-workspace-back-graph"),
                     cx,
                     move |this, _, cx| {
+                        if !target.current(this) {
+                            return;
+                        }
                         this.cancel_pointer(cx);
-                        this.graph_editor
-                            .workbenches
-                            .entry(panel)
-                            .or_default()
-                            .parameters = false;
+                        let state = this.graph_editor.workbenches.get_mut(&panel).unwrap();
+                        state.parameters = false;
+                        state.input_epoch = state.input_epoch.wrapping_add(1);
                         cx.notify();
                     },
                 )
@@ -629,6 +682,9 @@ impl AudioProcessing {
     }
 
     pub(in crate::gui) fn close_workbench_controls(&mut self) {
+        for state in self.graph_editor.workbenches.values_mut() {
+            state.input_epoch = state.input_epoch.wrapping_add(1);
+        }
         self.graph_editor.workbench_choices.close();
         self.graph_editor.workbench_menu = None;
         self.graph_editor.workbench_anchor.set(None);
@@ -656,6 +712,7 @@ impl AudioProcessing {
     ) {
         for (panel, state) in &mut self.graph_editor.workbenches {
             if !visible || !layout.is_panel_active(*panel) {
+                state.input_epoch = state.input_epoch.wrapping_add(1);
                 state.resize = None;
                 state.zoom_drag = None;
             }
@@ -666,6 +723,15 @@ impl AudioProcessing {
             .is_some_and(|(panel, _)| !visible || !layout.is_panel_active(panel))
         {
             self.close_workbench_controls();
+        }
+    }
+
+    pub(super) fn workbench_input(&self, panel: u64) -> WorkbenchInput {
+        WorkbenchInput {
+            panel,
+            bounds: Rc::clone(&self.graph_editor.workbenches[&panel].zoom_bounds),
+            input_epoch: self.graph_editor.workbenches[&panel].input_epoch,
+            geometry_epoch: self.geometry_epoch,
         }
     }
 
@@ -692,6 +758,7 @@ impl AudioProcessing {
                 .menu_bounds,
         );
         let trigger_bounds = Rc::clone(&measured);
+        let target = self.workbench_input(panel);
         let owner = cx.entity().downgrade();
         let close_on_move = open;
         let measure = canvas(
@@ -729,6 +796,9 @@ impl AudioProcessing {
             },
             cx,
             move |this, _, cx| {
+                if !target.current(this) {
+                    return;
+                }
                 if this.graph_editor.workbench_menu == Some((panel, menu))
                     && this.graph_editor.workbench_choices.is_open()
                 {
@@ -903,8 +973,11 @@ impl AudioProcessing {
 
     fn inspector_resize_handle(&self, panel: u64, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = rivu_ui::theme::palette(cx);
+        let pointer_target = self.workbench_input(panel);
+        let key_target = pointer_target.clone();
         div()
             .id(("inspector-resize", panel))
+            .debug_selector(move || format!("inspector-resize-{panel}"))
             .w_2()
             .h_full()
             .flex_shrink_0()
@@ -916,7 +989,7 @@ impl AudioProcessing {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if !this.graph_editor.workbenches.contains_key(&panel) {
+                    if !pointer_target.current(this) {
                         return;
                     }
                     this.cancel_pointer(cx);
@@ -932,28 +1005,61 @@ impl AudioProcessing {
                 }),
             )
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.modifiers != Modifiers::default() {
+                    return;
+                }
                 let change = match event.keystroke.key.as_str() {
                     "left" => 1.,
                     "right" => -1.,
                     _ => return,
                 };
-                let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
+                if !this.resize_inspector(&key_target, change, cx) {
                     return;
-                };
-                state.inspector_width = (state.inspector_width + change).clamp(16., 42.);
-                this.cancel_pointer(cx);
+                }
                 cx.stop_propagation();
                 cx.notify();
             }))
     }
 
-    fn inspector_resize_handlers(owner: WeakEntity<Self>, panel: u64, window: &mut Window) {
+    fn resize_inspector(
+        &mut self,
+        target: &WorkbenchInput,
+        change: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !target.current(self) {
+            return false;
+        }
+        let state = self
+            .graph_editor
+            .workbenches
+            .get_mut(&target.panel)
+            .unwrap();
+        if !state.wide || !state.inspector_open {
+            return false;
+        }
+        state.inspector_width = (state.inspector_width + change).clamp(16., 42.);
+        self.cancel_pointer(cx);
+        cx.notify();
+        true
+    }
+
+    fn inspector_resize_handlers(
+        owner: WeakEntity<Self>,
+        target: WorkbenchInput,
+        window: &mut Window,
+    ) {
+        let panel = target.panel;
+        let move_target = target.clone();
         let moved = owner.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Capture {
                 return;
             }
             let _ = moved.update(cx, |this, cx| {
+                if !move_target.current(this) {
+                    return;
+                }
                 // A removed panel can still have listeners in the last rendered frame.
                 let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
                     return;
@@ -965,10 +1071,9 @@ impl AudioProcessing {
                             != WindowGeometry::current(window, this.state.system.config.ui_scale)
                     {
                         state.zoom_drag = None;
-                    } else if let Some(value) = state
-                        .zoom_bounds
-                        .get()
-                        .and_then(|b| Slider::value_at(b, event.position))
+                    } else if let Some((bounds, measured_geometry)) = state.zoom_bounds.get()
+                        && geometry == measured_geometry
+                        && let Some(value) = Slider::value_at(bounds, event.position)
                     {
                         this.graph_zoom_to(0.35 + value * 1.65, [250., 160.], cx);
                     }
@@ -995,9 +1100,13 @@ impl AudioProcessing {
             });
         });
         let released = owner.clone();
+        let release_target = target.clone();
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = released.update(cx, |this, cx| {
+                    if !release_target.current(this) {
+                        return;
+                    }
                     let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
                         return;
                     };
@@ -1011,6 +1120,9 @@ impl AudioProcessing {
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
                 let _ = owner.update(cx, |this, cx| {
+                    if !target.current(this) {
+                        return;
+                    }
                     let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
                         return;
                     };
@@ -1027,6 +1139,10 @@ impl AudioProcessing {
         let state = &self.graph_editor.workbenches[&panel];
         let bounds = state.zoom_bounds.clone();
         let measured = bounds.clone();
+        let target = self.workbench_input(panel);
+        let measured_target = target.clone();
+        let owner = cx.entity().downgrade();
+        let ui_scale = self.state.system.config.ui_scale;
         Slider::new(
             ("graph-zoom", panel),
             (self.graph_editor.zoom - 0.35) / 1.65,
@@ -1034,14 +1150,21 @@ impl AudioProcessing {
         )
         .dragging(state.zoom_drag.is_some())
         .render(cx, move |this, input, window, cx| {
-            if !this.graph_editor.workbenches.contains_key(&panel) {
+            if !target.current(this) {
                 return;
             }
             this.cancel_pointer(cx);
             let zoom = match input {
                 SliderInput::PointerDown { position, .. } => {
-                    let Some(value) = bounds.get().and_then(|b| Slider::value_at(b, position))
-                    else {
+                    let Some((bounds, geometry)) = bounds.get() else {
+                        return;
+                    };
+                    if geometry
+                        != WindowGeometry::current(window, this.state.system.config.ui_scale)
+                    {
+                        return;
+                    }
+                    let Some(value) = Slider::value_at(bounds, position) else {
                         return;
                     };
                     let Some(state) = this.graph_editor.workbenches.get_mut(&panel) else {
@@ -1063,6 +1186,7 @@ impl AudioProcessing {
             this.graph_zoom_to(zoom, [250., 160.], cx);
             cx.stop_propagation();
         })
+        .debug_selector(move || format!("graph-zoom-{panel}"))
         .w_24()
         .flex_shrink_0()
         .tooltip(rivu_ui::text_tooltip(format!(
@@ -1071,7 +1195,13 @@ impl AudioProcessing {
         )))
         .child(
             canvas(
-                move |bounds, _, _| measured.set(Some(bounds)),
+                move |bounds, window, cx| {
+                    if let Some(owner) = owner.upgrade()
+                        && measured_target.current(owner.read(cx))
+                    {
+                        measured.set(Some((bounds, WindowGeometry::current(window, ui_scale))));
+                    }
+                },
                 |_, _, _, _| {},
             )
             .absolute()
@@ -1147,7 +1277,330 @@ fn fitted_view(
 
 #[cfg(test)]
 mod tests {
-    use super::{NODE_WIDTH, ProcessingGraph, fitted_view, node_height};
+    use super::*;
+    use crate::gui::feature::SnapshotSource;
+    use crate::test_support::{ConfigFixture, CoreRuntime};
+    use core::prelude::v1::test;
+    use gpui::InputEvent as _;
+    use rivu_format::config::Config;
+    use rivu_presentation::i18n::Localizer;
+
+    const PANEL: u64 = 7;
+
+    #[derive(Clone, Copy)]
+    enum ControlTransition {
+        Hide,
+        Replace,
+    }
+
+    struct ControlsWindow {
+        owner: Entity<AudioProcessing>,
+        zoom_focus: FocusHandle,
+        resize_focus: FocusHandle,
+        inspector: bool,
+        before_key: Rc<Cell<Option<ControlTransition>>>,
+    }
+
+    impl Render for ControlsWindow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.owner.update(cx, |this, cx| {
+                if self.inspector {
+                    return this.graph_inspector(PANEL, window, cx);
+                }
+                let before_key = self.before_key.clone();
+                column()
+                    .size_full()
+                    .capture_key_down(cx.listener(move |this, _: &KeyDownEvent, _, _| {
+                        match before_key.take() {
+                            Some(ControlTransition::Hide) => {
+                                this.retain_workbench_controls(&Default::default(), false);
+                            }
+                            Some(ControlTransition::Replace) => {
+                                this.graph_editor.workbenches.insert(
+                                    PANEL,
+                                    WorkbenchPanel {
+                                        wide: true,
+                                        ..Default::default()
+                                    },
+                                );
+                            }
+                            None => {}
+                        }
+                    }))
+                    .child(
+                        this.graph_zoom_slider(PANEL, cx)
+                            .track_focus(&self.zoom_focus),
+                    )
+                    .child(
+                        this.inspector_resize_handle(PANEL, cx)
+                            .h(px(80.))
+                            .track_focus(&self.resize_focus),
+                    )
+            })
+        }
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+        inspector: bool,
+    ) -> (
+        tempfile::TempDir,
+        CoreRuntime,
+        Entity<AudioProcessing>,
+        AnyWindowHandle,
+        FocusHandle,
+        FocusHandle,
+    ) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            Input::init(cx);
+            rivu_ui::theme::set_palette(
+                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
+                cx,
+            );
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
+                cx,
+            );
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = Config {
+            volume: 0.,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        };
+        for id in [3, 4] {
+            config.processing_graph.nodes.push(GraphNode {
+                id,
+                position: [360., 240.],
+                kind: GraphNodeKind::Separate {
+                    config: Default::default(),
+                },
+            });
+        }
+        config.processing_graph.next_id = 5;
+        config.save_fixture(&path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let owner = cx.new(|cx| AudioProcessing::new(context, cx));
+        owner.update(cx, |this, cx| {
+            this.graph_select(3, cx);
+            this.graph_editor.workbenches.entry(PANEL).or_default().wide = true;
+            this.command_active = true;
+        });
+        let zoom_focus = cx.update(|cx| cx.focus_handle());
+        let resize_focus = cx.update(|cx| cx.focus_handle());
+        let window = cx.open_window(size(px(900.), px(1200.)), {
+            let owner = owner.clone();
+            let zoom_focus = zoom_focus.clone();
+            let resize_focus = resize_focus.clone();
+            move |_, _| ControlsWindow {
+                owner,
+                zoom_focus,
+                resize_focus,
+                inspector,
+                before_key: Default::default(),
+            }
+        });
+        let handle = window.into();
+        draw(cx, handle);
+        (directory, runtime, owner, handle, zoom_focus, resize_focus)
+    }
+
+    fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+    }
+
+    fn dispatch_key(window: &mut Window, cx: &mut App, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        window.dispatch_event(
+            KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+    }
+
+    fn click(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn zoom_and_inspector_keys_preserve_ranges_without_a_source_format(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, handle, zoom_focus, resize_focus) = fixture(cx, false);
+        owner.read_with(cx, |this, _| {
+            assert!(this.state.current_track().is_none());
+            assert!(this.state.playback.duration.is_none());
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.focus(&zoom_focus, cx);
+            for _ in 0..80 {
+                dispatch_key(window, cx, "right");
+            }
+            assert_eq!(owner.read(cx).graph_editor.zoom, 2.);
+            dispatch_key(window, cx, "home");
+            for _ in 0..80 {
+                dispatch_key(window, cx, "left");
+            }
+            assert_eq!(owner.read(cx).graph_editor.zoom, 0.35);
+            window.focus(&resize_focus, cx);
+            for _ in 0..80 {
+                dispatch_key(window, cx, "left");
+            }
+            assert_eq!(
+                owner.read(cx).graph_editor.workbenches[&PANEL].inspector_width,
+                42.
+            );
+            for _ in 0..80 {
+                dispatch_key(window, cx, "right");
+            }
+            dispatch_key(window, cx, "ctrl-left");
+            assert_eq!(
+                owner.read(cx).graph_editor.workbenches[&PANEL].inspector_width,
+                16.
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn old_zoom_and_resize_callbacks_cannot_edit_hidden_or_replaced_panels(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, owner, handle, zoom_focus, resize_focus) = fixture(cx, false);
+        // GPUI redraws dirty windows before keyboard dispatch. Invalidate in capture,
+        // after that redraw but before the real, now-stale control listener bubbles.
+        for transition in [ControlTransition::Hide, ControlTransition::Replace] {
+            for (focus, key) in [(&zoom_focus, "end"), (&resize_focus, "left")] {
+                cx.update_window(handle, |root, window, cx| {
+                    let root = root.downcast::<ControlsWindow>().unwrap();
+                    let before_key = root.read(cx).before_key.clone();
+                    before_key.set(Some(transition));
+                    window.focus(focus, cx);
+                    dispatch_key(window, cx, key);
+                    assert!(before_key.get().is_none());
+                    owner.read_with(cx, |this, _| {
+                        assert_eq!(this.graph_editor.zoom, 1.);
+                        assert_eq!(this.graph_editor.workbenches[&PANEL].inspector_width, 25.);
+                    });
+                })
+                .unwrap();
+            }
+        }
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            window.focus(&resize_focus, cx);
+            dispatch_key(window, cx, "left");
+            assert_eq!(
+                owner.read(cx).graph_editor.workbenches[&PANEL].inspector_width,
+                26.
+            );
+            window.focus(&zoom_focus, cx);
+            dispatch_key(window, cx, "end");
+            assert_eq!(owner.read(cx).graph_editor.zoom, 2.);
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn stale_inspector_delete_cannot_remove_the_new_selection(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, handle, _, _) = fixture(cx, true);
+        let position = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-delete-7")
+            .unwrap()
+            .center();
+        cx.update_window(handle, |_, window, cx| {
+            owner.update(cx, |this, cx| this.graph_select(4, cx));
+            click(window, cx, position);
+            assert!(owner.read(cx).commands.is_empty());
+        })
+        .unwrap();
+        draw(cx, handle);
+        click_window(cx, handle, position);
+        owner.read_with(cx, |this, _| {
+            assert!(matches!(
+                &this.commands.front().unwrap().command,
+                Command::ProcessingGraphEdit { edit, .. } if matches!(edit.as_ref(), GraphEdit::Remove { id: 4 })
+            ));
+        });
+    }
+
+    fn click_window(cx: &mut TestAppContext, handle: AnyWindowHandle, position: Point<Pixels>) {
+        cx.update_window(handle, |_, window, cx| click(window, cx, position))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn stale_inspector_delete_cannot_remove_a_replaced_node_kind(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, handle, _, _) = fixture(cx, true);
+        let position = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-delete-7")
+            .unwrap()
+            .center();
+        let revision = runtime.handle.config_snapshot().processing_graph.revision;
+        let response =
+            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+                expected_revision: revision,
+                edit: Box::new(GraphEdit::Replace {
+                    id: 3,
+                    kind: GraphNodeKind::Output,
+                }),
+            }));
+        assert!(response.ack.is_success());
+        click_window(cx, handle, position);
+        assert!(owner.read_with(cx, |this, _| this.commands.is_empty()));
+        assert!(matches!(
+            runtime
+                .handle
+                .config_snapshot()
+                .processing_graph
+                .node(3)
+                .unwrap()
+                .kind,
+            GraphNodeKind::Output
+        ));
+    }
 
     #[test]
     fn fit_keeps_distant_nodes_inside_canvas_and_focuses_only_requested_nodes() {

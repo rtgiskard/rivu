@@ -62,6 +62,29 @@ fn stepped_field_text(timestamp: bool, text: &str, step: f64) -> Option<String> 
     Some(text)
 }
 
+#[derive(Clone)]
+struct InspectorInput {
+    workbench: super::workbench::WorkbenchInput,
+    node: u64,
+    revision: u64,
+}
+
+impl InspectorInput {
+    fn current(&self, owner: &mut AudioProcessing, cx: &mut Context<AudioProcessing>) -> bool {
+        owner.reconcile(owner.context.snapshot(), cx);
+        self.workbench.current(owner)
+            && owner.graph_editor.selected == Some(self.node)
+            && owner.state.system.config.processing_graph.revision == self.revision
+            && owner
+                .state
+                .system
+                .config
+                .processing_graph
+                .node(self.node)
+                .is_ok()
+    }
+}
+
 /// Construct and validate a replacement without mutating the committed graph.
 fn node_replacement(
     graph: &ProcessingGraph,
@@ -116,6 +139,14 @@ fn node_replacement(
 }
 
 impl AudioProcessing {
+    fn inspector_input(&self, panel: u64, node: u64) -> InspectorInput {
+        InspectorInput {
+            workbench: self.workbench_input(panel),
+            node,
+            revision: self.state.system.config.processing_graph.revision,
+        }
+    }
+
     pub(in super::super) fn graph_dirty_count(&self, cx: &App) -> usize {
         self.fields
             .iter()
@@ -437,6 +468,7 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let descriptor = binding.field;
         let key = FieldKey::Graph(binding);
+        let target = self.inspector_input(panel, binding.node);
         let label = self.graph_parameter_label(descriptor);
         let dirty = self.fields[&key].dirty;
         let label = if dirty {
@@ -452,25 +484,35 @@ impl AudioProcessing {
         } else if !choices.is_empty() {
             let mut options = row().flex_wrap().gap_1();
             for &(choice, label) in choices {
+                let target = target.clone();
                 options = options.child(
                     button(
                         SharedString::from(format!("graph-choice-{panel}-{key:?}-{choice}")),
                         self.tr(label),
                         cx,
-                        move |this, _, cx| this.stage_graph_text(key, choice.to_owned(), cx),
+                        move |this, _, cx| {
+                            if target.current(this, cx) {
+                                this.stage_graph_text(key, choice.to_owned(), cx);
+                            }
+                        },
                     )
                     .when(text == choice, |view| view.bg(rgb(theme.selected))),
                 );
             }
             options.into_any_element()
         } else if descriptor.is_boolean() {
+            let target = target.clone();
             checkbox(
                 SharedString::from(format!("graph-bool-{panel}-{key:?}")),
                 SharedString::from(self.tr("processing-enabled").to_string()),
                 text == "true",
                 true,
                 cx,
-                move |this, enabled, cx| this.stage_graph_text(key, enabled.to_string(), cx),
+                move |this, enabled, cx| {
+                    if target.current(this, cx) {
+                        this.stage_graph_text(key, enabled.to_string(), cx);
+                    }
+                },
             )
             .into_any_element()
         } else {
@@ -478,12 +520,20 @@ impl AudioProcessing {
             let editor = if let Some(step) = descriptor.numeric_step() {
                 let mut numeric = rivu_ui::NumericInput::new(input);
                 for (sign, delta) in [("−", -step), ("+", step)] {
-                    numeric = numeric.step(button(
-                        SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
-                        SharedString::from(format!("{sign}{}", step)),
-                        cx,
-                        move |this, _, cx| this.step_graph_field(key, delta, cx),
-                    ));
+                    let target = target.clone();
+                    numeric = numeric.step(
+                        button(
+                            SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
+                            SharedString::from(format!("{sign}{}", step)),
+                            cx,
+                            move |this, _, cx| {
+                                if target.current(this, cx) {
+                                    this.step_graph_field(key, delta, cx);
+                                }
+                            },
+                        )
+                        .debug_selector(move || format!("graph-step-{panel}-{key:?}-{sign}")),
+                    );
                 }
                 numeric.into_div()
             } else {
@@ -497,13 +547,18 @@ impl AudioProcessing {
                     view.tooltip(rivu_ui::text_tooltip(help))
                 });
             if descriptor.is_path() {
+                let target = target.clone();
                 editor = editor.child(disabled_control(
                     theme,
                     button(
                         SharedString::from(format!("graph-browse-{panel}-{key:?}")),
                         self.tr("processing-fields-browse"),
                         cx,
-                        move |this, _, cx| this.choose_graph_path(panel, key, cx),
+                        move |this, _, cx| {
+                            if target.current(this, cx) {
+                                this.choose_graph_path(panel, key, cx);
+                            }
+                        },
                     ),
                     self.choosing_path.is_some(),
                 ));
@@ -517,7 +572,11 @@ impl AudioProcessing {
                 SharedString::from(format!("graph-apply-{panel}-{key:?}")),
                 self.tr("processing-fields-apply-one"),
                 cx,
-                move |this, _, cx| this.apply_graph_field(apply_key, cx),
+                move |this, _, cx| {
+                    if target.current(this, cx) {
+                        this.apply_graph_field(apply_key, cx);
+                    }
+                },
             )
             .self_start(),
             self.graph_busy() || !dirty,
@@ -589,6 +648,7 @@ impl AudioProcessing {
             return column();
         };
         let id = node.id;
+        let target = self.inspector_input(panel, id);
         let drafts = self.graph_node_dirty_count(id, cx);
         let busy = self.graph_busy();
         let fixed = matches!(node.kind, GraphNodeKind::Source);
@@ -620,12 +680,15 @@ impl AudioProcessing {
                             self.tr("processing-graph-duplicate"),
                         )
                         .enabled(!busy && !fixed && drafts == 0)
-                        .build(
-                            IconButtonStyle::Quiet,
-                            IconButtonDensity::Compact,
-                            cx,
-                            |this, _, cx| this.graph_duplicate(cx),
-                        ),
+                        .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                            let target = target.clone();
+                            move |this, _, cx| {
+                                if target.current(this, cx) {
+                                    this.graph_duplicate(cx);
+                                }
+                            }
+                        })
+                        .debug_selector(move || format!("graph-duplicate-{panel}")),
                     )
                     .child(
                         IconButton::new(
@@ -634,12 +697,15 @@ impl AudioProcessing {
                             self.tr("processing-graph-delete"),
                         )
                         .enabled(!busy && !fixed && drafts == 0)
-                        .build(
-                            IconButtonStyle::Quiet,
-                            IconButtonDensity::Compact,
-                            cx,
-                            |this, _, cx| this.graph_remove(cx),
-                        ),
+                        .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
+                            let target = target.clone();
+                            move |this, _, cx| {
+                                if target.current(this, cx) {
+                                    this.graph_remove(cx);
+                                }
+                            }
+                        })
+                        .debug_selector(move || format!("graph-delete-{panel}")),
                     ),
             )
             .child(
@@ -664,7 +730,14 @@ impl AudioProcessing {
                             ("graph-apply-all", panel),
                             self.tr("processing-fields-apply-all"),
                             cx,
-                            move |this, _, cx| this.apply_graph_node(id, cx),
+                            {
+                                let target = target.clone();
+                                move |this, _, cx| {
+                                    if target.current(this, cx) {
+                                        this.apply_graph_node(id, cx);
+                                    }
+                                }
+                            },
                         ),
                         busy || drafts == 0,
                     ))
@@ -674,7 +747,14 @@ impl AudioProcessing {
                             ("graph-discard", panel),
                             self.tr("processing-fields-discard"),
                             cx,
-                            move |this, _, cx| this.discard_graph_node(id, cx),
+                            {
+                                let target = target.clone();
+                                move |this, _, cx| {
+                                    if target.current(this, cx) {
+                                        this.discard_graph_node(id, cx);
+                                    }
+                                }
+                            },
                         ),
                         busy || drafts == 0,
                     )),
@@ -686,6 +766,7 @@ impl AudioProcessing {
         }
         if let GraphNodeKind::Denoise { profile: None, .. } = &node.kind {
             let snapshot = Rc::clone(&self.state);
+            let target = target.clone();
             content = content.child(disabled_control(
                 theme,
                 button(
@@ -693,6 +774,9 @@ impl AudioProcessing {
                     self.tr("processing-graph-add-profile"),
                     cx,
                     move |this, _, cx| {
+                        if !target.current(this, cx) {
+                            return;
+                        }
                         this.activate_graph_profile(id, &snapshot, cx);
                     },
                 )
@@ -711,6 +795,7 @@ impl AudioProcessing {
             let mut lanes = row().flex_wrap().gap_1();
             for add in [true, false] {
                 let snapshot = Rc::clone(&self.state);
+                let target = target.clone();
                 let disabled = busy
                     || drafts > 0
                     || if add {
@@ -729,6 +814,9 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
+                            if !target.current(this, cx) {
+                                return;
+                            }
                             if disabled {
                                 return;
                             }
@@ -783,6 +871,7 @@ impl AudioProcessing {
                 content = content.child(caption(theme, self.tr("processing-fields-runtime")));
             }
             if group == 2 && neural {
+                let target = target.clone();
                 content = content.child(
                     button(
                         ("graph-backends", panel),
@@ -793,6 +882,9 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
+                            if !target.current(this, cx) {
+                                return;
+                            }
                             if !this.graph_editor.expanded_backends.remove(&id) {
                                 this.graph_editor.expanded_backends.insert(id);
                             }
@@ -834,6 +926,7 @@ impl AudioProcessing {
         if output_count(&node.kind) > 1 {
             let mut ports = row().flex_wrap().gap_1();
             for port in 0..output_count(&node.kind) {
+                let target = target.clone();
                 ports = ports.child(
                     button(
                         SharedString::from(format!("graph-target-{panel}-{port}")),
@@ -844,10 +937,14 @@ impl AudioProcessing {
                         }),
                         cx,
                         move |this, _, cx| {
+                            if !target.current(this, cx) {
+                                return;
+                            }
                             this.graph_editor.target_port = port as u16;
                             cx.notify();
                         },
                     )
+                    .debug_selector(move || format!("graph-target-{panel}-{port}"))
                     .when(self.graph_editor.target_port == port as u16, |view| {
                         view.bg(rgb(theme.selected))
                     }),
@@ -1174,5 +1271,39 @@ mod tests {
             implementation: EqImplementation::Iir,
         };
         assert!(GraphField::Taps.apply(&mut equalizer, "4097").is_err());
+    }
+
+    #[test]
+    fn inspector_mix_and_profile_ranges_validate_before_graph_commit() {
+        let mut graph = speech_graph();
+        graph.nodes.last_mut().unwrap().kind = GraphNodeKind::Mix {
+            gains_db: vec![0.; 2],
+            muted: vec![false; 2],
+            solo: vec![false; 2],
+        };
+        let gain = key(&graph, 3, GraphField::MixGain(1));
+        for text in ["-120", "24"] {
+            assert!(node_replacement(&graph, 3, &[(gain, text.into())], None).is_ok());
+        }
+        for text in ["-120.01", "24.01", "NaN", "inf"] {
+            assert!(node_replacement(&graph, 3, &[(gain, text.into())], None).is_err());
+        }
+        graph.nodes.last_mut().unwrap().kind = GraphNodeKind::Denoise {
+            config: Default::default(),
+            profile: Some(rivu_format::config::processing_graph::NoiseSelection {
+                start_seconds: 0.,
+                end_seconds: 1.,
+            }),
+        };
+        let start = key(&graph, 3, GraphField::ProfileStart);
+        let end = key(&graph, 3, GraphField::ProfileEnd);
+        for (a, b) in [("-0.1", "1"), ("1", "1"), ("2", "1"), ("0", "NaN")] {
+            assert!(
+                node_replacement(&graph, 3, &[(start, a.into()), (end, b.into())], None).is_err()
+            );
+        }
+        assert!(
+            node_replacement(&graph, 3, &[(start, "0".into()), (end, "0.1".into())], None).is_ok()
+        );
     }
 }
