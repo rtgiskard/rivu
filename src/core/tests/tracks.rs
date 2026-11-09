@@ -284,7 +284,6 @@ fn removed_retired_history_discards_deferred_activity_but_counts_heard_audio() {
     stats.record_heard(3.0, 100);
     core.transport.retired = Some(super::super::playback::RetiredPlayback {
         stats,
-        duration: Some(10.0),
         pending_close: None,
     });
     core.transport.write_deferred = true;

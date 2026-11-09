@@ -273,7 +273,7 @@ fn deferred_bitrate_flush_refreshes_payload_without_shape_invalidation() {
     started(&mut core, Some(10.0)).unwrap();
     core.publish();
     let before = core.shared.read().clone();
-    core.transport.pending_bitrate = Some((192_000, true));
+    core.transport.session.as_mut().unwrap().pending_bitrate = Some((192_000, true));
     core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     core.publish();
@@ -369,7 +369,7 @@ fn bitrate_commit_rejects_payload_batch_baselines_and_occurrence_continuations()
     };
     assert!(queue_batch.next.is_some());
     assert!(playlist_batch.next.is_some());
-    core.transport.pending_bitrate = Some((192_000, true));
+    core.transport.session.as_mut().unwrap().pending_bitrate = Some((192_000, true));
     core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     for query in [
@@ -1060,7 +1060,7 @@ fn unchanged_bitrate_enrichment_does_not_publish_an_update() {
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
     let before = core.state.library.bitrate_revision;
-    core.transport.pending_bitrate = Some((128_000, false));
+    core.transport.session.as_mut().unwrap().pending_bitrate = Some((128_000, false));
     core.transport.write_deferred = true;
     core.flush_deferred_playback().unwrap();
     assert_eq!(core.state.library.bitrate_revision, before);
@@ -2218,4 +2218,80 @@ fn late_started_and_progress_belong_to_the_unsettled_retired_source_only() {
     assert_eq!(play_count(&core, 1), 1);
     assert!(core.transport.retired.is_none());
     assert_eq!(core.state.library.history[0].track_id, 1);
+}
+
+#[test]
+fn play_count_uses_session_duration_not_the_presentation_snapshot() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    // The presentation is not the authority for this source's threshold.
+    core.state.playback.duration = Some(1000.0);
+    progress(&mut core, 3.0, 3.0);
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(
+        core.transport.session.as_ref().unwrap().duration,
+        Some(10.0)
+    );
+    assert_eq!(core.state.playback.duration, Some(1000.0));
+}
+
+#[test]
+fn retired_duration_and_pending_bitrate_settle_without_republishing_transport() {
+    let (_directory, mut core) = fixture_with_duration(None);
+    precision_pending(&mut core);
+    let source = core.transport.generation;
+    let mut start = started_event(&core, Some(20.0));
+    if let AudioEvent::Started { info, .. } = &mut start {
+        info.bitrate_bps = Some(64_000);
+    }
+    assert!(
+        core.finish_playback(Err(anyhow::anyhow!("stop deadline")), Ok(()))
+            .is_err()
+    );
+    let generation = core.transport.generation;
+    let seek_revision = core.state.playback.seek_revision;
+    let queue_id = core.state.queue.current_id;
+    core.database_unavailable = true;
+    core.audio_event(start).unwrap();
+    core.audio_event(AudioEvent::Progress {
+        generation: source,
+        seek_revision: 0,
+        position_seconds: 19.0,
+        listened_seconds: 4.0,
+    })
+    .unwrap();
+    core.audio_event(AudioEvent::Ended {
+        generation: source,
+        completed_duration: Some(10.0),
+        bitrate_bps: Some(192_000),
+    })
+    .unwrap();
+    let retired = core.transport.retired.as_ref().unwrap();
+    assert_eq!(retired.stats.duration, Some(20.0));
+    assert_eq!(retired.stats.pending_bitrate, Some((192_000, true)));
+    assert!(core.transport.session.is_none());
+    assert_eq!(play_count(&core, 1), 0);
+    assert_eq!(core.state.playback.duration, None);
+    core.audio_event(AudioEvent::DecoderStopped {
+        snapshot: audio::AudioSnapshot {
+            generation: source,
+            position_seconds: 19.01,
+            listened_seconds: 4.01,
+        },
+    })
+    .unwrap();
+    core.database_unavailable = false;
+    core.flush_deferred_playback().unwrap();
+    assert_eq!(play_count(&core, 1), 1);
+    let stored = core.store.track(1).unwrap().unwrap();
+    assert_eq!(stored.bitrate_bps, Some(192_000));
+    assert!(stored.bitrate_exact);
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.session.is_none());
+    assert_eq!(core.state.playback.duration, None);
+    assert_eq!(core.state.playback.position, 0.0);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.state.playback.seek_revision, seek_revision);
+    assert_eq!(core.state.queue.current_id, queue_id);
 }

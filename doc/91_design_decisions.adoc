@@ -285,6 +285,13 @@ Do not route retiring terminal events through ordinary dispatch, which can
 recursively Stop or advance navigation. Evidence and resolution:
 link:90_open_issues.adoc#retiring-settings-failures[retiring settings failures].
 
+Accepted refinement: listening duration, heard-time, count-commit and deferred
+bitrate facts belong to their source session. Retired settlement must consume
+that session explicitly, without installing it in the current playback slot.
+Physical close and statistics persistence remain independent; a committed count
+cannot be retried because a later projection read failed. Keep at most one
+unsettled retired source rather than introducing a session queue.
+
 [[DEC-012]]
 === DEC-012: Retire unreachable model boundaries before inference output allocation
 

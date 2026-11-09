@@ -429,6 +429,8 @@ fn pending(core: &mut Core, queue_id: u64) {
         source: core
             .playback_source(core.state.current_track().unwrap())
             .unwrap(),
+        duration: duration.filter(|duration| duration.is_finite() && *duration > 0.0),
+        pending_bitrate: None,
         heard: 0.0,
         started: false,
         counted: false,
