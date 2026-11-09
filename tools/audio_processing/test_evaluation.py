@@ -35,7 +35,7 @@ class MetricSemanticsTests(unittest.TestCase):
         ref = np.asarray(reference, dtype="float64")
         est = np.asarray(estimate, dtype="float64")
         processing = benchmark.PreparedReference(ref[:, None], 8000).score(est[:, None])
-        paired = quality.channel_metrics(ref, est)
+        paired = quality.channel_metrics(quality.PreparedChannel(ref), est)
         self.assertEqual(processing["absolute_snr_db"], paired["snr_db"])
         self.assertEqual(processing["si_sdr_db"][0], paired["si_sdr_db"])
         self.assertEqual(processing["reference_gain"][0], paired["least_squares_reference_gain"])
@@ -628,6 +628,31 @@ class EvaluationIdentityTests(unittest.TestCase):
 
 
 class PreparedQualityTests(unittest.TestCase):
+    def test_channel_reuse_preserves_dense_metrics_across_blocks(self):
+        time = np.arange(65536 + 31, dtype="float64")
+        reference = np.sin(time / 17) + 0.125
+        reference.flags.writeable = False
+        original = reference.copy()
+        prepared = quality.PreparedChannel(reference)
+        for estimate in (reference, reference * 0.75 + np.cos(time / 7) * 0.03,
+                         np.zeros_like(reference)):
+            measured = quality.channel_metrics(prepared, estimate)
+            error = estimate - reference
+            self.assertAlmostEqual(measured["reference_rms"], np.sqrt(np.mean(reference**2)))
+            self.assertEqual(measured["reference_dc"], float(reference.mean()))
+            self.assertAlmostEqual(measured["estimate_rms"], np.sqrt(np.mean(estimate**2)))
+            self.assertEqual(measured["peak_abs"], float(np.max(np.abs(estimate))))
+            self.assertEqual(measured["peak_error_abs"], float(np.max(np.abs(error))))
+            self.assertEqual(measured["overs_count"], int(np.count_nonzero(np.abs(estimate) > 1)))
+            expected_snr = quality.db_ratio(float(np.dot(reference, reference)), float(np.dot(error, error)))
+            if isinstance(expected_snr, float):
+                self.assertAlmostEqual(measured["snr_db"], expected_snr, places=11)
+            else:
+                self.assertEqual(measured["snr_db"], expected_snr)
+            self.assertEqual((measured["si_sdr_db"], measured["least_squares_reference_gain"]),
+                             projection_metrics(reference, estimate))
+        np.testing.assert_array_equal(reference, original)
+
     def test_snapshot_frame_policy_preserves_pcm_and_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "input.wav"
@@ -662,8 +687,8 @@ class PreparedQualityTests(unittest.TestCase):
                 self.assertEqual(report["reference"], reference_identity)
                 self.assertEqual(report["noisy_baseline"], noisy_identity)
                 self.assertEqual(report["estimate"], quality.identity(path))
-                self.assertEqual(report["metrics_by_channel"], [quality.channel_metrics(reference[:, 0], output[:, 0])])
-                self.assertEqual(report["baseline_metrics_by_channel"], [quality.channel_metrics(reference[:, 0], noisy[:, 0])])
+                self.assertEqual(report["metrics_by_channel"], [quality.channel_metrics(quality.PreparedChannel(reference[:, 0]), output[:, 0])])
+                self.assertEqual(report["baseline_metrics_by_channel"], [quality.channel_metrics(quality.PreparedChannel(reference[:, 0]), noisy[:, 0])])
                 json.dumps(report, allow_nan=False)
             fresh = quality.ReferenceEvaluation(ref_path)
             self.assertNotEqual(fresh.audio.identity, prepared.audio.identity)
@@ -735,8 +760,8 @@ class PreparedQualityTests(unittest.TestCase):
                 baseline = reference if row["noise_kind"] == "clean" else noisy
                 self.assertEqual(row["timings"], [{"core_seconds":1}, {"core_seconds":2}])
                 output, _ = sf.read(row["estimate"]["path"])
-                self.assertEqual(row["metrics_by_channel"], [quality.channel_metrics(reference, output)])
-                self.assertEqual(row["baseline_metrics_by_channel"], [quality.channel_metrics(reference, baseline)])
+                self.assertEqual(row["metrics_by_channel"], [quality.channel_metrics(quality.PreparedChannel(reference), output)])
+                self.assertEqual(row["baseline_metrics_by_channel"], [quality.channel_metrics(quality.PreparedChannel(reference), baseline)])
                 self.assertEqual(row["estimate"], quality.identity(row["estimate"]["path"]))
             json.dumps(report, allow_nan=False)
 

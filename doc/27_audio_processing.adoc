@@ -1001,8 +1001,10 @@ that same loaded noisy-clean pair.
 The processing benchmark and corpus evaluator retain the worker's input-duration
 contract; sharing identity capture does not impose the standalone quality tool's
 12,000,000-frame admission bound.
-Each processing benchmark retains prepared reference statistics across repeats;
-the corpus evaluator shares them between baseline and output scoring for one case.
+Each processing benchmark retains prepared reference statistics across repeats.
+Quality evaluation prepares each channel's projection, raw energy and DC once
+per reference, sharing them across baseline and all candidate outputs, including
+separation comparisons. Output-dependent errors and projections are not cached.
 Preparation owns only summaries and weak-frame indices, borrowing unchanged PCM;
 it does not cache by path. Per-output boundary checks still use that run's core
 duration. Reduced scoring work is not model-inference speedup.

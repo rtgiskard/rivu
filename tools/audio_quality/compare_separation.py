@@ -17,16 +17,17 @@ import json
 from pathlib import Path
 
 if __package__:
-    from .evaluate import channel_metrics, identity, load_identified, stereo_metrics
+    from .evaluate import ReferenceEvaluation, channel_metrics, identity, load_identified, stereo_metrics
     from .metric_core import reconstruction_metrics
 else:
-    from evaluate import channel_metrics, identity, load_identified, stereo_metrics
+    from evaluate import ReferenceEvaluation, channel_metrics, identity, load_identified, stereo_metrics
     from metric_core import reconstruction_metrics
 
 
 def compare(args):
     mixture_pcm = load_identified(args.mixture)
-    reference_pcm = load_identified(args.reference)
+    prepared = ReferenceEvaluation(args.reference)
+    reference_pcm = prepared.audio
     mixture, rate = mixture_pcm.data, mixture_pcm.rate
     reference, reference_rate = reference_pcm.data, reference_pcm.rate
     if mixture.shape != reference.shape or reference_rate != rate or mixture.shape[1] != 2:
@@ -34,7 +35,7 @@ def compare(args):
     mixture_identity = mixture_pcm.identity
     report = {"schema":1,"mixture":mixture_identity,"reference":reference_pcm.identity,
               "sample_rate":rate,"frames":len(mixture),"channels":2,"provenance":args.provenance,
-              "baseline_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(reference.T,mixture.T)],
+              "baseline_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(prepared.channels,mixture.T)],
               "models":[],"limits":"Same excerpt only; no listening review or full-corpus/model ranking. SI-SDR is scale invariant; inspect ordinary SNR, gain, stereo and peaks too. Mixture-minus-vocals reconstruction does not establish separation quality."}
     for path in args.result:
         path = Path(path).resolve(strict=True)
@@ -59,7 +60,7 @@ def compare(args):
             "processing":result["processing"],"performance":result["metrics"],
             "vocals":vocal_pcm.identity,
             "accompaniment":backing_pcm.identity,
-            "vocal_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(reference.T,vocals.T)],
+            "vocal_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(prepared.channels,vocals.T)],
             "vocal_stereo":stereo_metrics(vocals),
             "reconstruction":{"residual_rms":residual_rms,"residual_peak":residual_peak},
         })

@@ -16,9 +16,9 @@ import numpy as np
 import soundfile as sf
 
 if __package__:
-    from .metric_core import db_ratio, projection_metrics, reconstruction_metrics
+    from .metric_core import db_ratio, PreparedProjection, reconstruction_metrics
 else:
-    from metric_core import db_ratio, projection_metrics, reconstruction_metrics
+    from metric_core import db_ratio, PreparedProjection, reconstruction_metrics
 
 MAX_FRAMES = 12_000_000
 MAX_CHANNELS = 8
@@ -65,15 +65,30 @@ def require_alignment(reference, other, label):
         raise ValueError(f"{label} alignment contract violated: reference={reference.rate}/{reference.data.shape}, other={other.rate}/{other.data.shape}; not silently compensating")
 
 
+class PreparedChannel:
+    """Bounded reference statistics shared by all estimates for one channel."""
+
+    def __init__(self, reference):
+        self.projection = PreparedProjection(reference)
+        self.energy = 0.0
+        for start in range(0, len(reference), 65536):
+            ref = reference[start:start+65536].astype("float64", copy=False)
+            self.energy += float(np.dot(ref, ref))
+        self.dc = self.projection.mean
+
+
 def channel_metrics(reference, estimate):
-    si_sdr, alpha = projection_metrics(reference, estimate)
-    reference_energy = estimate_energy = error_energy = 0.0
+    si_sdr, alpha = reference.projection.score(estimate)
+    reference_energy = reference.energy
+    reference_dc = reference.dc
+    reference = reference.projection.reference
+    estimate_energy = error_energy = 0.0
     peak_abs = peak_error = 0.0
     overs_count = 0
     for start in range(0, len(reference), 65536):
-        ref, est = reference[start:start+65536], estimate[start:start+65536]
+        ref = reference[start:start+65536].astype("float64", copy=False)
+        est = estimate[start:start+65536].astype("float64", copy=False)
         error = est-ref
-        reference_energy += float(np.dot(ref, ref))
         estimate_energy += float(np.dot(est, est))
         error_energy += float(np.dot(error, error))
         peak_abs = max(peak_abs, float(np.max(np.abs(est))))
@@ -82,7 +97,7 @@ def channel_metrics(reference, estimate):
     return {
         "reference_rms": float(np.sqrt(reference_energy/len(reference))),
         "estimate_rms": float(np.sqrt(estimate_energy/len(estimate))),
-        "reference_dc": float(reference.mean()),
+        "reference_dc": reference_dc,
         "estimate_dc": float(estimate.mean()),
         "peak_abs": peak_abs,
         "peak_error_abs": peak_error,
@@ -125,12 +140,13 @@ class ReferenceEvaluation:
 
     def __init__(self, path):
         self.audio = load_identified(path)
+        self.channels = [PreparedChannel(channel) for channel in self.audio.data.T]
         self.stereo = stereo_metrics(self.audio.data)
 
     def baseline(self, path):
         audio = self.audio if Path(path).resolve(strict=True) == Path(self.audio.identity["path"]) else load_identified(path)
         require_alignment(self.audio, audio, "noisy baseline")
-        return PreparedBaseline(audio, [channel_metrics(a, b) for a, b in zip(self.audio.data.T, audio.data.T)], self.audio)
+        return PreparedBaseline(audio, [channel_metrics(a, b) for a, b in zip(self.channels, audio.data.T)], self.audio)
 
     def score(self, estimate_path, provenance, implementation, *, baseline=None, complement=None, mixture=None):
         estimate = load_identified(estimate_path)
@@ -143,7 +159,7 @@ class ReferenceEvaluation:
             "sample_rate": self.audio.rate,
             "frames": reference.shape[0],
             "channels": reference.shape[1],
-            "metrics_by_channel": [channel_metrics(a, b) for a, b in zip(reference.T, estimate.data.T)],
+            "metrics_by_channel": [channel_metrics(a, b) for a, b in zip(self.channels, estimate.data.T)],
             "reference_stereo": self.stereo,
             "estimate_stereo": stereo_metrics(estimate.data),
             "provenance": provenance,
