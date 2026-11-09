@@ -434,14 +434,17 @@ impl BlockDenoiser {
             self.queue.len() + self.output.len() <= self.queue.capacity(),
             "streaming denoise exceeded its admitted output capacity"
         );
-        self.queue.extend(self.output.iter().copied());
         ensure!(
-            self.queue.len() >= samples.len(),
+            self.queue.len() + self.output.len() >= samples.len(),
             "streaming denoise exceeded declared lookahead"
         );
-        for sample in samples {
+        let queued = self.queue.len().min(samples.len());
+        let direct = samples.len() - queued;
+        for sample in &mut samples[..queued] {
             *sample = self.queue.pop_front().expect("checked queue length");
         }
+        samples[queued..].copy_from_slice(&self.output[..direct]);
+        self.queue.extend(self.output[direct..].iter().copied());
         Ok(())
     }
 
@@ -685,6 +688,105 @@ mod tests {
                 adapter.reset();
                 adapter.process(&mut [], 0, true, &mut || false).unwrap();
             }
+        }
+    }
+
+    #[cfg(feature = "execution")]
+    #[test]
+    fn block_adapter_hum_only_direct_prefix_has_no_delay() {
+        const BLOCK: usize = 256;
+        let input: Vec<_> = (0..513 * 2)
+            .map(|index| (index as f32 * 0.031).sin() * 0.2)
+            .collect();
+        for wet in [0.5, 1.0] {
+            let mut config = DenoiseConfig {
+                mode: DenoiseMode::Off,
+                wet,
+                ..Default::default()
+            };
+            config.hum.enabled = true;
+            let mut reference = Denoiser::new(48_000, 2, config.clone(), None).unwrap();
+            let mut expected = Vec::new();
+            reference
+                .process_block(&input, &mut expected, &mut || false)
+                .unwrap();
+            reference.finish(&mut expected, &mut || false).unwrap();
+            assert_ne!(expected, input);
+            let mut adapter =
+                BlockDenoiser::new(Denoiser::new(48_000, 2, config, None).unwrap(), BLOCK).unwrap();
+            assert_eq!(adapter.lookahead_frames(), 0);
+            let mut actual = Vec::new();
+            for (index, chunk) in input.chunks(BLOCK * 2).enumerate() {
+                let mut block = chunk.to_vec();
+                adapter
+                    .process(
+                        &mut block,
+                        chunk.len(),
+                        (index + 1) * BLOCK * 2 >= input.len(),
+                        &mut || false,
+                    )
+                    .unwrap();
+                actual.extend_from_slice(&block);
+            }
+            assert_eq!(actual, expected);
+            adapter.process(&mut [], 0, true, &mut || false).unwrap();
+            let mut excess = [0.25, -0.5];
+            assert!(
+                adapter
+                    .process(&mut excess, 0, true, &mut || false)
+                    .is_err()
+            );
+            assert_eq!(excess, [0.25, -0.5]);
+        }
+    }
+
+    #[cfg(feature = "execution")]
+    #[test]
+    fn block_adapter_orders_backlog_direct_prefix_and_empty_eof_burst() {
+        const BLOCK: usize = 256;
+        let input: Vec<_> = (0..(BLOCK + 193) * 2)
+            .map(|index| (index as f32 * 0.031).sin() * 0.2)
+            .collect();
+        let config = DenoiseConfig {
+            mode: DenoiseMode::Stationary,
+            fft_size: BLOCK,
+            wet: 0.5,
+            ..Default::default()
+        };
+        let mut reference = Denoiser::new(48_000, 2, config.clone(), None).unwrap();
+        let mut expected = vec![0.0; reference.lookahead_frames() * 2];
+        reference
+            .process_block(&input, &mut expected, &mut || false)
+            .unwrap();
+        reference.finish(&mut expected, &mut || false).unwrap();
+        for finish_with_input in [false, true] {
+            let mut adapter = BlockDenoiser::new(
+                Denoiser::new(48_000, 2, config.clone(), None).unwrap(),
+                BLOCK,
+            )
+            .unwrap();
+            let mut actual = Vec::new();
+            for (index, chunk) in input.chunks(BLOCK * 2).enumerate() {
+                let mut block = chunk.to_vec();
+                adapter
+                    .process(
+                        &mut block,
+                        chunk.len(),
+                        finish_with_input && index == 1,
+                        &mut || false,
+                    )
+                    .unwrap();
+                actual.extend_from_slice(&block);
+            }
+            // EOF may emit a burst even when the caller requests no playback samples.
+            adapter.process(&mut [], 0, true, &mut || false).unwrap();
+            adapter.process(&mut [], 0, true, &mut || false).unwrap();
+            for frames in [1, 127, 128] {
+                let mut block = vec![f32::NAN; frames * 2];
+                adapter.process(&mut block, 0, true, &mut || false).unwrap();
+                actual.extend_from_slice(&block);
+            }
+            assert_eq!(actual, expected);
         }
     }
 
