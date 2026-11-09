@@ -449,8 +449,6 @@ impl ArtworkRuntime {
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
         self.visible = false;
-        self.track = None;
-        self.instances.clear();
         self.cancel_frame(cx);
         self.view.release_all_images(window, cx);
         for decoration in &mut self.decorations {
@@ -677,6 +675,98 @@ impl Render for ArtworkPanel {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[gpui::test]
+    fn hidden_image_release_preserves_panel_and_rotation_on_reveal(cx: &mut gpui::TestAppContext) {
+        use super::super::layout::{Node, Panel};
+        cx.update(|cx| {
+            crate::gui::appearance::theme::set_theme(
+                rivu_presentation::theme::Theme::default(),
+                cx,
+            );
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
+        });
+
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
+        let manager = Arc::new(ArtworkManager::new(directory.path()));
+        assert!(manager.load(crate::artwork_source(&track)).is_none());
+        let config = Config::default();
+        let mut panels = super::super::workspace::WorkspacePanels::default();
+        panels.reconcile(&super::super::layout::Layout {
+            root: Some(Node::Tabs {
+                id: 1,
+                active: 2,
+                panels: vec![Panel {
+                    id: 2,
+                    kind: "artwork".into(),
+                    show_tab_bar: false,
+                    audio_visualizer: None,
+                    artwork: Some(ArtworkOptions {
+                        mode: ArtworkMode::Rotating,
+                        ..(&config).into()
+                    }),
+                }],
+            }),
+            next_id: 3,
+            locked: true,
+        });
+        let owner = cx.update(|cx| {
+            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
+            cx.new(|cx| {
+                ArtworkRuntime::new(
+                    manager,
+                    default,
+                    ArtworkImageRegistry::default(),
+                    cx.new(|_| AnimationFrames::default()),
+                )
+            })
+        });
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                Some(&track),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            );
+            owner.instances.get_mut(&2).unwrap().rotation.angle = 0.75;
+        });
+        let window = cx.open_window(size(px(320.), px(320.)), {
+            let owner = owner.clone();
+            move |_, cx| ArtworkPanel::new(2, owner, cx)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            owner.update(cx, |owner, cx| {
+                owner.sync(
+                    Some(&track),
+                    PlaybackStatus::Paused,
+                    &config,
+                    &panels,
+                    false,
+                    cx,
+                );
+                owner.release_all_images(window, cx);
+                owner.sync(
+                    Some(&track),
+                    PlaybackStatus::Paused,
+                    &config,
+                    &panels,
+                    true,
+                    cx,
+                );
+                let instance = &owner.instances[&2];
+                assert!(instance.visible);
+                assert!(instance.panel.as_ref().unwrap().upgrade().is_some());
+                assert_angle(&instance.rotation, 0.75);
+            });
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+    }
+
     #[gpui::test]
     fn relocation_replaces_display_without_resetting_rotation(cx: &mut gpui::TestAppContext) {
         use super::super::layout::{Node, Panel};

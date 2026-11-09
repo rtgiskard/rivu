@@ -774,6 +774,8 @@ panel. No partial animation or silent first-frame fallback is published. Accepte
 GIF/WebP animations retain all frames and original delays. Stable element IDs
 retain their playback cursors; multiple artwork panels share decoded pixels but
 not cursor state. GPUI handles final display scaling of the selected image tier.
+Window suspension retires images without discarding configured panel instances,
+their render handles or paused rotation. Layout reconciliation prunes removed instances.
 Trusted decorations and generated default artwork keep their separate policies.
 Encoded-file maintenance does not measure or reclaim decoded images; the
 encoded-file limit is not a pixel budget.
