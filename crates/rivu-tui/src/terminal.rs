@@ -307,12 +307,10 @@ where
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let local_revision = tui.ui.local_revision;
-                    let previous_revision = tui.snapshot.system.revision;
-                    let next = match tui.ui.key_action(key, &tui.snapshot) {
+                    match tui.ui.key_action(key, &tui.snapshot) {
                         KeyAction::Quit => break,
                         KeyAction::Search => {
                             tui.ui.open_search();
-                            tui.snapshot.clone()
                         }
                         action @ (KeyAction::Command(_) | KeyAction::Shutdown) => {
                             let command = if let KeyAction::Command(command) = action {
@@ -341,10 +339,8 @@ where
                             }
                             continue;
                         }
-                    };
-                    tui.apply_snapshot(next);
-                    redraw |= tui.ui.local_revision != local_revision
-                        || tui.snapshot.system.revision != previous_revision;
+                    }
+                    redraw |= tui.ui.local_revision != local_revision;
                     immediate_redraw = true;
                 }
                 _ => {}

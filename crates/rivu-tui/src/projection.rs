@@ -33,7 +33,6 @@ pub struct TuiSystemSnapshot {
     pub scan_task_id: Option<u64>,
     pub scan_message: String,
     pub last_error: Option<String>,
-    pub revision: u64,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
     pub query_batch_size: u32,
     pub ui_theme: Theme,
@@ -47,7 +46,6 @@ impl Default for TuiSystemSnapshot {
             scan_task_id: None,
             scan_message: String::new(),
             last_error: None,
-            revision: 0,
             library_roots: Arc::default(),
             query_batch_size: DEFAULT_QUERY_BATCH_SIZE,
             ui_theme: Theme::default(),
@@ -80,7 +78,6 @@ impl TuiSnapshot {
                 scan_task_id: state.system.scan_task_id,
                 scan_message: state.system.scan_message.clone(),
                 last_error: state.system.last_error.clone(),
-                revision: state.system.revision,
                 library_roots: previous
                     .filter(|previous| {
                         Arc::ptr_eq(&previous.configuration, &state.configuration.config)

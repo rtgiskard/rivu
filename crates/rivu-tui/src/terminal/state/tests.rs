@@ -1727,7 +1727,6 @@ fn directory_pages_refresh_for_metadata_and_structure_but_not_publication() {
         }
         assert!(!tui.ui.apply_query(&next, &fresh, Ok(result)));
         load_visible(&mut tui.ui, &next);
-        next.system.revision += 1;
         tui.apply_snapshot(next.clone());
         assert!(tui.ui.query_request(&next).is_none());
     }
