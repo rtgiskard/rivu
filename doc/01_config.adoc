@@ -83,6 +83,12 @@ audio settings are not resent, except output settings: every explicit Apply
 revalidates the selected device, even if unchanged. Display-only changes do not
 reopen audio.
 
+Core rejects processing-graph replacement through Configure and validates the
+editable settings before preparing logging resources. Saving validates the full
+candidate, the existing TOML and the composed document; an unchanged, already
+saved candidate needs no persistence work. Graph edits use their revision-checked
+processing commands rather than the Settings Apply path.
+
 Save failures appear in logs, `rivu status` and the desktop notice. Correct the
 cause and retry; exit makes one final attempt. Atomic replacement prevents partial
 writes, not power loss. An audio-application failure after a successful save does

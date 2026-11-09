@@ -241,12 +241,9 @@ impl CoreRuntime {
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
     ) -> Result<Self> {
-        config.library_roots = config
-            .library_roots
-            .iter()
-            .map(|root| library::logical_path(root))
-            .collect::<Result<_>>()?;
-        config.validate()?;
+        let roots = config.validate_settings()?;
+        config.processing_graph.validate()?;
+        config.library_roots = roots;
         // An existing file establishes an effective, normalized baseline without
         // rewriting user formatting or materializing omitted defaults at startup.
         let saved_config = config_path.try_exists()?.then(|| config.clone());

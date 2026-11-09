@@ -325,6 +325,22 @@ fn escaped_configuration_cannot_expand_past_the_output_budget() {
 }
 
 #[test]
+fn validated_roots_preserve_order_and_reject_normalized_overlap() {
+    let mut config = Config {
+        library_roots: vec!["/Music/Z/../Z".into(), "/Music/A/./".into()],
+        ..Config::default()
+    };
+    assert_eq!(
+        config.validate_settings().unwrap(),
+        vec![PathBuf::from("/Music/Z"), PathBuf::from("/Music/A")]
+    );
+    config
+        .library_roots
+        .push("/Music/Elsewhere/../Z/Live".into());
+    assert!(config.validate_settings().is_err());
+}
+
+#[test]
 fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values() {
     for input in [
         "schema_version = 0\n",

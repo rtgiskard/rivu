@@ -638,11 +638,17 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_settings()?;
+        self.processing_graph.validate()
+    }
+
+    /// Validate editable settings and return normalized roots in configured order.
+    /// Callers must separately reject graph replacement; decoding and saving use `validate`.
+    pub fn validate_settings(&self) -> Result<Vec<PathBuf>> {
         self.equalizer.validate()?;
         self.denoise.validate()?;
         self.neural.validate()?;
         self.material.validate()?;
-        self.processing_graph.validate()?;
         ensure!(
             self.equalizer_presets.len() <= 64,
             "at most 64 equalizer presets are supported"
@@ -662,15 +668,16 @@ impl Config {
         if let Some(config) = &self.equalizer_ab {
             config.validate()?;
         }
-        let mut roots = self
+        let roots = self
             .library_roots
             .iter()
             .map(|root| logical_path(root))
             .collect::<Result<Vec<_>>>()?;
-        roots.sort_unstable();
-        for pair in roots.windows(2) {
+        let mut ordered_roots: Vec<_> = roots.iter().collect();
+        ordered_roots.sort_unstable();
+        for pair in ordered_roots.windows(2) {
             ensure!(
-                !pair[1].starts_with(&pair[0]),
+                !pair[1].starts_with(pair[0]),
                 "library.roots must not overlap: {} and {}",
                 pair[0].display(),
                 pair[1].display()
@@ -916,7 +923,7 @@ impl Config {
             self.artwork_period_seconds.is_finite() && self.artwork_period_seconds > 0.0,
             "interface.artwork.period_seconds must be finite and greater than zero"
         );
-        Ok(())
+        Ok(roots)
     }
 }
 

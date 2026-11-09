@@ -101,7 +101,6 @@ impl Core {
         if let ConfigMutation::Material(change) = change {
             let mut config = self.preferences.checkpoint();
             change.apply_to(&mut config.material);
-            config.validate()?;
             self.write_config(&config)?;
             self.preferences.accept(Arc::new(config));
             return Ok(());
@@ -165,8 +164,7 @@ impl Core {
             config.processing_graph == self.preferences.settings().processing_graph,
             "Processing graph changes require revision-checked ProcessingGraphEdit commands"
         );
-        config.validate()?;
-        let roots = library::normalize_roots(&config.library_roots)?;
+        let roots = config.validate_settings()?;
         Arc::make_mut(&mut config).library_roots = roots;
         let roots_changed = config.library_roots != self.preferences.settings().library_roots;
         let previous = self.preferences.settings();
