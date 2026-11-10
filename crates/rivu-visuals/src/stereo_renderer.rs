@@ -414,12 +414,13 @@ impl StereoState {
         // (including spatial peak history). Remap those without reaccepting audio
         // or restoring a second large CPU field. The publication API makes only
         // the replacement frame's required copy.
-        let retained = if self.retained && self.field().is_empty() {
-            gpu.snapshot()
-        } else {
-            None
-        };
-        let field = if let Some(frame) = &retained {
+        let previous = if self.retained { gpu.snapshot() } else { None };
+        let retained = previous.as_ref().filter(|_| self.field().is_empty());
+        let range_changed = previous.as_ref().is_some_and(|frame| {
+            matches!(frame.content(), gpui::GpuContent::Field { params, .. }
+                if params.mapping != GpuValueMapping::Logarithmic { db_range: self.db_range })
+        });
+        let field = if let Some(frame) = retained {
             let gpui::GpuContent::Field { values, params, .. } = frame.content() else {
                 return;
             };
@@ -455,7 +456,9 @@ impl StereoState {
             Ok(()) => {
                 self.publication_pending = false;
                 self.retained = retained.is_some();
-                self.range_label = "".into();
+                if range_changed {
+                    self.range_label = "".into();
+                }
                 self.gpu_error_reported = false;
             }
             Err(error) => self.publication_failed("publication", &error),
