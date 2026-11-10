@@ -533,11 +533,11 @@ impl Service {
         pcm: audio::PcmAudio,
         output: Option<GraphPort>,
     ) {
-        self.audition = Some(RetainedAudition {
+        self.replace_audition(Some(RetainedAudition {
             id,
             generation,
             resource: AuditionResource::Cached { pcm, output },
-        });
+        }));
     }
 
     pub(crate) fn select_graph_audition(
@@ -549,7 +549,7 @@ impl Service {
         output: GraphPort,
         mode: GraphExecutionMode,
     ) {
-        self.audition = Some(RetainedAudition {
+        self.replace_audition(Some(RetainedAudition {
             id,
             generation,
             resource: AuditionResource::Graph {
@@ -558,11 +558,20 @@ impl Service {
                 output,
                 mode,
             },
-        });
+        }));
     }
 
     pub(crate) fn clear_audition(&mut self) {
-        self.audition = None;
+        self.replace_audition(None);
+    }
+
+    /// A selected stem mix is owned only by its audition; its PCM must not be
+    /// destroyed on the business thread.
+    fn replace_audition(&mut self, next: Option<RetainedAudition>) {
+        let previous = std::mem::replace(&mut self.audition, next);
+        if let (Some(previous), Some(reclaimer)) = (previous, self.reclaimer.as_ref()) {
+            reclaimer.retire_audition(previous);
+        }
     }
 
     /// Bypass and resume replace audio without replacing the retained selection.
