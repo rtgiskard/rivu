@@ -90,6 +90,10 @@ impl RadialMapping {
     }
 }
 const TWO_PI: f32 = PI * 2.0;
+const BAR_ROTATION_SCALE: f32 = 0.2;
+// Bars rotate at 1/5 speed and the middle ring at 1/2 speed. Wrap only
+// after whole turns for both, so scaling a wrapped phase stays continuous.
+const ROTATION_PERIOD: f32 = TWO_PI * 10.0;
 const IDLE_FADE_DURATION: Duration = Duration::from_secs(2);
 const BAR_GLOW_PASSES: [(f32, f32, f32); 2] = [(0.05, 3.5, 0.18), (0.025, 2.0, 0.32)];
 
@@ -125,6 +129,12 @@ struct RadialState {
     signal: VisualizationSignal,
     time: f32,
     fade_started: Option<Instant>,
+}
+
+impl RadialState {
+    fn bar_rotation(&self) -> f32 {
+        self.time * BAR_ROTATION_SCALE
+    }
 }
 impl RadialRenderer {
     pub(super) fn new() -> Self {
@@ -376,7 +386,7 @@ impl RadialRenderer {
         // from the presentation clock; suspension merely replaces the anchor.
         if data.displayed.is_empty() {
             data.time = (presentation_time.as_secs_f64() * data.rotation_speed as f64)
-                .rem_euclid(TWO_PI as f64) as f32;
+                .rem_euclid(ROTATION_PERIOD as f64) as f32;
         }
         if data.displayed.len() != count || mapping_changed || data.last_presentation_time.is_none()
         {
@@ -411,7 +421,7 @@ impl RadialRenderer {
             changed |= next != *display;
             *display = next;
         }
-        let rotation = (data.time + elapsed * data.rotation_speed).rem_euclid(TWO_PI);
+        let rotation = (data.time + elapsed * data.rotation_speed).rem_euclid(ROTATION_PERIOD);
         changed |= rotation != data.time;
         data.time = rotation;
         data.last_presentation_time = Some(presentation_time);
@@ -604,6 +614,7 @@ fn paint_bars(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Win
     let section = TWO_PI / count as f32;
     let angular_width =
         (data.bar_width * 0.015 * scale / base.max(1.0)).clamp(0.004, section * 0.8);
+    let rotation = data.bar_rotation();
     for index in 0..count {
         let value_index = if index < data.displayed.len() {
             data.displayed.len() - 1 - index
@@ -611,7 +622,7 @@ fn paint_bars(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Win
             index - data.displayed.len()
         };
         let value = (data.displayed[value_index] * data.sensitivity).clamp(0.0, 1.0);
-        let angle = -PI + section * (index as f32 + 0.5) + data.time * 0.2;
+        let angle = -PI + section * (index as f32 + 0.5) + rotation;
         let end = bar_level_radius(scale, value);
         let color = fancy_bar_color(data, value);
         if data.bloom_intensity > 0.01 && value > 0.005 {
@@ -1334,6 +1345,43 @@ mod tests {
     }
 
     #[test]
+    fn bar_rotation_is_continuous_across_scaled_phase_wraps() {
+        for speed in [0.5, 10.0] {
+            for boundary in [TWO_PI, ROTATION_PERIOD, ROTATION_PERIOD * 2.0] {
+                let mut radial = RadialRenderer::new();
+                radial.configure(&VisualParameters::from(&Config {
+                    radial_rotation_speed: speed,
+                    ..Config::default()
+                }));
+                let crossing = f64::from(boundary) / f64::from(speed);
+                let before = Duration::from_secs_f64(crossing - 0.008);
+                let after = Duration::from_secs_f64(crossing + 0.008);
+                radial.update(&frame(), before);
+                let initial = radial.data.borrow().bar_rotation();
+                assert!(radial.animate(after));
+                let actual = radial.data.borrow().bar_rotation().sin_cos();
+                let expected = (initial
+                    + (after - before).as_secs_f32() * speed * BAR_ROTATION_SCALE)
+                    .sin_cos();
+                assert!((actual.0 - expected.0).abs() < 2e-6);
+                assert!((actual.1 - expected.1).abs() < 2e-6);
+
+                // A new source initialized after the boundary must point in
+                // the same direction as one animated continuously through it.
+                let mut fresh = RadialRenderer::new();
+                fresh.configure(&VisualParameters::from(&Config {
+                    radial_rotation_speed: speed,
+                    ..Config::default()
+                }));
+                fresh.update(&frame(), after);
+                let initialized = fresh.data.borrow().bar_rotation().sin_cos();
+                assert!((actual.0 - initialized.0).abs() < 2e-6);
+                assert!((actual.1 - initialized.1).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
     fn radial_resume_preserves_phase_after_speed_change() {
         for hidden in [false, true] {
             let mut radial = RadialRenderer::new();
@@ -1400,10 +1448,11 @@ mod tests {
                 radial.set_visible(true);
                 radial.update(&audio, Duration::from_secs(20));
             }
-            let expected = (20.0_f64 * f64::from(config.radial_rotation_speed))
-                .rem_euclid(f64::from(TWO_PI)) as f32;
+            let expected = (20.0 * config.radial_rotation_speed * BAR_ROTATION_SCALE).sin_cos();
             let data = radial.data.borrow();
-            assert_eq!(data.time, expected);
+            let actual = data.bar_rotation().sin_cos();
+            assert!((actual.0 - expected.0).abs() < 1e-6);
+            assert!((actual.1 - expected.1).abs() < 1e-6);
             assert_eq!(data.displayed, vec![0.0; 4]);
         }
     }
