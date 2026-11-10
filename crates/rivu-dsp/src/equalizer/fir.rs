@@ -229,12 +229,9 @@ impl FirEqualizer {
                     .zip(&self.kernels[kernel..kernel + FFT_SIZE])
                 {
                     *sum += *signal * *filter;
-                    ensure!(
-                        sum.re.is_finite() && sum.im.is_finite(),
-                        "FIR convolution overflow"
-                    );
                 }
             }
+            ensure!(finite_complex(&self.sum), "FIR convolution overflow");
             self.inverse
                 .as_ref()
                 .expect("active FIR has FFT plans")
