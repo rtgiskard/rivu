@@ -586,9 +586,11 @@ publications alone do not. Scene and final-drawing retention follow
 link:22_cache.adoc#resource-boundaries[Resource boundaries].
 
 Glow uses widening translucent strokes, not image feedback or blur. Three ordered
-layers share segment endpoints. Fixed topology, particle history and pulse slots
-bound storage; Flow integrates with bounded substeps and rebuilds segments only
-from the final state.
+layers share segment endpoints. Once all strokes fall below visible strength,
+the empty drawing is retained without repeated GPU publication or repaint;
+simulation continues so renewed audio can reveal the evolving scene.
+Fixed topology, particle history and pulse slots bound storage; Flow integrates
+with bounded substeps and rebuilds segments only from the final state.
 
 FFT/window or signal changes revoke scenes until compatible audio arrives.
 Color and Bloom republish material without advancing geometry; background only

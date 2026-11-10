@@ -10,6 +10,8 @@ use rivu_analysis::{AnalysisFrame, AnalysisSettings};
 use rivu_format::config::{AudioVisualizerOptions, AudioVisualizerStyle};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
+const MIN_VISIBLE_STRENGTH: f32 = 0.015;
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct Drive {
     pub bands: [f32; 3],
@@ -331,6 +333,12 @@ impl FractalState {
         }
     }
 
+    fn has_light(&self) -> bool {
+        self.gpu_frame.as_ref().is_some_and(|frame| {
+            matches!(frame.content(), gpui::GpuContent::Segments { segments, .. } if !segments.is_empty())
+        })
+    }
+
     fn animate(&mut self, presentation_time: Duration) -> bool {
         if !self.visible || self.last_time.is_none() {
             return false;
@@ -348,16 +356,9 @@ impl FractalState {
             .as_secs_f32()
             .min(0.5);
         self.last_presentation_time = Some(presentation_time);
-        let had_light = self
-            .scene
-            .as_ref()
-            .is_some_and(|scene| !scene.segments().is_empty());
+        let had_light = self.has_light();
         self.advance(elapsed);
-        had_light
-            || self
-                .scene
-                .as_ref()
-                .is_some_and(|scene| !scene.segments().is_empty())
+        had_light || self.has_light()
     }
 
     fn advance(&mut self, elapsed: f32) {
@@ -394,6 +395,23 @@ impl FractalState {
         if self.scene.is_none() {
             if !self.retained {
                 self.gpu_frame = None;
+            }
+            return;
+        }
+        // An invisible topology still advances, but cannot change the drawing.
+        // Clear the last lit frame once, then retain that empty publication.
+        if self.gpu_frame.is_some()
+            && !self.has_light()
+            && !self
+                .scene
+                .as_ref()
+                .unwrap()
+                .segments()
+                .iter()
+                .any(|segment| segment.strength >= MIN_VISIBLE_STRENGTH)
+        {
+            if self.visible && self.last_time.is_some() {
+                self.retained = false;
             }
             return;
         }
@@ -448,7 +466,10 @@ impl FractalState {
         let segments = self.scene.as_ref().expect("published scene").segments();
         let group = |s: &LightSegment| s.tone * 3 + ((s.strength * 3.0) as usize).min(2);
         let mut counts = [0usize; 9];
-        for segment in segments.iter().filter(|s| s.strength >= 0.015) {
+        for segment in segments
+            .iter()
+            .filter(|s| s.strength >= MIN_VISIBLE_STRENGTH)
+        {
             counts[group(segment)] += 1;
         }
         let count: usize = counts.iter().sum();
@@ -464,7 +485,10 @@ impl FractalState {
         for index in 1..9 {
             offsets[index] = offsets[index - 1] + counts[index - 1];
         }
-        for segment in segments.iter().filter(|s| s.strength >= 0.015) {
+        for segment in segments
+            .iter()
+            .filter(|s| s.strength >= MIN_VISIBLE_STRENGTH)
+        {
             let index = group(segment);
             self.gpu_segments[offsets[index]] = GpuSegment {
                 endpoints: [
@@ -1254,6 +1278,20 @@ mod tests {
                     .iter()
                     .all(|s| s.strength < 0.015)
             );
+            let empty = publication(&visual);
+            assert!(published_segments(&empty).is_empty());
+            let last = silence.sample_time;
+            silence.sample_time += Duration::from_millis(50);
+            visual.update(&silence, last);
+            assert!(!visual.animate(silence.sample_time));
+            assert!(Arc::ptr_eq(&empty, &publication(&visual)));
+
+            // Empty-output reuse must not freeze the simulation or suppress
+            // the next accepted signal's visible output.
+            let loud = frame(11_100);
+            visual.update(&loud, silence.sample_time);
+            assert!(visual.animate(loud.sample_time));
+            assert!(!published_segments(&publication(&visual)).is_empty());
         }
     }
 
