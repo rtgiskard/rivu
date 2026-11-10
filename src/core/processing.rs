@@ -930,11 +930,20 @@ impl Core {
             .clone();
         let admitted_source = if bypassing {
             crate::processing::SourceStamp::read(&track.path)?
-        } else if let Some(result) = self.processing.results().iter().find(|r| r.id == id) {
-            self.processing_source(&result.track, result.stamp)?;
-            result.stamp
         } else {
-            crate::processing::SourceStamp::read(&track.path)?
+            let stamp = self
+                .processing
+                .source_stamp(id)
+                .context("Processing result is no longer retained")?;
+            if let Some(result) = self.processing.results().iter().find(|r| r.id == id) {
+                self.processing_source(&result.track, stamp)?;
+            } else {
+                ensure!(
+                    crate::processing::SourceStamp::read(&track.path)? == stamp,
+                    "Processing result is stale"
+                );
+            }
+            stamp
         };
         ensure!(
             bypassing
@@ -945,8 +954,7 @@ impl Core {
                         .results()
                         .iter()
                         .find(|result| result.id == id)
-                        .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
-                    && format!("{admitted_source:?}") == status.source_version),
+                        .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)),
             "Processing result is stale"
         );
         ensure!(

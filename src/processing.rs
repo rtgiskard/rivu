@@ -235,6 +235,7 @@ pub(crate) enum Event {
 }
 struct ActiveTask {
     id: u64,
+    stamp: SourceStamp,
     cancelled: Arc<Cancellation>,
     worker: JoinHandle<()>,
 }
@@ -307,6 +308,20 @@ impl Service {
     }
     pub(crate) fn active_id(&self) -> Option<u64> {
         self.active.as_ref().map(|task| task.id)
+    }
+
+    /// Source admitted by a retained result or by the still-active run.
+    pub(crate) fn source_stamp(&self, id: u64) -> Option<SourceStamp> {
+        self.results
+            .iter()
+            .find(|result| result.id == id)
+            .map(|result| result.stamp)
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .filter(|task| task.id == id)
+                    .map(|task| task.stamp)
+            })
     }
 
     pub(crate) fn cancellation_requested(&self, id: u64) -> Option<bool> {
@@ -903,6 +918,7 @@ impl Service {
             .resume_after_release(release);
         self.active = Some(ActiveTask {
             id,
+            stamp,
             cancelled,
             worker,
         });
@@ -1034,6 +1050,7 @@ impl Service {
             .iter()
             .find(|result| result.id == id)
             .context("Processing result is no longer retained")?;
+        let stamp = result.stamp;
         let vocals = result.outputs.vocals.clone().context("No vocal stem")?;
         let accompaniment = result
             .outputs
@@ -1101,6 +1118,7 @@ impl Service {
             })?;
         self.active = Some(ActiveTask {
             id,
+            stamp,
             cancelled,
             worker,
         });

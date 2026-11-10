@@ -254,6 +254,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
             .ok()
             .unwrap();
     }
+    let stamp = blocked.stamp;
     let cancelled = Arc::new(Cancellation::new().unwrap());
     let observed = Arc::clone(&cancelled);
     let sender = service.sender.clone();
@@ -271,6 +272,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     });
     service.active = Some(ActiveTask {
         id: 4,
+        stamp,
         cancelled,
         worker,
     });
