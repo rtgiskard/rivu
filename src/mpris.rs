@@ -88,9 +88,7 @@ impl MprisController {
                             register(handle.clone(), app.clone(), Arc::clone(&artwork)),
                         ));
                     } else {
-                        let _ = handle.send(Command::MprisStatus {
-                            status: "Desktop media controls disabled".to_owned(),
-                        });
+                        handle.report_mpris_status("Desktop media controls disabled".to_owned());
                     }
                 }
                 let connection = {
@@ -126,9 +124,9 @@ impl MprisController {
                     // work. Retrying still requires an explicit enable transition.
                     let state = handle.mpris_service_state();
                     if state.enabled && !state.shutting_down {
-                        let _ = handle.send(Command::MprisStatus {
-                            status: "MPRIS unavailable: session bus disconnected".to_owned(),
-                        });
+                        handle.report_mpris_status(
+                            "MPRIS unavailable: session bus disconnected".to_owned(),
+                        );
                     }
                     if let Some(active) = service.take() {
                         active.retire().await;
@@ -155,9 +153,7 @@ impl MprisController {
                     }
                     Ok(connection) => retire_connection(connection).await,
                     Err(error) if current_attempt => {
-                        let _ = handle.send(Command::MprisStatus {
-                            status: format!("MPRIS unavailable: {error:#}"),
-                        });
+                        handle.report_mpris_status(format!("MPRIS unavailable: {error:#}"));
                     }
                     Err(_) => {}
                 }
@@ -273,9 +269,7 @@ impl Mpris {
         let publisher_handle = handle.clone();
         // Publish success before scheduling: an immediate bus-loss report must
         // never be overwritten by a publisher that has not started yet.
-        let _ = handle.send(Command::MprisStatus {
-            status: "Connected to desktop media controls".to_owned(),
-        });
+        handle.report_mpris_status("Connected to desktop media controls".to_owned());
         let publisher = executor.spawn(async move {
             let mut previous = initial;
             let mut previous_can_raise = initial_can_raise;
@@ -398,9 +392,8 @@ impl Mpris {
         {
             let state = self.handle.mpris_service_state();
             if state.enabled && !state.shutting_down {
-                let _ = self.handle.send(Command::MprisStatus {
-                    status: "publisher stopped: publisher task panicked".to_owned(),
-                });
+                self.handle
+                    .report_mpris_status("publisher stopped: publisher task panicked".to_owned());
             }
             tracing::warn!("mpris_publisher_task_panicked");
         }
@@ -425,9 +418,7 @@ async fn publish_until_cancelled(
     match result {
         Some(Ok(())) => true,
         Some(Err(error)) => {
-            let _ = handle.send(Command::MprisStatus {
-                status: format!("publisher stopped: {error}"),
-            });
+            handle.report_mpris_status(format!("publisher stopped: {error}"));
             tracing::warn!(error = %error, "mpris_publisher_stopped");
             false
         }
@@ -1384,11 +1375,7 @@ mod tests {
     fn publisher_failure_follows_connected_status_and_cancellation_wins_ready_error() {
         let (_directory, mut runtime) = runtime_fixture();
         let handle = &runtime.handle;
-        handle
-            .send(Command::MprisStatus {
-                status: "Connected to desktop media controls".to_owned(),
-            })
-            .unwrap();
+        handle.report_mpris_status("Connected to desktop media controls".to_owned());
         let (_cancel, mut cancelled) = oneshot::channel();
         assert!(!async_io::block_on(publish_until_cancelled(
             &mut cancelled,

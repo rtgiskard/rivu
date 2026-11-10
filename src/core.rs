@@ -127,6 +127,7 @@ pub struct CoreHandle {
     sender: mpsc::Sender<Request>,
     revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
     task_waiters: Arc<Mutex<TaskWaiters>>,
+    mpris_status: Arc<MprisStatusInbox>,
 }
 
 #[derive(Clone, Copy)]
@@ -149,7 +150,30 @@ pub(crate) struct MprisServiceState {
     pub shutting_down: bool,
 }
 
+struct MprisStatusInbox {
+    latest: Mutex<Option<String>>,
+    wake: mpsc::Sender<()>,
+    ready: mpsc::Receiver<()>,
+}
+
+impl Default for MprisStatusInbox {
+    fn default() -> Self {
+        let (wake, ready) = mpsc::bounded(1);
+        Self {
+            latest: Mutex::new(None),
+            wake,
+            ready,
+        }
+    }
+}
+
 impl CoreHandle {
+    /// Internal service facts bypass external command admission and coalesce.
+    pub(crate) fn report_mpris_status(&self, status: String) {
+        *self.mpris_status.latest.lock() = Some(status);
+        let _ = self.mpris_status.wake.try_send(());
+    }
+
     /// Capture the active audio source and processing state without waiting on the GUI thread.
     pub(crate) fn render_snapshot(
         &self,
@@ -389,6 +413,7 @@ struct Core {
     read_queries: Option<query_worker::ReadQueries>,
     initial_devices: Option<runtime::InitialDevices>,
     revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
+    mpris_status: Arc<MprisStatusInbox>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     #[cfg(test)]
@@ -453,19 +478,22 @@ impl Drop for Core {
 }
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
-        // Any earlier startup read can fail before the queue projection is reached.
         self.transport.projection_stale = true;
-        self.state.library.track_total = self.store.track_count()?;
-        self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
-        for playlist_id in self.store.playlist_ids()? {
-            self.advance_playlist_entry_revision(playlist_id);
-        }
-        self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
+        self.projections.track_total = true;
+        self.projections.playlist_total = true;
+        self.projections.playlist_tokens = true;
+        self.transport.history_pending = true;
         self.state.system.ffmpeg_status = if self.preferences.settings().ffmpeg_enabled {
             audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
         } else {
             "disabled".to_owned()
         };
+        self.state.library.track_total = self.store.track_count()?;
+        self.projections.track_total = false;
+        self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
+        self.projections.playlist_total = false;
+        self.recover_playlist_tokens()?;
+        self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
         self.refresh_queue_tracks()?;
         self.publish();
         Ok(())

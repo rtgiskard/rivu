@@ -64,8 +64,7 @@ impl Core {
             | Command::CancelScan { .. }
             | Command::CancelRelocation { .. }
             | Command::ProcessingBypass { .. }
-            | Command::CancelProcessing { .. }
-            | Command::MprisStatus { .. } => {}
+            | Command::CancelProcessing { .. } => {}
             _ => bail!("Database maintenance is in progress; this operation was not executed"),
         }
         Ok(false)

@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct ProjectionRecovery {
     pub(super) track_total: bool,
     pub(super) playlist_total: bool,
+    pub(super) playlist_tokens: bool,
     pub(super) current_track: bool,
     pub(super) in_flight: bool,
 }
@@ -109,6 +110,9 @@ impl Core {
     pub(super) fn recover_projections_on_demand(&mut self) {
         if self.database_maintenance_active() || self.database_unavailable {
             return;
+        }
+        if self.projections.playlist_tokens && self.recover_playlist_tokens().is_ok() {
+            self.publish();
         }
         // Metadata recovery reuses the queue control gate, without rereading its
         // structure. Never replay the catalog command that dirtied this snapshot.

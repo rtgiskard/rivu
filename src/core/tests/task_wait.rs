@@ -9,6 +9,7 @@ pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) 
         sender,
         revision_updates: Arc::clone(&core.revision_updates),
         task_waiters: Arc::clone(&core.task_waiters),
+        mpris_status: Arc::clone(&core.mpris_status),
     };
     (handle, requests)
 }

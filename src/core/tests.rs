@@ -109,6 +109,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         executor: tasks.handle.clone(),
         workers: tasks.workers.clone(),
         revision_updates: Arc::new(RwLock::new(Vec::new())),
+        mpris_status: Arc::new(MprisStatusInbox::default()),
         shared: Arc::new(RwLock::new(state.clone())),
         state,
         publication_observer: None,
@@ -240,6 +241,7 @@ fn navigation_runtime(
         sender,
         revision_updates: core.revision_updates.clone(),
         task_waiters: core.task_waiters.clone(),
+        mpris_status: Arc::clone(&core.mpris_status),
     };
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
@@ -283,6 +285,7 @@ fn pcm_fixture() -> (
         sender,
         revision_updates: Arc::new(RwLock::new(Vec::new())),
         task_waiters: Arc::new(Mutex::new(TaskWaiters::default())),
+        mpris_status: Arc::new(MprisStatusInbox::default()),
     };
     (handle, pcm, receiver)
 }

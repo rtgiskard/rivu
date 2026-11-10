@@ -1,6 +1,157 @@
 use super::*;
 use crate::core::catalog::ScanFinished;
 
+#[test]
+fn latest_mpris_status_survives_a_full_external_request_queue() {
+    let (_directory, mut core) = fixture();
+    let (handle, requests) = task_wait::wait_handle(&core);
+    while handle.send(Command::DismissError).is_ok() {}
+    assert!(requests.is_full());
+    handle.report_mpris_status("connected".into());
+    handle.report_mpris_status("disconnected".into());
+    assert_eq!(core.mpris_status.ready.len(), 1);
+    let (control, mut shutdown) = CoreLifecycle::new();
+    let mut requests = requests;
+    loop {
+        let event =
+            futures::executor::block_on(core.next_event(&mut requests, &mut shutdown, &control))
+                .unwrap();
+        let status = matches!(event, dispatch::BusinessEvent::MprisStatus);
+        core.business_event(event);
+        if status {
+            break;
+        }
+    }
+    assert_eq!(core.shared.read().system.mpris_status, "disconnected");
+    handle.report_mpris_status("connected again".into());
+    core.business_event(dispatch::BusinessEvent::MprisStatus);
+    assert_eq!(core.shared.read().system.mpris_status, "connected again");
+}
+
+#[test]
+fn device_enumeration_errors_and_panics_are_visible_but_empty_success_is_not_an_error() {
+    for outcome in ["error", "panic", "disconnected", "empty"] {
+        let (_directory, mut core) = fixture();
+        core.initial_devices = Some(runtime::InitialDevices::start(
+            &core.executor,
+            Arc::clone(&core.workers),
+            move || match outcome {
+                "error" => anyhow::bail!("enumeration unavailable"),
+                "panic" => panic!("enumeration panicked"),
+                _ => Ok(Vec::new()),
+            },
+        ));
+        if outcome == "disconnected" {
+            let (sender, receiver) = oneshot::channel();
+            drop(sender);
+            core.initial_devices.as_mut().unwrap().finished = receiver;
+        }
+        let (_sender, mut requests) = mpsc::bounded(1);
+        let (control, mut shutdown) = CoreLifecycle::new();
+        loop {
+            let event = futures::executor::block_on(core.next_event(
+                &mut requests,
+                &mut shutdown,
+                &control,
+            ))
+            .unwrap();
+            let completed = matches!(event, dispatch::BusinessEvent::DevicesEnumerated(_));
+            core.business_event(event);
+            if completed {
+                break;
+            }
+        }
+        assert!(core.state.system.devices.is_empty());
+        assert!(core.initial_devices.is_none());
+        if outcome == "empty" {
+            assert!(core.shared.read().system.last_error.is_none());
+        } else {
+            assert!(
+                core.shared
+                    .read()
+                    .system
+                    .last_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Enumerating audio devices:")
+            );
+        }
+    }
+}
+
+#[test]
+fn incomplete_startup_domains_recover_counts_history_and_playlist_edit_tokens() {
+    for failure in ["track_count", "playlist_summary", "history"] {
+        let (directory, mut core) = fixture();
+        let playlist = core
+            .store
+            .create_playlist_with_tracks("Saved", &[1, 2])
+            .unwrap();
+        core.store.mark_played(1, 42).unwrap();
+        core.state.library.track_total = 0;
+        core.state.library.playlist_total = 0;
+        core.state.library.playlist_entry_revisions = Arc::default();
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        let (break_read, restore_read) = match failure {
+            "track_count" => (
+                "ALTER TABLE tracks RENAME TO unavailable_tracks",
+                "ALTER TABLE unavailable_tracks RENAME TO tracks",
+            ),
+            "playlist_summary" => (
+                "ALTER TABLE playlists RENAME COLUMN name TO unavailable_name",
+                "ALTER TABLE playlists RENAME COLUMN unavailable_name TO name",
+            ),
+            _ => (
+                "UPDATE tracks SET last_played='unreadable' WHERE id=1",
+                "UPDATE tracks SET last_played=42 WHERE id=1",
+            ),
+        };
+        connection.execute_batch(break_read).unwrap();
+        assert!(core.load_initial_state().is_err());
+        assert!(core.transport.history_pending);
+        connection.execute_batch(restore_read).unwrap();
+        core.publish();
+        core.read_queries = Some(
+            query_worker::ReadQueries::start(
+                directory.path().join("library.db"),
+                Arc::clone(&core.shared),
+            )
+            .unwrap(),
+        );
+        core.recover_projections_on_demand();
+        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(event, ScanEvent::Projections { .. }));
+        core.scan_event(event);
+        assert_eq!(core.state.library.track_total, 4);
+        assert_eq!(core.state.library.playlist_total, 1);
+        assert_eq!(core.state.library.history[0].track_id, 1);
+        assert_eq!(core.state.library.history[0].played_at, 42);
+        assert!(!core.projections.track_total);
+        assert!(!core.projections.playlist_total);
+        assert!(!core.projections.playlist_tokens);
+        assert!(!core.transport.history_pending);
+        let token = core.state.library.playlist_entry_revisions[&playlist];
+        let rows = core
+            .store
+            .playlist_entries_page(playlist, None, 0, 10)
+            .unwrap()
+            .rows;
+        core.command(Command::RemovePlaylistEntries {
+            playlist_id: playlist,
+            entry_ids: vec![rows[0].id],
+            expected_revision: token,
+        })
+        .unwrap();
+        assert_eq!(
+            core.store
+                .playlist_entries_page(playlist, None, 0, 0)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+}
+
 fn initialize_with_pending_devices(
     mut core: Core,
 ) -> (

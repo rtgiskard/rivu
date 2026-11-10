@@ -890,9 +890,6 @@ pub enum Command {
     Configure {
         config: Arc<rivu_format::config::Config>,
     },
-    MprisStatus {
-        status: String,
-    },
     DismissScanResult,
     CancelScan {
         id: u64,

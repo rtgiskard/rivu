@@ -12,6 +12,7 @@ pub(super) enum BusinessEvent {
     Optimization(Result<DatabaseOptimization>),
     FfmpegLoaded,
     DevicesEnumerated(Result<Vec<String>>),
+    MprisStatus,
     Shutdown(CoreLifecycle),
 }
 
@@ -111,7 +112,7 @@ impl Core {
         control.record_result(self.finalize());
     }
 
-    async fn next_event(
+    pub(super) async fn next_event(
         &mut self,
         requests: &mut mpsc::Receiver<Request>,
         shutdown: &mut mpsc::Receiver<()>,
@@ -126,6 +127,7 @@ impl Core {
             active_external_admission,
             active_optimization,
             processing,
+            mpris_status,
             ..
         } = self;
         let awaiting_ffmpeg = self.state.system.ffmpeg_status == "not loaded";
@@ -133,6 +135,7 @@ impl Core {
         // permanent priority for a hot input.
         Some(futures::select! {
             _ = shutdown.recv().fuse() => BusinessEvent::Shutdown(control.clone()),
+            _ = mpris_status.ready.recv().fuse() => BusinessEvent::MprisStatus,
             request = requests.recv().fuse() => BusinessEvent::Request(request.ok()?),
             event = engine.events.as_ref().expect("Core owns audio events").recv().fuse() => {
                 event.map_or(BusinessEvent::AudioStopped, BusinessEvent::Audio)
@@ -220,10 +223,22 @@ impl Core {
                 self.publish();
             }
             BusinessEvent::DevicesEnumerated(result) => {
-                if let Some(mut task) = self.initial_devices.take()
-                    && let Ok(devices) = task.join().and(result)
-                {
-                    self.state.system.devices = Arc::new(devices);
+                if let Some(mut task) = self.initial_devices.take() {
+                    match task.join().and(result) {
+                        Ok(devices) => self.state.system.devices = Arc::new(devices),
+                        Err(error) => {
+                            tracing::error!(error = %error, "initial_device_enumeration_failed");
+                            self.state.system.last_error =
+                                Some(format!("Enumerating audio devices: {error:#}"));
+                        }
+                    }
+                    self.publish();
+                }
+            }
+            BusinessEvent::MprisStatus => {
+                let status = self.mpris_status.latest.lock().take();
+                if let Some(status) = status {
+                    self.state.system.mpris_status = status;
                     self.publish();
                 }
             }

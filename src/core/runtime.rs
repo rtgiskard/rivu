@@ -267,12 +267,14 @@ impl CoreRuntime {
         *shared.write() = initial.clone();
         let revision_updates = Arc::new(RwLock::new(Vec::new()));
         let task_waiters = Arc::new(Mutex::new(TaskWaiters::default()));
+        let mpris_status = Arc::new(MprisStatusInbox::default());
         let handle = CoreHandle {
             state: shared.clone(),
             pcm: Arc::clone(&engine.pcm),
             sender,
             revision_updates: Arc::clone(&revision_updates),
             task_waiters: Arc::clone(&task_waiters),
+            mpris_status: Arc::clone(&mpris_status),
         };
         let (scan_tx, scan_rx) = async_channel::bounded(3);
         let (relocation_tx, relocation_rx) = async_channel::bounded(1);
@@ -285,6 +287,7 @@ impl CoreRuntime {
             read_queries: None,
             initial_devices: None,
             revision_updates,
+            mpris_status,
             state: initial,
             shared,
             #[cfg(test)]

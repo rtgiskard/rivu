@@ -442,9 +442,6 @@ pub enum WireCommand {
     Configure {
         config: Box<WireConfig>,
     },
-    MprisStatus {
-        status: String,
-    },
     Shutdown,
     DismissScanResult,
     CancelScan {
@@ -1330,7 +1327,6 @@ impl From<Command> for WireCommand {
             Command::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
             },
-            Command::MprisStatus { status } => Self::MprisStatus { status },
             Command::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
             Command::RelocateTrack {
                 source_id,
@@ -1640,7 +1636,6 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
             },
-            WireCommand::MprisStatus { status } => Self::MprisStatus { status },
             WireCommand::Shutdown => bail!("Shutdown is an application request"),
             WireCommand::CreatePlaylistFromQueue { name } => Self::CreatePlaylistFromQueue { name },
             WireCommand::RelocateTrack {

@@ -533,10 +533,6 @@ impl Core {
             }
             Command::Configure { config } => self.configure(config)?,
             Command::MutateConfig { change } => self.mutate_config(change)?,
-            Command::MprisStatus { status } => {
-                self.state.system.mpris_status = status;
-                return Ok(CommandOutcome::Immediate);
-            }
             Command::SeekQueue { queue_id, seconds } => {
                 if self.state.queue.current_id == Some(queue_id) {
                     self.seek(seconds)?;

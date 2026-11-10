@@ -1,6 +1,23 @@
 use super::*;
 
 impl Core {
+    pub(in crate::core) fn recover_playlist_tokens(&mut self) -> Result<()> {
+        if self.projections.playlist_tokens {
+            for playlist_id in self.store.playlist_ids()? {
+                if !self
+                    .state
+                    .library
+                    .playlist_entry_revisions
+                    .contains_key(&playlist_id)
+                {
+                    self.advance_playlist_entry_revision(playlist_id);
+                }
+            }
+            self.projections.playlist_tokens = false;
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn create_playlist(&mut self, name: String) -> Result<()> {
         let playlist_id = self.store.create_playlist(&name)?;
         self.playlist_created(playlist_id, false)
@@ -185,10 +202,12 @@ impl Core {
     }
 
     pub(in crate::core) fn check_playlist_entry_revision(
-        &self,
+        &mut self,
         playlist_id: i64,
         expected: u64,
     ) -> Result<()> {
+        self.recover_playlist_tokens()
+            .context("Initializing playlist entry revisions")?;
         anyhow::ensure!(
             self.state
                 .library
