@@ -1054,6 +1054,149 @@ fn container_page(request: &QueryRequest, catalog: bool, found: bool, total: usi
 }
 
 #[test]
+fn container_revision_refresh_preserves_identity_and_activation_in_visible_and_hidden_views() {
+    for catalog in [false, true] {
+        for hidden in [false, true] {
+            let (mut ui, mut snapshot) = container_fixture(catalog);
+            snapshot.system.query_batch_size = 3;
+            if let View::Playlists(rows) = &mut ui.view {
+                rows.insert(
+                    0,
+                    3,
+                    3,
+                    [0, 1, 2]
+                        .map(|id| PlaylistSummary {
+                            id,
+                            name: format!("playlist-{id}"),
+                            entry_count: 0,
+                        })
+                        .into(),
+                );
+            }
+            if hidden {
+                let view = std::mem::replace(&mut ui.view, View::Queue);
+                if catalog {
+                    ui.cached_playlists = Some(view);
+                } else {
+                    ui.cached_library = Some(view);
+                }
+            }
+            let mut tui = TuiState { snapshot, ui };
+            let mut next = tui.snapshot.clone();
+            next.library.revision += 1;
+            next.library.structure_revision += 1;
+            next.library.playlist_revision += 1;
+            tui.apply_snapshot(next.clone());
+            if hidden {
+                tui.ui.view = if catalog {
+                    tui.ui.cached_playlists.take().unwrap()
+                } else {
+                    tui.ui.cached_library.take().unwrap()
+                };
+            }
+            let request = tui.ui.query_request(&next).unwrap();
+            assert_eq!(request.demand.offset, 0);
+            let page = if catalog {
+                ViewResponse::PlaylistSummaries(Page {
+                    total: 3,
+                    rows: [2, 0, 1]
+                        .map(|id| PlaylistSummary {
+                            id,
+                            name: format!("playlist-{id}"),
+                            entry_count: 0,
+                        })
+                        .into(),
+                })
+            } else {
+                ViewResponse::DirectoryPage(Page {
+                    total: 3,
+                    rows: ["new", "first", "target"]
+                        .map(|name| DirectoryRow::Directory {
+                            path: format!("/music/{name}").into(),
+                        })
+                        .into(),
+                })
+            };
+            assert!(
+                tui.ui
+                    .apply_query(&next, &request, Ok(result(&request, page)))
+            );
+            match &tui.ui.view {
+                View::Playlists(rows) => {
+                    assert_eq!(rows.selection.selected(), Some(2));
+                    assert_eq!(rows.selected().unwrap().id, 1);
+                }
+                View::Tree(tree) => {
+                    assert_eq!(tree.entries.selection.selected(), Some(2));
+                    assert!(
+                        matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path == Path::new("/music/target"))
+                    );
+                }
+                _ => unreachable!(),
+            }
+            if catalog {
+                assert!(matches!(
+                    key(&mut tui.ui, &next, KeyCode::Enter),
+                    KeyAction::Command(Command::PlayPlaylist { playlist_id: 1 })
+                ));
+                key(&mut tui.ui, &next, KeyCode::Right);
+                assert!(
+                    matches!(&tui.ui.view, View::PlaylistDetail { detail, .. } if detail.playlist_id == 1)
+                );
+            } else {
+                key(&mut tui.ui, &next, KeyCode::Enter);
+                assert!(
+                    matches!(&tui.ui.view, View::Tree(tree) if tree.directory == Path::new("/music/target"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn container_revision_refresh_restarts_pending_identity_scan() {
+    for catalog in [false, true] {
+        let (mut ui, snapshot) = container_fixture(catalog);
+        replace_query(&mut ui, &snapshot, "filter");
+        let first = ui.query_request(&snapshot).unwrap();
+        assert!(ui.apply_query(
+            &snapshot,
+            &first,
+            Ok(container_page(&first, catalog, true, 4))
+        ));
+        let obsolete = ui.query_request(&snapshot).unwrap();
+        assert_eq!(obsolete.demand.offset, 2);
+        let mut tui = TuiState { snapshot, ui };
+        let mut next = tui.snapshot.clone();
+        next.library.revision += 1;
+        next.library.structure_revision += 1;
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert!(!tui.ui.apply_query(
+            &next,
+            &obsolete,
+            Ok(container_page(&obsolete, catalog, true, 4))
+        ));
+        for offset in [0, 2] {
+            let request = tui.ui.query_request(&next).unwrap();
+            assert_eq!(request.demand.offset, offset);
+            assert!(tui.ui.apply_query(
+                &next,
+                &request,
+                Ok(container_page(&request, catalog, true, 4))
+            ));
+        }
+        match &tui.ui.view {
+            View::Playlists(rows) => assert_eq!(rows.selected().unwrap().id, 1),
+            View::Tree(tree) => assert!(
+                matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path == Path::new("/music/target"))
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
     for catalog in [false, true] {
         for (found, total) in [(true, 4), (false, 4), (false, 0)] {
@@ -1125,12 +1268,22 @@ fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
                 next.library.structure_revision += 1;
                 next.library.playlist_revision += 1;
                 tui.apply_snapshot(next.clone());
-                let page = tui.ui.query_request(&next).unwrap();
-                assert!(tui.ui.apply_query(
-                    &next,
-                    &page,
-                    Ok(container_page(&page, catalog, false, 4))
-                ));
+                for _ in 0..2 {
+                    let page = tui.ui.query_request(&next).unwrap();
+                    assert!(tui.ui.apply_query(
+                        &next,
+                        &page,
+                        Ok(container_page(&page, catalog, false, 4))
+                    ));
+                    let pending = match &tui.ui.view {
+                        View::Tree(tree) => tree.entries.identity_lookup.is_some(),
+                        View::Playlists(rows) => rows.identity_lookup.is_some(),
+                        _ => unreachable!(),
+                    };
+                    if !pending {
+                        break;
+                    }
+                }
                 match &tui.ui.view {
                     View::Tree(tree) => {
                         assert!(tree.entries.identity_lookup.is_none());

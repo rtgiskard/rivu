@@ -580,6 +580,8 @@ impl View {
         }
         if rows_changed && !coordinates_changed && !page_size_changed {
             self.invalidate_payload();
+        } else if coordinates_changed && matches!(self, Self::Tree(_) | Self::Playlists(_)) {
+            self.retain_container_identity();
         } else if rows_changed || page_size_changed {
             match self {
                 Self::LibraryResults(results) => results.invalidate(coordinates_changed),
@@ -907,10 +909,8 @@ impl View {
 }
 
 impl View {
-    fn refilter(&mut self, queue: &mut QueuePage, state: &TuiSnapshot, query: &str) {
+    fn retain_container_identity(&mut self) {
         match self {
-            View::Queue => queue.refilter(state),
-            View::LibraryResults(results) => results.refilter(),
             View::Tree(tree) => {
                 let container = tree
                     .entries
@@ -949,6 +949,15 @@ impl View {
                     });
                 rows.retain_identity(identity);
             }
+            _ => unreachable!("only container views retain container identities"),
+        }
+    }
+
+    fn refilter(&mut self, queue: &mut QueuePage, state: &TuiSnapshot, query: &str) {
+        match self {
+            View::Queue => queue.refilter(state),
+            View::LibraryResults(results) => results.refilter(),
+            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(),
             View::PlaylistDetail { detail, .. } => {
                 detail.entry_anchor = detail
                     .entry_anchor
