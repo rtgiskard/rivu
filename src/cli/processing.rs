@@ -5,7 +5,7 @@ use super::args::{
 use anyhow::{Context, Result};
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{model::*, response::StateSections};
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 fn show_settings(
     i18n: &Localizer,
@@ -14,8 +14,10 @@ fn show_settings(
     instance_id: u32,
     graph_only: bool,
 ) -> Result<()> {
+    let mut output = std::io::stdout().lock();
     if !graph_only {
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-processing-equalizer",
@@ -33,14 +35,15 @@ fn show_settings(
                     ("bands", config.equalizer.bands.len().to_string().into()),
                 ]
             )
-        );
+        )?;
         let mode = match config.denoise.mode {
             rivu_dsp::denoise::DenoiseMode::Off => "processing-off",
             rivu_dsp::denoise::DenoiseMode::Stationary => "processing-stationary",
             rivu_dsp::denoise::DenoiseMode::Profile => "processing-profile",
             rivu_dsp::denoise::DenoiseMode::Adaptive => "processing-adaptive",
         };
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-processing-denoise",
@@ -57,8 +60,9 @@ fn show_settings(
                     ("mode", i18n.text(mode).into()),
                 ]
             )
-        );
-        println!(
+        )?;
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-processing-neural",
@@ -74,10 +78,11 @@ fn show_settings(
                     ("threads", config.neural.threads.to_string().into()),
                 ]
             )
-        );
+        )?;
     }
     let graph = &config.processing_graph;
-    println!(
+    writeln!(
+        output,
         "{}",
         i18n.format(
             "core-processing-graph",
@@ -87,7 +92,7 @@ fn show_settings(
                 ("edges", graph.edges.len().to_string().into()),
             ]
         )
-    );
+    )?;
     if graph_only {
         for node in &graph.nodes {
             let kind = match node.kind {
@@ -99,7 +104,8 @@ fn show_settings(
                 GraphNodeKind::Mix { .. } => "processing-mix",
                 GraphNodeKind::Output => "processing-graph-output",
             };
-            println!(
+            writeln!(
+                output,
                 "{}",
                 i18n.format(
                     "core-processing-node",
@@ -108,20 +114,22 @@ fn show_settings(
                         ("kind", i18n.text(kind).into()),
                     ]
                 )
-            );
+            )?;
         }
         for edge in &graph.edges {
-            println!(
+            writeln!(
+                output,
                 "{}:{} -> {}:{}",
                 edge.from.node, edge.from.port, edge.to.node, edge.to.port
-            );
+            )?;
         }
     }
     if let Some(task) = task {
         super::tasks::emit_processing(i18n, instance_id, task, false)?;
     } else {
-        println!("{}", i18n.text("core-processing-latest"));
+        writeln!(output, "{}", i18n.text("core-processing-latest"))?;
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -156,6 +164,7 @@ fn show_processing(
         .config;
     let instance_id = super::tasks::instance_id(session)?;
     let playback = response.playback.context("Missing playback state")?;
+    let mut output = std::io::stdout().lock();
     if json {
         let processing = state
             .task
@@ -167,11 +176,23 @@ fn show_processing(
         } else {
             serde_json::json!({"processing_bypassed":config.processing_bypassed,"processing_selection":playback.processing_selection,"processing_audition":playback.processing_audition,"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
         };
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
     } else {
-        println!("processing_bypassed: {}", config.processing_bypassed);
-        println!("processing_selection: {:?}", playback.processing_selection);
-        println!("processing_audition: {:?}", playback.processing_audition);
+        writeln!(
+            output,
+            "processing_bypassed: {}",
+            config.processing_bypassed
+        )?;
+        writeln!(
+            output,
+            "processing_selection: {:?}",
+            playback.processing_selection
+        )?;
+        writeln!(
+            output,
+            "processing_audition: {:?}",
+            playback.processing_audition
+        )?;
         show_settings(
             i18n,
             &config,
@@ -180,6 +201,7 @@ fn show_processing(
             graph_only,
         )?;
     }
+    output.flush()?;
     Ok(())
 }
 

@@ -116,14 +116,16 @@ pub(super) fn list_library(
 }
 
 pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool) -> Result<()> {
+    let mut output = io::stdout().lock();
     match view {
         ViewResponse::LibraryPage(page) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&page)?);
+                writeln!(output, "{}", serde_json::to_string_pretty(&page)?)?;
             } else {
-                println!("total\t{}", page.total);
+                writeln!(output, "total\t{}", page.total)?;
                 for track in page.rows {
-                    println!(
+                    writeln!(
+                        output,
                         "{}\t{}\t{}\t{}\t{}{}{}",
                         track.id,
                         TerminalEscaped(&track.title),
@@ -140,28 +142,29 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
                         } else {
                             ""
                         },
-                    );
+                    )?;
                 }
             }
         }
-        ViewResponse::OtherTracksCount(count) => println!("{count}"),
+        ViewResponse::OtherTracksCount(count) => writeln!(output, "{count}")?,
         ViewResponse::LibraryLocate(location) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&location)?);
+                writeln!(output, "{}", serde_json::to_string_pretty(&location)?)?;
             } else {
                 use rivu_protocol::model::LibraryLocateResult;
                 match location {
                     LibraryLocateResult::Located(location) => {
-                        println!("located\t{}\t{}", location.offset, location.total);
+                        writeln!(output, "located\t{}\t{}", location.offset, location.total)?;
                     }
-                    LibraryLocateResult::Filtered => println!("filtered"),
-                    LibraryLocateResult::Unavailable => println!("unavailable"),
-                    LibraryLocateResult::OutsideRoot => println!("outside-root"),
+                    LibraryLocateResult::Filtered => writeln!(output, "filtered")?,
+                    LibraryLocateResult::Unavailable => writeln!(output, "unavailable")?,
+                    LibraryLocateResult::OutsideRoot => writeln!(output, "outside-root")?,
                 }
             }
         }
         _ => bail!("Other query returned an unexpected response"),
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -287,6 +290,7 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
     if json {
         writeln!(output, "]")?;
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -328,6 +332,7 @@ pub(super) fn write_error(
     } else {
         writeln!(output, "rivu: {:#}", TerminalEscaped(error))?;
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -338,6 +343,7 @@ pub(super) fn show_history(
 ) -> Result<()> {
     serde_json::to_writer(&mut *output, &entries[..entries.len().min(limit)])?;
     writeln!(output)?;
+    output.flush()?;
     Ok(())
 }
 
@@ -348,6 +354,7 @@ pub(super) fn show_duplicates(output: &mut impl Write, view: &ViewResponse) -> R
         _ => bail!("Duplicate query returned an unexpected response"),
     }
     writeln!(output)?;
+    output.flush()?;
     Ok(())
 }
 
@@ -365,6 +372,7 @@ pub(super) fn show_task_ack(
     if !ids.iter().any(|(_, id)| id.is_some()) {
         return show_ack(i18n, ack, json);
     }
+    let mut output = io::stdout().lock();
     let instance_id = super::tasks::instance_id(session)?;
     if json {
         let mut value = serde_json::to_value(ack)?;
@@ -386,8 +394,9 @@ pub(super) fn show_task_ack(
             })
             .collect();
         fields.insert("task_refs".into(), references.into());
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
         if !ack.is_success() {
+            output.flush()?;
             bail!(
                 "{:?}: {}",
                 ack.status,
@@ -398,13 +407,15 @@ pub(super) fn show_task_ack(
         show_ack(i18n, ack, false)?;
         for (kind, id) in ids {
             if let Some(id) = id {
-                println!(
+                writeln!(
+                    output,
                     "{kind}: {}",
                     super::tasks::TaskReference { instance_id, id }
-                );
+                )?;
             }
         }
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -413,10 +424,12 @@ pub(super) fn show_ack(
     ack: &rivu_protocol::response::Ack,
     json: bool,
 ) -> Result<()> {
+    let mut output = io::stdout().lock();
     if json {
-        println!("{}", serde_json::to_string_pretty(ack)?);
+        writeln!(output, "{}", serde_json::to_string_pretty(ack)?)?;
     }
     if !ack.is_success() {
+        output.flush()?;
         bail!(
             "{:?}: {}",
             ack.status,
@@ -424,19 +437,23 @@ pub(super) fn show_ack(
         );
     }
     if !json {
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-command-accepted",
                 &[("revision", ack.revision.to_string().into())]
             )
-        );
+        )?;
     }
+    output.flush()?;
     Ok(())
 }
 pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool) -> Result<()> {
+    let mut output = io::stdout().lock();
     if json {
-        println!("{}", serde_json::to_string_pretty(response)?);
+        writeln!(output, "{}", serde_json::to_string_pretty(response)?)?;
+        output.flush()?;
         return Ok(());
     }
     let playback = response
@@ -457,7 +474,8 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
         PlaybackStatus::Paused => i18n.text("core-paused"),
     };
     if let Some(track) = playback.current_track.as_deref() {
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-state-track",
@@ -483,10 +501,11 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
                     ),
                 ]
             )
-        );
+        )?;
     } else {
         let queued = response.queue.as_ref().map_or(0, |queue| queue.total);
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-state-empty",
@@ -496,24 +515,32 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
                     ("queued", queued.to_string().into()),
                 ]
             )
-        );
+        )?;
     }
     if let Some(progress) = &system.scan_progress {
-        show_scan(i18n, progress);
+        show_scan(i18n, progress)?;
     }
-    println!(
+    writeln!(
+        output,
         "{}",
         i18n.format(
             "core-ffmpeg",
             &[("status", terminal_text(&system.ffmpeg_status).into())]
         )
-    );
+    )?;
+    output.flush()?;
     if let Some(error) = &system.last_error {
-        eprintln!("{}", TerminalEscaped(error));
+        let mut output = io::stderr().lock();
+        writeln!(output, "{}", TerminalEscaped(error))?;
+        output.flush()?;
     }
     Ok(())
 }
-pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanProgress) {
+pub(super) fn show_scan(
+    i18n: &Localizer,
+    progress: &rivu_protocol::model::ScanProgress,
+) -> Result<()> {
+    let mut output = io::stdout().lock();
     let phase = i18n.text(match progress.phase {
         rivu_protocol::model::ScanPhase::Discovering => "core-discovering",
         rivu_protocol::model::ScanPhase::ReadingMetadata => "core-reading-metadata",
@@ -522,7 +549,8 @@ pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanP
         rivu_protocol::model::ScanPhase::Failed => "core-failed",
         rivu_protocol::model::ScanPhase::Cancelled => "core-cancelled",
     });
-    println!(
+    writeln!(
+        output,
         "{}",
         i18n.format(
             "core-scan-progress",
@@ -539,10 +567,12 @@ pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanP
                 ("errors", progress.errors.to_string().into()),
             ]
         )
-    );
+    )?;
     if let Some(path) = &progress.path {
-        println!("{}", TerminalEscaped(path.display()));
+        writeln!(output, "{}", TerminalEscaped(path.display()))?;
     }
+    output.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -550,6 +580,39 @@ mod tests {
     use super::{show_history, write_error};
     use rivu_utils::terminal::TerminalEscaped;
     use std::path::Path;
+
+    #[test]
+    fn buffered_error_output_propagates_real_broken_pipe_on_flush() {
+        use std::{io, io::BufWriter, os::unix::net::UnixStream};
+
+        for json in [false, true] {
+            let (writer, reader) = UnixStream::pair().unwrap();
+            drop(reader);
+            let mut output = BufWriter::new(writer);
+            let error =
+                write_error(&mut output, &anyhow::anyhow!("query failed"), json).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert!(!output.buffer().is_empty());
+        }
+    }
+
+    #[test]
+    fn history_output_propagates_real_broken_pipe_on_flush() {
+        use std::{io, io::BufWriter, os::unix::net::UnixStream};
+
+        let (writer, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        let mut output = BufWriter::new(writer);
+        let error = show_history(&mut output, &[], 0).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(output.buffer(), b"[]\n");
+    }
 
     #[test]
     fn queue_listing_rejects_a_changed_initial_current_snapshot() {

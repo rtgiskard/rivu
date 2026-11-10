@@ -104,6 +104,9 @@ disconnects that sink; failures return the retained diagnostic to the launcher.
 Manual `serve` retains its normal stderr. GUI open requests coalesce during
 desktop startup under the original child and startup deadline. A failed startup
 is reported rather than automatically replayed; a later explicit open can retry.
+The service writes and flushes its readiness message to stdout. If either fails,
+startup returns an error after normal application teardown and exits unsuccessfully,
+including when a pipe reader has closed; it does not panic or retry the output.
 Explicit application shutdown stops the service and connected consumers; closing
 or killing only a frontend leaves the service alive. Accepted shutdown
 acknowledgements drain before transport retirement. Window/display resource release is described in
@@ -415,6 +418,8 @@ notifications. After closing the window and retiring its IPC workers, it returns
 the failure to the launcher as an unsuccessful exit. Closing the window locally
 or receiving a normal Core shutdown remains a successful exit; neither path
 replays commands or restarts the service.
+The GUI analysis worker also reports an unwind panic through its fatal connection
+path, withdrawing its current frame before notifying the desktop owner.
 
 The TUI uses independent retained command, query, and Watch sessions. The Watch
 Hello supplies initial state and pins the instance; the loading screen still
@@ -422,6 +427,8 @@ accepts `q`. Other sessions must bind to that instance. Command/query reconnecti
 cannot target a replacement instance, and Watch never automatically reconnects.
 A fatal connection, handshake, or identity error restores the terminal and exits,
 without replaying queued commands.
+Permanent command or query worker termination is fatal to the TUI owner as well;
+it is not reported as a busy queue or left as an indefinitely pending read.
 
 Query replacement cancels the active read, drains its physical exchange, then
 sends only the latest pending query. TUI exit closes in-flight waits, including

@@ -157,27 +157,9 @@ impl VisualClient {
         let worker = thread::Builder::new()
             .name("rivu-visual-client".into())
             .spawn(move || {
-                let initialized =
-                    (|| -> Result<_> { Ok((SharedPcmWindow::open(&root)?, Async::new(stream)?)) })(
-                    );
-                match initialized {
-                    Ok((subscriber, stream)) => {
-                        let _ = ready_tx.send(Ok(()));
-                        if let Err(error) = async_io::block_on(run_client(
-                            stream,
-                            subscriber,
-                            &staging,
-                            &worker_state,
-                            receiver,
-                        )) && !worker_state.stopped.load(Ordering::Acquire)
-                        {
-                            worker_state.fail(format!("Analysis connection lost: {error:#}"));
-                        }
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                    }
-                }
+                run_worker(&worker_state, &staging, receiver, ready_tx, || {
+                    Ok((SharedPcmWindow::open(&root)?, Async::new(stream)?))
+                });
             })?;
         if let Err(error) = ready_rx
             .recv()
@@ -395,6 +377,42 @@ impl Drop for VisualClient {
         self.stop();
     }
 }
+fn run_worker(
+    state: &ClientState,
+    staging: &RwLock<AnalysisFrame>,
+    notifications: Receiver<()>,
+    ready: std::sync::mpsc::SyncSender<Result<()>>,
+    initialize: impl FnOnce() -> Result<(SharedPcmWindow, AsyncStream)>,
+) {
+    let mut initialized = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match initialize() {
+        Ok((window, stream)) => {
+            initialized = true;
+            let _ = ready.send(Ok(()));
+            async_io::block_on(run_client(stream, window, staging, state, notifications))
+        }
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            Ok(())
+        }
+    }));
+    match result {
+        Ok(Err(error)) if !state.stopped.load(Ordering::Acquire) => {
+            state.fail(format!("Analysis connection lost: {error:#}"));
+        }
+        Err(_) => {
+            // An initialization unwind must release connect's ready wait too.
+            if !initialized {
+                let _ = ready.send(Err(anyhow::anyhow!("GUI analysis worker panicked")));
+            }
+            if !state.stopped.load(Ordering::Acquire) {
+                state.fail("GUI analysis worker panicked".into());
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn run_client(
     stream: AsyncStream,
     window: SharedPcmWindow,
@@ -684,3 +702,242 @@ async fn run_client(
 #[cfg(test)]
 #[path = "visual_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod worker_panic_tests {
+    use super::*;
+    use rivu_analysis::VisualizerDemand;
+    use rivu_protocol::pcm::{PcmHeader, REQUEST_SIZE, write_status};
+
+    struct Fixture {
+        client: Arc<VisualClient>,
+        window: SharedPcmWindow,
+        server: AsyncStream,
+        ready: std::sync::mpsc::Receiver<Result<()>>,
+        wakes: Receiver<u64>,
+    }
+
+    fn fixture(panic_on_initialize: bool) -> Fixture {
+        let window = SharedPcmWindow::new().unwrap();
+        let root = window.share_path();
+        let (socket, server) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        server.set_nonblocking(true).unwrap();
+        let stream = socket.try_clone().unwrap();
+        let (notifications, receiver) = async_channel::bounded(1);
+        let (ready_tx, ready) = std::sync::mpsc::sync_channel(1);
+        let (wake, wakes) = async_channel::unbounded();
+        let state = Arc::new(ClientState {
+            desired: Mutex::new(Desired {
+                settings: AnalysisSettings {
+                    fps: 60,
+                    fft_size: 512,
+                    ..AnalysisSettings::from(&Config::default())
+                },
+                ..Desired::default()
+            }),
+            current: RwLock::new(None),
+            wakeup: RwLock::new(None),
+            error: Mutex::new(ErrorState::default()),
+            stopped: AtomicBool::new(false),
+            summary: Mutex::new(WaveformSummary::default()),
+            waveform: Arc::new(RwLock::new(WaveformFrame::default())),
+        });
+        let weak = Arc::downgrade(&state);
+        *state.wakeup.write() = Some(Arc::new(move || {
+            let state = weak.upgrade().unwrap();
+            let sequence = state.current.read().map_or(0, |current| current.sequence);
+            let _ = wake.try_send(sequence);
+        }));
+        let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker_state = Arc::clone(&state);
+        let staging = Arc::clone(&analysis);
+        let worker = thread::spawn(move || {
+            run_worker(&worker_state, &staging, receiver, ready_tx, || {
+                assert!(!panic_on_initialize, "injected initialization panic");
+                Ok((SharedPcmWindow::open(&root)?, Async::new(stream)?))
+            });
+        });
+        Fixture {
+            client: Arc::new(VisualClient {
+                analysis,
+                waveform: Arc::clone(&state.waveform),
+                state,
+                notifications,
+                socket,
+                worker: Mutex::new(Some(worker)),
+            }),
+            window,
+            server: Async::new(server).unwrap(),
+            ready,
+            wakes,
+        }
+    }
+
+    #[test]
+    fn initialization_panic_completes_ready_and_notifies_a_late_owner() {
+        let f = fixture(true);
+        assert!(
+            f.ready
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_err()
+        );
+        let worker = f.client.worker.lock().take().unwrap();
+        assert!(worker.join().is_ok());
+        let (fatal, received) = std::sync::mpsc::sync_channel(1);
+        f.client.set_error_callback(Arc::new(move |_| {
+            fatal.send(()).unwrap();
+        }));
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(f.client.state.current.read().is_none());
+        assert!(f.client.state.error.lock().message.is_some());
+        assert_eq!(f.wakes.try_recv().unwrap(), 0);
+    }
+
+    async fn publish(f: &mut Fixture, state: PcmState, start_frame: u64) {
+        let header = PcmHeader {
+            epoch: state.epoch,
+            intent: state.intent,
+            generation: state.generation,
+            capture: state.capture,
+            start_frame,
+            output_frame: start_frame,
+            media_start: start_frame as f64 / f64::from(state.sample_rate),
+            media_step: f64::from(state.sample_rate).recip(),
+            sample_rate: state.sample_rate,
+            ..PcmHeader::default()
+        };
+        assert!(f.window.publish(header, &[0, 1], (0..1024).map(|_| 0.25)));
+        write_status(&mut f.server, state, 1, PcmPosition::default())
+            .await
+            .unwrap();
+    }
+
+    async fn next_current(f: &Fixture) {
+        rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+            loop {
+                let notified = f.wakes.recv().await.unwrap();
+                if f.client.consume_current_analysis(|frame| {
+                    frame.sequence == notified && frame.settings.is_some()
+                }) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn runtime_panic(stopping: bool) {
+        async_io::block_on(async {
+            let mut f = fixture(false);
+            f.ready
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            f.client.set_display_demand(DisplayDemand {
+                enabled: true,
+                spectrum: true,
+                visualizer: VisualizerDemand {
+                    pcm: true,
+                    ..VisualizerDemand::default()
+                },
+            });
+            ControlReader::<REQUEST_SIZE>::new()
+                .read(&mut f.server)
+                .await
+                .unwrap();
+            write_status(
+                &mut f.server,
+                PcmState {
+                    epoch: 2,
+                    ..PcmState::default()
+                },
+                1,
+                PcmPosition::default(),
+            )
+            .await
+            .unwrap();
+            rivu_protocol::transport::timeout(Duration::from_secs(5), async {
+                while f.client.analysis.read().audio_epoch != 2 {
+                    f.wakes.recv().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            let state = PcmState {
+                active: true,
+                sample_rate: 48_000,
+                heard_frame: u64::MAX,
+                ..PcmState::default()
+            };
+            publish(&mut f, state, 0).await;
+            next_current(&f).await;
+
+            let worker_id = f.client.worker.lock().as_ref().unwrap().thread().id();
+            let (fatal, received) = std::sync::mpsc::sync_channel(1);
+            let weak = Arc::downgrade(&f.client);
+            f.client.set_error_callback(Arc::new(move |_| {
+                let client = weak.upgrade().unwrap();
+                assert!(client.state.current.read().is_none());
+                // The fatal owner's real path calls stop synchronously on this
+                // worker. It must release resources without joining itself.
+                client.stop();
+                fatal.send(thread::current().id()).unwrap();
+            }));
+            let injected = Arc::new(AtomicBool::new(false));
+            let worker_injected = Arc::clone(&injected);
+            let weak = Arc::downgrade(&f.client);
+            let (finished, completion) = std::sync::mpsc::sync_channel(1);
+            let cancelled_worker = if stopping {
+                f.client.worker.lock().take()
+            } else {
+                None
+            };
+            f.client.set_wakeup(Arc::new(move || {
+                if !worker_injected.swap(true, Ordering::AcqRel) {
+                    let client = weak.upgrade().unwrap();
+                    assert!(client.consume_current_analysis(|_| true));
+                    if stopping {
+                        client.stop();
+                    }
+                    panic!("injected publication panic");
+                }
+                let _ = finished.try_send(());
+            }));
+            publish(&mut f, state, 512).await;
+            if stopping {
+                assert!(cancelled_worker.unwrap().join().is_ok());
+                assert!(received.try_recv().is_err());
+                assert!(f.client.state.error.lock().message.is_none());
+            } else {
+                assert_eq!(
+                    received.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    worker_id
+                );
+                completion.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(f.client.state.error.lock().message.is_some());
+            }
+            assert!(injected.load(Ordering::Acquire));
+            let mut consumed = false;
+            assert!(!f.client.consume_current_analysis(|_| {
+                consumed = true;
+                true
+            }));
+            assert!(!consumed);
+            assert!(f.client.state.current.read().is_none());
+            assert!(f.client.worker.lock().is_none());
+        });
+    }
+
+    #[test]
+    fn runtime_panic_revokes_current_frame_and_notifies_owner_without_self_join() {
+        runtime_panic(false);
+    }
+
+    #[test]
+    fn panic_during_shutdown_does_not_report_a_fatal_error() {
+        runtime_panic(true);
+    }
+}

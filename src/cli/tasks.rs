@@ -12,7 +12,7 @@ use rivu_protocol::{
     response::{TaskOutcome, ViewResponse},
 };
 use rivu_utils::terminal::TerminalEscaped;
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TaskReference {
@@ -137,11 +137,13 @@ pub(super) fn emit_processing(
     task: &ProcessingTaskStatus,
     json: bool,
 ) -> Result<()> {
+    let mut output = std::io::stdout().lock();
     if json {
-        println!(
+        writeln!(
+            output,
             "{}",
             serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
-        );
+        )?;
     } else {
         let phase = match task.phase {
             ProcessingPhase::Queued => "processing-queued",
@@ -151,7 +153,8 @@ pub(super) fn emit_processing(
             ProcessingPhase::Cancelled => "processing-cancelled",
             ProcessingPhase::Failed => "processing-failed",
         };
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-processing-task",
@@ -175,11 +178,12 @@ pub(super) fn emit_processing(
                     ),
                 ]
             )
-        );
+        )?;
         if let Some(error) = &task.error {
-            println!("{}", TerminalEscaped(error));
+            writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
+    output.flush()?;
     Ok(())
 }
 fn scan_status(session: &mut rivu_client::ClientSession, id: u64) -> Result<ScanTaskStatus> {
@@ -214,24 +218,28 @@ fn relocation_status(
 }
 
 fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bool) -> Result<()> {
+    let mut output = std::io::stdout().lock();
     if json {
-        println!(
+        writeln!(
+            output,
             "{}",
             serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
-        );
+        )?;
     } else {
-        println!(
+        writeln!(
+            output,
             "{}",
             TaskReference {
                 instance_id,
                 id: task.id
             }
-        );
-        show_scan(i18n, &task.progress);
+        )?;
+        show_scan(i18n, &task.progress)?;
         if let Some(error) = &task.error {
-            println!("{}", TerminalEscaped(error));
+            writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
+    output.flush()?;
     Ok(())
 }
 
@@ -241,11 +249,13 @@ fn emit_relocation(
     task: &RelocationTaskStatus,
     json: bool,
 ) -> Result<()> {
+    let mut output = std::io::stdout().lock();
     if json {
-        println!(
+        writeln!(
+            output,
             "{}",
             serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
-        );
+        )?;
     } else {
         let phase = i18n.text(match task.phase {
             RelocationPhase::Verifying => "core-verifying",
@@ -253,7 +263,8 @@ fn emit_relocation(
             RelocationPhase::Cancelled => "core-cancelled",
             RelocationPhase::Failed => "core-failed",
         });
-        println!(
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-relocation-status",
@@ -272,11 +283,12 @@ fn emit_relocation(
                     ("phase", phase.into()),
                 ]
             )
-        );
+        )?;
         if let Some(error) = &task.error {
-            println!("{}", TerminalEscaped(error));
+            writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
+    output.flush()?;
     Ok(())
 }
 

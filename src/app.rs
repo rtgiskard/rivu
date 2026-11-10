@@ -25,6 +25,7 @@ use desktop_launcher::DesktopLauncher;
 use futures::{FutureExt, StreamExt};
 use rivu_protocol::{AppCommand, model::Command, response::Ack};
 use std::{
+    io::Write,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::{
@@ -284,13 +285,18 @@ impl App {
         }
         #[cfg(any(feature = "gui", feature = "tui"))]
         frontend_host::detach_startup_diagnostics()?;
-        println!(
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        writeln!(
+            output,
             "{}",
             i18n.format(
                 "core-ready",
                 &[("path", data_dir.display().to_string().into())]
             )
-        );
+        )
+        .and_then(|()| output.flush())
+        .context("Writing service readiness to stdout")?;
         Ok(app)
     }
     pub fn run(mut self) -> Result<()> {

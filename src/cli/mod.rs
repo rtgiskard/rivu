@@ -21,7 +21,7 @@ use rivu_protocol::{
     response::StateSections,
 };
 use rivu_utils::terminal::{TerminalEscaped, cli_error};
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 pub(super) struct CliError {
     error: anyhow::Error,
@@ -44,14 +44,23 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
     let i18n = Localizer::for_cli("auto");
     let mut command = Args::command();
     localize_help(&mut command, &i18n, "");
-    let matches = command
-        .try_get_matches_from_mut(std::env::args_os())
-        .unwrap_or_else(|error| cli_error(error).exit());
-    let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| cli_error(error).exit());
-    args.validate(&matches)
-        .unwrap_or_else(|error| cli_error(error).exit());
+    let matches = match command.try_get_matches_from_mut(std::env::args_os()) {
+        Ok(matches) => matches,
+        Err(error) => return finish_parse(error),
+    };
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(error) => return finish_parse(error),
+    };
+    if let Err(error) = args.validate(&matches) {
+        return finish_parse(error);
+    }
     if args.action.is_none() {
         command.print_help().map_err(|error| CliError {
+            error: error.into(),
+            json: args.json,
+        })?;
+        std::io::stdout().lock().flush().map_err(|error| CliError {
             error: error.into(),
             json: args.json,
         })?;
@@ -59,6 +68,26 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
     }
     let json = args.json;
     execute(args, i18n).map_err(|error| CliError { error, json })
+}
+
+fn finish_parse(error: clap::Error) -> std::result::Result<(), CliError> {
+    let error = cli_error(error);
+    let result = error.print().and_then(|()| {
+        if error.use_stderr() {
+            std::io::stderr().lock().flush()
+        } else {
+            std::io::stdout().lock().flush()
+        }
+    });
+    result.map_err(|error| CliError {
+        error: error.into(),
+        json: false,
+    })?;
+    if error.exit_code() == 0 {
+        Ok(())
+    } else {
+        std::process::exit(error.exit_code());
+    }
 }
 
 fn execute(args: Args, i18n: Localizer) -> Result<()> {
@@ -101,13 +130,15 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         }
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
+            let mut output = std::io::stdout().lock();
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&devices)?);
+                writeln!(output, "{}", serde_json::to_string_pretty(&devices)?)?;
             } else {
                 for device in devices {
-                    println!("{}", TerminalEscaped(device));
+                    writeln!(output, "{}", TerminalEscaped(device))?;
                 }
             }
+            output.flush()?;
             return Ok(());
         }
         Action::Status => {

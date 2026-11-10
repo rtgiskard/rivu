@@ -183,6 +183,123 @@ fn watcher_failure_and_disconnection_exit_without_polling_and_preserve_the_cause
 }
 
 #[test]
+fn command_and_query_worker_death_exit_the_owner_before_input() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    for command_dies in [true, false] {
+        for panics in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let commands = if command_dies {
+                let (sender, receiver) = bounded(1);
+                let (result_sender, results) = bounded(1);
+                let worker = std::thread::spawn(move || {
+                    let _requests = receiver;
+                    let _results = result_sender;
+                    assert!(!panics, "injected command worker panic");
+                });
+                assert!(matches!(
+                    results.recv_timeout(Duration::from_secs(5)),
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                ));
+                let commands = CommandWorker {
+                    sender: Some(sender),
+                    stopping: None,
+                    shutdown: rivu_client::SessionCancellation::default(),
+                    results,
+                    worker: Some(worker),
+                };
+                assert!(commands.take_result().is_err());
+                assert!(commands.request(AppCommand::Shutdown).is_err());
+                commands
+            } else {
+                spawn_command_worker(directory.path(), 1)
+            };
+            let queries = if command_dies {
+                spawn_query_worker(directory.path(), 1)
+            } else {
+                let (sender, receiver) = bounded(1);
+                let (alive, liveness) = bounded(0);
+                let worker = std::thread::spawn(move || {
+                    let _requests = receiver;
+                    let _alive = alive;
+                    assert!(!panics, "injected query worker panic");
+                });
+                assert!(matches!(
+                    liveness.recv_timeout(Duration::from_secs(5)),
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                ));
+                let mut cancellation = rivu_protocol::query_tracking::QueryEpoch::default();
+                let mut tracker = QueryTracker::default();
+                let request = queue_request(&mut tracker, 0, QueryRevisions::default());
+                QueryWorker {
+                    sender: Some(sender),
+                    pending: Arc::new(Mutex::new(Some(QueryJob {
+                        request,
+                        ticket: cancellation.ticket(),
+                    }))),
+                    latest: Arc::new(Mutex::new(None)),
+                    liveness,
+                    cancellation,
+                    demanded: true,
+                    shutdown: rivu_client::SessionCancellation::default(),
+                    worker: Some(worker),
+                }
+            };
+            let command_shutdown = commands.shutdown.clone();
+            let query_shutdown = queries.shutdown.clone();
+            let pending = Arc::clone(&queries.pending);
+            let mut workers = Some((commands, queries));
+            let mut initial = Some((1, ClientSnapshot::default()));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let error = crate::terminal::run_loop_with_workers(
+                directory.path(),
+                &mut terminal,
+                Arc::new(rivu_presentation::i18n::Localizer::for_terminal("en")),
+                &AtomicBool::new(false),
+                || Ok(initial.take()),
+                |_| panic!("dead workers must not leave the owner polling for input"),
+                |_, _| workers.take().unwrap(),
+            )
+            .unwrap_err();
+            assert!(!error.is::<QueryError>());
+            assert!(command_shutdown.is_cancelled());
+            assert!(query_shutdown.is_cancelled());
+            assert!(pending.lock().is_none());
+        }
+    }
+}
+
+#[test]
+fn command_worker_empty_results_and_full_queue_remain_live() {
+    use std::{io::Read, os::unix::net::UnixListener};
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let worker = spawn_command_worker(directory.path(), 1);
+    assert!(worker.take_result().unwrap().is_none());
+    assert!(worker.request(AppCommand::Shutdown).unwrap());
+    let mut stream = listener.accept().unwrap().0;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut prefix = [0; 4];
+    stream.read_exact(&mut prefix).unwrap();
+    let length = u32::from_le_bytes(prefix) as usize;
+    assert!(length <= 4096);
+    stream.read_exact(&mut vec![0; length]).unwrap();
+    // Hello is physically pending, so all eight queue slots can be filled
+    // without racing command completion or mistaking the worker for dead.
+    for _ in 0..8 {
+        assert!(worker.request(AppCommand::Shutdown).unwrap());
+    }
+    assert!(!worker.request(AppCommand::Shutdown).unwrap());
+    assert!(worker.take_result().unwrap().is_none());
+    drop(worker);
+    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
 fn watcher_shutdown_closes_stalled_initial_handshake() {
     use std::{io::Read, os::unix::net::UnixListener};
 
@@ -335,23 +452,28 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         ..UiState::default()
     };
     let request = ui.query_request(&state).unwrap();
-    worker.request(request.clone());
+    worker.request(request.clone()).unwrap();
     let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(worker.take_result().unwrap().is_none());
     stream
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
     for offset in 1..100 {
-        worker.request(QueryRequest {
-            demand: Arc::new(
-                ReadDemand {
-                    offset,
-                    ..request.demand.borrowed()
-                }
-                .own(&state),
-            ),
-            submission: request.submission,
-        });
+        worker
+            .request(QueryRequest {
+                demand: Arc::new(
+                    ReadDemand {
+                        offset,
+                        ..request.demand.borrowed()
+                    }
+                    .own(&state),
+                ),
+                submission: request.submission,
+            })
+            .unwrap();
     }
+    assert!(worker.sender.as_ref().unwrap().is_full());
+    assert!(worker.take_result().unwrap().is_none());
     // The peer deliberately stalls Hello. Replacements must not abandon
     // the active connection and start more server work behind it.
     let mut buffer = [0; 4096];
@@ -430,17 +552,19 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone());
+    worker.request(request.clone()).unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     for offset in 1..100 {
-        worker.request(queue_request(
-            &mut tracker,
-            offset,
-            QueryRevisions::default().with_bitrate_revision(offset as u64),
-        ));
+        worker
+            .request(queue_request(
+                &mut tracker,
+                offset,
+                QueryRevisions::default().with_bitrate_revision(offset as u64),
+            ))
+            .unwrap();
     }
     cancellation.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(worker.latest.lock().is_none());
+    assert!(worker.take_result().unwrap().is_none());
     release.send(()).unwrap();
     // Finish the accepted jobs without shutdown cancellation so the final
     // consumer result can be inspected without polling or timing races.
@@ -475,9 +599,11 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone());
+    worker.request(request.clone()).unwrap();
     let stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.request(queue_request(&mut tracker, 99, QueryRevisions::default()));
+    worker
+        .request(queue_request(&mut tracker, 99, QueryRevisions::default()))
+        .unwrap();
     let pending = Arc::clone(&worker.pending);
     let results = Arc::clone(&worker.latest);
     drop(worker);
@@ -632,7 +758,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
         .unwrap();
     let (instance_id, _) = watcher.latest.lock().take().unwrap().unwrap();
     assert_eq!(instance_id, 1);
-    let commands = spawn_command_worker(directory.path(), instance_id);
+    let mut commands = spawn_command_worker(directory.path(), instance_id);
     commands
         .sender
         .as_ref()
@@ -644,20 +770,15 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
             .into(),
         )
         .unwrap();
-    let failure = commands
-        .results
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap()
-        .unwrap_err();
-    assert!(failure.instance_changed);
-    assert!(
-        failure.into_message().is_err(),
-        "instance failure must leave the TUI loop"
-    );
+    commands.worker.take().unwrap().join().unwrap();
+    // A disconnected submission must preserve the buffered identity failure,
+    // rather than reporting either queue saturation or generic worker death.
+    let error = commands.request(AppCommand::Shutdown).unwrap_err();
+    assert!(error.is::<QueryError>());
     let mut queries = spawn_query_worker(directory.path(), instance_id);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    queries.request(request);
+    queries.request(request).unwrap();
     queries.sender.take();
     queries.worker.take().unwrap().join().unwrap();
     let (_, result) = queries.latest.lock().take().unwrap();
@@ -725,13 +846,20 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
-    worker.request(queue_request(&mut tracker, 0, QueryRevisions::default()));
+    worker
+        .request(queue_request(&mut tracker, 0, QueryRevisions::default()))
+        .unwrap();
     connected.recv_timeout(Duration::from_secs(5)).unwrap();
     worker.cancel();
     release.send(()).unwrap();
-    worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();
-    let (_, result) = worker.latest.lock().take().unwrap();
+    let error = worker
+        .request(queue_request(&mut tracker, 1, QueryRevisions::default()))
+        .unwrap_err();
+    assert!(error.is::<QueryError>());
+    // Even after its publisher has exited and demand was withdrawn, identity
+    // invalidation wins over the liveness failure and reaches the owner.
+    let (_, result) = worker.take_result().unwrap().unwrap();
     let failure = result.err().unwrap();
     assert!(failure.instance_changed);
     assert!(failure.into_message().is_err());
@@ -769,9 +897,11 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone());
+    worker.request(request.clone()).unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.request(queue_request(&mut tracker, 20, QueryRevisions::default()));
+    worker
+        .request(queue_request(&mut tracker, 20, QueryRevisions::default()))
+        .unwrap();
     release.send(()).unwrap();
     worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();
@@ -1025,14 +1155,20 @@ fn repeated_withdrawal_discards_pending_but_retains_active_until_reply() {
     // Withdrawing an idle worker must leave its next real demand usable.
     worker.cancel();
     worker.cancel();
-    worker.request(queue_request(&mut tracker, 0, QueryRevisions::default()));
+    worker
+        .request(queue_request(&mut tracker, 0, QueryRevisions::default()))
+        .unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.request(queue_request(&mut tracker, 1, QueryRevisions::default()));
+    worker
+        .request(queue_request(&mut tracker, 1, QueryRevisions::default()))
+        .unwrap();
     worker.cancel();
     worker.cancel();
     cancelled.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(worker.latest.lock().is_none());
-    worker.request(queue_request(&mut tracker, 2, QueryRevisions::default()));
+    assert!(worker.take_result().unwrap().is_none());
+    worker
+        .request(queue_request(&mut tracker, 2, QueryRevisions::default()))
+        .unwrap();
     release.send(()).unwrap();
     worker.sender.take();
     worker.worker.take().unwrap().join().unwrap();

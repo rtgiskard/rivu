@@ -7,6 +7,7 @@ use rivu_protocol::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command as Process, Stdio},
 };
@@ -254,11 +255,13 @@ pub(super) fn run(data_dir: &Path, setup: ProcessingSetup, json: bool) -> Result
         interpreter: prepared.interpreter,
         activated: setup.activate && activation.is_ok(),
     };
+    let mut output = std::io::stdout().lock();
     if json {
-        println!("{}", serde_json::to_string(&result)?);
+        writeln!(output, "{}", serde_json::to_string(&result)?)?;
     } else {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        writeln!(output, "{}", serde_json::to_string_pretty(&result)?)?;
     }
+    output.flush()?;
     activation.with_context(|| {
         format!(
             "Bundle prepared and retained at {}; manifest {}; activation failed",

@@ -1,6 +1,6 @@
 use crate::projection::TuiSnapshot;
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
     AppCommand,
@@ -188,11 +188,44 @@ impl WorkerFailure {
 }
 
 pub(super) struct CommandWorker {
-    pub(super) sender: Option<Sender<AppCommand>>,
+    sender: Option<Sender<AppCommand>>,
     stopping: Option<Sender<()>>,
     shutdown: rivu_client::SessionCancellation,
-    pub(super) results: Receiver<Result<Ack, WorkerFailure>>,
+    results: Receiver<Result<Ack, WorkerFailure>>,
     worker: Option<JoinHandle<()>>,
+}
+
+impl CommandWorker {
+    pub(super) fn take_result(&self) -> Result<Option<Result<Ack, WorkerFailure>>> {
+        match self.results.try_recv() {
+            Ok(result) => Ok(Some(result)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                anyhow::bail!("TUI command worker stopped unexpectedly")
+            }
+        }
+    }
+
+    pub(super) fn request(&self, command: AppCommand) -> Result<bool> {
+        let Some(sender) = &self.sender else {
+            anyhow::bail!("TUI command worker stopped unexpectedly");
+        };
+        match sender.try_send(command) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Disconnected(_)) => {
+                // The worker can publish an instance failure and exit between
+                // the owner's result drain and command dispatch. Preserve that
+                // fatal cause rather than replacing it with queue busy/death.
+                for result in self.results.try_iter() {
+                    if let Err(error) = result {
+                        error.into_query_error()?;
+                    }
+                }
+                anyhow::bail!("TUI command worker stopped unexpectedly")
+            }
+        }
+    }
 }
 
 impl Drop for CommandWorker {
@@ -621,7 +654,8 @@ type QueryCompletion = (QueryRequest, Result<QueryResult, WorkerFailure>);
 pub(super) struct QueryWorker {
     sender: Option<Sender<()>>,
     pending: Arc<Mutex<Option<QueryJob>>>,
-    pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
+    latest: Arc<Mutex<Option<QueryCompletion>>>,
+    liveness: Receiver<()>,
     cancellation: rivu_protocol::query_tracking::QueryEpoch,
     // Logical ownership only: withdrawing demand does not retire the worker's
     // retained physical exchange, which still drains before the next job.
@@ -631,13 +665,47 @@ pub(super) struct QueryWorker {
 }
 
 impl QueryWorker {
-    pub(super) fn request(&mut self, request: QueryRequest) {
+    pub(super) fn take_result(&self) -> Result<Option<QueryCompletion>> {
+        // The coalesced slot is not a liveness signal. Channel closure must
+        // terminate its owner even with no demanded read or a cached success.
+        let disconnected = matches!(self.liveness.try_recv(), Err(TryRecvError::Disconnected));
+        let latest = self.latest.lock().take();
+        if disconnected
+            && !latest.as_ref().is_some_and(|(_, result)| {
+                result.as_ref().is_err_and(|error| error.instance_changed)
+            })
+        {
+            anyhow::bail!("TUI query worker stopped unexpectedly");
+        }
+        Ok(latest)
+    }
+
+    fn stopped(&self) -> Result<()> {
+        if let Some((_, Err(error))) = self.latest.lock().as_ref()
+            && error.instance_changed
+        {
+            // Identity invalidation remains fatal even for superseded demand,
+            // and takes precedence over the worker's subsequent normal exit.
+            error.clone().into_query_error()?;
+        }
+        anyhow::bail!("TUI query worker stopped unexpectedly")
+    }
+
+    pub(super) fn request(&mut self, request: QueryRequest) -> Result<()> {
         self.cancel();
         let ticket = self.cancellation.ticket();
         *self.pending.lock() = Some(QueryJob { request, ticket });
         self.demanded = true;
-        if let Some(sender) = &self.sender {
-            let _ = sender.try_send(());
+        let Some(sender) = &self.sender else {
+            self.cancel();
+            return self.stopped();
+        };
+        match sender.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => Ok(()),
+            Err(TrySendError::Disconnected(())) => {
+                self.cancel();
+                self.stopped()
+            }
         }
     }
 
@@ -666,6 +734,7 @@ impl Drop for QueryWorker {
 pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWorker {
     let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded(1);
+    let (alive, liveness) = bounded::<()>(0);
     let pending = Arc::new(Mutex::new(None::<QueryJob>));
     let requests = Arc::clone(&pending);
     let latest = Arc::new(Mutex::new(None));
@@ -673,6 +742,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
     let shutdown = rivu_client::SessionCancellation::default();
     let stopping = shutdown.clone();
     let worker = std::thread::spawn(move || {
+        let _alive = alive;
         let mut session = rivu_client::client_session_with_cancel(&data_dir, stopping.clone());
         let mut session = session
             .bind_instance(instance_id)
@@ -714,6 +784,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
         sender: Some(sender),
         pending,
         latest,
+        liveness,
         cancellation: rivu_protocol::query_tracking::QueryEpoch::default(),
         demanded: false,
         shutdown,

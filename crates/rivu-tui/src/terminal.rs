@@ -196,8 +196,36 @@ fn run_loop_with_events<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     i18n: Arc<Localizer>,
     terminating: &AtomicBool,
+    take_update: impl FnMut() -> Result<Option<(u32, rivu_protocol::model::ClientSnapshot)>>,
+    next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
+    run_loop_with_workers(
+        data_dir,
+        terminal,
+        i18n,
+        terminating,
+        take_update,
+        next_event,
+        |data_dir, instance_id| {
+            (
+                spawn_command_worker(data_dir, instance_id),
+                spawn_query_worker(data_dir, instance_id),
+            )
+        },
+    )
+}
+
+fn run_loop_with_workers<B: ratatui::backend::Backend>(
+    data_dir: &Path,
+    terminal: &mut Terminal<B>,
+    i18n: Arc<Localizer>,
+    terminating: &AtomicBool,
     mut take_update: impl FnMut() -> Result<Option<(u32, rivu_protocol::model::ClientSnapshot)>>,
     mut next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
+    mut spawn_workers: impl FnMut(&Path, u32) -> (worker::CommandWorker, worker::QueryWorker),
 ) -> Result<()>
 where
     B::Error: Send + Sync + 'static,
@@ -218,10 +246,7 @@ where
                 break;
             }
             if workers.is_none() {
-                workers = Some((
-                    spawn_command_worker(data_dir, instance_id),
-                    spawn_query_worker(data_dir, instance_id),
-                ));
+                workers = Some(spawn_workers(data_dir, instance_id));
             }
             let next = TuiSnapshot::from_client(state, tui.as_ref().map(|tui| &tui.snapshot));
             match &mut tui {
@@ -256,7 +281,7 @@ where
             continue;
         };
         let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
-        while let Ok(result) = commands.results.try_recv() {
+        while let Some(result) = commands.take_result()? {
             match result {
                 Ok(ack) if !ack.is_success() => {
                     tui.ui.set_notice(
@@ -281,7 +306,7 @@ where
             immediate_redraw = true;
         }
         let local_revision = tui.ui.local_revision;
-        let latest = queries.latest.lock().take();
+        let latest = queries.take_result()?;
         if let Some((request, result)) = latest {
             // Instance validity is independent of view/state revision validity:
             // even a superseded query must exit on a replacement server.
@@ -296,7 +321,7 @@ where
         }
         let submit = tui.ui.prepare_query_request(&tui.snapshot);
         match tui.ui.reads.requested.as_ref() {
-            Some(request) if submit => queries.request(request.clone()),
+            Some(request) if submit => queries.request(request.clone())?,
             None => queries.cancel(),
             _ => {}
         }
@@ -333,11 +358,7 @@ where
                             } else {
                                 rivu_protocol::AppCommand::Shutdown
                             };
-                            let queued = commands
-                                .sender
-                                .as_ref()
-                                .is_some_and(|sender| sender.try_send(command).is_ok());
-                            if !queued {
+                            if !commands.request(command)? {
                                 tui.ui.set_notice(
                                     i18n.text("terminal-command-busy").into(),
                                     NoticeKind::Warning,

@@ -13,7 +13,7 @@ use rivu_protocol::{
     response::{StateSections, ViewResponse},
 };
 use rivu_utils::terminal::{TerminalEscaped, terminal_text};
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 pub(super) fn run(
     i18n: &Localizer,
@@ -22,7 +22,8 @@ pub(super) fn run(
     action: LibraryAction,
     json: bool,
 ) -> Result<()> {
-    match action {
+    let mut output = std::io::stdout().lock();
+    let result = match action {
         LibraryAction::Tags {
             path,
             title,
@@ -37,12 +38,13 @@ pub(super) fn run(
             if patch.title.is_some() || patch.artist.is_some() || patch.album.is_some() {
                 let report = rivu_metadata::edit_file(&path, &patch)?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
+                    writeln!(output, "{}", serde_json::to_string_pretty(&report)?)?;
                 } else if report.changed() {
                     let backup = report
                         .backup_path()
                         .context("Source tag edit omitted its backup path")?;
-                    println!(
+                    writeln!(
+                        output,
                         "{}",
                         i18n.format(
                             "core-tags-written",
@@ -57,9 +59,10 @@ pub(super) fn run(
                                 ),
                             ]
                         )
-                    );
+                    )?;
                 } else {
-                    println!(
+                    writeln!(
+                        output,
                         "{}",
                         i18n.format(
                             "core-tags-unchanged",
@@ -68,8 +71,9 @@ pub(super) fn run(
                                 TerminalEscaped(report.path.display()).to_string().into()
                             )]
                         )
-                    );
+                    )?;
                 }
+                output.flush()?;
                 return Ok(());
             }
             let mut file =
@@ -79,15 +83,17 @@ pub(super) fn run(
             let tags = rivu_metadata::read_tags(&mut file)?
                 .context("Source tag reading is not supported for this container")?;
             if json {
-                println!(
+                writeln!(
+                    output,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "path": rivu_metadata::JsonPath(&path),
                         "tags": tags,
                     }))?
-                );
+                )?;
             } else {
-                println!(
+                writeln!(
+                    output,
                     "{}",
                     i18n.format(
                         "core-tags",
@@ -123,7 +129,7 @@ pub(super) fn run(
                             ),
                         ]
                     )
-                );
+                )?;
             }
             Ok(())
         }
@@ -138,7 +144,8 @@ pub(super) fn run(
                 "disabled".to_owned()
             };
             if json {
-                println!(
+                writeln!(
+                    output,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "path": rivu_metadata::JsonPath(&path), "title": info.title, "artist": info.artist, "album": info.album,
@@ -152,10 +159,12 @@ pub(super) fn run(
                         "probe_backend": result.probe_backend,
                         "decoder_backend": result.decoder_backend,
                     }))?
-                );
+                )?;
+                output.flush()?;
                 return Ok(());
             }
-            println!(
+            writeln!(
+                output,
                 "{}",
                 i18n.format(
                     "core-probe",
@@ -213,7 +222,7 @@ pub(super) fn run(
                         ("ffmpeg", terminal_text(&decoder_status).into()),
                     ]
                 )
-            );
+            )?;
             Ok(())
         }
         LibraryAction::List {
@@ -239,9 +248,10 @@ pub(super) fn run(
                 bail!("Statistics query returned an unexpected response");
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
+                writeln!(output, "{}", serde_json::to_string_pretty(&stats)?)?;
             } else {
-                println!(
+                writeln!(
+                    output,
                     "{}",
                     i18n.format(
                         "core-stats",
@@ -250,7 +260,7 @@ pub(super) fn run(
                             ("plays", stats.play_count.to_string().into())
                         ]
                     )
-                );
+                )?;
             }
             Ok(())
         }
@@ -267,15 +277,16 @@ pub(super) fn run(
                 .as_ref()
                 .context("State omitted library section")?;
             if json {
-                return output::show_history(&mut std::io::stdout().lock(), &state.history, limit);
+                return output::show_history(&mut output, &state.history, limit);
             }
             for entry in state.history.iter().take(limit) {
-                println!(
+                writeln!(
+                    output,
                     "{}\t{}\t{}",
                     entry.played_at,
                     entry.track_id,
                     TerminalEscaped(&entry.title)
-                );
+                )?;
             }
             Ok(())
         }
@@ -312,19 +323,21 @@ pub(super) fn run(
                 .result
                 .map_err(anyhow::Error::from)?;
             if json {
-                output::show_duplicates(&mut std::io::stdout().lock(), &view)?;
+                output::show_duplicates(&mut output, &view)?;
             } else {
                 match view {
                     ViewResponse::DuplicateGroups(page) => {
-                        println!(
+                        writeln!(
+                            output,
                             "{}",
                             i18n.format(
                                 "core-duplicate-groups",
                                 &[("count", page.total.to_string().into())]
                             )
-                        );
+                        )?;
                         for group in page.rows {
-                            println!(
+                            writeln!(
+                                output,
                                 "{}",
                                 i18n.format(
                                     "core-duplicate-group",
@@ -335,19 +348,21 @@ pub(super) fn run(
                                         ("present", group.present_members.to_string().into()),
                                     ]
                                 )
-                            );
+                            )?;
                         }
                     }
                     ViewResponse::DuplicateMembers(page) => {
-                        println!(
+                        writeln!(
+                            output,
                             "{}",
                             i18n.format(
                                 "core-duplicate-members",
                                 &[("count", page.total.to_string().into())]
                             )
-                        );
+                        )?;
                         for member in page.rows {
-                            println!(
+                            writeln!(
+                                output,
                                 "{}",
                                 i18n.format(
                                     "core-duplicate-member",
@@ -403,7 +418,7 @@ pub(super) fn run(
                                         ),
                                     ]
                                 )
-                            );
+                            )?;
                         }
                     }
                     _ => bail!("Duplicate query returned an unexpected response"),
@@ -444,7 +459,8 @@ pub(super) fn run(
             let after = report
                 .database_bytes_after
                 .saturating_add(report.wal_bytes_after);
-            println!(
+            writeln!(
+                output,
                 "{}",
                 i18n.format(
                     "core-optimization",
@@ -456,14 +472,16 @@ pub(super) fn run(
                         ("reclaimed", before.saturating_sub(after).to_string().into()),
                     ]
                 )
-            );
+            )?;
             Ok(())
         }
         action => {
             let (command, wait) = translate(action)?;
             submit_command(i18n, data_dir, command, wait, json)
         }
-    }
+    };
+    output.flush()?;
+    result
 }
 
 pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {

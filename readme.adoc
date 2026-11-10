@@ -115,6 +115,9 @@ rivu playback volume 50
   rather than acceptance. A timeout does not prove failure; do not retry blindly.
 * *JSON:* paginated lists stream one array and may be incomplete on failure;
   check the exit status before consuming stdout.
+* *Output failures:* text and JSON writes, including the final flush, return exit
+  status 1 if stdout fails (including a closed pipe). A command may already have
+  taken effect before its output fails; do not retry it blindly.
 * *Paths:* preset, playlist and graph export paths are relative to the invoking
   client's working directory, not the core's.
 
