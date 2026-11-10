@@ -1481,12 +1481,18 @@ impl BrowserColumns {
     }
 }
 
-fn cell_graphemes(text: &str) -> impl Iterator<Item = &str> {
-    text.graphemes(true).filter(|grapheme| {
-        !grapheme
-            .chars()
-            .any(|ch| ch.is_control() || matches!(ch, '\u{2068}' | '\u{2069}'))
-    })
+fn is_hidden(ch: char) -> bool {
+    ch.is_control() || matches!(ch, '\u{2068}' | '\u{2069}')
+}
+
+// Remove hidden characters before segmentation: removing them afterwards can
+// join neighbours into a different, wider grapheme than the one measured.
+fn cell_clean(text: &str) -> Cow<'_, str> {
+    if text.contains(is_hidden) {
+        Cow::Owned(text.chars().filter(|&ch| !is_hidden(ch)).collect())
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn push_track_title(
@@ -1500,7 +1506,7 @@ fn push_track_title(
     if !artist.is_empty() && !text.is_empty() {
         let mut artist_start = 0;
         if !title.is_empty() {
-            for part in cell_graphemes(title) {
+            for part in cell_clean(title).graphemes(true) {
                 artist_start += Span::raw(part).width();
                 if artist_start >= width {
                     spans.push(Span::raw(text));
@@ -1535,7 +1541,7 @@ fn cell_text(text: &str, width: usize, right: bool) -> String {
     let mut output = String::with_capacity(width);
     let mut used = 0;
     let mut clipped = false;
-    for grapheme in cell_graphemes(text) {
+    for grapheme in cell_clean(text).graphemes(true) {
         let cells = Span::raw(grapheme).width();
         if used + cells > width {
             clipped = true;

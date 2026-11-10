@@ -475,6 +475,9 @@ fn metadata_columns_clip_whole_graphemes_without_horizontal_overflow() {
     }
     assert_eq!(cell_text("春风", 3, false), "春…");
     assert_eq!(cell_text("e\u{301}夜航", 4, false), "e\u{301}夜…");
+    // Hidden characters must not split a grapheme that becomes wider once joined.
+    assert_eq!(cell_text("#\n\u{FE0F}x", 1, false), "…");
+    assert_eq!(cell_text("#\n\u{FE0F}x", 3, false), "#\u{FE0F}x");
 }
 
 #[test]
