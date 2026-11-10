@@ -1134,6 +1134,94 @@ fn audition_preserves_queue_source_identity_and_cumulative_heard_stats() {
     assert_eq!(core.state.queue.current_id, Some(queue_id));
     assert!(core.transport.session.as_ref().unwrap().counted);
 }
+
+#[test]
+fn repeated_cached_audition_rejections_preserve_selection_under_reclamation_backpressure() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let _commands = recording_audio(&mut core);
+    core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+        .unwrap();
+    let selected = core.processing.audition_projection();
+    let generation = core.transport.generation;
+    let retained = pcm_samples(
+        core.processing.results()[0]
+            .outputs
+            .denoised
+            .as_ref()
+            .unwrap(),
+    );
+    let memory = core.processing.memory_bytes();
+    let release = core.processing.hold_reclamation();
+    let (commands, receive) = async_channel::bounded(1);
+    let previous = core.engine.replace_commands(commands);
+    for _ in 0..64 {
+        assert!(
+            core.command(Command::AuditionProcessing {
+                id: 1,
+                mode: AuditionMode::Denoised,
+                vocal_gain_db: 0.0,
+                accompaniment_gain_db: 0.0,
+            })
+            .is_err()
+        );
+    }
+    assert!(receive.try_recv().is_err());
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert_eq!(core.processing.memory_bytes(), memory);
+    assert_eq!(
+        pcm_samples(
+            core.processing.results()[0]
+                .outputs
+                .denoised
+                .as_ref()
+                .unwrap()
+        ),
+        retained
+    );
+    core.engine.replace_commands(previous);
+    release.send(()).unwrap();
+}
+
+#[test]
+fn rejected_mix_audition_retires_new_pcm_without_releasing_retained_stems() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    prepare_mix(&mut core);
+    let _commands = recording_audio(&mut core);
+    let retained = core.processing.memory_bytes();
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        event,
+        crate::processing::Event::MixFinished { result: Ok(_), .. }
+    ));
+    let rendered = core.processing.memory_bytes();
+    assert!(rendered > retained);
+    let release = core.processing.hold_reclamation();
+    let (commands, receive) = async_channel::bounded(1);
+    let previous = core.engine.replace_commands(commands);
+    core.processing_event(event);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Failed
+    );
+    assert!(core.processing.audition_projection().is_none());
+    assert!(receive.try_recv().is_err());
+    assert_eq!(core.processing.memory_bytes(), rendered);
+    core.engine.replace_commands(previous);
+    release.send(()).unwrap();
+    core.shutdown_processing();
+    assert_eq!(core.processing.memory_bytes(), retained);
+    assert!(core.processing.results()[0].outputs.vocals.is_some());
+    assert!(core.processing.results()[0].outputs.accompaniment.is_some());
+}
+
 #[test]
 fn manifest_patch_distinguishes_json_clear_and_preserves_binary_absence() {
     let patch: NeuralPatch = serde_json::from_str(r#"{"speech_manifest":null}"#).unwrap();

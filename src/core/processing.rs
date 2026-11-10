@@ -145,7 +145,8 @@ impl Core {
             let pcm = output.pcm.clone();
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
-            self.select_cached_processing_audition(id, pcm, Some(node))?;
+            self.select_cached_processing_audition(id, pcm, Some(node))
+                .map_err(|(_, error)| error)?;
             return Ok(None);
         }
         let mut config = self.preferences.checkpoint();
@@ -702,9 +703,12 @@ impl Core {
                             Ok(())
                         })();
                         match outcome {
-                            Ok(()) if requested => {
-                                self.select_cached_processing_audition(id, pcm, None)
-                            }
+                            Ok(()) if requested => self
+                                .select_cached_processing_audition(id, pcm, None)
+                                .map_err(|(pcm, error)| {
+                                    self.processing.retire_pcm(pcm);
+                                    error
+                                }),
                             outcome => {
                                 self.processing.retire_pcm(pcm);
                                 outcome
@@ -831,22 +835,24 @@ impl Core {
             AuditionMode::Mix => unreachable!(),
         };
         if let Some(pcm) = pcm {
-            self.select_cached_processing_audition(id, pcm, None)?;
+            self.select_cached_processing_audition(id, pcm, None)
+                .map_err(|(_, error)| error)?;
         } else {
             self.restore_original_processing_source(id)?;
         }
         Ok(None)
     }
 
+    // Failed admission returns ownership: cached aliases can drop immediately,
+    // while a newly rendered mix must retire its final PCM owner off Core.
     fn select_cached_processing_audition(
         &mut self,
         id: u64,
         pcm: audio::PcmAudio,
         output: Option<GraphPort>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), (audio::PcmAudio, anyhow::Error)> {
         if let Err(error) = self.replace_processing_source(id, Some(pcm.clone()), None, None) {
-            self.processing.retire_pcm(pcm);
-            return Err(error);
+            return Err((pcm, error));
         }
         self.processing
             .select_cached_audition(id, self.transport.generation, pcm, output);

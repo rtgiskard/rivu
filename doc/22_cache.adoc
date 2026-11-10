@@ -298,10 +298,12 @@ audition slot and publish only a file and receipt; publication does not request
 storage synchronization (link:91_design_decisions.adoc#DEC-018[file publication policy]).
 
 Standalone stem mixes belong to the selected audition, not a second result cache.
-Completed mixes whose selection was revoked retire off Core; retained stems remain
-available for another mix.
+Completed mixes whose selection was revoked or rejected retire off Core; retained
+stems remain available for another mix.
 
 One bounded reclamation worker releases rejected/replaced payloads off Core.
+Rejected cached auditions drop only temporary aliases while the result cache owns
+the PCM; repeated admission failures do not enqueue reclamation work.
 Workers wait for preceding retirement without blocking Core; charges persist
 while playback, exports or aliases still own the PCM. Export publication rechecks
 cancellation and source identity before its atomic no-clobber commit. Shutdown

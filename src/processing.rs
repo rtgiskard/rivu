@@ -943,6 +943,13 @@ impl Service {
     pub fn memory_bytes(&self) -> u64 {
         self.budget.used_bytes()
     }
+    #[cfg(test)]
+    pub(crate) fn hold_reclamation(&self) -> std::sync::mpsc::Sender<()> {
+        self.reclaimer
+            .as_ref()
+            .expect("reclamation requires an admitted worker")
+            .hold(self.sender.clone())
+    }
     fn release_unpinned_audio(&mut self) {
         let Some(reclaimer) = self.reclaimer.as_ref() else {
             return;
