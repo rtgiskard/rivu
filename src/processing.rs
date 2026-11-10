@@ -442,12 +442,28 @@ impl Service {
 
     pub(crate) fn outcome(&mut self, id: u64, phase: ProcessingPhase, error: Option<String>) {
         if let Some(status) = self.records.get_mut(&id) {
-            if status.phase == phase && status.error == error {
+            let aborting = matches!(phase, ProcessingPhase::Failed | ProcessingPhase::Cancelled);
+            let unfinished_nodes = aborting
+                && status
+                    .graph_nodes
+                    .iter()
+                    .any(|node| !node.phase.is_terminal());
+            if status.phase == phase && status.error == error && !unfinished_nodes {
                 return;
             }
             let status = Arc::make_mut(status);
             status.phase = phase;
             status.error = error;
+            if aborting {
+                // The task owner closes every unfinished node, including queued
+                // descendants that can no longer run. Keep completed work and
+                // specifically attributed node failures intact.
+                for node in &mut status.graph_nodes {
+                    if !node.phase.is_terminal() {
+                        node.phase = phase;
+                    }
+                }
+            }
         }
     }
 

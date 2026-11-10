@@ -97,6 +97,57 @@ fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
 }
 
 #[test]
+fn aborted_task_terminalizes_unfinished_nodes_preserving_specific_results() {
+    let (_directory, mut service, _track, _config) = fixture();
+    let id = service.results[0].id;
+    for phase in [ProcessingPhase::Failed, ProcessingPhase::Cancelled] {
+        for already_terminal in [false, true] {
+            let status = Arc::make_mut(service.records.get_mut(&id).unwrap());
+            let error = Some("task stopped".to_owned());
+            status.phase = if already_terminal {
+                phase
+            } else {
+                ProcessingPhase::Processing
+            };
+            status.error = already_terminal.then(|| "task stopped".into());
+            status.graph_nodes = [
+                ProcessingPhase::Complete,
+                ProcessingPhase::Failed,
+                ProcessingPhase::Processing,
+                ProcessingPhase::Queued,
+                ProcessingPhase::Rendering,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| GraphNodeStatus {
+                node: index as u64,
+                phase,
+                error: (phase == ProcessingPhase::Failed).then(|| "specific node failure".into()),
+                model_id: None,
+                model_sha256: None,
+            })
+            .collect();
+
+            service.outcome(id, phase, error.clone());
+
+            let status = service.status(id).unwrap();
+            assert_eq!(status.phase, phase);
+            assert_eq!(status.error, error);
+            assert_eq!(status.graph_nodes[0].phase, ProcessingPhase::Complete);
+            assert_eq!(status.graph_nodes[1].phase, ProcessingPhase::Failed);
+            assert_eq!(
+                status.graph_nodes[1].error.as_deref(),
+                Some("specific node failure")
+            );
+            for node in &status.graph_nodes[2..] {
+                assert_eq!(node.phase, phase);
+                assert!(node.error.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn cached_export_rejects_source_replacement_between_lookup_and_task_admission() {
     let (directory, mut service, track, config) = fixture();
     let result = &service.results[0];
