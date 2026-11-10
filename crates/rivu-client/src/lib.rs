@@ -27,6 +27,18 @@ use std::{
     time::Duration,
 };
 
+/// Only transport evidence of an absent listener permits starting an instance.
+pub fn is_no_instance(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            )
+        })
+    })
+}
+
 #[derive(Debug)]
 pub struct InstanceChanged;
 

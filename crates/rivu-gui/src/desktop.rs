@@ -57,17 +57,6 @@ impl Drop for TaskRuntime {
     }
 }
 
-fn is_no_instance(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-            matches!(
-                error.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-            )
-        })
-    })
-}
-
 #[derive(Default)]
 struct ControlState {
     raise_pending: bool,
@@ -329,7 +318,7 @@ impl Desktop {
                     match async_io::block_on(raise_async(&data_dir, expected, None)) {
                         Ok(true) => return Ok(()),
                         Ok(false) => {}
-                        Err(error) if is_no_instance(&error) => {}
+                        Err(error) if rivu_client::is_no_instance(&error) => {}
                         Err(error) => return Err(error),
                     }
                 }

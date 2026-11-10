@@ -1,6 +1,6 @@
 use crate::app::AppHandle;
 use crate::core::CoreHandle;
-use anyhow::{Context, Error, Result, bail};
+use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
 use async_io::Async;
 use bytes::{BufMut, BytesMut};
@@ -680,17 +680,6 @@ fn log_connection_result(result: Result<()>) {
     if let Err(error) = result {
         tracing::debug!(error = %error, "ipc_connection_ended");
     }
-}
-
-pub fn is_no_instance(error: &Error) -> bool {
-    error.chain().any(|cause| {
-        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
-            matches!(
-                io.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-            )
-        })
-    })
 }
 
 #[cfg(test)]

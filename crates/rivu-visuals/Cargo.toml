@@ -5,7 +5,7 @@ edition = "2024"
 description = "Rivu GPUI audio visualization renderers"
 
 [features]
-test-support = ["rivu-protocol/test-support", "rivu-analysis/test-support"]
+test-support = ["rivu-analysis/test-support"]
 
 [dependencies]
 rivu-format = { path = "../rivu-format", default-features = false }
@@ -20,5 +20,4 @@ futures = "0.3"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
 rivu-analysis = { path = "../rivu-analysis", features = ["test-support"] }

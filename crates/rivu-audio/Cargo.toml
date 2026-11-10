@@ -8,7 +8,7 @@ description = "Rivu audio decoding, playback, rendering and PCM capture engine"
 default = ["ffmpeg"]
 ffmpeg = ["dep:bindgen", "dep:libloading"]
 # Application fixtures exercise command admission and PCM ownership.
-test-support = ["rivu-protocol/test-support"]
+test-support = []
 
 [dependencies]
 rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
@@ -39,7 +39,6 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 [dev-dependencies]
 hound = "3.5"
 tempfile = "3.27"
-rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
 rivu-analysis = { path = "../rivu-analysis" }
 
 [build-dependencies]

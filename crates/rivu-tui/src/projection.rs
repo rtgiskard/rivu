@@ -1,29 +1,15 @@
 use rivu_format::config::{Config, DEFAULT_QUERY_BATCH_SIZE, Theme};
-use rivu_protocol::model::{ClientSnapshot, HistoryEntry, PlaybackState, QueueState, Track};
-use std::{collections::BTreeMap, sync::Arc};
+use rivu_protocol::model::{ClientSnapshot, LibrarySnapshot, PlaybackState, QueueState, Track};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct TuiSnapshot {
-    pub library: TuiLibrarySnapshot,
+    pub library: LibrarySnapshot,
     pub queue: QueueState,
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: TuiSystemSnapshot,
     pub(crate) configuration: Arc<Config>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TuiLibrarySnapshot {
-    pub revision: u64,
-    pub structure_revision: u64,
-    pub album_revision: u64,
-    pub playlist_revision: u64,
-    pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
-    pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
-    pub bitrate_revision: u64,
-    pub duplicate_groups_revision: u64,
-    pub duplicate_members_revision: u64,
-    pub history: Arc<Vec<HistoryEntry>>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,18 +42,7 @@ impl Default for TuiSystemSnapshot {
 impl TuiSnapshot {
     pub(crate) fn from_client(state: ClientSnapshot, previous: Option<&Self>) -> Self {
         Self {
-            library: TuiLibrarySnapshot {
-                revision: state.library.revision,
-                structure_revision: state.library.structure_revision,
-                album_revision: state.library.album_revision,
-                playlist_revision: state.library.playlist_revision,
-                playlist_entry_revisions: state.library.playlist_entry_revisions,
-                metadata_revisions: state.library.metadata_revisions,
-                bitrate_revision: state.library.bitrate_revision,
-                duplicate_groups_revision: state.library.duplicate_groups_revision,
-                duplicate_members_revision: state.library.duplicate_members_revision,
-                history: state.library.history,
-            },
+            library: state.library,
             queue: state.queue,
             current_track: state.current_track,
             playback: state.playback,
@@ -130,22 +105,8 @@ impl TuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> rivu_protocol::response::QueryRevisions {
-        let mut revisions = rivu_protocol::response::QueryRevisions::from_library(
-            self.library.revision,
-            self.library.structure_revision,
-            self.library.playlist_revision,
-            self.queue.revision,
-            self.library.duplicate_groups_revision,
-            self.library.duplicate_members_revision,
-        )
-        .with_album_revision(self.library.album_revision)
-        .with_playlist_scope(
-            playlist_id,
-            &self.library.playlist_entry_revisions,
-            &self.library.metadata_revisions,
-        );
-        revisions.bitrate = self.library.bitrate_revision;
-        revisions
+        self.library
+            .query_revisions(self.queue.revision, playlist_id)
     }
 }
 

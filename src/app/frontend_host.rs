@@ -126,7 +126,7 @@ pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Resul
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     match probe(data_dir, deadline).await {
         Ok(instance) => return Ok(instance),
-        Err(error) if crate::ipc::is_no_instance(&error) => {}
+        Err(error) if rivu_client::is_no_instance(&error) => {}
         Err(error) => return Err(error),
     }
     if Instant::now() >= deadline {
@@ -168,7 +168,7 @@ pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Resul
         let ready = loop {
             match probe(data_dir, deadline).await {
                 Ok(instance) => break Ok(instance),
-                Err(error) if crate::ipc::is_no_instance(&error) => {
+                Err(error) if rivu_client::is_no_instance(&error) => {
                     // A competing starter may have won ownership; its Hello,
                     // not the child PID or exit code, is authoritative.
                     if let Some(status) = child.try_status().context("Observing service startup")? {

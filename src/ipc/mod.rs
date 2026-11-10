@@ -1,5 +1,5 @@
 mod server;
-pub use server::{Server, SocketOwner, is_no_instance};
+pub use server::{Server, SocketOwner};
 pub(crate) mod audio;
 pub(crate) mod pcm;
 
