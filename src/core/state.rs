@@ -18,6 +18,8 @@ pub(crate) struct CoreState {
     pub(crate) processing: Option<Arc<ProcessingTaskStatus>>,
     pub(crate) system: SystemState,
     pub(crate) configuration: ConfigurationState,
+    /// Runtime-only identity of the latest explicit MPRIS enable transition.
+    pub(crate) mpris_enable_generation: u64,
     pub(crate) scan_owner: Option<MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
 }

@@ -499,6 +499,22 @@ operating-system failure. Do not expose sync-failure states or retry paths for
 barriers that are not performed. SQLite's internal synchronization policy is
 separate and unchanged; see link:02_library.adoc[Library storage].
 
+[[DEC-019]]
+=== DEC-019: Preserve explicit MPRIS re-enable intent across retirement
+
+Status: implemented, 2026-11-10.
+
+Core publishes a runtime-only enable generation alongside MPRIS's current enabled
+state. Each committed disabled-to-enabled transition advances that generation;
+coalesced notifications therefore cannot erase a re-enable while the controller
+waits for old artwork work to physically retire. The generation is not persisted
+or added to the IPC configuration contract.
+
+The controller consumes an intent before attempting registration and accepts its
+result only while that intent remains current. Retirement rechecks current intent
+before starting replacement work. Failure or bus loss alone does not authorize
+automatic retries; see link:04_playback.adoc#_mpris_and_artwork[MPRIS recovery].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

@@ -494,6 +494,13 @@ impl Core {
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         let changes = {
             let mut shared = self.shared.write();
+            if self.state.configuration.config.mpris_enabled
+                && !shared.configuration.config.mpris_enabled
+            {
+                self.state.mpris_enable_generation =
+                    self.state.mpris_enable_generation.wrapping_add(1);
+            }
+            shared.mpris_enable_generation = self.state.mpris_enable_generation;
             let changed = self.state.changed_sections(&shared);
             let changes = PublicationChanges::between(&self.state, &shared, changed);
             let revisions = &mut self.state.revisions;

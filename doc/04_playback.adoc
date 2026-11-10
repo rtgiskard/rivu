@@ -563,8 +563,11 @@ static preview.
 
 `interface.mpris_enabled` controls desktop media integration in graphical and
 headless cores and can be changed while running. It requires session D-Bus;
-registration failure appears in status without preventing playback. Restore the
-bus, then disable and re-enable the setting to retry registration.
+registration failure and loss of an established bus connection appear in status
+without preventing playback. Restore the bus, then disable and re-enable the
+setting to retry registration. A re-enable committed while the old service waits
+for artwork work to retire is retained and retried after retirement. Registration
+failure or bus loss alone does not trigger automatic retries.
 
 MPRIS, Track details, album cards, and the Artwork panel prefer embedded
 front-cover artwork, then another supported embedded image. If none is available,

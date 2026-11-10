@@ -59,19 +59,28 @@ impl MprisController {
             let mut stopped = stopped.fuse();
             let mut service: Option<Mpris> = None;
             let mut registration: Option<Registration> = None;
-            let mut enabled = None;
+            let mut observed_intent = None;
             loop {
                 let state = handle.mpris_service_state();
                 if state.shutting_down {
                     break;
                 }
-                if enabled != Some(state.enabled) {
-                    enabled = Some(state.enabled);
+                let intent = (state.enabled, state.enable_generation);
+                if observed_intent != Some(intent) {
+                    // Consume before registration: a failed attempt is not a retry intent.
+                    observed_intent = Some(intent);
                     if let Some(pending) = registration.take() {
                         pending.cancel().await;
                     }
                     if let Some(active) = service.take() {
                         active.retire().await;
+                    }
+                    // Retirement may outlive disable/re-enable or shutdown.
+                    let current = handle.mpris_service_state();
+                    if current.shutting_down
+                        || (current.enabled, current.enable_generation) != intent
+                    {
+                        continue;
                     }
                     if state.enabled {
                         registration = Some(Registration::spawn(
@@ -92,7 +101,14 @@ impl MprisController {
                         }
                     }
                     .fuse();
-                    futures::pin_mut!(registered);
+                    let disconnected = async {
+                        match service.as_ref() {
+                            Some(active) => active.connection.closed().await,
+                            None => futures::future::pending().await,
+                        }
+                    }
+                    .fuse();
+                    futures::pin_mut!(registered, disconnected);
                     futures::select_biased! {
                         _ = stopped => break,
                         changed = changes.recv().fuse() => {
@@ -101,15 +117,33 @@ impl MprisController {
                             }
                             continue;
                         }
-                        connection = registered => connection,
+                        _ = disconnected => None,
+                        connection = registered => Some(connection),
                     }
+                };
+                let Some(connection) = connection else {
+                    // Report loss before retirement waits for physical artwork
+                    // work. Retrying still requires an explicit enable transition.
+                    let state = handle.mpris_service_state();
+                    if state.enabled && !state.shutting_down {
+                        let _ = handle.send(Command::MprisStatus {
+                            status: "MPRIS unavailable: session bus disconnected".to_owned(),
+                        });
+                    }
+                    if let Some(active) = service.take() {
+                        active.retire().await;
+                    }
+                    continue;
                 };
                 registration = None;
                 // Reconcile intent again: registration may finish with
                 // disable or shutdown already queued by the core.
                 let state = handle.mpris_service_state();
+                let current_attempt = state.enabled
+                    && !state.shutting_down
+                    && observed_intent == Some((true, state.enable_generation));
                 match connection {
-                    Ok(connection) if state.enabled && !state.shutting_down => {
+                    Ok(connection) if current_attempt => {
                         service = Some(Mpris::start(
                             connection,
                             handle.clone(),
@@ -120,7 +154,7 @@ impl MprisController {
                         ));
                     }
                     Ok(connection) => retire_connection(connection).await,
-                    Err(error) if state.enabled && !state.shutting_down => {
+                    Err(error) if current_attempt => {
                         let _ = handle.send(Command::MprisStatus {
                             status: format!("MPRIS unavailable: {error:#}"),
                         });
@@ -237,12 +271,12 @@ impl Mpris {
         let (cancel, mut cancelled) = oneshot::channel();
         let bus = connection.clone();
         let publisher_handle = handle.clone();
+        // Publish success before scheduling: an immediate bus-loss report must
+        // never be overwritten by a publisher that has not started yet.
+        let _ = handle.send(Command::MprisStatus {
+            status: "Connected to desktop media controls".to_owned(),
+        });
         let publisher = executor.spawn(async move {
-            // The publisher alone owns success/failure status; initial failure
-            // must not be overwritten by a delayed manager success message.
-            let _ = handle.send(Command::MprisStatus {
-                status: "Connected to desktop media controls".to_owned(),
-            });
             let mut previous = initial;
             let mut previous_can_raise = initial_can_raise;
             let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
@@ -269,6 +303,7 @@ impl Mpris {
                         futures::pin_mut!(completion);
                         futures::select_biased! {
                             _ = (&mut cancelled).fuse() => break,
+                            _ = bus.closed().fuse() => break,
                             update = updates.recv().fuse() => {
                                 if update.is_err() { break; }
                                 PublisherEvent::Revision
@@ -361,9 +396,12 @@ impl Mpris {
             .await
             .is_err()
         {
-            let _ = self.handle.send(Command::MprisStatus {
-                status: "publisher stopped: publisher task panicked".to_owned(),
-            });
+            let state = self.handle.mpris_service_state();
+            if state.enabled && !state.shutting_down {
+                let _ = self.handle.send(Command::MprisStatus {
+                    status: "publisher stopped: publisher task panicked".to_owned(),
+                });
+            }
             tracing::warn!("mpris_publisher_task_panicked");
         }
         retire_connection(self.connection).await;
@@ -1109,7 +1147,7 @@ mod tests {
     use super::*;
     use crate::config::ConfigPersistence;
     use crossbeam_channel::bounded;
-    use rivu_protocol::model::{PlaybackState, QueueState, Track};
+    use rivu_protocol::model::{ConfigMutation, ConfigPatch, PlaybackState, QueueState, Track};
     use std::{
         io::{BufRead, BufReader},
         path::PathBuf,
@@ -1130,6 +1168,23 @@ mod tests {
         .unwrap();
         let runtime = crate::core::CoreRuntime::start(directory.path(), &config).unwrap();
         (directory, runtime)
+    }
+
+    fn set_enabled(handle: &CoreHandle, enabled: bool) {
+        let baseline = handle
+            .state(rivu_protocol::response::StateSections {
+                configuration: true,
+                ..Default::default()
+            })
+            .configuration
+            .unwrap()
+            .config;
+        let mut draft = baseline.as_ref().clone();
+        draft.mpris_enabled = enabled;
+        let ack = async_io::block_on(handle.request_ack(Command::MutateConfig {
+            change: ConfigMutation::Settings(Box::new(ConfigPatch::between(&baseline, &draft))),
+        }));
+        assert!(ack.is_success(), "{:?}", ack.error);
     }
 
     fn wait_status(handle: &CoreHandle, expected: &str) {
@@ -1374,8 +1429,16 @@ mod tests {
 
     impl TestBus {
         fn start() -> Self {
-            let child = std::process::Command::new("dbus-daemon")
-                .args(["--session", "--nofork", "--print-address=1"])
+            Self::start_at(None)
+        }
+
+        fn start_at(address: Option<&str>) -> Self {
+            let mut command = std::process::Command::new("dbus-daemon");
+            command.args(["--session", "--nofork", "--print-address=1"]);
+            if let Some(address) = address {
+                command.arg(format!("--address={address}"));
+            }
+            let child = command
                 .stdout(Stdio::piped())
                 .spawn()
                 .expect("MPRIS lifecycle tests require dbus-daemon");
@@ -1405,6 +1468,27 @@ mod tests {
                 "isolated D-Bus daemon exited before publishing its address"
             );
             bus
+        }
+
+        fn disconnect(&mut self) {
+            self.child.kill().unwrap();
+            self.child.wait().unwrap();
+        }
+
+        fn has_player(&self) -> bool {
+            let connection = self.connect();
+            async_io::block_on(rivu_protocol::transport::timeout(
+                Duration::from_secs(5),
+                async {
+                    zbus::fdo::DBusProxy::new(&connection)
+                        .await
+                        .unwrap()
+                        .name_has_owner(BUS_NAME.try_into().unwrap())
+                        .await
+                        .unwrap()
+                },
+            ))
+            .unwrap()
         }
 
         fn connect(&self) -> Connection {
@@ -1442,6 +1526,224 @@ mod tests {
     }
 
     #[test]
+    fn idle_bus_disconnect_reports_unavailable_and_toggle_registers_again() {
+        if crate::test_support::run_in_subprocess(
+            "mpris::tests::idle_bus_disconnect_reports_unavailable_and_toggle_registers_again",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
+        let bus_directory = tempfile::tempdir().unwrap();
+        let address = format!("unix:path={}", bus_directory.path().join("bus").display());
+        let mut bus = TestBus::start_at(Some(&address));
+        // This exact-test subprocess has no application threads or other tests
+        // reading the environment; set it before starting Core and zbus.
+        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address) };
+        let (directory, mut runtime) = runtime_fixture();
+        let app = AppHandle::new(&runtime, directory.path());
+        let manager = MprisController::start(
+            runtime.handle.clone(),
+            app.clone(),
+            Arc::new(ArtworkManager::new(directory.path())),
+            runtime.test_executor(),
+            Arc::clone(runtime.test_workers()),
+        );
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        set_enabled(&runtime.handle, true);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        let revisions = runtime.handle.subscribe_revisions(RevisionInterest::Mpris);
+        assert!(runtime.handle.mpris_snapshot().current_track().is_none());
+
+        bus.disconnect();
+        wait_status(
+            &runtime.handle,
+            "MPRIS unavailable: session bus disconnected",
+        );
+        assert!(revisions.try_recv().is_err());
+        // SIGKILL may leave the private filesystem socket behind.
+        std::fs::remove_file(bus_directory.path().join("bus"))
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .unwrap();
+        bus = TestBus::start_at(Some(&address));
+        assert!(!bus.has_player());
+        set_enabled(&runtime.handle, false);
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        set_enabled(&runtime.handle, true);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        assert!(bus.has_player());
+
+        set_enabled(&runtime.handle, false);
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        let replacement = bus.serve_root(app.clone());
+        async_io::block_on(replacement.close()).unwrap();
+        set_enabled(&runtime.handle, true);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        drop(manager);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        let replacement = bus.serve_root(app);
+        async_io::block_on(replacement.close()).unwrap();
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn bus_disconnect_reports_before_artwork_retirement_and_preserves_disable() {
+        if crate::test_support::run_in_subprocess(
+            "mpris::tests::bus_disconnect_reports_before_artwork_retirement_and_preserves_disable",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
+        disconnect_during_artwork_retirement(false);
+    }
+
+    #[test]
+    fn bus_disconnect_preserves_reenable_during_artwork_retirement() {
+        if crate::test_support::run_in_subprocess(
+            "mpris::tests::bus_disconnect_preserves_reenable_during_artwork_retirement",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
+        disconnect_during_artwork_retirement(true);
+    }
+
+    fn disconnect_during_artwork_retirement(reenable: bool) {
+        let bus_directory = tempfile::tempdir().unwrap();
+        let address = format!("unix:path={}", bus_directory.path().join("bus").display());
+        let mut bus = TestBus::start_at(Some(&address));
+        // Environment mutation is confined to this exact-test subprocess,
+        // before any application threads or zbus connections exist.
+        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address) };
+        let (directory, mut runtime) = runtime_fixture();
+        let path = directory.path().join("selected.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        writer.write_sample(0_i16).unwrap();
+        writer.finalize().unwrap();
+        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
+            paths: vec![path],
+            index: None,
+            expected_revision: None,
+        }));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        async_io::block_on(
+            runtime
+                .handle
+                .wait_task(rivu_protocol::model::TaskTarget::Scan {
+                    id: ack.scan_id.unwrap(),
+                }),
+        )
+        .unwrap();
+        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+
+        // Hold the only execution slot: even cancelling an unstarted artwork
+        // load must await that slot and its physical completion boundary.
+        let workers = BlockingExecutor::new(1);
+        let blocked_workers = Arc::clone(&workers);
+        let (started, entered) = bounded(1);
+        let (release, released) = bounded(1);
+        let blocker = runtime.test_executor().spawn(async move {
+            blocked_workers
+                .execute(move || {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(10)).unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let manager = MprisController::start(
+            runtime.handle.clone(),
+            AppHandle::new(&runtime, directory.path()),
+            Arc::new(ArtworkManager::new(directory.path())),
+            runtime.test_executor(),
+            workers,
+        );
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        set_enabled(&runtime.handle, true);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        bus.disconnect();
+        wait_status(
+            &runtime.handle,
+            "MPRIS unavailable: session bus disconnected",
+        );
+        if reenable {
+            std::fs::remove_file(bus_directory.path().join("bus"))
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .unwrap();
+            bus = TestBus::start_at(Some(&address));
+            assert!(!bus.has_player());
+        }
+        set_enabled(&runtime.handle, false);
+        if reenable {
+            // Both ACKs commit while retirement still waits for the held slot.
+            set_enabled(&runtime.handle, true);
+        }
+        release.send(()).unwrap();
+        async_io::block_on(blocker);
+        if reenable {
+            wait_status(&runtime.handle, "Connected to desktop media controls");
+            assert!(bus.has_player());
+            set_enabled(&runtime.handle, false);
+        }
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        drop(manager);
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_retires_connected_service_without_reporting_bus_loss() {
+        if crate::test_support::run_in_subprocess(
+            "mpris::tests::shutdown_retires_connected_service_without_reporting_bus_loss",
+            Duration::from_secs(20),
+        ) {
+            return;
+        }
+        let bus = TestBus::start();
+        // Only this exact test runs in the child, before application startup.
+        unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &bus.address) };
+        let (directory, mut runtime) = runtime_fixture();
+        let manager = MprisController::start(
+            runtime.handle.clone(),
+            AppHandle::new(&runtime, directory.path()),
+            Arc::new(ArtworkManager::new(directory.path())),
+            runtime.test_executor(),
+            Arc::clone(runtime.test_workers()),
+        );
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        set_enabled(&runtime.handle, true);
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+        runtime.control.request_shutdown().unwrap();
+        drop(manager);
+        runtime.join().unwrap();
+        assert!(!bus.has_player());
+        wait_status(&runtime.handle, "Connected to desktop media controls");
+    }
+
+    #[test]
     fn retirement_deadline_closes_connection_even_with_live_interface_guard() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
@@ -1472,6 +1774,7 @@ mod tests {
     fn publisher_panic_still_retires_connection_and_releases_bus_name() {
         let bus = TestBus::start();
         let (_directory, mut runtime) = runtime_fixture();
+        set_enabled(&runtime.handle, true);
         let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
         let retained = connection.clone();
         let (cancel, _cancelled) = oneshot::channel();

@@ -145,6 +145,7 @@ struct RevisionSubscription {
 
 pub(crate) struct MprisServiceState {
     pub enabled: bool,
+    pub enable_generation: u64,
     pub shutting_down: bool,
 }
 
@@ -185,6 +186,7 @@ impl CoreHandle {
         let state = self.state.read();
         MprisServiceState {
             enabled: state.configuration.config.mpris_enabled,
+            enable_generation: state.mpris_enable_generation,
             shutting_down: state.system.shutting_down,
         }
     }
