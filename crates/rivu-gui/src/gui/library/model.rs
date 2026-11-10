@@ -716,14 +716,18 @@ impl LibraryBrowser {
                 LibraryNode::Directory(_) | LibraryNode::OtherTracks => None,
             })
             .collect::<Vec<_>>();
-        ids.sort_by_cached_key(|id| {
-            (
-                self.tree
-                    .first_index_of(&LibraryNode::Track(*id))
-                    .unwrap_or(usize::MAX),
-                *id,
-            )
-        });
+        if ids.len() > 1 {
+            let indices = self.tree.first_indices();
+            ids.sort_unstable_by_key(|id| {
+                (
+                    indices
+                        .get(&LibraryNode::Track(*id))
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                    *id,
+                )
+            });
+        }
         ids.dedup();
         ids
     }

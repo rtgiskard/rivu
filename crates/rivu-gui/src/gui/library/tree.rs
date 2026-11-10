@@ -1202,13 +1202,18 @@ impl DirectoryTree {
             .map(|segment| segment.start + index - segment.offset)
     }
 
-    /// Action ordering uses the first occurrence, not keyboard focus.
-    pub(super) fn first_index_of(&self, node: &super::LibraryNode) -> Option<usize> {
-        self.selected_locations
-            .iter()
-            .filter(|((candidate, _), _)| candidate == node)
-            .filter_map(|((_, key), index)| self.location_index(key, *index))
-            .min()
+    /// Resolve action ordering in one pass, independently of keyboard focus.
+    pub(super) fn first_indices(&self) -> HashMap<&super::LibraryNode, usize> {
+        let mut indices = HashMap::with_capacity(self.selected_locations.len());
+        for ((node, branch), offset) in &self.selected_locations {
+            if let Some(index) = self.location_index(branch, *offset) {
+                indices
+                    .entry(node)
+                    .and_modify(|first: &mut usize| *first = (*first).min(index))
+                    .or_insert(index);
+            }
+        }
+        indices
     }
 
     /// Keep the clicked occurrence distinct from the deduplicated action selection.
@@ -2294,11 +2299,11 @@ mod tests {
         tree.remember_selection(&nodes, &HashSet::new());
         tree.focus_selection(&directory, 3);
         assert_eq!(tree.selected_index(), Some(3));
-        assert_eq!(tree.first_index_of(&directory), Some(1));
+        assert_eq!(tree.first_indices().get(&directory).copied(), Some(1));
         assert_eq!(tree.parent_index(tree.selected_index().unwrap()), None);
         tree.focus_selection(&leaf, 4);
         assert_eq!(tree.selected_index(), Some(4));
-        assert_eq!(tree.first_index_of(&leaf), Some(2));
+        assert_eq!(tree.first_indices().get(&leaf).copied(), Some(2));
         assert_eq!(tree.parent_index(tree.selected_index().unwrap()), Some(3));
         tree.collapse(&root);
         assert_eq!(tree.selected_index(), Some(2));
@@ -2492,11 +2497,11 @@ mod tests {
         tree.focus_selection(&focused, 3);
         tree.collapse(&root);
         assert!(tree.branches.contains_key(&root));
-        assert_eq!(tree.first_index_of(&selected), None);
+        assert_eq!(tree.first_indices().get(&selected), None);
         assert_eq!(tree.selected_index(), Some(2));
         assert!(tree.focused.is_some());
         tree.expand(&root);
-        assert_eq!(tree.first_index_of(&selected), Some(1));
+        assert_eq!(tree.first_indices().get(&selected).copied(), Some(1));
         assert_eq!(tree.selected_index(), Some(3));
         tree.collapse(&root);
         tree.remember_selection(&HashSet::from([focused]), &HashSet::new());
