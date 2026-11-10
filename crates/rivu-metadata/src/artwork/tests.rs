@@ -391,6 +391,39 @@ fn unusable_front_cover_does_not_hide_a_later_usable_picture() {
 }
 
 #[test]
+fn corrupt_supported_images_do_not_hide_embedded_or_directory_fallbacks() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut corrupt_pixels = DEFAULT_IMAGE.to_vec();
+    // Keep the complete PNG header but corrupt IDAT payload and its checksum.
+    corrupt_pixels[48] ^= 0xff;
+    for rejected in [&DEFAULT_IMAGE[..8], &DEFAULT_IMAGE[..33], &corrupt_pixels] {
+        assert!(image::guess_format(rejected).is_ok());
+        for version in [2, 3, 4] {
+            let path = directory.path().join(format!("corrupt-{version}.wav"));
+            pictures_wav(
+                &path,
+                version,
+                &[
+                    (rejected, rejected.len(), 3),
+                    (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
+                ],
+            );
+            let manager = ArtworkManager::new(directory.path());
+            let artwork = manager.load(source_fixture(path.clone()).source()).unwrap();
+            assert_eq!(fs::read(artwork.path()).unwrap(), DEFAULT_IMAGE);
+
+            // A corrupt embedded picture also permits the directory fallback.
+            pictures_wav(&path, version, &[(rejected, rejected.len(), 3)]);
+            fs::write(directory.path().join("cover.png"), rejected).unwrap();
+            fs::write(directory.path().join("folder.jpg"), DEFAULT_IMAGE).unwrap();
+            let manager = ArtworkManager::new(directory.path());
+            let artwork = manager.load(source_fixture(path).source()).unwrap();
+            assert_eq!(fs::read(artwork.path()).unwrap(), DEFAULT_IMAGE);
+        }
+    }
+}
+
+#[test]
 fn embedded_cover_size_boundary_applies_across_id3_versions() {
     let directory = tempfile::tempdir().unwrap();
     for version in [2, 3, 4] {

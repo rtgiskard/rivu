@@ -582,6 +582,11 @@ TIF/TIFF, and ICO, also ignoring case. Within each priority, filenames sort
 case-insensitively with their original bytes as a tie-breaker. Invalid,
 unsupported, or oversized candidates are skipped. File contents determine the
 cached image format; an extension alone does not establish it.
+Before accepting a candidate, Rivu decodes its first displayed frame using the
+image decoder's default 512 MiB allocation limit, then discards those pixels and
+caches the original encoded bytes. Decoder scratch limits are best-effort;
+later animation frames are not validated. Invalid first-frame pixel data falls
+through to the next candidate just like invalid headers.
 The GUI shows a default cover until a real cover is ready or when none is found.
 MPRIS uses the bundled application icon as its fallback. Directory discovery is
 cached, not watched for edits; moving a track retries it, otherwise restart Rivu

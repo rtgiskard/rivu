@@ -11,7 +11,7 @@ test-support = ["artwork"]
 [dependencies]
 anyhow = "1"
 blake3 = { version = "1", optional = true }
-image = { version = "0.25", default-features = false, optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"], optional = true }
 lofty = "=0.25.5"
 libc = "0.2"
 parking_lot = { version = "0.12", optional = true }

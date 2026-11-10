@@ -525,8 +525,8 @@ impl ArtworkManager {
             return None;
         }
         // Sniff the bytes rather than trusting tag MIME types or file names.
-        // Keep the original image; desktop clients handle decoding and scaling.
-        let extension = match image::guess_format(bytes).ok()? {
+        let format = image::guess_format(bytes).ok()?;
+        let extension = match format {
             image::ImageFormat::Png => "png",
             image::ImageFormat::Jpeg => "jpg",
             image::ImageFormat::Gif => "gif",
@@ -536,6 +536,15 @@ impl ArtworkManager {
             image::ImageFormat::Ico => "ico",
             _ => return None,
         };
+        // Validate the displayed image, not just its magic/header: otherwise a
+        // corrupt candidate prevents trying later embedded or directory covers.
+        // Use ImageReader's default allocation budget (512 MiB, best-effort for
+        // decoder scratch) without imposing a side-length cap. Validate the first
+        // frame only; corruption in subsequent animation frames is not detected.
+        // Discard pixels here and preserve original encoded bytes for clients.
+        image::ImageReader::with_format(io::Cursor::new(bytes), format)
+            .decode()
+            .ok()?;
         let hash = blake3::hash(bytes);
         let path = cache_paths::original_path(&self.directory.join("cache"), hash, extension);
         write_image(&path, bytes, self.max_image_bytes).ok()
