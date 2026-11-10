@@ -14,7 +14,8 @@ use rivu_protocol::{
     model::Query,
     query_wait_timeout,
     response::{
-        Ack, AckStatus, QueryResponse, StateResponse, StateRevisions, StateSections, StateWatch,
+        Ack, AckStatus, QueryError, QueryResponse, StateResponse, StateRevisions, StateSections,
+        StateWatch,
     },
 };
 use std::{
@@ -347,6 +348,15 @@ impl ClientSession {
         cancelled: impl Future<Output = ()>,
     ) -> Result<QueryResponse> {
         self.ensure_handshake()?;
+        let mut cancelled = std::pin::pin!(cancelled);
+        if async_io::block_on(future::poll_once(cancelled.as_mut())).is_some()
+            && !self.stop.is_cancelled()
+        {
+            return Ok(QueryResponse {
+                revisions: Default::default(),
+                result: Err(QueryError::Cancelled),
+            });
+        }
         self.next_query_id = self.next_query_id.wrapping_add(1);
         let request = WireRequest::QueryRetained(WireRetainedQuery {
             id: self.next_query_id,

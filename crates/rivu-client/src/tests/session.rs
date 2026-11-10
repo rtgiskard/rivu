@@ -210,7 +210,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let server = std::thread::spawn(move || {
-        for _ in 0..3 {
+        for _ in 0..4 {
             let mut stream = listener.accept().unwrap().0;
             complete_test_handshake_for_instance(&mut stream, 2);
             assert_eq!(
@@ -238,6 +238,10 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
             offset: 0,
             limit: 10,
         })
+        .unwrap_err();
+    assert!(error.is::<InstanceChanged>());
+    let error = session
+        .query_retained_until(Query::LibraryStats, std::future::ready(()))
         .unwrap_err();
     assert!(error.is::<InstanceChanged>());
     let error = session.get_state(StateSections::ALL).unwrap_err();
@@ -405,6 +409,91 @@ fn cancelling_retained_query_disconnects_its_physical_session() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn owner_cancel_during_handshake_skips_unsent_query_and_reuses_session() {
+    use rivu_protocol::{
+        query_tracking::QueryEpoch,
+        response::{QueryError, ViewResponse},
+    };
+    use std::os::unix::net::UnixListener;
+
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let mut owner = QueryEpoch::default();
+    let ticket = owner.ticket();
+    let mut session = client_session(directory.path());
+    let client = std::thread::spawn(move || {
+        let first = session
+            .query_retained_until(Query::LibraryStats, ticket.cancelled())
+            .unwrap();
+        let next = session.query(Query::Track { track_id: 42 }).unwrap();
+        (first, next)
+    });
+    let mut stream = listener.accept().unwrap().0;
+    let timeout = Some(Duration::from_secs(5));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    assert!(matches!(
+        read_test_request(&mut stream),
+        WireRequest::Hello(_)
+    ));
+    owner.cancel();
+    write_test_response(
+        &mut stream,
+        WireResponse::Hello(HelloResponse {
+            instance_id: 1_u32.to_le_bytes(),
+            state: wire_state(StateResponse {
+                revisions: StateRevisions::default(),
+                playback: None,
+                queue: None,
+                library: None,
+                system: None,
+                configuration: None,
+                processing: None,
+            }),
+        }),
+    );
+    assert!(matches!(
+        read_test_request(&mut stream),
+        WireRequest::Query(WireQuery::Track { track_id: 42 })
+    ));
+    write_test_response(
+        &mut stream,
+        WireResponse::Query(QueryResponse {
+            revisions: Default::default(),
+            result: Ok(ViewResponse::Track(None)),
+        }),
+    );
+    let (first, next) = client.join().unwrap();
+    assert!(matches!(first.result, Err(QueryError::Cancelled)));
+    assert!(matches!(next.result, Ok(ViewResponse::Track(None))));
+}
+
+#[test]
+fn session_shutdown_disconnects_even_when_retained_query_owner_is_cancelled() {
+    use std::{io::Read, os::unix::net::UnixListener};
+
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        complete_test_handshake(&mut stream);
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    });
+    let mut session = client_session(directory.path());
+    session.get_state(StateSections::default()).unwrap();
+    session.cancel();
+    assert!(
+        session
+            .query_retained_until(Query::LibraryStats, std::future::ready(()))
+            .is_err()
+    );
+    assert_eq!(session.instance_id(), None);
+    server.join().unwrap();
 }
 
 #[test]
