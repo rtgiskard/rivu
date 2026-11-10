@@ -352,6 +352,10 @@ impl Queue {
                         &scroll,
                         cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                             let row_height = rivu_ui::list_row_height(window, cx);
+                            let active_id = this
+                                .focused
+                                .then(|| this.model.active().map(|row| row.id))
+                                .flatten();
                             range
                                 .map(|index| {
                                     let Some(entry) = this.model.rows.get(index) else {
@@ -401,11 +405,9 @@ impl Queue {
                                             .border_color(rgb(theme.accent))
                                             .bg(rgb(theme.highlight))
                                     })
-                                    .when(
-                                        this.focused
-                                            && this.model.active().is_some_and(|row| row.id == id),
-                                        |row| row.border_color(rgb(theme.accent)),
-                                    )
+                                    .when(active_id == Some(id), |row| {
+                                        row.border_color(rgb(theme.accent))
+                                    })
                                     .group("queue-track-row")
                                     .relative()
                                     .child(

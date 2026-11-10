@@ -1551,6 +1551,7 @@ impl Layout {
         panels
     }
 
+    #[cfg(test)]
     pub fn panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {

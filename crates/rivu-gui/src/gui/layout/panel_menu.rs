@@ -196,9 +196,9 @@ impl WindowView {
             .workspace
             .layouts
             .current()
-            .panels()
-            .into_iter()
-            .find(|panel| panel.id == state.panel_id)
+            .root
+            .as_ref()
+            .and_then(|root| root.find_panel(&|panel| panel.id == state.panel_id))
             .map(|panel| panel.kind.as_str());
         let is_queue = panel_kind == Some("queue");
         let is_library = panel_kind == Some("library");

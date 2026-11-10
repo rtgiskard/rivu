@@ -223,16 +223,6 @@ impl MaterialAppearance for MaterialPreset {
             panel = panel.child(image.absolute().size_full().object_fit(ObjectFit::Cover));
         }
         // Paint decorative layers before content. Alpha never applies to text or hitboxes.
-        let tint = div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .bg(linear_gradient(
-                145.,
-                linear_color_stop(rgb(theme.control).alpha(top), 0.),
-                linear_color_stop(rgb(theme.panel).alpha(bottom), 1.),
-            ));
         if matches!(
             self,
             Self::Glass | Self::Spring | Self::Glint | Self::Ripple | Self::Mirror
@@ -240,6 +230,16 @@ impl MaterialAppearance for MaterialPreset {
             panel = panel.bg(transparent_black());
         }
         if self != Self::Glint {
+            let tint = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(theme.control).alpha(top), 0.),
+                    linear_color_stop(rgb(theme.panel).alpha(bottom), 1.),
+                ));
             panel = panel.child(tint);
         }
         panel = match self {

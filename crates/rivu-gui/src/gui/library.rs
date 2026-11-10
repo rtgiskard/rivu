@@ -432,7 +432,7 @@ impl Library {
                 LibraryNode::Directory(_) | LibraryNode::OtherTracks => None,
             })
             .collect::<Vec<_>>();
-        ids.sort_unstable_by_key(|id| {
+        ids.sort_by_cached_key(|id| {
             (
                 self.library
                     .tree()

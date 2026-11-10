@@ -836,6 +836,27 @@ impl EntityInputHandler for Input {
     }
 }
 
+fn character_geometry(content: &str, line: &gpui::LineLayout, scale: f32) -> (Vec<f32>, Vec<f32>) {
+    let mut positions = Vec::with_capacity(content.chars().count());
+    let mut widths = Vec::with_capacity(positions.capacity());
+    let mut glyphs = line.runs.iter().flat_map(|run| &run.glyphs).peekable();
+    let mut start = glyphs.peek().map_or(line.width, |glyph| glyph.position.x);
+    for (offset, ch) in content.char_indices() {
+        let boundary = offset + ch.len_utf8();
+        // Match GPUI's first glyph whose byte index is >= the boundary, not
+        // an interpolated cluster edge. Increasing boundaries can only discard
+        // glyphs, even when RTL shaping leaves their byte indices unordered.
+        while glyphs.peek().is_some_and(|glyph| glyph.index < boundary) {
+            glyphs.next();
+        }
+        let end = glyphs.peek().map_or(line.width, |glyph| glyph.position.x);
+        positions.push(f32::from(start.min(end)) * scale);
+        widths.push(f32::from((end - start).abs()) * scale);
+        start = end;
+    }
+    (positions, widths)
+}
+
 struct InputElement {
     input: Entity<Input>,
 }
@@ -967,14 +988,7 @@ impl Element for InputElement {
                     .map(|ch| ch.len_utf8() as u8)
                     .collect::<Vec<_>>(),
             );
-            let mut positions = Vec::with_capacity(input.content.chars().count());
-            let mut widths = Vec::with_capacity(positions.capacity());
-            for (offset, ch) in input.content.char_indices() {
-                let start = line.x_for_index(offset);
-                let end = line.x_for_index(offset + ch.len_utf8());
-                positions.push(f32::from(start.min(end)) * scale);
-                widths.push(f32::from((end - start).abs()) * scale);
-            }
+            let (positions, widths) = character_geometry(&input.content, &line, scale);
             run.set_character_positions(positions);
             run.set_character_widths(widths);
             let origin = bounds.left() - scroll_offset;
@@ -2242,6 +2256,67 @@ mod tests {
             selected_range_after_replacement("😀a", Some(&(2..3)), 5),
             9..10
         );
+    }
+
+    #[test]
+    fn accessible_geometry_preserves_clusters_rtl_and_marked_run_boundaries() {
+        type GlyphRun<'a> = &'a [(usize, f32)];
+        let cases: &[(&str, &[GlyphRun<'_>])] = &[
+            ("", &[]),
+            // Multibyte scalars, combining marks and a ligature cluster gap.
+            (
+                "a中😀e\u{301}fi",
+                &[&[(0, 0.), (1, 5.), (4, 12.), (8, 20.), (8, 20.), (11, 25.)]],
+            ),
+            // Descending and mixed visual order must keep GPUI's first match.
+            ("אבג", &[&[(4, 0.), (2, 7.), (0, 14.)]]),
+            ("aאבz", &[&[(0, 0.), (3, 5.), (1, 12.), (5, 19.)]]),
+            // IME decoration and font fallback can split a cluster across runs.
+            (
+                "e\u{301}中😀",
+                &[&[(0, 0.)], &[], &[(0, 0.), (3, 8.)], &[(6, 17.)]],
+            ),
+        ];
+        for &(content, runs) in cases {
+            let line = gpui::LineLayout {
+                width: px(30.),
+                len: content.len(),
+                runs: runs
+                    .iter()
+                    .map(|glyphs| gpui::ShapedRun {
+                        font_id: gpui::FontId(0),
+                        glyphs: glyphs
+                            .iter()
+                            .map(|&(index, x)| gpui::ShapedGlyph {
+                                id: gpui::GlyphId(0),
+                                position: point(px(x), px(0.)),
+                                index,
+                                is_emoji: false,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            for scale in [1., 1.5, 2.] {
+                let expected: (Vec<_>, Vec<_>) = content
+                    .char_indices()
+                    .map(|(offset, ch)| {
+                        let start = line.x_for_index(offset);
+                        let end = line.x_for_index(offset + ch.len_utf8());
+                        (
+                            f32::from(start.min(end)) * scale,
+                            f32::from((end - start).abs()) * scale,
+                        )
+                    })
+                    .unzip();
+                assert_eq!(
+                    character_geometry(content, &line, scale),
+                    expected,
+                    "{content:?}"
+                );
+            }
+        }
     }
 
     #[test]

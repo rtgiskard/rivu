@@ -371,6 +371,22 @@ fn sheen_band(theme: &'static Palette, highlight: f32, phase: f32) -> Div {
         )
 }
 
+const PAPER_FIBERS: [[f32; 4]; 320] = {
+    let mut samples = [[0.; 4]; 320];
+    let mut i = 0;
+    while i < samples.len() {
+        let index = i as u32;
+        samples[i] = [
+            hash(index * 2 + 17),
+            hash(index * 2 + 901),
+            hash(index + 41),
+            hash(index + 73),
+        ];
+        i += 1;
+    }
+    samples
+};
+
 /// A deterministic bounded fiber field; no time seed, image generation, or cache.
 fn paper(theme: &'static Palette, strength: f32, panel: bool) -> impl IntoElement {
     canvas(
@@ -378,17 +394,15 @@ fn paper(theme: &'static Palette, strength: f32, panel: bool) -> impl IntoElemen
         move |bounds, _, window, _| {
             let mut fibers = PathBuilder::stroke(px(0.65));
             let count = if panel { 112 } else { 320 };
-            for i in 0..count {
-                let x = hash(i * 2 + 17);
-                let y = hash(i * 2 + 901);
+            for &[x, y, length, slope] in &PAPER_FIBERS[..count] {
                 let p = point(
                     bounds.left() + bounds.size.width * x,
                     bounds.top() + bounds.size.height * y,
                 );
                 fibers.move_to(p);
                 fibers.line_to(point(
-                    p.x + px(0.7 + hash(i + 41) * 2.1),
-                    p.y + px((hash(i + 73) - 0.5) * 1.3),
+                    p.x + px(0.7 + length * 2.1),
+                    p.y + px((slope - 0.5) * 1.3),
                 ));
             }
             if let Ok(path) = fibers.build() {
@@ -402,7 +416,7 @@ fn paper(theme: &'static Palette, strength: f32, panel: bool) -> impl IntoElemen
     .size_full()
 }
 
-fn hash(index: u32) -> f32 {
+const fn hash(index: u32) -> f32 {
     let mut value = index.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
     value = ((value >> ((value >> 28) + 4)) ^ value).wrapping_mul(277_803_737);
     ((value >> 22) ^ value) as f32 / u32::MAX as f32
