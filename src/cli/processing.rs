@@ -133,7 +133,7 @@ fn show_settings(
     Ok(())
 }
 
-fn equalizer_command(edit: &str) -> Result<Command> {
+fn equalizer_command(edit: &str, expected_revision: u64) -> Result<Command> {
     let mut edit: EqualizerEdit =
         serde_json::from_str(edit).context("Parsing EqualizerEdit JSON")?;
     match &mut edit {
@@ -142,7 +142,10 @@ fn equalizer_command(edit: &str) -> Result<Command> {
         }
         _ => {}
     }
-    Ok(Command::EqualizerEdit { edit })
+    Ok(Command::EqualizerEdit {
+        expected_revision,
+        edit,
+    })
 }
 
 fn show_processing(
@@ -279,7 +282,13 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
                 }
             }
         },
-        ProcessingAction::Eq { edit } => equalizer_command(&edit)?,
+        ProcessingAction::Eq { edit } => {
+            let state = session.get_state(StateSections {
+                configuration: true,
+                ..Default::default()
+            })?;
+            equalizer_command(&edit, state.revisions.configuration)?
+        }
         ProcessingAction::Denoise { patch } => Command::DenoiseEdit {
             patch: serde_json::from_str(&patch).context("Parsing DenoisePatch JSON")?,
         },

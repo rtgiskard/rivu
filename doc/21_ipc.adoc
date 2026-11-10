@@ -1386,13 +1386,16 @@ link:22_cache.adoc#processing-output-retention[Processing output retention].
 
 === Audio processing commands
 
-`EqualizerEdit { edit }` carries a field edit, preset operation or A/B swap;
+`EqualizerEdit { expected_revision, edit }` carries a field edit, preset operation
+or A/B swap. `expected_revision` is the observed `StateRevisions.configuration`
+token; Core rejects stale commands before applying edits or performing preset
+I/O. Refresh configuration before retrying; GUI rejection retains field drafts.
 `DenoiseEdit { patch }` and `NeuralEdit { patch }` merge specified fields into
 current core configuration. In human-readable serde form, boxed Rust patch
 storage does not add a wrapper: a patch remains an ordinary object. For example,
 command values are `{"DenoiseEdit":{"patch":{"mode":"adaptive","wet":0.8}}}` and
 `{"NeuralEdit":{"patch":{"threads":4}}}`. Equalizer edits use externally tagged
-variants, for example `{"EqualizerEdit":{"edit":{"Enabled":true}}}`.
+variants, for example `{"EqualizerEdit":{"expected_revision":7,"edit":{"Enabled":true}}}`.
 These examples describe command shape, not socket input: IPC sends the corresponding
 WireCommand as a Postcard body in the ordinary Command frame after Hello, never
 raw JSON. Unknown patch fields and invalid settings fail; omitted patch fields

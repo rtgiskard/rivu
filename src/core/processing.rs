@@ -324,7 +324,15 @@ impl Core {
         }
         Ok(())
     }
-    pub(in crate::core) fn equalizer_edit(&mut self, edit: EqualizerEdit) -> Result<()> {
+    pub(in crate::core) fn equalizer_edit(
+        &mut self,
+        expected_revision: u64,
+        edit: EqualizerEdit,
+    ) -> Result<()> {
+        ensure!(
+            expected_revision == self.state.revisions.configuration,
+            "Equalizer configuration changed; refresh before editing"
+        );
         use EqualizerEdit::*;
         let mut config = self.preferences.checkpoint();
         let sample_rate = self

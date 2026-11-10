@@ -913,6 +913,8 @@ pub enum Command {
         bypassed: bool,
     },
     EqualizerEdit {
+        /// Observed `StateRevisions::configuration`; checked before any edit side effects.
+        expected_revision: u64,
         edit: EqualizerEdit,
     },
     DenoiseEdit {

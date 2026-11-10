@@ -2835,7 +2835,13 @@ impl AudioProcessing {
         {
             return;
         }
-        self.send(Command::EqualizerEdit { edit }, cx);
+        self.send(
+            Command::EqualizerEdit {
+                expected_revision: self.context.snapshot().revisions.configuration,
+                edit,
+            },
+            cx,
+        );
     }
 
     fn equalizer_blocked(&self, target: EqTarget) -> bool {
@@ -2880,7 +2886,10 @@ impl AudioProcessing {
         match target {
             EqTarget::Monitor => self.enqueue_submission(
                 Submission {
-                    command: Command::EqualizerEdit { edit },
+                    command: Command::EqualizerEdit {
+                        expected_revision: snapshot.revisions.configuration,
+                        edit,
+                    },
                     field: None,
                     equalizer_field: submitted,
                 },
@@ -3581,7 +3590,7 @@ fn replaces_band_identity(edit: &EqualizerEdit) -> bool {
 impl AudioProcessing {
     pub(super) fn begin_equalizer_command(&mut self, command: &Command) {
         self.equalizer_editors.reset_band_focus = match command {
-            Command::EqualizerEdit { edit } if replaces_band_identity(edit) => {
+            Command::EqualizerEdit { edit, .. } if replaces_band_identity(edit) => {
                 Some(EqTarget::Monitor)
             }
             Command::ProcessingGraphEdit {
@@ -3602,6 +3611,7 @@ impl AudioProcessing {
         };
         if let Command::EqualizerEdit {
             edit: EqualizerEdit::RemoveBand { index },
+            ..
         } = command
         {
             self.equalizer_editors.removing.insert(
@@ -3696,6 +3706,7 @@ mod tests {
             assert!(matches!(
                 owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::Enabled(false)
                 }
             ));
@@ -3742,6 +3753,7 @@ mod tests {
         };
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
                 edit: EqualizerEdit::Replace {
                     config: config.clone()
                 },
@@ -4001,9 +4013,13 @@ mod tests {
                             EqualizerEdit::RemoveBand { index: 0 }
                         };
                         assert!(
-                            futures::executor::block_on(
-                                runtime.handle.request_ack(Command::EqualizerEdit { edit })
-                            )
+                            futures::executor::block_on(runtime.handle.request_ack(
+                                Command::EqualizerEdit {
+                                    expected_revision:
+                                        runtime.handle.gui_snapshot().revisions.configuration,
+                                    edit
+                                }
+                            ))
                             .ack
                             .is_success()
                         );
@@ -4181,7 +4197,7 @@ mod tests {
         );
         owner.read_with(cx, |owner, _| {
             assert!(matches!(&owner.commands.front().unwrap().command,
-                Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) } } if *value == 0.8123456789));
+                Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }, .. } if *value == 0.8123456789));
         });
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, cx| {
@@ -4223,7 +4239,7 @@ mod tests {
         }
         owner.read_with(cx, |owner, _| {
             assert!(matches!(&owner.commands.front().unwrap().command,
-                Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) } } if *value == 2.5));
+                Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }, .. } if *value == 2.5));
         });
     }
 
@@ -4261,6 +4277,7 @@ mod tests {
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::GainDb(value) }
                 } if *value == 24.
             ));
@@ -4475,6 +4492,146 @@ mod tests {
     }
 
     #[gpui::test]
+    fn stale_monitor_edit_rejection_keeps_numeric_draft(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, _| owner.command_active = true);
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
+        enter_number(cx, handle, &input, "2.5");
+        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
+        let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+            expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+            edit: EqualizerEdit::BandField {
+                index: 0,
+                field: EqBandEdit::GainDb(4.0),
+            },
+        }));
+        assert!(ack.ack.is_success());
+        acknowledge_front(cx, &runtime, &owner, false);
+        editor.read_with(cx, |editor, cx| {
+            let field = &editor.fields[&EqField::Band(0, BandField::Q)];
+            assert!(field.dirty);
+            assert!(!field.auto_pending);
+            assert_eq!(field.input.read(cx).text(), "2.5");
+        });
+        assert_eq!(
+            runtime.handle.config_snapshot().equalizer.bands[0].gain_db,
+            4.0
+        );
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+    }
+
+    #[gpui::test]
+    fn rejected_old_numeric_edit_preserves_new_same_or_other_field_input(cx: &mut TestAppContext) {
+        for key in [
+            EqField::Band(0, BandField::Q),
+            EqField::Band(0, BandField::GainDb),
+        ] {
+            let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+            owner.update(cx, |owner, _| owner.command_active = true);
+            let first = editor.read_with(cx, |editor, _| {
+                editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+            });
+            enter_number(cx, handle, &first, "1.5");
+            let input = editor.read_with(cx, |editor, _| editor.fields[&key].input.clone());
+            enter_number(cx, handle, &input, "2.5");
+            let generation = editor.read_with(cx, |editor, _| {
+                assert!(editor.fields[&key].auto_pending);
+                editor.fields[&key].generation
+            });
+            assert!(
+                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+                    edit: EqualizerEdit::PreampDb(4.),
+                }))
+                .ack
+                .is_success()
+            );
+            acknowledge_front(cx, &runtime, &owner, false);
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(owner.commands.len(), 1);
+                let submitted = owner
+                    .commands
+                    .front()
+                    .unwrap()
+                    .equalizer_field
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(submitted.key, key);
+                assert_eq!(submitted.generation, generation);
+                assert_eq!(submitted.text, "2.5");
+            });
+            editor.read_with(cx, |editor, cx| {
+                let field = &editor.fields[&key];
+                assert!(field.dirty);
+                assert!(!field.auto_pending);
+                assert_eq!(field.generation, generation);
+                assert_eq!(input.read(cx).text(), "2.5");
+            });
+            acknowledge_front(cx, &runtime, &owner, true);
+            editor.read_with(cx, |editor, cx| {
+                assert!(!editor.fields[&key].dirty);
+                assert_eq!(input.read(cx).text(), "2.5");
+                if key == EqField::Band(0, BandField::Q) {
+                    assert_eq!(editor.config.bands[0].q, 2.5);
+                } else {
+                    assert_eq!(editor.config.bands[0].gain_db, 2.5);
+                    let rejected = &editor.fields[&EqField::Band(0, BandField::Q)];
+                    assert!(rejected.dirty);
+                    assert!(!rejected.auto_pending);
+                    assert_eq!(rejected.input.read(cx).text(), "1.5");
+                }
+            });
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        }
+    }
+
+    #[gpui::test]
+    fn unrelated_command_failure_preserves_pending_numeric_input(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, cx| {
+            owner.command_active = true;
+            owner.patch_denoise(
+                super::super::DenoisePatch {
+                    fft_size: Some(0),
+                    ..Default::default()
+                },
+                cx,
+            );
+            // The fixture renders the editor directly, unlike the production
+            // owner view that reconciles queue availability before rendering it.
+            owner.reconcile(owner.context.snapshot(), cx);
+        });
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
+        });
+        enter_number(cx, handle, &input, "2.5");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.pending, 1);
+            assert!(editor.fields[&EqField::Band(0, BandField::Q)].auto_pending);
+        });
+        acknowledge_front(cx, &runtime, &owner, false);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.commands.len(), 1);
+            assert!(matches!(
+                &owner.commands.front().unwrap().command,
+                Command::EqualizerEdit {
+                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) },
+                    ..
+                } if *value == 2.5
+            ));
+        });
+        acknowledge_front(cx, &runtime, &owner, true);
+        editor.read_with(cx, |editor, cx| {
+            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
+            assert_eq!(editor.config.bands[0].q, 2.5);
+            assert_eq!(input.read(cx).text(), "2.5");
+        });
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+    }
+
+    #[gpui::test]
     fn pending_live_edits_coalesce_to_latest_without_old_ack_erasing_new_draft(
         cx: &mut TestAppContext,
     ) {
@@ -4493,6 +4650,7 @@ mod tests {
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }
                 } if *value == 1.1
             ));
@@ -4536,6 +4694,7 @@ mod tests {
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }
                 } if *value == 3.3
             ));
@@ -4598,6 +4757,7 @@ mod tests {
             // before this editor receives its successful local acknowledgement.
             assert!(
                 futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
                     edit: EqualizerEdit::BandField {
                         index: 0,
                         field: external
@@ -4684,7 +4844,36 @@ mod tests {
         });
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 2);
         acknowledge_front(cx, &runtime, &owner, true);
-        acknowledge_front(cx, &runtime, &owner, true);
+        let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
+        let ack = futures::executor::block_on(runtime.handle.request_ack(submission.command)).ack;
+        assert!(!ack.is_success());
+        owner.update(cx, |owner, cx| {
+            owner.pending = owner.pending.saturating_sub(1);
+            owner.finish_equalizer_command(false);
+            owner.reconcile(owner.context.snapshot(), cx);
+            editor.read_with(cx, |editor, cx| {
+                assert!(editor.config.enabled);
+                for (key, input, text, generation) in &drafts {
+                    let field = &editor.fields[key];
+                    assert!(field.dirty);
+                    assert!(field.auto_pending);
+                    assert_eq!(&field.input, input);
+                    assert_eq!(field.input.read(cx).text(), text);
+                    assert_eq!(field.generation, *generation);
+                }
+            });
+            // Only an authoritative disabled snapshot cancels unissued input.
+            // Publish it before the deferred live submission can consume a draft.
+            assert!(
+                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+                    edit: EqualizerEdit::Enabled(false),
+                }))
+                .ack
+                .is_success()
+            );
+            owner.reconcile(owner.context.snapshot(), cx);
+        });
         draw(cx, handle);
         editor.read_with(cx, |editor, cx| {
             assert!(!editor.config.enabled);
@@ -4692,6 +4881,7 @@ mod tests {
             for (key, input, text, generation) in &drafts {
                 let field = &editor.fields[key];
                 assert!(field.dirty);
+                assert!(!field.auto_pending);
                 assert_eq!(&field.input, input);
                 assert_eq!(field.input.read(cx).text(), text);
                 assert_eq!(field.generation, *generation);
@@ -4766,6 +4956,7 @@ mod tests {
         acknowledge_front(cx, &runtime, &owner, true);
         assert!(
             futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
                 edit: EqualizerEdit::BandField {
                     index: 0,
                     field: EqBandEdit::Kind(FilterKind::LowPass)
@@ -5712,7 +5903,7 @@ mod tests {
             assert_eq!(owner.commands.len(), 1);
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit { edit: EqualizerEdit::Replace { config } }
+                Command::EqualizerEdit { edit: EqualizerEdit::Replace { config }, .. }
                     if config == &(EqualizerConfig { enabled: true, ..Default::default() })
             ));
         });
@@ -5755,6 +5946,7 @@ mod tests {
             band.kind = kind;
             assert!(
                 futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
                     edit: EqualizerEdit::Band { index: 0, band },
                 }))
                 .ack
@@ -5978,7 +6170,7 @@ mod tests {
                 assert!(owner.preset_popup.is_none());
                 assert!(!owner.preset_choices.is_open());
                 assert!(matches!(&owner.commands.back().unwrap().command,
-                    Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name } } if name == "Second"));
+                    Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name }, .. } if name == "Second"));
             });
         }).unwrap();
     }
@@ -6057,7 +6249,7 @@ mod tests {
             assert!(owner.preset_popup.is_none());
             assert_eq!(owner.fields[&FieldKey::PresetName].input.read(cx).text(), "Second");
             assert!(matches!(&owner.commands.back().unwrap().command,
-                Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name } } if name == "Second"));
+                Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name }, .. } if name == "Second"));
         });
         // Tab reaches Manage; its first tab stop is the native name input.
         press(cx, handle, "tab");
@@ -6216,16 +6408,19 @@ mod tests {
                 let submission = owner.commands.back().unwrap();
                 match &submission.command {
                     Command::EqualizerEdit {
+                        expected_revision: _,
                         edit: EqualizerEdit::PreampDb(gain),
                     } if key == &EqField::PreampDb => {
                         assert_eq!(*gain, value);
                     }
                     Command::EqualizerEdit {
+                        expected_revision: _,
                         edit: EqualizerEdit::OutputGainDb(gain),
                     } if key == &EqField::OutputGainDb => {
                         assert_eq!(*gain, value);
                     }
                     Command::EqualizerEdit {
+                        expected_revision: _,
                         edit:
                             EqualizerEdit::BandField {
                                 index: 0,
@@ -6303,7 +6498,7 @@ mod tests {
             let submission = owner.commands.front().unwrap();
             assert!(matches!(
                 &submission.command,
-                Command::EqualizerEdit { edit: EqualizerEdit::PreampDb(gain) } if *gain == -7.
+                Command::EqualizerEdit { edit: EqualizerEdit::PreampDb(gain), .. } if *gain == -7.
             ));
             assert_eq!(submission.equalizer_field.as_ref().unwrap().text, "-7");
         });
@@ -6385,6 +6580,7 @@ mod tests {
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::RemoveBand { index: 2 }
                 }
             ));
@@ -6889,6 +7085,7 @@ mod tests {
             assert!(matches!(
                 &owner.commands.front().unwrap().command,
                 Command::EqualizerEdit {
+                    expected_revision: _,
                     edit: EqualizerEdit::ResizeBands { count: 1 }
                 }
             ));

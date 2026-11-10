@@ -494,6 +494,7 @@ pub enum WireCommand {
         delta: f64,
     },
     EqualizerEdit {
+        expected_revision: u64,
         edit: crate::model::EqualizerEdit,
     },
     DenoiseEdit {
@@ -1341,7 +1342,13 @@ impl From<Command> for WireCommand {
             Command::CancelRelocation { id } => Self::CancelRelocation { id },
             Command::KeepTrackIndependent { track_id } => Self::KeepTrackIndependent { track_id },
             Command::ProcessingBypass { bypassed } => Self::ProcessingBypass { bypassed },
-            Command::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
+            Command::EqualizerEdit {
+                expected_revision,
+                edit,
+            } => Self::EqualizerEdit {
+                expected_revision,
+                edit,
+            },
             Command::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             Command::NeuralEdit { patch } => Self::NeuralEdit { patch },
             Command::ProcessingGraphEdit {
@@ -1648,7 +1655,13 @@ impl TryFrom<WireCommand> for Command {
                 Self::KeepTrackIndependent { track_id }
             }
             WireCommand::ProcessingBypass { bypassed } => Self::ProcessingBypass { bypassed },
-            WireCommand::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
+            WireCommand::EqualizerEdit {
+                expected_revision,
+                edit,
+            } => Self::EqualizerEdit {
+                expected_revision,
+                edit,
+            },
             WireCommand::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             WireCommand::NeuralEdit { patch } => Self::NeuralEdit { patch },
             WireCommand::ProcessingGraphEdit {

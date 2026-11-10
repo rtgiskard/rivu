@@ -1682,6 +1682,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
             }),
         },
         Command::EqualizerEdit {
+            expected_revision: 37,
             edit: EqualizerEdit::BandField {
                 index: 2,
                 field: EqBandEdit::Position {

@@ -495,11 +495,14 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     let mut bytes = serde_json::to_vec(&preset).unwrap();
     bytes.resize(65536, b' ');
     std::fs::write(&path, &bytes).unwrap();
-    core.equalizer_edit(EqualizerEdit::ImportPreset {
-        path: path.clone(),
-        name: "bounded".into(),
-        overwrite: false,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::ImportPreset {
+            path: path.clone(),
+            name: "bounded".into(),
+            overwrite: false,
+        },
+    )
     .unwrap();
     let imported = core
         .preferences
@@ -512,11 +515,14 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     let accepted = (*core.preferences.settings()).clone();
     bytes.push(b' ');
     std::fs::write(&path, bytes).unwrap();
-    core.equalizer_edit(EqualizerEdit::ImportPreset {
-        path: path.clone(),
-        name: "oversized".into(),
-        overwrite: false,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::ImportPreset {
+            path: path.clone(),
+            name: "oversized".into(),
+            overwrite: false,
+        },
+    )
     .unwrap_err();
     assert_eq!((*core.preferences.settings()), accepted);
 
@@ -526,11 +532,14 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     let (completed, receive) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let result = core.equalizer_edit(EqualizerEdit::ImportPreset {
-            path,
-            name: "pipe".into(),
-            overwrite: false,
-        });
+        let result = core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::ImportPreset {
+                path,
+                name: "pipe".into(),
+                overwrite: false,
+            },
+        );
         completed
             .send(((*core.preferences.settings()).clone(), result))
             .unwrap();
@@ -545,10 +554,13 @@ fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
 #[test]
 fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
     let (directory, mut core) = fixture();
-    core.equalizer_edit(EqualizerEdit::SavePreset {
-        name: "Reference".into(),
-        overwrite: false,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::SavePreset {
+            name: "Reference".into(),
+            overwrite: false,
+        },
+    )
     .unwrap();
     let configuration = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
@@ -559,17 +571,20 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
         path,
         name: "Reference".into(),
     };
-    core.equalizer_edit(export(path.clone())).unwrap();
+    core.equalizer_edit(core.state.revisions.configuration, export(path.clone()))
+        .unwrap();
     let expected = serde_json::to_vec_pretty(&configuration.equalizer_presets[0].config).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), expected);
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
 
     std::fs::write(&path, b"created by another owner").unwrap();
-    core.equalizer_edit(export(path.clone())).unwrap_err();
+    core.equalizer_edit(core.state.revisions.configuration, export(path.clone()))
+        .unwrap_err();
     assert_eq!(std::fs::read(&path).unwrap(), b"created by another owner");
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
     let missing = exports.join("missing/preset.json");
-    core.equalizer_edit(export(missing.clone())).unwrap_err();
+    core.equalizer_edit(core.state.revisions.configuration, export(missing.clone()))
+        .unwrap_err();
     assert!(!missing.parent().unwrap().exists());
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
     assert!(Arc::ptr_eq(core.preferences.settings(), &configuration));
@@ -605,10 +620,13 @@ fn equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file() {
     }
 
     let (directory, mut core) = fixture();
-    core.equalizer_edit(EqualizerEdit::SavePreset {
-        name: "Reference".into(),
-        overwrite: false,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::SavePreset {
+            name: "Reference".into(),
+            overwrite: false,
+        },
+    )
     .unwrap();
     let exports = directory.path().join("exports");
     std::fs::create_dir(&exports).unwrap();
@@ -630,10 +648,13 @@ fn equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file() {
         assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limited), 0);
         (limits, signal)
     };
-    let result = core.equalizer_edit(EqualizerEdit::ExportPreset {
-        path: path.clone(),
-        name: "Reference".into(),
-    });
+    let result = core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::ExportPreset {
+            path: path.clone(),
+            name: "Reference".into(),
+        },
+    );
     // SAFETY: restore the limits and signal disposition captured above.
     unsafe {
         assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limits), 0);
@@ -645,22 +666,65 @@ fn equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file() {
 }
 
 #[test]
+fn monitor_equalizer_edits_reject_stale_configuration_before_mutation() {
+    let (_directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBands { count: 2 },
+    )
+    .unwrap();
+    core.publish();
+    let stale_revision = core.state.revisions.configuration;
+    core.equalizer_edit(stale_revision, EqualizerEdit::RemoveBand { index: 0 })
+        .unwrap();
+    core.publish();
+    let current_revision = core.state.revisions.configuration;
+    assert_ne!(current_revision, stale_revision);
+    let baseline = Arc::clone(core.preferences.settings());
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+    let edit = || EqualizerEdit::BandField {
+        index: 0,
+        field: EqBandEdit::GainDb(3.0),
+    };
+    let error = core.equalizer_edit(stale_revision, edit()).unwrap_err();
+    assert!(error.to_string().contains("configuration changed"));
+    assert!(Arc::ptr_eq(core.preferences.settings(), &baseline));
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    core.equalizer_edit(current_revision, edit()).unwrap();
+    assert_eq!(core.preferences.settings().equalizer.bands.len(), 1);
+    assert_eq!(core.preferences.settings().equalizer.bands[0].gain_db, 3.0);
+}
+
+#[test]
 fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
-    core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::config::EqBand::default(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBand {
+            band: rivu_dsp::equalizer::config::EqBand::default(),
+        },
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::BandField {
-        index: 0,
-        field: EqBandEdit::GainDb(3.0),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::BandField {
+            index: 0,
+            field: EqBandEdit::GainDb(3.0),
+        },
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::BandField {
-        index: 0,
-        field: EqBandEdit::FrequencyHz(2500.0),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::BandField {
+            index: 0,
+            field: EqBandEdit::FrequencyHz(2500.0),
+        },
+    )
     .unwrap();
     assert_eq!(core.preferences.settings().equalizer.bands[0].gain_db, 3.0);
     core.denoise_edit(DenoisePatch {
@@ -737,25 +801,38 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
     let _commands = recording_audio(&mut core);
     let name = "Reference".to_owned();
     assert!(
-        core.equalizer_edit(EqualizerEdit::SavePreset {
-            name: name.clone(),
-            overwrite: true
-        })
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::SavePreset {
+                name: name.clone(),
+                overwrite: true
+            }
+        )
         .is_err()
     );
-    core.equalizer_edit(EqualizerEdit::SavePreset {
-        name: name.clone(),
-        overwrite: false,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::SavePreset {
+            name: name.clone(),
+            overwrite: false,
+        },
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::PreampDb(-6.0)).unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::PreampDb(-6.0),
+    )
+    .unwrap();
     let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
-        core.equalizer_edit(EqualizerEdit::SavePreset {
-            name: name.clone(),
-            overwrite: false
-        })
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::SavePreset {
+                name: name.clone(),
+                overwrite: false
+            }
+        )
         .is_err()
     );
     assert_eq!((*core.preferences.settings()), baseline);
@@ -763,10 +840,13 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
         std::fs::read(&core.state.configuration.config_path).unwrap(),
         saved
     );
-    core.equalizer_edit(EqualizerEdit::SavePreset {
-        name: name.clone(),
-        overwrite: true,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::SavePreset {
+            name: name.clone(),
+            overwrite: true,
+        },
+    )
     .unwrap();
     assert_eq!(
         core.preferences.settings().equalizer_presets[0]
@@ -780,27 +860,36 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
     std::fs::write(&path, serde_json::to_vec(&imported).unwrap()).unwrap();
     let baseline = (*core.preferences.settings()).clone();
     assert!(
-        core.equalizer_edit(EqualizerEdit::ImportPreset {
-            path: path.clone(),
-            name: name.clone(),
-            overwrite: false
-        })
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::ImportPreset {
+                path: path.clone(),
+                name: name.clone(),
+                overwrite: false
+            }
+        )
         .is_err()
     );
     assert!(
-        core.equalizer_edit(EqualizerEdit::ImportPreset {
-            path: path.clone(),
-            name: "Missing".to_owned(),
-            overwrite: true
-        })
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::ImportPreset {
+                path: path.clone(),
+                name: "Missing".to_owned(),
+                overwrite: true
+            }
+        )
         .is_err()
     );
     assert_eq!((*core.preferences.settings()), baseline);
-    core.equalizer_edit(EqualizerEdit::ImportPreset {
-        path,
-        name,
-        overwrite: true,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::ImportPreset {
+            path,
+            name,
+            overwrite: true,
+        },
+    )
     .unwrap();
     assert_eq!(core.preferences.settings().equalizer_presets.len(), 1);
     assert_eq!(
@@ -816,8 +905,11 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
         let (_directory, mut core) = fixture();
         let (commands, _receive) = async_channel::bounded(64);
         let _idle_commands = core.engine.replace_commands(commands);
-        core.equalizer_edit(EqualizerEdit::AddBands { count })
-            .unwrap();
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::AddBands { count },
+        )
+        .unwrap();
         let equalizer = &core.preferences.settings().equalizer;
         assert_eq!(equalizer.bands.len(), count);
         for (index, band) in equalizer.bands.iter().enumerate() {
@@ -869,12 +961,18 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
             },
         ],
     };
-    core.equalizer_edit(EqualizerEdit::Replace {
-        config: original.clone(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Replace {
+            config: original.clone(),
+        },
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::AddBands { count: 2 })
-        .unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBands { count: 2 },
+    )
+    .unwrap();
     let equalizer = &core.preferences.settings().equalizer;
     assert_eq!(&equalizer.bands[..2], original.bands.as_slice());
     assert_eq!(equalizer.enabled, original.enabled);
@@ -907,14 +1005,20 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
         gain_db: -3.5,
         ..Default::default()
     };
-    core.equalizer_edit(EqualizerEdit::AddBand {
-        band: first.clone(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBand {
+            band: first.clone(),
+        },
+    )
     .unwrap();
     receive.try_recv().unwrap();
     for count in [3, 1, MAX_BANDS, 0] {
-        core.equalizer_edit(EqualizerEdit::ResizeBands { count })
-            .unwrap();
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::ResizeBands { count },
+        )
+        .unwrap();
         let eq = &core.preferences.settings().equalizer;
         assert_eq!(eq.bands.len(), count);
         if count > 0 {
@@ -935,8 +1039,11 @@ fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [MAX_BANDS + 1, usize::MAX] {
         assert!(
-            core.equalizer_edit(EqualizerEdit::ResizeBands { count })
-                .is_err()
+            core.equalizer_edit(
+                core.state.revisions.configuration,
+                EqualizerEdit::ResizeBands { count }
+            )
+            .is_err()
         );
         assert_eq!((*core.preferences.settings()), baseline);
         assert_eq!(
@@ -953,9 +1060,12 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     let (_directory, mut core) = fixture();
     let (commands, receive) = async_channel::bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
-    core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::config::EqBand::default(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBand {
+            band: rivu_dsp::equalizer::config::EqBand::default(),
+        },
+    )
     .unwrap();
     assert!(matches!(
         receive.try_recv().unwrap().command,
@@ -965,8 +1075,11 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     for count in [0, MAX_BANDS, MAX_BANDS + 1, usize::MAX] {
         assert!(
-            core.equalizer_edit(EqualizerEdit::AddBands { count })
-                .is_err()
+            core.equalizer_edit(
+                core.state.revisions.configuration,
+                EqualizerEdit::AddBands { count }
+            )
+            .is_err()
         );
         assert_eq!((*core.preferences.settings()), baseline);
         assert_eq!(
@@ -975,9 +1088,12 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
         );
         assert!(receive.try_recv().is_err());
     }
-    core.equalizer_edit(EqualizerEdit::AddBands {
-        count: MAX_BANDS - 1,
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBands {
+            count: MAX_BANDS - 1,
+        },
+    )
     .unwrap();
     assert_eq!(core.preferences.settings().equalizer.bands.len(), MAX_BANDS);
     assert!(matches!(
@@ -987,8 +1103,11 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     let baseline = (*core.preferences.settings()).clone();
     let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
     assert!(
-        core.equalizer_edit(EqualizerEdit::AddBands { count: 1 })
-            .is_err()
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::AddBands { count: 1 }
+        )
+        .is_err()
     );
     assert_eq!((*core.preferences.settings()), baseline);
     assert_eq!(
@@ -1012,8 +1131,11 @@ fn equalizer_batch_generation_uses_current_track_rate_or_unknown_rate_fallback()
         } else {
             20_000.0_f64.min(f64::from(sample_rate) * MAX_FREQUENCY_RATE_RATIO)
         };
-        core.equalizer_edit(EqualizerEdit::AddBands { count: MAX_BANDS })
-            .unwrap();
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::AddBands { count: MAX_BANDS },
+        )
+        .unwrap();
         for (index, band) in core
             .preferences
             .settings()
@@ -1043,12 +1165,18 @@ fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
         gain_db: 5.0,
         ..Default::default()
     };
-    core.equalizer_edit(EqualizerEdit::AddBand {
-        band: original.clone(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBand {
+            band: original.clone(),
+        },
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
-        .unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBands { count: 3 },
+    )
+    .unwrap();
     let bands = &core.preferences.settings().equalizer.bands;
     assert_eq!(bands[0], original);
     let maximum_hz = 8000.0 * MAX_FREQUENCY_RATE_RATIO;
@@ -1069,8 +1197,11 @@ fn unusable_equalizer_batch_frequency_range_is_rejected_atomically() {
     track.sample_rate = 40;
     core.state.current_track = Some(Arc::new(track));
     let baseline = (*core.preferences.settings()).clone();
-    core.equalizer_edit(EqualizerEdit::AddBands { count: 3 })
-        .unwrap_err();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBands { count: 3 },
+    )
+    .unwrap_err();
     assert_eq!((*core.preferences.settings()), baseline);
     assert!(!core.state.configuration.config_path.exists());
     assert!(receive.try_recv().is_err());
@@ -1822,40 +1953,55 @@ fn audition_rejects_stop_snapshot_from_another_generation() {
 fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
-    core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::config::EqBand::default(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::AddBand {
+            band: rivu_dsp::equalizer::config::EqBand::default(),
+        },
+    )
     .unwrap();
     for _ in 0..2 {
-        core.equalizer_edit(EqualizerEdit::BandField {
-            index: 0,
-            field: EqBandEdit::GainSteps(1),
-        })
-        .unwrap();
-        core.equalizer_edit(EqualizerEdit::BandField {
-            index: 0,
-            field: EqBandEdit::FrequencySteps {
-                steps: 1,
-                maximum_hz: 20000.0,
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::BandField {
+                index: 0,
+                field: EqBandEdit::GainSteps(1),
             },
-        })
+        )
+        .unwrap();
+        core.equalizer_edit(
+            core.state.revisions.configuration,
+            EqualizerEdit::BandField {
+                index: 0,
+                field: EqBandEdit::FrequencySteps {
+                    steps: 1,
+                    maximum_hz: 20000.0,
+                },
+            },
+        )
         .unwrap();
     }
     let band = &core.preferences.settings().equalizer.bands[0];
     assert_eq!(band.gain_db, 1.0);
     assert!((band.frequency_hz - 1000.0 * 2.0_f64.powf(2.0 / 12.0)).abs() < 1e-9);
-    core.equalizer_edit(EqualizerEdit::BandField {
-        index: 0,
-        field: EqBandEdit::FrequencySteps {
-            steps: 100,
-            maximum_hz: 2000.0,
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::BandField {
+            index: 0,
+            field: EqBandEdit::FrequencySteps {
+                steps: 100,
+                maximum_hz: 2000.0,
+            },
         },
-    })
+    )
     .unwrap();
-    core.equalizer_edit(EqualizerEdit::BandField {
-        index: 0,
-        field: EqBandEdit::GainSteps(100),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::BandField {
+            index: 0,
+            field: EqBandEdit::GainSteps(100),
+        },
+    )
     .unwrap();
     let band = &core.preferences.settings().equalizer.bands[0];
     assert_eq!(band.frequency_hz, 2000.0);
@@ -3047,7 +3193,11 @@ fn master_bypass_is_core_owned_across_full_configuration_commits() {
 fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
     let (_directory, mut core) = fixture();
     let commands = recording_audio(&mut core);
-    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Enabled(true),
+    )
+    .unwrap();
     core.processing_bypass(true).unwrap();
     for _ in 0..2 {
         assert!(matches!(
@@ -3055,7 +3205,11 @@ fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
             AudioCommand::Equalizer(_)
         ));
     }
-    core.equalizer_edit(EqualizerEdit::PreampDb(-7.0)).unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::PreampDb(-7.0),
+    )
+    .unwrap();
     let mut config = core.preferences.checkpoint();
     config.equalizer.output_gain_db = -2.0;
     core.configure(Arc::new(config)).unwrap();
@@ -3092,8 +3246,16 @@ fn master_bypass_cached_roundtrip_preserves_selection_position_and_new_eq() {
     started(&mut core, Some(4096.0 / 48000.0)).unwrap();
     core.seek(0.035).unwrap();
     core.processing_bypass(true).unwrap();
-    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
-    core.equalizer_edit(EqualizerEdit::PreampDb(-3.0)).unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Enabled(true),
+    )
+    .unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::PreampDb(-3.0),
+    )
+    .unwrap();
     while commands.try_recv().is_ok() {}
     core.processing_bypass(false).unwrap();
     assert_eq!(core.processing.audition_projection(), selected);
@@ -3273,8 +3435,11 @@ fn monitor_bypass_without_selected_audition_uses_actual_command_capacity() {
         for available in 0..=2 {
             let (_directory, mut core) = fixture();
             let _commands = recording_audio(&mut core);
-            core.equalizer_edit(EqualizerEdit::Enabled(monitor_enabled))
-                .unwrap();
+            core.equalizer_edit(
+                core.state.revisions.configuration,
+                EqualizerEdit::Enabled(monitor_enabled),
+            )
+            .unwrap();
             let baseline = core.preferences.settings().clone();
             let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
             let (commands, receive) = async_channel::bounded(2);
@@ -3329,7 +3494,11 @@ fn selected_bypass_recovers_metadata_before_admitting_or_saving_the_cutover() {
         .unwrap();
     complete(&mut core);
     let _commands = recording_audio(&mut core);
-    core.equalizer_edit(EqualizerEdit::Enabled(true)).unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Enabled(true),
+    )
+    .unwrap();
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
     let selected = core.processing.audition_projection().unwrap();
@@ -3395,9 +3564,12 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
         bands: vec![rivu_dsp::equalizer::config::EqBand::default()],
         ..Default::default()
     };
-    core.equalizer_edit(EqualizerEdit::Replace {
-        config: equalizer.clone(),
-    })
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Replace {
+            config: equalizer.clone(),
+        },
+    )
     .unwrap();
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
