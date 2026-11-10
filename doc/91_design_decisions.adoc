@@ -515,6 +515,33 @@ result only while that intent remains current. Retirement rechecks current inten
 before starting replacement work. Failure or bus loss alone does not authorize
 automatic retries; see link:04_playback.adoc#_mpris_and_artwork[MPRIS recovery].
 
+[[DEC-020]]
+=== DEC-020: One Audio processing panel per named layout
+
+Status: implemented, 2026-11-10.
+
+Limit Audio processing to one panel per named layout, with editing state owned
+by the window feature. Layouts describe placement, not independent processing
+sessions; duplicate editors would require extra input identities and draft
+reconciliation without providing a separate workflow.
+
+Insertion and migration behavior: link:24_layout.adoc#_panel_insertion[Panel insertion].
+Draft and input lifetime: link:27_audio_processing.adoc#_ownership_and_invariants[Ownership and invariants].
+
+[[DEC-021]]
+=== DEC-021: Processing task status has one authoritative record
+
+Status: implemented, 2026-11-10.
+
+Keep one service-owned task record, referenced by current selection, terminal
+history and retained resources. Their lifetimes differ, but they must not become
+independent status authorities. This avoids synchronizing mutable copies when
+an operation's outcome or resource availability changes; publishing a snapshot
+does not transfer mutation authority.
+
+Record retention and resource boundaries:
+link:27_audio_processing.adoc#_ownership_and_invariants[Ownership and invariants].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

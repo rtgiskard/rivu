@@ -22,10 +22,10 @@ impl Core {
                     .processing
                     .results()
                     .iter()
-                    .find(|result| result.status.id == selection.id)
+                    .find(|result| result.id == selection.id)
                     .context("Resume target is no longer retained")
                     .and_then(|result| {
-                        let track = self.processing_source(result)?;
+                        let track = self.processing_source(&result.track, result.stamp)?;
                         ensure!(
                             self.state.current_track.as_ref().is_some_and(|current| {
                                 current.id == track.id
@@ -131,16 +131,18 @@ impl Core {
             .processing
             .results()
             .iter()
-            .find(|r| r.status.id == id)
+            .find(|r| r.id == id)
             .context("Graph run is no longer retained")?;
-        let graph = result
-            .status
+        let graph = self
+            .processing
+            .status(result.id)
+            .context("Graph run status is no longer retained")?
             .settings
             .graph
             .clone()
             .context("Not a graph run")?;
         graph.ancestors(node)?;
-        let track = self.processing_source(result)?;
+        let track = self.processing_source(&result.track, result.stamp)?;
         if let Some(output) = result.graph_outputs.get(&node) {
             let pcm = output.pcm.clone();
             let track_id = result.track.id;
@@ -180,7 +182,7 @@ impl Core {
                     .processing
                     .results()
                     .iter()
-                    .find(|result| result.status.id == id)
+                    .find(|result| result.id == id)
                     .and_then(|result| result.graph_outputs.get(&boundary))
                     .context("Hybrid prefix is not ready")?;
                 if let Some(context) = &output.context {
@@ -241,16 +243,18 @@ impl Core {
             .processing
             .results()
             .iter()
-            .find(|r| r.status.id == id)
+            .find(|r| r.id == id)
             .context("Graph run is no longer retained")?;
-        let graph = result
-            .status
+        let graph = self
+            .processing
+            .status(result.id)
+            .context("Graph run status is no longer retained")?
             .settings
             .graph
             .clone()
             .context("Not a graph run")?;
         graph.ancestors(node)?;
-        let track = self.processing_source(result)?;
+        let track = self.processing_source(&result.track, result.stamp)?;
         let cached_output =
             result
                 .graph_outputs
@@ -529,21 +533,25 @@ impl Core {
         }
     }
 
-    fn processing_source(&self, result: &crate::processing::ProcessingResult) -> Result<Track> {
+    fn processing_source(
+        &self,
+        source: &Track,
+        stamp: crate::processing::SourceStamp,
+    ) -> Result<Track> {
         ensure!(
             !self.database_unavailable,
             "Database outcome is uncertain; restart Rivu before publishing processing results"
         );
-        let track = self.track(result.track.id)?;
+        let track = self.track(source.id)?;
         ensure!(
-            track.path == result.track.path
-                && track.cue == result.track.cue
-                && track.decoder_hint == result.track.decoder_hint
-                && track.fingerprint == result.track.fingerprint,
+            track.path == source.path
+                && track.cue == source.cue
+                && track.decoder_hint == source.decoder_hint
+                && track.fingerprint == source.fingerprint,
             "Processing result is stale: source identity changed before publication"
         );
         ensure!(
-            crate::processing::SourceStamp::read(&track.path)? == result.stamp,
+            crate::processing::SourceStamp::read(&track.path)? == stamp,
             "Processing result is stale: source file changed before publication"
         );
         Ok(track)
@@ -555,7 +563,7 @@ impl Core {
         cancelled: bool,
     ) -> Result<()> {
         ensure!(!cancelled, "Processing cancelled");
-        self.processing_source(result)?;
+        self.processing_source(&result.track, result.stamp)?;
         Ok(())
     }
 
@@ -697,9 +705,9 @@ impl Core {
                                 .processing
                                 .results()
                                 .iter()
-                                .find(|r| r.status.id == id)
+                                .find(|r| r.id == id)
                                 .context("Processing result is no longer retained")?;
-                            self.processing_source(source)?;
+                            self.processing_source(&source.track, source.stamp)?;
                             Ok(())
                         })();
                         match outcome {
@@ -760,9 +768,9 @@ impl Core {
             .processing
             .results()
             .iter()
-            .find(|r| r.status.id == id)
+            .find(|r| r.id == id)
             .context("Processing result is no longer retained")?;
-        let track = self.processing_source(result)?;
+        let track = self.processing_source(&result.track, result.stamp)?;
         let outputs = &result.outputs;
         match mode {
             AuditionMode::Denoised => ensure!(outputs.denoised.is_some(), "No denoised output"),
@@ -819,7 +827,7 @@ impl Core {
             .processing
             .results()
             .iter()
-            .find(|r| r.status.id == id)
+            .find(|r| r.id == id)
             .context("Processing result is no longer retained")?;
         let outputs = &result.outputs;
         let pcm = match mode {
@@ -922,8 +930,8 @@ impl Core {
             .clone();
         let admitted_source = if bypassing {
             crate::processing::SourceStamp::read(&track.path)?
-        } else if let Some(result) = self.processing.results().iter().find(|r| r.status.id == id) {
-            self.processing_source(result)?;
+        } else if let Some(result) = self.processing.results().iter().find(|r| r.id == id) {
+            self.processing_source(&result.track, result.stamp)?;
             result.stamp
         } else {
             crate::processing::SourceStamp::read(&track.path)?
@@ -936,13 +944,13 @@ impl Core {
                         .processing
                         .results()
                         .iter()
-                        .find(|result| result.status.id == id)
+                        .find(|result| result.id == id)
                         .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
                     && format!("{admitted_source:?}") == status.source_version),
             "Processing result is stale"
         );
         ensure!(
-            self.processing.results().iter().any(|r| r.status.id == id)
+            self.processing.results().iter().any(|r| r.id == id)
                 || ((graph.is_some() || self.processing.audition_id() == Some(id))
                     && self.processing.active_id() == Some(id)),
             "Processing result is no longer retained"

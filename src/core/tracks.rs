@@ -56,7 +56,7 @@ impl Core {
                 .processing
                 .results()
                 .iter()
-                .find(|result| result.status.id == id)
+                .find(|result| result.id == id)
             && track.as_ref().is_none_or(|track| {
                 track.id != result.track.id
                     || track.path != result.track.path

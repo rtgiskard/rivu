@@ -85,6 +85,12 @@ impl WindowView {
         for &panel_kind in PanelKind::ALL {
             let kind = panel_kind.key();
             let title = self.tr(panel_kind.title_id());
+            let available = self
+                .workspace
+                .layouts
+                .current()
+                .existing_singleton(kind)
+                .is_none();
             let drag = PanelDrag {
                 source: DockSource::Catalog(kind),
                 title: title.clone(),
@@ -104,27 +110,44 @@ impl WindowView {
                 .min_h_8()
                 .rounded_sm()
                 .text_sm()
-                .hover(|style| style.bg(rgb(theme.highlight)))
+                .when(available, |view| {
+                    view.hover(|style| style.bg(rgb(theme.highlight)))
+                })
+                .when(!available, |view| view.text_color(rgb(theme.muted)))
                 .child(div().text_color(rgb(theme.muted)).child("⠿"))
                 .child(div().min_w_0().truncate().child(title.clone()))
-                .when(!self.workspace.layouts.current().locked, |view| {
-                    let entity = cx.entity().downgrade();
-                    view.cursor_move()
-                        .on_drag(drag, move |drag, _, window, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                if this.workspace.layouts.current().locked {
-                                    return;
-                                }
-                                this.shell.dismiss(shell::Surface::PanelCatalog);
-                                this.start_panel_docking(drag.source, window, cx);
-                                if !this.panel_docking_blocked(cx) {
-                                    this.update_panel_docking(window.mouse_position(), window, cx);
-                                }
-                                cx.notify();
-                            });
-                            cx.new(|_| drag.clone())
-                        })
-                });
+                .when(
+                    available && !self.workspace.layouts.current().locked,
+                    |view| {
+                        let entity = cx.entity().downgrade();
+                        view.cursor_move()
+                            .on_drag(drag, move |drag, _, window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    if this.workspace.layouts.current().locked
+                                        || this
+                                            .workspace
+                                            .layouts
+                                            .current()
+                                            .existing_singleton(kind)
+                                            .is_some()
+                                    {
+                                        return;
+                                    }
+                                    this.shell.dismiss(shell::Surface::PanelCatalog);
+                                    this.start_panel_docking(drag.source, window, cx);
+                                    if !this.panel_docking_blocked(cx) {
+                                        this.update_panel_docking(
+                                            window.mouse_position(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    cx.notify();
+                                });
+                                cx.new(|_| drag.clone())
+                            })
+                    },
+                );
             if matches!(
                 panel_kind,
                 PanelKind::Metadata

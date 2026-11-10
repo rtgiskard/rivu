@@ -334,7 +334,6 @@ processing-workspace-processed = Processed audio
 processing-editor-node = Processing-node EQ · included in graph rendering
 processing-editor-drafts-block = Apply or discard node parameter drafts before using quick EQ controls. Apply all includes EQ field drafts.
 processing-editor-stale = The EQ target changed after this edit began. Discard the stale draft and re-enter against its current settings.
-processing-editor-conflict = Panels contain conflicting EQ drafts for { $field }. Resolve them before applying all.
 processing-editor-monitor-only = This operation is available only for monitor EQ.
 processing-workspace-restore-original = Return to original
 processing-tab-graph = Graph

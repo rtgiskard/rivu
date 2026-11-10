@@ -15,6 +15,7 @@ type Release = mpsc::Sender<std::result::Result<(), String>>;
 )]
 enum Work {
     Retire(Box<ProcessingResult>),
+    RetireRetained(RetainedResult),
     RetirePcm(audio::PcmAudio),
     ReleaseAudio {
         outputs: AudioOutputs,
@@ -45,6 +46,7 @@ impl Reclaimer {
                 while let Ok(work) = receiver.recv() {
                     match work {
                         Work::Retire(result) => drop(result),
+                        Work::RetireRetained(result) => drop(result),
                         Work::RetirePcm(pcm) => drop(pcm),
                         Work::ReleaseAudio {
                             outputs,
@@ -86,6 +88,9 @@ impl Reclaimer {
 
     pub(super) fn retire(&self, result: Box<ProcessingResult>) {
         self.send(Work::Retire(result));
+    }
+    pub(super) fn retire_retained(&self, result: RetainedResult) {
+        self.send(Work::RetireRetained(result));
     }
     pub(super) fn retire_pcm(&self, pcm: audio::PcmAudio) {
         self.send(Work::RetirePcm(pcm));

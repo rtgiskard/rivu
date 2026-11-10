@@ -203,7 +203,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     assert_eq!(complete_status.phase, ProcessingPhase::Complete);
     assert!(complete_status.error.is_none());
     assert_eq!(core.processing.history().len(), 1);
-    assert_eq!(core.processing.history()[0], complete_status);
+    assert_eq!(core.processing.history().next().unwrap(), &complete_status);
 
     // Cancel once more so falling back to the original Complete is observable.
     begin_mix(&mut core, 1);
@@ -230,13 +230,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(
-        !core
-            .processing
-            .history()
-            .iter()
-            .any(|status| status.id == 1)
-    );
+    assert!(!core.processing.history().any(|status| status.id == 1));
     assert_eq!(core.processing.results().len(), 1);
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
@@ -377,7 +371,11 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(actual, expected);
     assert_eq!(core.store.track_count().unwrap(), before);
     assert_eq!(
-        core.processing.results()[0].status.settings.denoise,
+        core.processing
+            .status(core.processing.results()[0].id)
+            .unwrap()
+            .settings
+            .denoise,
         core.preferences.settings().denoise
     );
 }
@@ -1383,7 +1381,7 @@ fn rejected_invalid_profile_preserves_retained_pcm_and_availability() {
     assert!(core.processing.active_id().is_none());
     assert_eq!(core.processing.memory_bytes(), bytes);
     assert_eq!(core.processing_status(1).unwrap(), retained);
-    assert_eq!(core.processing.history().back().unwrap(), &retained);
+    assert_eq!(core.processing.history().next_back().unwrap(), &retained);
     assert_eq!(
         pcm_samples(
             core.processing.results()[0]
@@ -1501,13 +1499,7 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(
-        !core
-            .processing
-            .history()
-            .iter()
-            .any(|status| status.id == 1)
-    );
+    assert!(!core.processing.history().any(|status| status.id == 1));
     let ViewResponse::ProcessingTask(Some(task)) =
         core.view(&Query::ProcessingTask { id: 1 }).unwrap()
     else {
@@ -1519,7 +1511,7 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
         .processing
         .results()
         .iter()
-        .find(|result| result.status.id == 1)
+        .find(|result| result.id == 1)
         .unwrap();
     assert_eq!(
         pcm_samples(result.outputs.denoised.as_ref().unwrap()),
@@ -2383,7 +2375,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
                 core.processing
                     .results()
                     .iter()
-                    .map(|r| r.status.id)
+                    .map(|r| r.id)
                     .collect::<Vec<_>>(),
                 vec![1, 2, 3, 4]
             );
@@ -2395,7 +2387,7 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
                         .processing
                         .results()
                         .iter()
-                        .find(|result| result.status.id == id)
+                        .find(|result| result.id == id)
                         .unwrap();
                     assert_eq!(
                         pcm_samples(&result.graph_outputs[&output.port].pcm),
@@ -2561,8 +2553,13 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert!(core.processing.audition_id().is_none());
     assert!(core.processing.audition_projection().is_none());
     let cancelled = core.processing_status(1).unwrap();
-    assert_eq!(core.processing.history()[0], cancelled);
-    assert_eq!(core.processing.results()[0].status, cancelled);
+    assert_eq!(core.processing.history().next().unwrap(), &cancelled);
+    assert_eq!(
+        core.processing
+            .status(core.processing.results()[0].id)
+            .unwrap(),
+        &cancelled
+    );
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
@@ -2573,13 +2570,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(
-        !core
-            .processing
-            .history()
-            .iter()
-            .any(|status| status.id == 1)
-    );
+    assert!(!core.processing.history().any(|status| status.id == 1));
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
@@ -2634,13 +2625,7 @@ fn selected_live_audition_can_be_cancelled_after_its_receipt_ages_out() {
             .unwrap();
         complete(&mut core);
     }
-    assert!(
-        !core
-            .processing
-            .history()
-            .iter()
-            .any(|status| status.id == 1)
-    );
+    assert!(!core.processing.history().any(|status| status.id == 1));
     assert_eq!(core.processing.audition_projection().unwrap().id, 1);
     core.cancel_processing(1).unwrap();
     assert!(core.processing.audition_projection().is_none());
@@ -4298,7 +4283,7 @@ fn export_failure_and_cancellation_keep_source_capabilities_until_directory_evic
         core.processing
             .results()
             .iter()
-            .all(|result| result.status.id != run)
+            .all(|result| result.id != run)
     );
     assert!(!core.processing_status(run).unwrap().graph_actions_available);
     for receipt in receipts {

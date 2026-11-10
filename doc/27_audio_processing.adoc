@@ -16,12 +16,13 @@ measured observations from remaining acceptance gaps.
 
 == Practical workflow
 
-Add the Audio processing panel from the layout catalog. It provides Processing
-graph, Monitor EQ, Restoration, Speech enhancement, Separation and Results.
-Switching tabs does not run a job, change audition or
-discard drafts. Multiple panels share drafts and Core-owned settings; focus,
-cursor geometry and scroll state are panel-local. Monitor EQ affects playback
-independently of graph-node EQ.
+Add the Audio processing panel from the layout catalog. Each named layout allows
+one instance, providing Processing graph, Monitor EQ, Restoration, Speech
+enhancement, Separation and Results. Switching tabs or layouts does not run a
+job, change audition or discard drafts. Closing and readding the panel preserves
+window-owned drafts for still-valid targets, but cancels focus and pointer
+interaction. Core owns committed settings. Monitor EQ affects playback
+independently of graph-node EQ. See link:24_layout.adoc#_panel_insertion[Panel insertion].
 
 Keep headroom when boosting or remixing: there is no implicit loudness matching
 or limiter.
@@ -166,8 +167,8 @@ When a track rate is known, adding bands requires room for the 20 Hz lower
 bound; otherwise the editor reports an error. Removing bands remains available.
 
 Reset preserves the enabled state but clears bands and both gains; graph EQ also
-returns to IIR. It discards that target's EQ drafts across panels, including
-implementation/taps, and retires queued local edit intent.
+returns to IIR. It discards that target's EQ drafts, including implementation/taps,
+and retires queued local edit intent.
 Band-count changes and Reset are unavailable while a processing acknowledgement is pending.
 
 Hover/focus the curve to see numbered band nodes. Drag horizontally for frequency
@@ -599,8 +600,8 @@ rejects it without replacing playback or committing a late stem-mix selection.
 `task cancel processing INSTANCE:ID` also returns a matching selected audition to
 Original after preparation has completed. For realtime/hybrid runs it marks the
 task cancelled; stopping a cached offline audition leaves its completed status
-intact. Current status, bounded task history and retained results agree on terminal
-phase/error, including later audition or stem-mix failure.
+intact. Current status, bounded task history and retained runs resolve the same
+task record, including later audition or stem-mix failure.
 
 Results are immutable shared in-memory PCM: node execution creates no processing
 directory, intermediate WAV, request file or result report. A 512 MiB allocation
@@ -804,12 +805,21 @@ JSON is a command-line/import representation, not a second configuration owner.
 
 Page edits submit sparse patches; graph edits replace a node at its expected
 revision. Draft acknowledgements and file-choice completions belong to the
-originating panel, target and edit generation. Stale completions cannot clear
-newer drafts, busy state or errors; programmatic synchronization is not a user edit.
+window feature owner, target and edit generation. Hiding node parameters or retiring
+a panel host invalidates native input frames and dismisses preedit, but preserves
+drafts and submitted edit acknowledgements. Stale completions
+cannot clear newer drafts, busy state or errors; programmatic synchronization is
+not a user edit.
 
-The processing service owns task history, retained outputs, audition selection
-and physical worker retirement. Core owns cross-domain playback intent,
-cancellation/source admission and export commit. Cancellation invalidates publication
+The processing service owns task records, retained outputs, audition selection
+and physical worker retirement. Current selection, terminal history and retained
+runs reference one status record per ID; published snapshots remain immutable.
+Record retention is bounded by the current task, 32 terminal history entries and
+four retained runs. Frozen run metadata survives PCM release, while resource
+eviction updates availability without changing the recorded outcome.
+
+Core owns cross-domain playback intent, cancellation/source admission and export
+commit. Cancellation invalidates publication
 without transferring worker ownership. Model runners return audio and provenance;
 they do not own task status.
 

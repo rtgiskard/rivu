@@ -64,6 +64,16 @@ impl WindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let DockSource::Catalog(kind) = source
+            && self
+                .workspace
+                .layouts
+                .current()
+                .existing_singleton(kind)
+                .is_some()
+        {
+            return;
+        }
         self.synchronize_interaction(window, cx);
         let cancellation = self.workspace.interaction.start_docking(
             source,
@@ -500,7 +510,7 @@ mod tests {
 
     #[test]
     fn catalog_tabs_keep_measured_order_and_only_mutate_the_candidate() {
-        let current = Layout {
+        let mut current = Layout {
             root: Some(tabs(2, &[101, 102, 103], 102)),
             next_id: 1000,
             locked: false,
@@ -536,6 +546,29 @@ mod tests {
             );
             assert_eq!(candidate.next_id, 1001);
             assert_eq!(current, unchanged);
+        }
+        let processing = current.add("audio_processing", Some(2));
+        let unchanged = current.clone();
+        for edge in [
+            Edge::Center,
+            Edge::Left,
+            Edge::Top,
+            Edge::Right,
+            Edge::Bottom,
+        ] {
+            let request = DockRequest {
+                target: docking::Target { node: 2, edge },
+                index: Some(0),
+            };
+            assert!(
+                docking_candidate(&current, DockSource::Catalog("audio_processing"), request)
+                    .is_none()
+            );
+            assert_eq!(current, unchanged);
+            let moved =
+                docking_candidate(&current, DockSource::Existing(processing), request).unwrap();
+            assert_eq!(moved.panel, processing);
+            moved.layout.validate().unwrap();
         }
     }
 

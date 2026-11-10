@@ -616,16 +616,21 @@ struct Field {
     committed: String,
     dirty: bool,
     generation: u64,
+    native_epoch: Option<u64>,
     _subscription: Subscription,
 }
 
-struct PanelInput {
-    input: Entity<Input>,
-    _subscriptions: [Subscription; 2],
+impl Field {
+    fn retire(&mut self, cx: &mut Context<AudioProcessing>) {
+        if self.native_epoch.take().is_some() {
+            self.input
+                .update(cx, |input, cx| input.set_enabled(false, cx));
+        }
+    }
 }
 
 struct SubmittedParameter {
-    input: Entity<Input>,
+    key: FieldKey,
     generation: u64,
     text: String,
 }
@@ -710,8 +715,9 @@ pub(super) struct AudioProcessing {
     state: Rc<GuiSnapshot>,
     page: Page,
     fields: HashMap<FieldKey, Field>,
-    panel_inputs: HashMap<u64, HashMap<FieldKey, PanelInput>>,
     panel_demand: Option<(u64, bool)>,
+    panel: Option<u64>,
+    input_epoch: u64,
     choosing_path: Option<PathRequest>,
     chooser_generation: u64,
     error: Option<String>,
@@ -726,70 +732,11 @@ pub(super) struct AudioProcessing {
     preset_popup: Option<PresetPopup>,
     preset_choices: rivu_ui::ChoiceState<String>,
     preset_intent_generation: u64,
-    preset_bounds: HashMap<u64, Rc<Cell<Option<Bounds<Pixels>>>>>,
+    preset_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     results: ResultsState,
 }
 
 impl AudioProcessing {
-    fn panel_input(
-        &mut self,
-        panel: u64,
-        key: FieldKey,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) -> Entity<Input> {
-        if let Some(field) = self
-            .panel_inputs
-            .get(&panel)
-            .and_then(|fields| fields.get(&key))
-        {
-            return field.input.clone();
-        }
-        let backing = self.fields[&key].input.clone();
-        let placeholder = self
-            .path_placeholder(key)
-            .unwrap_or_else(|| label.to_owned().into());
-        let input = cx.new(|cx| {
-            Input::new(
-                label.to_owned(),
-                backing.read(cx).text().to_owned(),
-                placeholder,
-                cx,
-            )
-        });
-        let name = key;
-        let edited = cx.subscribe(&input, move |this, input, event, cx| match event {
-            InputEvent::Changed {
-                user: true,
-                composing: false,
-            } => {
-                let text = input.read(cx).text().to_owned();
-                this.stage_graph_text(name, text, cx);
-                cx.notify();
-            }
-            InputEvent::Submit => this.apply_field(name, cx),
-            _ => {}
-        });
-        let replica = input.downgrade();
-        let changed = cx.subscribe(&backing, move |_, backing, event, cx| {
-            if matches!(event, InputEvent::Changed { .. })
-                && let Some(input) = replica.upgrade()
-                && input.read(cx).text() != backing.read(cx).text()
-            {
-                let text = backing.read(cx).text().to_owned();
-                input.update(cx, |input, cx| input.set_text(text, cx));
-            }
-        });
-        self.panel_inputs.entry(panel).or_default().insert(
-            key,
-            PanelInput {
-                input: input.clone(),
-                _subscriptions: [edited, changed],
-            },
-        );
-        input
-    }
-
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         let mut this = Self {
@@ -797,8 +744,9 @@ impl AudioProcessing {
             state,
             page: Page::Graph,
             fields: HashMap::new(),
-            panel_inputs: HashMap::new(),
             panel_demand: None,
+            panel: None,
+            input_epoch: 0,
             choosing_path: None,
             chooser_generation: 0,
             error: None,
@@ -813,7 +761,7 @@ impl AudioProcessing {
             preset_popup: None,
             preset_choices: rivu_ui::ChoiceState::default(),
             preset_intent_generation: 0,
-            preset_bounds: HashMap::new(),
+            preset_bounds: Rc::new(Cell::new(None)),
             results: ResultsState::default(),
         };
         this.sync_fields(cx);
@@ -921,15 +869,31 @@ impl AudioProcessing {
         }
     }
 
+    // A retired host loses native identities, not draft or submission generations.
+    fn retire_field_inputs(&mut self, cx: &mut Context<Self>) {
+        self.input_epoch = self.input_epoch.wrapping_add(1);
+        for field in self.fields.values_mut() {
+            field.retire(cx);
+        }
+    }
+
+    fn bind_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
+        if self.panel == Some(panel) {
+            return;
+        }
+        if self.panel.is_some() {
+            self.retire_field_inputs(cx);
+            self.invalidate_geometry(cx);
+            self.choosing_path = None;
+        }
+        self.panel = Some(panel);
+    }
+
     pub(super) fn invalidate_geometry(&mut self, cx: &mut Context<Self>) {
         self.geometry_epoch = self.geometry_epoch.wrapping_add(1);
         self.invalidate_equalizer_geometry(cx);
-        for bounds in self.graph_editor.bounds.values() {
-            bounds.set(None);
-        }
-        for bounds in self.preset_bounds.values() {
-            bounds.set(None);
-        }
+        self.graph_editor.bounds.set(None);
+        self.preset_bounds.set(None);
         let _ = self.set_preset_popup(None, cx);
         self.cancel_pointer(cx);
     }
@@ -941,15 +905,12 @@ impl AudioProcessing {
     }
 
     pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.panel_inputs.values().any(|fields| {
-            fields
-                .values()
-                .any(|field| field.input.read(cx).is_focused(window))
-        }) || self.equalizer_input_focused(window, cx)
-            || self
-                .fields
-                .values()
-                .any(|field| field.input.read(cx).is_focused(window))
+        self.equalizer_input_focused(window, cx)
+            || self.panel.is_some()
+                && self
+                    .fields
+                    .values()
+                    .any(|field| field.input.read(cx).is_focused(window))
     }
 
     pub(super) fn sync_panels(
@@ -962,10 +923,21 @@ impl AudioProcessing {
         if self.panel_demand == Some(demand) {
             return;
         }
+        let layout_changed = self
+            .panel_demand
+            .is_some_and(|(revision, _)| revision != layout.revision);
         self.panel_demand = Some(demand);
-        self.retain_equalizer_panels(layout, visible, cx);
-        self.preset_bounds
-            .retain(|id, _| layout.contains_panel(*id));
+        if layout_changed
+            || self
+                .panel
+                .is_some_and(|panel| !visible || !layout.is_panel_active(panel))
+        {
+            self.retire_field_inputs(cx);
+            self.panel = None;
+            self.invalidate_geometry(cx);
+            self.choosing_path = None;
+        }
+        self.retain_equalizer_panels(layout, visible && !layout_changed, cx);
         if self
             .preset_popup
             .as_ref()
@@ -976,19 +948,13 @@ impl AudioProcessing {
         if !visible {
             self.cancel_pointer(cx);
         }
-        self.graph_editor
-            .bounds
-            .retain(|id, _| layout.contains_panel(*id));
-        self.panel_inputs.retain(|id, _| layout.contains_panel(*id));
-        self.graph_editor.retain_panels(layout);
-        self.results.retain_panels(layout);
         if self
             .choosing_path
             .is_some_and(|request| !visible || !layout.is_panel_active(request.panel))
         {
             self.choosing_path = None;
         }
-        self.retain_workbench_controls(layout, visible);
+        self.retain_workbench_controls(layout, visible && !layout_changed);
         if self
             .graph_editor
             .pointer
@@ -1105,14 +1071,11 @@ impl AudioProcessing {
 
     fn finish_parameter_fields(&mut self, submitted: SubmittedFields, cx: &mut Context<Self>) {
         for submitted in submitted.first.into_iter().chain(submitted.rest) {
-            if let Some((key, field)) = self
-                .fields
-                .iter_mut()
-                .find(|(_, field)| field.input.entity_id() == submitted.input.entity_id())
+            if let Some(field) = self.fields.get_mut(&submitted.key)
                 && submitted_text_current(
                     field.generation,
                     submitted.generation,
-                    key.value_text(field.input.read(cx).text()),
+                    submitted.key.value_text(field.input.read(cx).text()),
                     &submitted.text,
                 )
             {
@@ -1180,6 +1143,7 @@ impl AudioProcessing {
                 committed: value,
                 dirty: false,
                 generation: 0,
+                native_epoch: Some(self.input_epoch),
                 _subscription: subscription,
             },
         );
@@ -1191,7 +1155,13 @@ impl AudioProcessing {
         name: FieldKey,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(input, move |this, _, event, cx| {
+        cx.subscribe(input, move |this, input, event, cx| {
+            if !this.fields.get(&name).is_some_and(|field| {
+                field.input.entity_id() == input.entity_id()
+                    && field.native_epoch == Some(this.input_epoch)
+            }) {
+                return;
+            }
             if matches!(event, InputEvent::Changed { .. })
                 && matches!(name, FieldKey::PresetName | FieldKey::PresetPath)
                 && let Some(popup) = &mut this.preset_popup
@@ -1202,10 +1172,7 @@ impl AudioProcessing {
             }
             match event {
                 InputEvent::Changed { user: true, .. } => {
-                    if let Some(field) = this.fields.get_mut(&name) {
-                        field.dirty = true;
-                        field.generation += 1;
-                    }
+                    this.mark_field_edited(name);
                     if name == FieldKey::PresetName {
                         this.notify_preset_labels(cx);
                     }
@@ -1299,6 +1266,13 @@ impl AudioProcessing {
     }
 
     fn apply_field(&mut self, key: FieldKey, cx: &mut Context<Self>) {
+        if self
+            .fields
+            .get(&key)
+            .is_some_and(|field| field.input.read(cx).is_composing())
+        {
+            return;
+        }
         if matches!(key, FieldKey::Graph(_)) {
             self.apply_graph_field(key, cx);
             return;
@@ -1308,7 +1282,7 @@ impl AudioProcessing {
         match result {
             Ok(Some(command)) => {
                 let submitted = self.fields.get(&key).map(|field| SubmittedParameter {
-                    input: field.input.clone(),
+                    key,
                     generation: field.generation,
                     text: value,
                 });
@@ -1399,6 +1373,36 @@ impl AudioProcessing {
         self.context.i18n.text(id).to_owned()
     }
 
+    fn field_input(
+        &mut self,
+        panel: u64,
+        key: FieldKey,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<Input> {
+        self.bind_panel(panel, cx);
+        if self.fields[&key].native_epoch != Some(self.input_epoch) {
+            let text = self.fields[&key].input.read(cx).text().to_owned();
+            let placeholder = self
+                .path_placeholder(key)
+                .unwrap_or_else(|| label.to_owned().into());
+            let input = cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx));
+            let subscription = self.subscribe_field(&input, key, cx);
+            let field = self
+                .fields
+                .get_mut(&key)
+                .expect("existing processing field");
+            field.input = input;
+            field.native_epoch = Some(self.input_epoch);
+            field._subscription = subscription;
+        }
+        let input = self.fields[&key].input.clone();
+        let enabled = !matches!(key, FieldKey::PresetName | FieldKey::PresetPath)
+            || self.state.system.config.equalizer.enabled;
+        input.update(cx, |input, cx| input.set_enabled(enabled, cx));
+        input
+    }
+
     fn field_view(
         &mut self,
         panel: u64,
@@ -1408,7 +1412,7 @@ impl AudioProcessing {
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let label: SharedString = label.into();
-        let input = self.panel_input(panel, key, &label, cx);
+        let input = self.field_input(panel, key, &label, cx);
         Self::parameter_row(
             caption(theme, label.clone())
                 .id(SharedString::from(format!("field-label-{key:?}")))
@@ -1564,13 +1568,12 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(popup) = self.preset_popup.as_ref().filter(|popup| !popup.manage) else {
+        let Some(_) = self.preset_popup.as_ref().filter(|popup| !popup.manage) else {
             return false;
         };
         if self
             .preset_bounds
-            .get(&popup.panel)
-            .and_then(|bounds| bounds.get())
+            .get()
             .is_some_and(|bounds| bounds.contains(&event.position))
         {
             return false;
@@ -1721,21 +1724,20 @@ impl AudioProcessing {
     }
 
     fn preset_view(&mut self, panel: u64, window: &Window, cx: &mut Context<Self>) -> Div {
+        self.bind_panel(panel, cx);
         let theme = rivu_ui::theme::palette(cx);
         let enabled = self.state.system.config.equalizer.enabled;
         for key in [FieldKey::PresetName, FieldKey::PresetPath] {
             if let Some(field) = self.fields.get(&key) {
-                field
-                    .input
-                    .update(cx, |input, cx| input.set_enabled(enabled, cx));
+                field.input.update(cx, |input, cx| {
+                    input.set_enabled(enabled && field.native_epoch == Some(self.input_epoch), cx)
+                });
             }
         }
-        let bounds = self
-            .preset_bounds
-            .entry(panel)
-            .or_insert_with(|| Rc::new(Cell::new(None)))
-            .clone();
+        let bounds = self.preset_bounds.clone();
         let measure = bounds.clone();
+        let owner = cx.entity().downgrade();
+        let epoch = self.geometry_epoch;
         let name = self.text(FieldKey::PresetName, cx);
         let preset_exists = self
             .state
@@ -1779,7 +1781,14 @@ impl AudioProcessing {
                 .gap_1()
                 .child(
                     canvas(
-                        move |bounds, _, _| measure.set(Some(bounds)),
+                        move |bounds, _, cx| {
+                            if let Some(owner) = owner.upgrade()
+                                && owner.read(cx).panel == Some(panel)
+                                && owner.read(cx).geometry_epoch == epoch
+                            {
+                                measure.set(Some(bounds));
+                            }
+                        },
                         |_, _, _, _| {},
                     )
                     .absolute()
@@ -2400,33 +2409,33 @@ impl AudioProcessing {
     }
 
     fn apply_page_parameters(&mut self, cx: &mut Context<Self>) {
+        if self.fields.iter().any(|(key, field)| {
+            field.dirty && self.page_parameter_key(*key) && field.input.read(cx).is_composing()
+        }) {
+            return;
+        }
         let fields: Vec<_> = self
             .fields
             .iter()
             .filter(|(key, field)| field.dirty && self.page_parameter_key(**key))
-            .map(|(key, field)| {
-                (
-                    *key,
-                    SubmittedParameter {
-                        input: field.input.clone(),
-                        generation: field.generation,
-                        text: key.value_text(field.input.read(cx).text()).to_owned(),
-                    },
-                )
+            .map(|(key, field)| SubmittedParameter {
+                key: *key,
+                generation: field.generation,
+                text: key.value_text(field.input.read(cx).text()).to_owned(),
             })
             .collect();
         match page_parameter_command(
             self.page,
             fields
                 .iter()
-                .map(|(key, submitted)| (*key, submitted.text.as_str())),
+                .map(|submitted| (submitted.key, submitted.text.as_str())),
         ) {
             Ok(Some(command)) => self.enqueue_submission(
                 Submission {
                     command,
                     field: Some(SubmittedFields {
                         first: None,
-                        rest: fields.into_iter().map(|(_, submitted)| submitted).collect(),
+                        rest: fields,
                     }),
                     equalizer_field: None,
                 },
@@ -2631,6 +2640,7 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.bind_panel(panel, cx);
         let theme = rivu_ui::theme::palette(cx);
         let mut tabs = row()
             .gap_1()
@@ -2823,7 +2833,7 @@ impl AudioProcessing {
             })),
         );
         if self.page != Page::Graph {
-            self.deactivate_graph_inputs(panel, window, cx);
+            self.deactivate_graph_inputs(window, cx);
         }
         if !matches!(self.page, Page::Graph | Page::Equalizer) {
             self.deactivate_equalizer_panel(panel, window, cx);

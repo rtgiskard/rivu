@@ -334,7 +334,6 @@ processing-workspace-processed = 处理后音频
 processing-editor-node = 处理节点均衡器 · 纳入图渲染
 processing-editor-drafts-block = 使用均衡器快捷控件前，请先应用或放弃节点参数草稿。“全部应用”也会提交均衡器字段草稿。
 processing-editor-stale = 此次编辑开始后，均衡器目标已发生变化。请放弃过期草稿，并根据当前设置重新输入。
-processing-editor-conflict = 多个面板对 { $field } 保留了冲突的均衡器草稿。请先消除冲突，再全部应用。
 processing-editor-monitor-only = 此操作仅适用于监听均衡器。
 processing-workspace-restore-original = 切回原始音频
 processing-tab-graph = 处理图

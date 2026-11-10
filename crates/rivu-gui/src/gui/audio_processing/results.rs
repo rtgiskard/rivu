@@ -8,16 +8,9 @@ use serde_json::{Value, json};
 #[derive(Default)]
 pub(super) struct ResultsState {
     pub(super) export_draft_generation: u64,
-    pub(super) details: std::collections::HashSet<u64>,
-    pub(super) errors: HashMap<u64, String>,
+    pub(super) details: bool,
+    pub(super) error: Option<String>,
     pub(super) task_details: bool,
-}
-
-impl ResultsState {
-    pub(super) fn retain_panels(&mut self, layout: &crate::gui::workspace::WorkspacePanels) {
-        self.details.retain(|id| layout.contains_panel(*id));
-        self.errors.retain(|id, _| layout.contains_panel(*id));
-    }
 }
 
 pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus) -> Option<u64> {
@@ -407,7 +400,7 @@ impl AudioProcessing {
                     ("graph-show-results", panel),
                     self.tr("processing-view-results"),
                     cx,
-                    move |this, _, cx| this.show_graph_results(panel, cx),
+                    |this, _, cx| this.show_graph_results(cx),
                 )
                 .flex_shrink_0()
                 .whitespace_nowrap(),
@@ -491,27 +484,24 @@ impl AudioProcessing {
                     return;
                 }
                 cx.notify();
-                if !this.panel_inputs.contains_key(&panel)
-                    || !graph_export_request_current(
-                        this.state.system.processing.as_deref(),
-                        task_id,
-                        run_id,
-                    )
-                    || !path_snapshot_current(
-                        (task_id, draft_generation, &original),
-                        (
-                            this.state
-                                .system
-                                .processing
-                                .as_ref()
-                                .map_or(0, |task| task.id),
-                            this.results.export_draft_generation,
-                            this.fields
-                                .get(&FieldKey::GraphExport)
-                                .map(|field| field.input.read(cx).text()),
-                        ),
-                    )
-                {
+                if !graph_export_request_current(
+                    this.state.system.processing.as_deref(),
+                    task_id,
+                    run_id,
+                ) || !path_snapshot_current(
+                    (task_id, draft_generation, &original),
+                    (
+                        this.state
+                            .system
+                            .processing
+                            .as_ref()
+                            .map_or(0, |task| task.id),
+                        this.results.export_draft_generation,
+                        this.fields
+                            .get(&FieldKey::GraphExport)
+                            .map(|field| field.input.read(cx).text()),
+                    ),
+                ) {
                     return;
                 }
                 match crate::gui::chooser_result(result) {
@@ -520,11 +510,10 @@ impl AudioProcessing {
                             match path.into_os_string().into_string() {
                                 Ok(path) => {
                                     this.stage_graph_text(FieldKey::GraphExport, path, cx);
-                                    this.results.errors.remove(&panel);
+                                    this.results.error = None;
                                 }
                                 Err(_) => {
-                                    this.results.errors.insert(
-                                        panel,
+                                    this.results.error = Some(
                                         this.tr("processing-result-path-encoding").to_string(),
                                     );
                                 }
@@ -533,7 +522,7 @@ impl AudioProcessing {
                     }
                     Ok(None) => return,
                     Err(error) => {
-                        this.results.errors.insert(panel, error.to_string());
+                        this.results.error = Some(error.to_string());
                     }
                 }
                 cx.notify();
@@ -552,7 +541,7 @@ impl AudioProcessing {
             .as_ref()
             .is_some_and(|task| graph_action_run(task).is_some())
         {
-            Some(self.panel_input(
+            Some(self.field_input(
                 panel,
                 FieldKey::GraphExport,
                 &self.tr("processing-export-path"),
@@ -569,7 +558,7 @@ impl AudioProcessing {
             return column();
         };
         let export_receipt = id != task_id;
-        let expanded = self.results.details.contains(&panel);
+        let expanded = self.results.details;
         let mut content = column().flex_shrink_0().gap_2();
         if let Some(error) = &task.error {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
@@ -721,7 +710,7 @@ impl AudioProcessing {
                                         .map(|field| field.input.read(cx).text().to_owned())
                                         .unwrap_or_default();
                                     if !path.is_empty() {
-                                        this.results.errors.remove(&panel);
+                                        this.results.error = None;
                                         this.send(
                                             Command::ProcessingGraphExport {
                                                 id,
@@ -731,8 +720,7 @@ impl AudioProcessing {
                                             cx,
                                         );
                                     } else {
-                                        this.results.errors.insert(
-                                            panel,
+                                        this.results.error = Some(
                                             this.context
                                                 .i18n
                                                 .text("processing-graph-export-required")
@@ -749,7 +737,7 @@ impl AudioProcessing {
                 );
             }
         }
-        if let Some(error) = self.results.errors.get(&panel) {
+        if let Some(error) = &self.results.error {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content = content.child(
@@ -762,9 +750,7 @@ impl AudioProcessing {
                 }),
                 cx,
                 move |this, _, cx| {
-                    if !this.results.details.remove(&panel) {
-                        this.results.details.insert(panel);
-                    }
+                    this.results.details = !this.results.details;
                     cx.notify();
                 },
             )

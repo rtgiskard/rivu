@@ -610,11 +610,19 @@ mod serialized {
                     .root
                     .map(|root| root.into_node(&mut next_id, 0))
                     .transpose()?;
-                let layout = Layout {
+                let mut layout = Layout {
                     root,
                     next_id,
                     locked: true,
                 };
+                // Validate the complete input before removing duplicates: migration
+                // must not hide malformed containers, options, or active indices.
+                layout.validate().map_err(anyhow::Error::msg)?;
+                if let Some(root) = &mut layout.root
+                    && root.remove_duplicate_processing(&mut false)
+                {
+                    layout.root = layout.root.take().and_then(Node::normalize);
+                }
                 if layouts.insert(name, Arc::new(layout)).is_some() {
                     return Err(anyhow!("duplicate trimmed layout name"));
                 }
@@ -877,6 +885,34 @@ impl Node {
         }
     }
 
+    fn remove_duplicate_processing(&mut self, seen: &mut bool) -> bool {
+        match self {
+            Self::Split { children, .. } => {
+                let mut changed = false;
+                for child in children {
+                    changed |= child.remove_duplicate_processing(seen);
+                }
+                changed
+            }
+            Self::Tabs { panels, active, .. } => {
+                let original_len = panels.len();
+                let active_index = panels.iter().position(|panel| panel.id == *active).unwrap();
+                panels.retain(|panel| {
+                    if panel.kind != "audio_processing" {
+                        return true;
+                    }
+                    !std::mem::replace(seen, true)
+                });
+                if !panels.iter().any(|panel| panel.id == *active) {
+                    *active = panels
+                        .get(active_index.min(panels.len().saturating_sub(1)))
+                        .map_or(0, |panel| panel.id);
+                }
+                panels.len() != original_len
+            }
+        }
+    }
+
     fn map_node<F: FnOnce(Self) -> Self>(mut self, target: u64, update: &mut Option<F>) -> Self {
         if update.is_none() {
             return self;
@@ -1025,9 +1061,24 @@ impl Default for Layout {
 }
 
 impl Layout {
+    fn existing_singleton(&self, kind: &str) -> Option<u64> {
+        if kind != "audio_processing" {
+            return None;
+        }
+        self.root
+            .as_ref()?
+            .find_panel(&|panel| panel.kind == kind)
+            .map(|panel| panel.id)
+    }
+
     /// Add and activate an instance. Missing targets use the first tabs; split
-    /// targets select their first tabs. Kinds are opaque panel catalog keys.
+    /// targets select their first tabs. Audio processing reuses its existing
+    /// instance; all other kinds remain opaque, repeatable panel catalog keys.
     pub fn add(&mut self, kind: &str, target: Option<u64>) -> u64 {
+        if let Some(id) = self.existing_singleton(kind) {
+            self.activate(id);
+            return id;
+        }
         let id = self.next_id;
         let count = if self.root.is_some() { 1 } else { 2 };
         let next_id = id.checked_add(count).expect("layout ID space exhausted");
@@ -1068,6 +1119,9 @@ impl Layout {
         edge: Edge,
         index: Option<usize>,
     ) -> Option<(Self, u64)> {
+        if self.existing_singleton(kind).is_some() {
+            return None;
+        }
         match (&self.root, target) {
             (Some(root), Some(target)) => {
                 let node = root.find(target)?;
@@ -1787,6 +1841,90 @@ impl LayoutSet {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn processing_reuses_activation_but_rejects_new_docking_without_mutation() {
+        let mut layout = empty();
+        let processing = layout.add("audio_processing", None);
+        let other = layout.add("audio_visualizer", None);
+        let target = group(&layout, other);
+        let before = layout.clone();
+        for edge in [
+            Edge::Center,
+            Edge::Left,
+            Edge::Top,
+            Edge::Right,
+            Edge::Bottom,
+        ] {
+            for destination in [Some(target), Some(u64::MAX), None] {
+                assert!(
+                    layout
+                        .with_docked_panel("audio_processing", destination, edge, Some(0))
+                        .is_none()
+                );
+                assert_eq!(layout, before);
+            }
+        }
+        assert_eq!(layout.add("audio_processing", Some(u64::MAX)), processing);
+        assert_eq!(layout.next_id, before.next_id);
+        assert!(layout.is_panel_active(processing));
+        assert_eq!(layout.panels().len(), 2);
+        assert_ne!(layout.add("audio_visualizer", None), other);
+        assert!(layout.move_panel(processing, target, Edge::Right, None));
+        layout.validate().unwrap();
+        assert!(layout.remove(processing));
+        let target = group(&layout, other);
+        let (replacement, id) = layout
+            .with_docked_panel("audio_processing", Some(target), Edge::Center, None)
+            .unwrap();
+        assert_ne!(id, processing);
+        replacement.validate().unwrap();
+    }
+
+    #[test]
+    fn loading_processing_duplicates_keeps_first_and_normalizes_each_named_layout() {
+        let root = json!({
+            "type":"split", "axis":"horizontal", "boundaries":[0.4], "children":[
+                {"type":"tabs", "active":2, "panels":[
+                    {"kind":"audio_processing", "show_tab_bar":false},
+                    {"kind":"audio_visualizer", "style":"bars", "reference_lines":true, "labels":false},
+                    {"kind":"audio_processing"}
+                ]},
+                {"type":"split", "axis":"vertical", "children":[
+                    {"type":"tabs", "panels":[{"kind":"audio_processing"}]},
+                    {"type":"tabs", "active":1, "panels":[{"kind":"custom"}, {"kind":"custom"}]}
+                ]}
+            ]
+        });
+        let value = json!({"active":"Work", "layouts":{
+            "Work":{"root":root.clone()}, "Other":{"root":root}
+        }});
+        let mut loaded = decoded(value).unwrap();
+        let expected = json!({
+            "type":"split", "axis":"horizontal", "boundaries":[0.4], "children":[
+                {"type":"tabs", "active":1, "panels":[
+                    {"kind":"audio_processing", "show_tab_bar":false},
+                    {"kind":"audio_visualizer", "style":"bars", "reference_lines":true, "labels":false, "oscilloscope_overlay_channels":false}
+                ]},
+                {"type":"tabs", "active":1, "panels":[{"kind":"custom"}, {"kind":"custom"}]}
+            ]
+        });
+        for name in ["Work", "Other"] {
+            assert_eq!(encoded(&loaded)["layouts"][name]["root"], expected);
+        }
+        let saved = encoded(&loaded);
+        assert_eq!(encoded(&decoded(saved.clone()).unwrap()), saved);
+        loaded.duplicate("Copy").unwrap();
+        let processing = loaded.current().panels()[0].id;
+        assert_eq!(
+            loaded.current_mut().add("audio_processing", None),
+            processing
+        );
+        assert!(loaded.current_mut().remove(processing));
+        loaded.select("Work").unwrap();
+        assert!(loaded.current().contains_panel(processing));
+        loaded.validate().unwrap();
+    }
 
     fn persisted_fixture() -> LayoutSet {
         let artwork = artwork_options(rivu_format::config::ArtworkStyle::Plain);
@@ -2991,6 +3129,10 @@ mod tests {
             json!({"type":"tabs", "panels":[{"kind":"a", "style":"bars", "reference_lines":true, "labels":true}]}),
             json!({"type":"tabs", "panels":[{"kind":"audio_visualizer", "style":null}]}),
             json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":null}]}),
+            json!({"type":"tabs", "active":2, "panels":[{"kind":"audio_processing"}, {"kind":"audio_processing"}]}),
+            json!({"type":"tabs", "panels":[{"kind":"audio_processing"}, {"kind":"audio_processing", "style":"bars"}]}),
+            json!({"type":"split", "axis":"horizontal", "children":[wire_tabs("audio_processing")]}),
+            json!({"type":"split", "axis":"horizontal", "children":[wire_tabs("audio_processing"), wire_tabs("audio_processing")], "boundaries":[0.0]}),
             json!({"type":"split", "axis":"horizontal", "children":[leaf.clone()]}),
             json!({"type":"split", "axis":"Horizontal", "children":[leaf.clone(), leaf.clone()]}),
             json!({"type":"split", "axis":"horizontal", "children":[split, leaf.clone()]}),

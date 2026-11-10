@@ -109,7 +109,7 @@ fn cached_export_rejects_source_replacement_between_lookup_and_task_admission() 
     fs::write(&track.path, b"replacement after retained-result lookup").unwrap();
     let destination = directory.path().join("stale.wav");
     let next_id = service.next_id;
-    let history = service.history.len();
+    let history = service.history().len();
     let bytes = service.memory_bytes();
     let error = service
         .start_graph(
@@ -131,7 +131,7 @@ fn cached_export_rejects_source_replacement_between_lookup_and_task_admission() 
     );
     assert!(service.active_id().is_none());
     assert_eq!(service.next_id, next_id);
-    assert_eq!(service.history.len(), history);
+    assert_eq!(service.history().len(), history);
     assert_eq!(service.memory_bytes(), bytes);
     assert!(!destination.exists());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
@@ -1051,7 +1051,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
         let (_directory, service, _track, _) = fixture();
         let retained = &service.results[0];
         let input = retained.outputs.vocals.as_ref().unwrap();
-        let mut status = retained.status.clone();
+        let mut status = service.status(retained.id).unwrap().clone();
         let target = GraphPort { node: 2, port: 0 };
         let config = graph_config(vec![kind]);
         let graph = &config.processing_graph;
@@ -1645,9 +1645,41 @@ fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
     service.release_unpinned_audio();
     assert!(service.results()[0].outputs.vocals.is_some());
     assert!(service.results()[1].outputs.denoised.is_none());
-    assert!(service.results()[1].status.outputs.is_none());
+    assert!(
+        service
+            .status(service.results()[1].id)
+            .unwrap()
+            .outputs
+            .is_none()
+    );
     assert_eq!(service.results()[1].track.path, track.path);
-    assert_eq!(service.results()[1].status.settings.denoise, config.denoise);
+    assert_eq!(
+        service
+            .status(service.results()[1].id)
+            .unwrap()
+            .settings
+            .denoise,
+        config.denoise
+    );
+    let result = completed_graph(&mut service, &track, config.clone()).unwrap();
+    let graph_id = result.status.id;
+    let frozen = result.status.settings.graph.clone();
+    assert!(!result.graph_outputs.is_empty());
+    service.accept_result(Box::new(result));
+    service.release_unpinned_audio();
+    let status = service.status(graph_id).unwrap();
+    assert_eq!(status.settings.graph, frozen);
+    assert!(status.graph_actions_available);
+    assert!(status.graph_outputs.is_empty());
+    assert!(
+        service
+            .results()
+            .iter()
+            .find(|result| result.id == graph_id)
+            .unwrap()
+            .graph_outputs
+            .is_empty()
+    );
     service.shutdown();
     assert_eq!(
         service.memory_bytes(),
@@ -1663,8 +1695,6 @@ fn unpinned_audio_release_preserves_frozen_history_and_selected_audition() {
 #[test]
 fn resource_directory_projects_eviction_without_overwriting_outcome_or_pinned_audio() {
     let (_directory, mut service, track, config) = fixture();
-    let pinned = service.results()[0].status.clone();
-    service.accept_status(pinned);
     service.retain_terminal(1);
     for _ in 0..4 {
         let result = completed(&mut service, &track, &config);
@@ -1673,8 +1703,8 @@ fn resource_directory_projects_eviction_without_overwriting_outcome_or_pinned_au
         service.retain_terminal(id);
     }
     assert_eq!(service.results().len(), 4);
-    assert!(service.results().iter().any(|result| result.status.id == 1));
-    assert!(!service.results().iter().any(|result| result.status.id == 2));
+    assert!(service.results().iter().any(|result| result.id == 1));
+    assert!(!service.results().iter().any(|result| result.id == 2));
     assert!(service.status(1).unwrap().outputs.as_ref().unwrap().vocals);
     let evicted = service.status(2).unwrap();
     assert_eq!(evicted.phase, ProcessingPhase::Complete);
@@ -1685,6 +1715,144 @@ fn resource_directory_projects_eviction_without_overwriting_outcome_or_pinned_au
     assert!(Arc::ptr_eq(&first, &second));
     assert!(first.outputs.as_ref().unwrap().denoised);
     assert_eq!(service.audition_id(), Some(1));
+}
+
+#[test]
+fn expired_pinned_live_run_stops_without_replacing_newer_current() {
+    let (_directory, mut service, track, config) = fixture();
+    let target = GraphPort { node: 2, port: 0 };
+    let live = service
+        .start_graph(
+            track.clone(),
+            config.clone(),
+            GraphRequest {
+                target,
+                mode: GraphExecutionMode::Realtime,
+                export_path: None,
+                source_run: None,
+                cached_output: None,
+            },
+        )
+        .unwrap();
+    let result = loop {
+        if let Event::Finished { id, result } = next_event(&mut service) {
+            assert_eq!(id, live);
+            service.finish_task(id).unwrap();
+            break result.unwrap();
+        }
+    };
+    let snapshot = result.runner.as_ref().unwrap().snapshot();
+    let frozen = result.status.settings.graph.clone();
+    service.accept_result(result);
+    service.select_graph_audition(
+        live,
+        1,
+        None,
+        snapshot,
+        target,
+        GraphExecutionMode::Realtime,
+    );
+    service.retain_terminal(live);
+    for _ in 0..33 {
+        let result = completed(&mut service, &track, &config);
+        let id = result.status.id;
+        service.accept_result(Box::new(result));
+        service.retain_terminal(id);
+    }
+    assert!(!service.history().any(|status| status.id == live));
+    assert_eq!(service.audition_id(), Some(live));
+    assert_eq!(service.status(live).unwrap().settings.graph, frozen);
+    assert!(service.status(live).unwrap().graph_actions_available);
+    let newer = service.current_projection().unwrap();
+    service.stop_live_audition(live);
+    let stopped = service.status(live).unwrap();
+    assert_eq!(stopped.phase, ProcessingPhase::Cancelled);
+    assert_eq!(stopped.error.as_deref(), Some("Live audition stopped"));
+    assert!(
+        stopped
+            .graph_nodes
+            .iter()
+            .all(|node| node.phase != ProcessingPhase::Processing)
+    );
+    assert!(Arc::ptr_eq(&newer, &service.current_projection().unwrap()));
+    assert_eq!(service.history().next_back().unwrap().id, live);
+    assert_eq!(service.history().len(), 32);
+    let position = service.history().position(|status| status.id == newer.id);
+    service.retain_terminal(newer.id);
+    assert_eq!(
+        service.history().position(|status| status.id == newer.id),
+        position
+    );
+}
+
+#[test]
+fn published_processing_arc_survives_record_and_availability_changes() {
+    let (_directory, mut service, _track, _config) = fixture();
+    service.retain_terminal(1);
+    let published = service.current_projection().unwrap();
+    let expected = published.as_ref().clone();
+    service.start_mix(1, 7, 0.0, 0.0).unwrap();
+    assert_eq!(service.current_projection().unwrap().id, 1);
+    assert_eq!(
+        service.status(1).unwrap().phase,
+        ProcessingPhase::Processing
+    );
+    let processing = service.current_projection().unwrap();
+    service.progress(1, 2, Some(4), ProcessingPhase::Processing);
+    assert_eq!(processing.completed, expected.completed);
+    assert_eq!(service.status(1).unwrap().completed, 2);
+    let pcm = match next_event(&mut service) {
+        Event::MixFinished { id, result, .. } => {
+            service.finish_task(id).unwrap();
+            result.unwrap()
+        }
+        _ => panic!("unexpected stem mix event"),
+    };
+    service.retire_pcm(pcm);
+    service.outcome(1, ProcessingPhase::Failed, Some("audition rejected".into()));
+    service.retain_terminal(1);
+    assert_eq!(service.history().len(), 1);
+    assert_eq!(
+        service.history().next().unwrap(),
+        service.status(1).unwrap()
+    );
+    service.clear_audition();
+    service.release_unpinned_audio();
+    assert!(service.status(1).unwrap().outputs.is_none());
+    assert_eq!(published.as_ref(), &expected);
+    let released = service.current_projection().unwrap();
+    service.release_unpinned_audio();
+    assert!(Arc::ptr_eq(
+        &released,
+        &service.current_projection().unwrap()
+    ));
+}
+
+#[test]
+fn processing_status_expires_after_last_membership_despite_published_arc() {
+    let (_directory, mut service, track, config) = fixture();
+    service.retain_terminal(1);
+    let published = service.current_projection().unwrap();
+    let expected = published.as_ref().clone();
+    service.clear_audition();
+    for _ in 0..31 {
+        let result = completed(&mut service, &track, &config);
+        let id = result.status.id;
+        service.accept_result(Box::new(result));
+        service.retain_terminal(id);
+    }
+    assert!(!service.results().iter().any(|result| result.id == 1));
+    assert_ne!(service.current_projection().unwrap().id, 1);
+    assert_eq!(service.history().next().unwrap().id, 1);
+    assert!(service.status(1).is_some());
+    let result = completed(&mut service, &track, &config);
+    let id = result.status.id;
+    service.accept_result(Box::new(result));
+    assert!(service.status(1).is_some());
+    service.retain_terminal(id);
+    assert!(!service.history().any(|status| status.id == 1));
+    assert!(service.status(1).is_none());
+    assert_eq!(published.as_ref(), &expected);
 }
 
 #[test]
@@ -1753,7 +1921,13 @@ fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
     service.reclaimer.as_mut().unwrap().fail_spawns = false;
     let result = completed(&mut service, &track, &config);
     assert!(service.results()[0].outputs.vocals.is_none());
-    assert!(service.results()[0].status.outputs.is_none());
+    assert!(
+        service
+            .status(service.results()[0].id)
+            .unwrap()
+            .outputs
+            .is_none()
+    );
     assert_eq!(
         service.memory_bytes(),
         result.outputs.denoised.as_ref().unwrap().retained_bytes()

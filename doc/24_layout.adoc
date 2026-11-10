@@ -148,6 +148,15 @@ Audio processing, and Visualization. Visualization inserts one `audio_visualizer
 instance, initialized from global style and overlay defaults; Spectrum,
 Spectrogram, and Waveform are selectable styles rather than catalog entries.
 
+Audio processing is limited to one panel per named layout. Once present, its
+catalog entry cannot start another insertion; the existing panel can still move,
+close and be added again. Loading an older layout retains the first Audio
+processing panel in tree order and removes later duplicates, normalizing empty
+containers without removing other panel kinds. Other panel kinds retain their
+existing multiplicity. Processing drafts belong to the window feature owner,
+not a named layout or panel instance; layout switches and closing/reopening the
+panel cancel interactions but preserve drafts for still-valid targets.
+
 Catalog insertion is drag-only. It shares docking geometry, preview and commit
 with existing tabs; click, double-click and keyboard activation insert nothing.
 The preview owns a candidate tree with the actual new panel identity. Only a

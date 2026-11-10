@@ -1,6 +1,5 @@
 //! Core owns the graph; this view retains drafts, selection, viewport and undo.
-//! Hidden fields own shared drafts/commit state. Painted inputs belong to one
-//! panel each and mirror text only on changes, never sharing focus or geometry.
+//! Each field input owns its draft, including when its node is not visible.
 use super::*;
 use rivu_format::config::processing_graph::{
     EqImplementation, GraphEdit, GraphNode, GraphNodeKind, GraphPort, ProcessingGraph,
@@ -171,12 +170,12 @@ pub(super) struct GraphEditorState {
     redo: VecDeque<ProcessingGraph>,
     pending: Option<PendingEdit>,
     pub(super) pointer: Option<GraphPointer>,
-    pub(super) bounds: HashMap<u64, MeasuredGraph>,
+    pub(super) bounds: MeasuredGraph,
     draft_stamps: HashMap<FieldKey, DraftStamp>,
     draft_generation: u64,
     field_errors: HashMap<FieldKey, String>,
     expanded_backends: std::collections::HashSet<u64>,
-    workbenches: HashMap<u64, WorkbenchPanel>,
+    workbench: WorkbenchPanel,
     workbench_choices: rivu_ui::ChoiceState<WorkbenchChoice>,
     workbench_menu: Option<(u64, WorkbenchMenu)>,
     workbench_anchor: Cell<Option<Bounds<Pixels>>>,
@@ -197,12 +196,12 @@ impl Default for GraphEditorState {
             redo: VecDeque::new(),
             pending: None,
             pointer: None,
-            bounds: HashMap::new(),
+            bounds: Rc::new(Cell::new(None)),
             draft_stamps: HashMap::new(),
             draft_generation: 0,
             field_errors: HashMap::new(),
             expanded_backends: std::collections::HashSet::new(),
-            workbenches: HashMap::new(),
+            workbench: WorkbenchPanel::default(),
             workbench_choices: rivu_ui::ChoiceState::default(),
             workbench_menu: None,
             workbench_anchor: Cell::new(None),
@@ -215,10 +214,6 @@ impl GraphEditorState {
         // Stamps are retired with their dirty fields. Availability depends on
         // draft presence, not every edit to an already-dirty field's text.
         (self.pending.is_some(), !self.draft_stamps.is_empty())
-    }
-
-    pub(super) fn retain_panels(&mut self, layout: &super::super::workspace::WorkspacePanels) {
-        self.workbenches.retain(|id, _| layout.contains_panel(*id));
     }
 }
 
@@ -548,6 +543,11 @@ impl AudioProcessing {
 
     fn graph_select(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.graph_editor.selected != Some(id) {
+            for (key, field) in &mut self.fields {
+                if key.graph_node().is_some_and(|node| node != id) {
+                    field.retire(cx);
+                }
+            }
             self.graph_editor.selected = Some(id);
             self.graph_editor.target_port = 0;
         }
@@ -558,9 +558,8 @@ impl AudioProcessing {
     fn sync_graph_fields(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.graph_editor.selected else {
             self.graph_editor.fields_revision = None;
-            for fields in self.panel_inputs.values_mut() {
-                fields.retain(|key, _| key.graph_node().is_none());
-            }
+            self.fields
+                .retain(|key, field| key.graph_node().is_none() || field.dirty);
             return;
         };
         let stamp = (self.state.system.config.processing_graph.revision, id);
@@ -593,11 +592,6 @@ impl AudioProcessing {
             Some(node) if node == id => active_keys.contains(key),
             Some(_) => field.dirty,
         });
-        // Retire replicas belonging to other graph inspectors, not shared page
-        // controls. Drafts for other nodes remain in the backing fields.
-        for fields in self.panel_inputs.values_mut() {
-            fields.retain(|key, _| key.graph_node().is_none() || active_keys.contains(key));
-        }
         if !self.fields.contains_key(&FieldKey::GraphExport) {
             self.field(
                 FieldKey::GraphExport,
@@ -628,12 +622,11 @@ impl AudioProcessing {
         self.submit_graph_fields(vec![key], cx);
     }
 
-    fn graph_add(&mut self, panel: u64, kind: GraphNodeKind, cx: &mut Context<Self>) {
+    fn graph_add(&mut self, kind: GraphNodeKind, cx: &mut Context<Self>) {
         let viewport = self
             .graph_editor
             .bounds
-            .get(&panel)
-            .and_then(|b| b.get())
+            .get()
             .map(|(bounds, _)| [f32::from(bounds.size.width), f32::from(bounds.size.height)])
             .unwrap_or([600., 380.]);
         let position = self.graph_editor.view.placement(
@@ -746,8 +739,7 @@ impl AudioProcessing {
         if self.graph_busy() && node.is_some() {
             return;
         }
-        let Some((bounds, geometry)) = self.graph_editor.bounds.get(&panel).and_then(|b| b.get())
-        else {
+        let Some((bounds, geometry)) = self.graph_editor.bounds.get() else {
             return;
         };
         if geometry != WindowGeometry::current(window, self.state.system.config.ui_scale) {
@@ -977,26 +969,26 @@ impl AudioProcessing {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.bind_panel(panel, cx);
+        self.graph_editor.workbench.panel = Some(panel);
         let focus = self
             .graph_editor
-            .workbenches
-            .entry(panel)
-            .or_default()
+            .workbench
             .canvas_focus
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
+        let frame = self.workbench_input(panel);
+        let key_frame = frame.clone();
+        let pan_frame = frame.clone();
+        let scroll_frame = frame.clone();
+        let measure_frame = frame.clone();
         let theme = rivu_ui::theme::palette(cx);
         let graph = &self.state.system.config.processing_graph;
         let edges = graph.edges.clone();
         let highlighted = self.graph_editor.highlight_connection;
         let view = self.graph_view();
         let scaled = |length: f32| px((f64::from(length) * view.zoom) as f32);
-        let measured = self
-            .graph_editor
-            .bounds
-            .entry(panel)
-            .or_insert_with(|| Rc::new(Cell::new(None)))
-            .clone();
+        let measured = self.graph_editor.bounds.clone();
         let measure = measured.clone();
         let epoch = self.geometry_epoch;
         let scale = self.state.system.config.ui_scale;
@@ -1026,6 +1018,8 @@ impl AudioProcessing {
             {
                 continue;
             }
+            let select_frame = frame.clone();
+            let pointer_frame = frame.clone();
             let mut card = div()
                 .id(SharedString::from(format!("graph-card-{panel}-{id}")))
                 .debug_selector(move || format!("graph-card-{panel}-{id}"))
@@ -1051,6 +1045,9 @@ impl AudioProcessing {
                     self.tr(node_label(&node.kind))
                 )))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if !select_frame.current(this) {
+                        return;
+                    }
                     this.graph_select(id, cx);
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
@@ -1059,7 +1056,9 @@ impl AudioProcessing {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event, window, cx| {
-                        this.graph_start_pointer(panel, Some(id), event, window, cx)
+                        if pointer_frame.current(this) {
+                            this.graph_start_pointer(panel, Some(id), event, window, cx);
+                        }
                     }),
                 )
                 .child(
@@ -1093,6 +1092,7 @@ impl AudioProcessing {
                         format!("PCM {}", port + 1)
                     };
                     let active = output && self.graph_editor.connecting == Some(endpoint);
+                    let connect_frame = frame.clone();
                     let control = div()
                         .id(SharedString::from(format!(
                             "graph-port-{panel}-{id}-{output}-{port}"
@@ -1126,6 +1126,9 @@ impl AudioProcessing {
                         .child(div().min_w_0().truncate().child(label))
                         .when(output, |view| view.child(div().flex_shrink_0().child("●")))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            if !connect_frame.current(this) {
+                                return;
+                            }
                             this.graph_connect(endpoint, output, cx);
                             cx.stop_propagation();
                         }));
@@ -1149,6 +1152,9 @@ impl AudioProcessing {
             .track_focus(&focus)
             .aria_label(self.tr("processing-routing-graph"))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !key_frame.current(this) {
+                    return;
+                }
                 this.graph_key(event, cx);
                 let key = event.keystroke.key.as_str();
                 let editing =
@@ -1165,10 +1171,15 @@ impl AudioProcessing {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event, window, cx| {
-                    this.graph_start_pointer(panel, None, event, window, cx)
+                    if pan_frame.current(this) {
+                        this.graph_start_pointer(panel, None, event, window, cx);
+                    }
                 }),
             )
             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                if !scroll_frame.current(this) {
+                    return;
+                }
                 let delta = match event.delta {
                     ScrollDelta::Pixels(p) => [f32::from(p.x), f32::from(p.y)],
                     ScrollDelta::Lines(p) => [p.x * 24., p.y * 24.],
@@ -1196,8 +1207,11 @@ impl AudioProcessing {
                 canvas(
                     move |bounds, window, cx| {
                         let geometry = WindowGeometry::current(window, scale);
-                        measure.set(Some((bounds, geometry)));
                         let _ = owner.update(cx, |this, cx| {
+                            if !measure_frame.current(this) {
+                                return;
+                            }
+                            measure.set(Some((bounds, geometry)));
                             if this.graph_editor.pointer.as_ref().is_some_and(|p| {
                                 p.panel == panel
                                     && (p.bounds != bounds
@@ -1381,10 +1395,11 @@ mod tests {
 
     impl Render for GraphWindow {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let panel = self.processing.read(cx).panel.unwrap_or(PANEL);
             column().size_full().child(self.input.clone()).child(
                 div().w_full().h(px(500.)).child(
                     self.processing
-                        .update(cx, |this, cx| this.routing_canvas(PANEL, window, cx)),
+                        .update(cx, |this, cx| this.routing_canvas(panel, window, cx)),
                 ),
             )
         }
@@ -1478,7 +1493,7 @@ mod tests {
         cx: &TestAppContext,
     ) -> Point<Pixels> {
         processing.read_with(cx, |this, _| {
-            let bounds = this.graph_editor.bounds[&PANEL].get().unwrap().0;
+            let bounds = this.graph_editor.bounds.get().unwrap().0;
             let node = this
                 .state
                 .system
@@ -1767,7 +1782,7 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             processing.update(cx, |this, cx| {
                 this.sync_panels(&Default::default(), true, cx);
-                assert!(!this.graph_editor.workbenches.contains_key(&PANEL));
+                assert!(this.graph_editor.workbench.panel.is_none());
             });
             // Keep the rendered frame: these are the listeners from the removed panel.
             window.dispatch_event(
@@ -1789,7 +1804,7 @@ mod tests {
                 cx,
             );
             processing.read_with(cx, |this, _| {
-                assert!(!this.graph_editor.workbenches.contains_key(&PANEL));
+                assert!(this.graph_editor.workbench.panel.is_none());
             });
         })
         .unwrap();
@@ -1800,10 +1815,15 @@ mod tests {
         let (_directory, _runtime, processing, handle) = fixture(cx);
         let key = FieldKey::Neural(NeuralField::Threads);
         processing.update(cx, |this, _| this.command_active = true);
+        let initial = processing.update(cx, |this, cx| this.field_input(PANEL, key, "Threads", cx));
         replace_parameter_text(cx, &processing, handle, key, "4");
         let submitted = processing.update(cx, |this, cx| {
             this.apply_field(key, cx);
             this.commands.pop_front().unwrap().field.unwrap()
+        });
+        processing.update(cx, |this, cx| {
+            let rebound = this.field_input(PANEL + 1, key, "Threads", cx);
+            assert_ne!(initial.entity_id(), rebound.entity_id());
         });
         replace_parameter_text(cx, &processing, handle, key, "5");
         replace_parameter_text(cx, &processing, handle, key, "4");
@@ -1813,6 +1833,7 @@ mod tests {
             assert_eq!(this.fields[&key].input.read(cx).text(), "4");
             this.apply_field(key, cx);
             let submitted = this.commands.pop_front().unwrap().field.unwrap();
+            this.field_input(PANEL + 2, key, "Threads", cx);
             this.finish_parameter_fields(submitted, cx);
             assert!(!this.fields[&key].dirty);
             let generation = this.fields[&key].generation;
@@ -1825,6 +1846,29 @@ mod tests {
         processing.read_with(cx, |this, _| {
             assert!(!this.fields[&key].dirty);
             assert_eq!(this.fields[&key].generation, generation);
+        });
+        // Tentative IME text is a newer draft even when it equals the issued value.
+        replace_parameter_text(cx, &processing, handle, key, "7");
+        let submitted = processing.update(cx, |this, cx| {
+            this.apply_field(key, cx);
+            this.commands.pop_front().unwrap().field.unwrap()
+        });
+        let input = processing.read_with(cx, |this, _| this.fields[&key].input.clone());
+        cx.update_window(handle, |_, window, cx| {
+            use gpui::EntityInputHandler as _;
+            input.update(cx, |input, cx| {
+                input.focus_and_select_all(window, cx);
+                input.replace_and_mark_text_in_range(None, "7", None, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        processing.update(cx, |this, cx| {
+            this.finish_parameter_fields(submitted, cx);
+            assert!(this.fields[&key].dirty);
+            assert!(this.fields[&key].input.read(cx).is_composing());
+            this.apply_field(key, cx);
+            assert!(this.commands.is_empty(), "preedit is not submitted");
         });
     }
 
@@ -1849,7 +1893,6 @@ mod tests {
                     )
                 })
                 .unwrap();
-            this.panel_input(PANEL, key, "Worker", cx);
             this.stage_graph_text(key, "python".into(), cx);
             let revision = this.state.system.config.processing_graph.revision;
             let generation = this.graph_editor.draft_stamps[&key].generation;
@@ -2347,9 +2390,7 @@ mod tests {
         let handle = window.into();
         draw(cx, handle);
         let input = processing.read_with(cx, |this, _| {
-            this.panel_inputs[&PANEL][&FieldKey::GraphExport]
-                .input
-                .clone()
+            this.fields[&FieldKey::GraphExport].input.clone()
         });
         cx.update_window(handle, |_, window, cx| {
             input.read(cx).focus_handle(cx).focus(window, cx);

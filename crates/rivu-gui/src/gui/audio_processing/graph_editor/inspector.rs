@@ -169,18 +169,12 @@ impl AudioProcessing {
             .any(|(key, field)| key.graph_node().is_some() && field.dirty)
     }
 
-    pub(in crate::gui::audio_processing) fn stage_graph_text(
-        &mut self,
-        key: FieldKey,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(in crate::gui::audio_processing) fn mark_field_edited(&mut self, key: FieldKey) {
         let Some(field) = self.fields.get_mut(&key) else {
             return;
         };
         field.dirty = true;
         field.generation += 1;
-        field.input.update(cx, |input, cx| input.set_text(text, cx));
         if key.graph_node().is_some() {
             self.graph_editor.draft_generation += 1;
             let stamp = self
@@ -197,6 +191,19 @@ impl AudioProcessing {
         if key == FieldKey::GraphExport {
             self.results.export_draft_generation += 1;
         }
+    }
+
+    pub(in crate::gui::audio_processing) fn stage_graph_text(
+        &mut self,
+        key: FieldKey,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.fields.get(&key) else {
+            return;
+        };
+        field.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.mark_field_edited(key);
         cx.notify();
     }
 
@@ -218,6 +225,13 @@ impl AudioProcessing {
             return;
         }
         self.reconcile(self.context.snapshot(), cx);
+        if keys.iter().any(|key| {
+            self.fields
+                .get(key)
+                .is_some_and(|field| field.input.read(cx).is_composing())
+        }) {
+            return;
+        }
         keys.sort();
         let revision = self.state.system.config.processing_graph.revision;
         let stale = keys
@@ -412,9 +426,8 @@ impl AudioProcessing {
         result: Result<Option<ashpd::desktop::file_chooser::SelectedFiles>, E>,
         cx: &mut Context<Self>,
     ) {
-        let PathRequest { panel, key, .. } = request;
-        let owner_current = self.panel_inputs.contains_key(&panel)
-            && matches!(key, FieldKey::Graph(binding) if self.state.system.config.processing_graph.nodes.iter().any(|node| binding.matches(node)))
+        let PathRequest { key, .. } = request;
+        let owner_current = matches!(key, FieldKey::Graph(binding) if self.state.system.config.processing_graph.nodes.iter().any(|node| binding.matches(node)))
             && path_snapshot_current(
                 snapshot,
                 (
@@ -516,7 +529,7 @@ impl AudioProcessing {
             )
             .into_any_element()
         } else {
-            let input = self.panel_input(panel, key, &label, cx);
+            let input = self.field_input(panel, key, &label, cx);
             let editor = if let Some(step) = descriptor.numeric_step() {
                 let mut numeric = rivu_ui::NumericInput::new(input);
                 for (sign, delta) in [("−", -step), ("+", step)] {
