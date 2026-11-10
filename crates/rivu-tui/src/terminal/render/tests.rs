@@ -12,6 +12,47 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
+fn current_error_overrides_retained_scan_but_not_active_scan_or_notice() {
+    use rivu_protocol::model::{ScanPhase, ScanProgress};
+
+    let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let mut state = TuiSnapshot::default();
+    state.system.scan_progress = Some(ScanProgress {
+        phase: ScanPhase::Completed,
+        processed: 1,
+        total: Some(1),
+        errors: 0,
+        path: None,
+    });
+    state.system.scan_message = "retained scan result".into();
+    let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+    for (scanning, error, notice, expected) in [
+        (false, None, None, "retained scan result"),
+        (false, Some("playback failed"), None, "playback failed"),
+        (true, Some("playback failed"), None, "retained scan result"),
+        (
+            true,
+            Some("playback failed"),
+            Some("current notice"),
+            "current notice",
+        ),
+    ] {
+        state.system.scanning = scanning;
+        state.system.last_error = error.map(str::to_owned);
+        ui.message = notice.map(|text| crate::terminal::state::Notice {
+            kind: NoticeKind::Error,
+            text: text.into(),
+            expires_at: std::time::Instant::now(),
+        });
+        terminal
+            .draw(|frame| draw_messages(frame, frame.area(), &ui, &state, colors))
+            .unwrap();
+        assert!(terminal_text(&terminal).contains(expected));
+    }
+}
+
+#[test]
 fn command_prompt_keeps_unicode_cursor_in_bounds() {
     for width in [1, 8, 40, 120] {
         let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));

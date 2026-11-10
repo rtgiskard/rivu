@@ -1159,7 +1159,9 @@ fn draw_messages(
                 .style(Style::default().fg(color)),
             area,
         );
-    } else if state.system.scanning || state.system.scan_progress.is_some() {
+    } else if state.system.scanning
+        || (state.system.scan_progress.is_some() && state.system.last_error.is_none())
+    {
         let color = match &state.system.scan_progress {
             Some(progress) if progress.phase == rivu_protocol::model::ScanPhase::Failed => {
                 colors.error
