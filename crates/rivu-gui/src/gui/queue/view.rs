@@ -97,6 +97,7 @@ impl Queue {
                     .map(|row| row.id)
                     .collect(),
                 index,
+                expected_revision: self.state.queue.revision,
             },
             cx,
         );
@@ -486,6 +487,7 @@ impl Queue {
                                                             Command::MoveQueue {
                                                                 queue_id: id,
                                                                 index: position - 1,
+                                                                expected_revision: revision,
                                                             },
                                                             cx,
                                                         );
@@ -507,6 +509,7 @@ impl Queue {
                                                             Command::MoveQueue {
                                                                 queue_id: id,
                                                                 index: position + 1,
+                                                                expected_revision: revision,
                                                             },
                                                             cx,
                                                         );

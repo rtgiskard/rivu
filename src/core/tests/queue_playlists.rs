@@ -1708,6 +1708,7 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
             core.command(Command::MoveQueueEntries {
                 queue_ids: requested,
                 index: target,
+                expected_revision: revision,
             })
             .unwrap();
             assert_eq!(
@@ -1772,10 +1773,12 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         Command::MoveQueue {
             queue_id: 3,
             index: 0,
+            expected_revision: core.state.queue.revision,
         },
         Command::MoveQueueEntries {
             queue_ids: vec![5, 1, 3, 1],
             index: 1,
+            expected_revision: core.state.queue.revision,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -1802,6 +1805,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
         Command::MoveQueueEntries {
             queue_ids: vec![3, 99],
             index: 0,
+            expected_revision: core.state.queue.revision,
         },
         Command::RemoveQueueEntries {
             queue_ids: vec![3, 99],
@@ -1809,6 +1813,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
         Command::MoveQueue {
             queue_id: 3,
             index: usize::MAX,
+            expected_revision: core.state.queue.revision,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -1819,6 +1824,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![5, 1, 3, 1],
         index: 1,
+        expected_revision: core.state.queue.revision,
     })
     .unwrap();
     assert_eq!(
@@ -1832,6 +1838,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![1, 3, 5],
         index: usize::MAX,
+        expected_revision: core.state.queue.revision,
     })
     .unwrap();
     assert_eq!(
@@ -1861,6 +1868,7 @@ fn dedup_preserves_playing_duplicate_identity_at_first_position_and_prunes_histo
     core.command(Command::MoveQueue {
         queue_id: 3,
         index: 4,
+        expected_revision: core.state.queue.revision,
     })
     .unwrap();
     playing(&mut core, 3);
@@ -1910,6 +1918,7 @@ fn empty_and_singleton_queue_edits_are_valid_and_empty_bulk_requests_are_no_ops(
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![],
         index: usize::MAX,
+        expected_revision: core.state.queue.revision,
     })
     .unwrap();
     assert_eq!(core.state.queue, before);
@@ -2290,6 +2299,7 @@ fn incremental_queue_commits_recover_projection_before_previous() {
             Command::MoveQueueEntries {
                 queue_ids: vec![5],
                 index: 0,
+                expected_revision: 0,
             },
         ),
         ("UPDATE OF position", Command::RandomizeQueue),
@@ -2317,6 +2327,13 @@ fn incremental_queue_commits_recover_projection_before_previous() {
                 other_tracks,
                 directories,
                 track_ids,
+                index,
+                expected_revision: core.state.queue.revision,
+            },
+            Command::MoveQueueEntries {
+                queue_ids, index, ..
+            } => Command::MoveQueueEntries {
+                queue_ids,
                 index,
                 expected_revision: core.state.queue.revision,
             },
@@ -2445,4 +2462,47 @@ fn delayed_projection_cannot_replace_a_selection_already_saved_after_its_read() 
     assert_eq!(core.state.queue.current_position, Some(2));
     assert_eq!(core.state.current_track().unwrap().id, 2);
     assert_queue_saved(&core);
+}
+
+#[test]
+fn stale_queue_move_indices_are_rejected_without_changing_order() {
+    let (_directory, mut core) = fixture();
+    let observed = core.state.queue.revision;
+    core.command(Command::MoveQueue {
+        queue_id: 3,
+        index: 0,
+        expected_revision: observed,
+    })
+    .unwrap();
+    let order = core.store.queue_ids().unwrap();
+    let revision = core.state.queue.revision;
+    assert_ne!(revision, observed);
+    for command in [
+        Command::MoveQueue {
+            queue_id: 3,
+            index: 2,
+            expected_revision: observed,
+        },
+        Command::MoveQueueEntries {
+            queue_ids: vec![3],
+            index: 2,
+            expected_revision: observed,
+        },
+    ] {
+        assert!(
+            core.command(command)
+                .unwrap_err()
+                .to_string()
+                .contains("Queue revision changed")
+        );
+        assert_eq!(core.store.queue_ids().unwrap(), order);
+        assert_eq!(core.state.queue.revision, revision);
+    }
+    core.command(Command::MoveQueueEntries {
+        queue_ids: vec![3],
+        index: 2,
+        expected_revision: revision,
+    })
+    .unwrap();
+    assert_eq!(core.store.queue_ids().unwrap()[2], 3);
 }

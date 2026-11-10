@@ -775,10 +775,12 @@ pub enum Command {
     MoveQueue {
         queue_id: u64,
         index: usize,
+        expected_revision: u64,
     },
     MoveQueueEntries {
         queue_ids: Vec<u64>,
         index: usize,
+        expected_revision: u64,
     },
     ClearQueue,
     RandomizeQueue,

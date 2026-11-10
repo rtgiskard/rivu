@@ -1007,6 +1007,11 @@ selection. Storage work is scoped to affected collections and position ranges,
 but widely scattered moves can touch a list-length span. Business owners retain
 validation, playback effects, and revision publication.
 
+`MoveQueue` and `MoveQueueEntries` carry the queue `expected_revision` observed
+when choosing their target index. Core rejects stale revisions before changing
+positions; clients must refresh and choose a new target rather than replaying
+the old index. A successful move advances the queue revision only if order changes.
+
 After a confirmed structural queue commit, Core advances its in-memory content
 revision once, before refreshing projections. Store transactions do not persist
 or issue that token; rollback and no-op mutations leave it unchanged. Metadata

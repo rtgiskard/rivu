@@ -139,7 +139,11 @@ Desktop Queue rows use the shared
 link:02_library.adoc#track-information[track information and hover rules].
 
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
-and `queue move`. Move positions start at zero. `queue add TRACK_ID...` appends
+and `queue move`. Move positions start at zero; `queue move QUEUE_ID INDEX
+--expected-revision REVISION` requires the observed queue revision (`queue.revision`
+in `rivu --json status`). Refresh state and the listing, then choose the position
+again if Core rejects a stale revision.
+`queue add TRACK_ID...` appends
 every supplied occurrence in argument order without starting playback;
 `queue clear` empties the queue and stops playback. Removing queue occurrences
 does not unregister their library tracks. JSON listings contain occurrence rows

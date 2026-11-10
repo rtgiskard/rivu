@@ -994,6 +994,7 @@ fn request_round_trip_uses_explicit_message_types() {
         WireRequest::Command(WireCommand::from(Command::MoveQueue {
             queue_id: 4,
             index: 9,
+            expected_revision: 12,
         })),
         WireRequest::Watch(
             StateRevisions {
@@ -1044,8 +1045,12 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::WaitTask(target) => {
                 assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
             }
-            WireRequest::Command(WireCommand::MoveQueue { queue_id, index }) => {
-                assert_eq!((queue_id, index), (4, 9))
+            WireRequest::Command(WireCommand::MoveQueue {
+                queue_id,
+                index,
+                expected_revision,
+            }) => {
+                assert_eq!((queue_id, index, expected_revision), (4, 9, 12))
             }
             WireRequest::Watch(watch) => {
                 assert_eq!(watch.sections, StateSections::ALL);
@@ -1606,6 +1611,7 @@ fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
             Command::MoveQueueEntries {
                 queue_ids: (1..=200_000).collect(),
                 index: 0,
+                expected_revision: 1,
             }
             .into(),
         ),

@@ -471,6 +471,9 @@ pub(super) enum QueueAction {
     Move {
         queue_id: u64,
         index: usize,
+        /// Queue revision observed when choosing the target index.
+        #[arg(long)]
+        expected_revision: u64,
     },
     Play {
         queue_id: u64,

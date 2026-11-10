@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 21;
+pub const PROTOCOL_VERSION: u8 = 22;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -351,10 +351,12 @@ pub enum WireCommand {
     MoveQueue {
         queue_id: u64,
         index: u64,
+        expected_revision: u64,
     },
     MoveQueueEntries {
         queue_ids: Vec<u64>,
         index: u64,
+        expected_revision: u64,
     },
     ClearQueue,
     RandomizeQueue,
@@ -1185,13 +1187,23 @@ impl From<Command> for WireCommand {
             },
             Command::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
             Command::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
-            Command::MoveQueue { queue_id, index } => Self::MoveQueue {
+            Command::MoveQueue {
+                queue_id,
+                index,
+                expected_revision,
+            } => Self::MoveQueue {
                 queue_id,
                 index: index as u64,
+                expected_revision,
             },
-            Command::MoveQueueEntries { queue_ids, index } => Self::MoveQueueEntries {
+            Command::MoveQueueEntries {
+                queue_ids,
+                index,
+                expected_revision,
+            } => Self::MoveQueueEntries {
                 queue_ids,
                 index: index as u64,
+                expected_revision,
             },
             Command::ClearQueue => Self::ClearQueue,
             Command::RandomizeQueue => Self::RandomizeQueue,
@@ -1479,13 +1491,23 @@ impl TryFrom<WireCommand> for Command {
             },
             WireCommand::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
             WireCommand::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
-            WireCommand::MoveQueue { queue_id, index } => Self::MoveQueue {
+            WireCommand::MoveQueue {
+                queue_id,
+                index,
+                expected_revision,
+            } => Self::MoveQueue {
                 queue_id,
                 index: wire_usize(index, "index")?,
+                expected_revision,
             },
-            WireCommand::MoveQueueEntries { queue_ids, index } => Self::MoveQueueEntries {
+            WireCommand::MoveQueueEntries {
+                queue_ids,
+                index,
+                expected_revision,
+            } => Self::MoveQueueEntries {
                 queue_ids,
                 index: wire_usize(index, "index")?,
+                expected_revision,
             },
             WireCommand::ClearQueue => Self::ClearQueue,
             WireCommand::RandomizeQueue => Self::RandomizeQueue,

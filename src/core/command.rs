@@ -327,16 +327,24 @@ impl Core {
             }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
-            Command::MoveQueue { queue_id, index } => {
+            Command::MoveQueue {
+                queue_id,
+                index,
+                expected_revision,
+            } => {
                 self.ensure_queue_control_ready()?;
                 ensure!(
                     index < self.state.queue.total,
                     "Queue target position out of range"
                 );
-                self.move_queue_entries(&[queue_id], index)?;
+                self.move_queue_entries(&[queue_id], index, expected_revision)?;
             }
-            Command::MoveQueueEntries { queue_ids, index } => {
-                self.move_queue_entries(&queue_ids, index)?;
+            Command::MoveQueueEntries {
+                queue_ids,
+                index,
+                expected_revision,
+            } => {
+                self.move_queue_entries(&queue_ids, index, expected_revision)?;
             }
             Command::ClearQueue => self.clear_queue()?,
             Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,

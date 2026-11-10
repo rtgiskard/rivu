@@ -204,7 +204,15 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 }
             }
             QueueAction::Remove { queue_id } => Command::RemoveQueue { queue_id },
-            QueueAction::Move { queue_id, index } => Command::MoveQueue { queue_id, index },
+            QueueAction::Move {
+                queue_id,
+                index,
+                expected_revision,
+            } => Command::MoveQueue {
+                queue_id,
+                index,
+                expected_revision,
+            },
             QueueAction::Play { queue_id } => Command::PlayQueue { queue_id },
             QueueAction::Clear => Command::ClearQueue,
             QueueAction::List => return list_queue(&i18n, &data_dir, args.json),

@@ -221,7 +221,12 @@ impl Core {
         &mut self,
         queue_ids: &[u64],
         index: usize,
+        expected_revision: u64,
     ) -> Result<()> {
+        ensure!(
+            self.state.queue.revision == expected_revision,
+            "Queue revision changed"
+        );
         if queue_ids.is_empty() {
             return Ok(());
         }
