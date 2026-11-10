@@ -209,7 +209,7 @@ pub(super) fn prepare(
     .as_ref()
     .context("Missing model manifest")?;
     let mut contents = Vec::new();
-    std::fs::File::open(manifest)
+    rivu_utils::regular_file::open_regular_file(manifest)
         .context("Opening model manifest")?
         .take(1024 * 1024 + 1)
         .read_to_end(&mut contents)?;
@@ -1040,6 +1040,100 @@ mod tests {
                 provenance.id.as_deref(),
                 Some(if field == "id" { "unknown" } else { "GTCRN" })
             );
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_nonregular_manifests_without_waiting_for_a_writer() {
+        if crate::test_support::run_in_subprocess(
+            "processing::neural::tests::prepare_rejects_nonregular_manifests_without_waiting_for_a_writer",
+            std::time::Duration::from_secs(5),
+        ) {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("manifest.fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is NUL terminated and mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let link = directory.path().join("manifest-link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        // No writer is ever opened: a blocking open must be killed by the
+        // subprocess deadline rather than hanging the test runner.
+        for manifest in [&fifo, &link, &directory.path().to_path_buf()] {
+            for operation in [ProcessingOperation::Speech, ProcessingOperation::Separate] {
+                let config = rivu_format::config::NeuralConfig {
+                    speech_manifest: Some(manifest.clone()),
+                    separation_manifest: Some(manifest.clone()),
+                    ..Default::default()
+                };
+                let mut provenance = ModelProvenance::default();
+                let error = prepare(
+                    operation,
+                    &config,
+                    48_000,
+                    &[audio::Channel::FrontLeft, audio::Channel::FrontRight],
+                    &mut provenance,
+                    &AtomicBool::new(false),
+                )
+                .err()
+                .expect("nonregular manifest must fail during preparation");
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::InvalidInput
+                );
+                assert!(provenance.id.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_regular_manifests_and_symlinks_reach_existing_parser() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("manifest.json");
+        let link = directory.path().join("manifest-link.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let worker = directory.path().join("worker.py");
+        std::fs::write(&worker, b"").unwrap();
+        for operation in [ProcessingOperation::Speech, ProcessingOperation::Separate] {
+            for manifest in [&path, &link] {
+                let config = rivu_format::config::NeuralConfig {
+                    speech_manifest: Some(manifest.clone()),
+                    separation_manifest: Some(manifest.clone()),
+                    worker: worker.clone(),
+                    ..Default::default()
+                };
+                let mut provenance = ModelProvenance::default();
+                std::fs::write(&path, br#"{"id":"regular-fixture","backend":"python"}"#).unwrap();
+                let prepared = prepare(
+                    operation,
+                    &config,
+                    48_000,
+                    &[audio::Channel::FrontLeft, audio::Channel::FrontRight],
+                    &mut provenance,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                assert!(matches!(prepared.backend, PreparedBackend::Python { .. }));
+                assert_eq!(provenance.id.as_deref(), Some("regular-fixture"));
+                std::fs::write(&path, b"not json").unwrap();
+                let error = prepare(
+                    operation,
+                    &config,
+                    48_000,
+                    &[audio::Channel::FrontLeft, audio::Channel::FrontRight],
+                    &mut ModelProvenance::default(),
+                    &AtomicBool::new(false),
+                )
+                .err()
+                .expect("invalid regular manifest must reach JSON parsing");
+                assert!(
+                    error
+                        .downcast_ref::<serde_json::Error>()
+                        .unwrap()
+                        .is_syntax()
+                );
+            }
         }
     }
 

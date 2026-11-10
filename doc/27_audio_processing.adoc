@@ -319,6 +319,9 @@ graph nodes select the backend from the prepared manifest; each graph node has
 its own model configuration. Native speech does not use Python interpreter or
 worker paths. It requires the `onnx` build feature (enabled by default); builds
 without it reject native manifests rather than falling back to Python.
+Model manifests must resolve to ordinary files; symlinks to ordinary files are
+accepted. FIFOs and other non-regular inputs are rejected during preparation
+without waiting for a writer.
 
 Use `rivu processing setup MODEL` to prepare a model without starting Core.
 Installed distributions include the preparation tools; Python 3 is required.
