@@ -161,7 +161,7 @@ impl StereoRenderer {
         data.db_range = config.reactive_db_range();
         if reset {
             data.clear();
-        } else if recolor && !data.field().is_empty() {
+        } else if recolor {
             data.publish();
         }
         changed
@@ -174,6 +174,8 @@ impl StereoRenderer {
             data.visible = visible;
             if !visible {
                 data.retire();
+            } else {
+                data.retry_publication();
             }
         }
         restored
@@ -240,7 +242,6 @@ impl StereoState {
         self.spatial_mapping = SpatialMapping::default();
         self.sample_time = None;
         self.sequence = None;
-        self.publication_pending = false;
         self.retained = true;
     }
 
@@ -265,6 +266,7 @@ impl StereoState {
         self.retained = false;
         self.stereo_metrics = [None; 3];
         self.readout = "".into();
+        self.range_label = "".into();
         self.high_label = "".into();
     }
 
@@ -395,7 +397,7 @@ impl StereoState {
     }
 
     fn retry_publication(&mut self) {
-        if !self.publication_pending {
+        if !self.visible || !self.publication_pending {
             return;
         }
         // This deterministic configuration error cannot recover by publishing
@@ -407,11 +409,42 @@ impl StereoState {
         let (Some(gpu), Some(palette)) = (&self.gpu, &self.palette) else {
             return;
         };
+        // Retirement releases the analysis snapshots and spatial working field,
+        // but the immutable publication still owns the exact displayed powers
+        // (including spatial peak history). Remap those without reaccepting audio
+        // or restoring a second large CPU field. The publication API makes only
+        // the replacement frame's required copy.
+        let retained = if self.retained && self.field().is_empty() {
+            gpu.snapshot()
+        } else {
+            None
+        };
+        let field = if let Some(frame) = &retained {
+            let gpui::GpuContent::Field { values, params, .. } = frame.content() else {
+                return;
+            };
+            if params.mapping
+                == (GpuValueMapping::Logarithmic {
+                    db_range: self.db_range,
+                })
+                && Arc::ptr_eq(frame.palette(), palette)
+            {
+                self.publication_pending = false;
+                self.gpu_error_reported = false;
+                return;
+            }
+            values.as_ref()
+        } else {
+            self.field()
+        };
+        if field.is_empty() {
+            return;
+        }
         let (width, height) = field_dimensions(self.style);
         match gpu.publish_field(
             width,
             height,
-            self.field(),
+            field,
             Arc::clone(palette),
             GpuFieldParams {
                 mapping: GpuValueMapping::Logarithmic {
@@ -421,7 +454,8 @@ impl StereoState {
         ) {
             Ok(()) => {
                 self.publication_pending = false;
-                self.retained = false;
+                self.retained = retained.is_some();
+                self.range_label = "".into();
                 self.gpu_error_reported = false;
             }
             Err(error) => self.publication_failed("publication", &error),
@@ -435,11 +469,28 @@ impl StereoState {
             && let Some(gpu) = &self.gpu
         {
             gpu.clear();
+            self.range_label = "".into();
         }
         self.publication_pending = true;
         if !self.gpu_error_reported {
             self.gpu_error_reported = true;
             eprintln!("rivu analysis visualizer GPU {operation}: {error}");
+        }
+    }
+
+    fn display_db_range(&self) -> f32 {
+        if let Some(frame) = self.gpu.as_ref().and_then(|gpu| gpu.snapshot())
+            && let gpui::GpuContent::Field {
+                params:
+                    GpuFieldParams {
+                        mapping: GpuValueMapping::Logarithmic { db_range },
+                    },
+                ..
+            } = frame.content()
+        {
+            *db_range
+        } else {
+            self.db_range
         }
     }
 
@@ -556,7 +607,7 @@ impl StereoState {
             return;
         }
         if self.range_label.is_empty() {
-            self.range_label = i18n.range(density, self.db_range).into();
+            self.range_label = i18n.range(density, self.display_db_range()).into();
         }
         let title = self.labels.as_ref().expect("localized plot labels")
             [if density { 0 } else { 1 }]
@@ -1319,10 +1370,15 @@ mod tests {
             plot.update(&frame);
             assert!(plot.data.borrow().publication_pending);
             assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            assert_eq!(
+                plot.data.borrow().display_db_range(),
+                Config::default().reactive_db_range()
+            );
             plot.data.borrow_mut().db_range = 70.0;
             plot.update(&frame);
             assert!(!plot.data.borrow().publication_pending);
             assert!(!Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            assert_eq!(plot.data.borrow().display_db_range(), 70.0);
         }
     }
 
@@ -1452,13 +1508,188 @@ mod tests {
             assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             plot.set_visible(true);
-            assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            assert!(!Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            assert_eq!(plot.data.borrow().display_db_range(), 50.0);
+            assert_eq!(plot.data.borrow().field.capacity(), 0);
+            assert!(plot.data.borrow().density.is_empty());
             plot.update(&frame(style));
             assert!(publication(&plot).is_some());
             assert!(!Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
             plot.set_visible(false);
             plot.clear();
             assert!(publication(&plot).is_none());
+        }
+    }
+
+    #[test]
+    fn hidden_range_change_remaps_retained_density_and_spatial_on_paused_reveal() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            let mut audio = frame(style);
+            if style == AudioVisualizerStyle::StereoDensity {
+                set_density_cell(&mut audio, 0, 0.25);
+            }
+            plot.update(&audio);
+            audio.sequence += 1;
+            audio.sample_time += Duration::from_millis(100);
+            if style == AudioVisualizerStyle::StereoDensity {
+                set_density_cell(&mut audio, 0, 0.125);
+            }
+            audio.visualizer.spatial[0].pan = 1.0;
+            audio.visualizer.spatial[0].power = 0.0001;
+            plot.update(&audio);
+            // Spatial's displayed field contains the decaying previous peak,
+            // not merely the latest frame's bins. It is the remapping authority.
+            let retained = publication(&plot).unwrap();
+            let gpui::GpuContent::Field { values, .. } = retained.content() else {
+                panic!("expected retained numerical field");
+            };
+            if style == AudioVisualizerStyle::SpatialSpectrum {
+                let (x, y) = spatial_cell(1000.0, 0.0, high_frequency(audio.sample_rate)).unwrap();
+                assert!(values[y * SPATIAL_WIDTH + x] > 0.0001);
+            }
+            plot.set_visible(false);
+            let mut config = Config {
+                reactive_db_range: Some(50.0),
+                ..Config::default()
+            };
+            plot.configure_config(&config);
+            assert!(Arc::ptr_eq(&retained, &publication(&plot).unwrap()));
+            // No update call: paused coordination reveals without new audio.
+            plot.set_visible(true);
+            let remapped = publication(&plot).unwrap();
+            let gpui::GpuContent::Field {
+                values: remapped_values,
+                params,
+                ..
+            } = remapped.content()
+            else {
+                panic!("expected remapped numerical field");
+            };
+            assert_eq!(values, remapped_values);
+            assert_eq!(
+                params.mapping,
+                GpuValueMapping::Logarithmic { db_range: 50.0 }
+            );
+            assert!(Arc::ptr_eq(retained.palette(), remapped.palette()));
+            {
+                let data = plot.data.borrow();
+                assert_eq!(data.display_db_range(), 50.0);
+                assert!(data.field().is_empty());
+                assert_eq!(data.field.capacity(), 0);
+                assert_eq!(data.spatial_next.capacity(), 0);
+                assert_eq!(data.spatial_mapping.rows.capacity(), 0);
+                assert_eq!(data.sample_time, None);
+                assert_eq!(data.sequence, None);
+                assert!(!data.publication_pending);
+            }
+            // Repeated paused syncs neither advance powers nor republish.
+            for _ in 0..3 {
+                plot.set_visible(true);
+                plot.configure_config(&config);
+                assert!(Arc::ptr_eq(&remapped, &publication(&plot).unwrap()));
+            }
+            // Material-only configuration still republishes frozen powers.
+            config.effect_primary_color = "#0033ff".parse().unwrap();
+            plot.configure_config(&config);
+            let recolored = publication(&plot).unwrap();
+            let gpui::GpuContent::Field {
+                values: recolored_values,
+                ..
+            } = recolored.content()
+            else {
+                panic!("expected recolored numerical field");
+            };
+            assert_eq!(values, recolored_values);
+            assert!(!Arc::ptr_eq(remapped.palette(), recolored.palette()));
+            assert_eq!(plot.data.borrow().sample_time, None);
+            audio.sequence += 1;
+            audio.sample_time += Duration::from_secs(1);
+            if style == AudioVisualizerStyle::StereoDensity {
+                set_density_cell(&mut audio, 0, 0.5);
+            }
+            audio.visualizer.spatial[0].pan = -1.0;
+            audio.visualizer.spatial[0].power = 0.5;
+            plot.update(&audio);
+            let resumed = publication(&plot).unwrap();
+            let gpui::GpuContent::Field {
+                values: resumed_values,
+                params,
+                ..
+            } = resumed.content()
+            else {
+                panic!("expected resumed numerical field");
+            };
+            assert_eq!(
+                params.mapping,
+                GpuValueMapping::Logarithmic { db_range: 50.0 }
+            );
+            assert_eq!(resumed_values.as_ref(), plot.data.borrow().field());
+            assert_ne!(resumed_values, values);
+            assert_eq!(plot.data.borrow().sample_time, Some(audio.sample_time));
+            assert!(!plot.data.borrow().retained);
+            plot.update(&audio);
+            assert!(Arc::ptr_eq(&resumed, &publication(&plot).unwrap()));
+        }
+    }
+
+    #[test]
+    fn hidden_range_round_trip_reuses_publication_and_visible_round_trip_remaps() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            plot.update(&frame(style));
+            let original = publication(&plot).unwrap();
+            plot.set_visible(false);
+            let mut config = Config {
+                reactive_db_range: Some(50.0),
+                ..Config::default()
+            };
+            plot.configure_config(&config);
+            config.reactive_db_range = None;
+            plot.configure_config(&config);
+            plot.set_visible(true);
+            assert!(Arc::ptr_eq(&original, &publication(&plot).unwrap()));
+            assert!(!plot.data.borrow().publication_pending);
+            assert_eq!(
+                plot.data.borrow().display_db_range(),
+                config.reactive_db_range()
+            );
+            config.reactive_db_range = Some(50.0);
+            plot.configure_config(&config);
+            assert_eq!(plot.data.borrow().display_db_range(), 50.0);
+            config.reactive_db_range = None;
+            plot.configure_config(&config);
+            let returned = publication(&plot).unwrap();
+            assert!(!Arc::ptr_eq(&original, &returned));
+            let gpui::GpuContent::Field {
+                values: original_values,
+                ..
+            } = original.content()
+            else {
+                panic!("expected original numerical field");
+            };
+            let gpui::GpuContent::Field { values, params, .. } = returned.content() else {
+                panic!("expected returned numerical field");
+            };
+            assert_eq!(values, original_values);
+            assert_eq!(
+                params.mapping,
+                GpuValueMapping::Logarithmic {
+                    db_range: config.reactive_db_range()
+                }
+            );
+            assert_eq!(
+                plot.data.borrow().display_db_range(),
+                config.reactive_db_range()
+            );
+            assert!(plot.data.borrow().field().is_empty());
+            assert_eq!(plot.data.borrow().sample_time, None);
         }
     }
 

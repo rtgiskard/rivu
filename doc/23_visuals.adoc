@@ -513,6 +513,9 @@ panels. Enlargement neither increases source resolution nor advances analysis.
 Semantic continuity breaks revoke the publication; hiding retains only that final
 field and releases CPU field/history/mapping storage. Active color/range changes
 republish from accepted fields, without another FFT or a CPU-generated image.
+Changes made while hidden remap the retained numerical publication on reveal,
+even while paused; this neither replays audio nor advances decay. The displayed
+dB range follows the publication, including while a replacement is pending.
 There is no application image-retirement queue.
 
 Color ramps derive from the configured visualizer colors, with increasing
