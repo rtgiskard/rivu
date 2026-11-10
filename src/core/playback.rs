@@ -966,7 +966,7 @@ impl Core {
             // Every Next is an independent draw over occurrences, including current.
             let id = self
                 .random_queue_id(&mut rand::rng())?
-                .expect("queue is nonempty");
+                .context("Queue positions are inconsistent")?;
             return self.start_with_status(id, QueueHistory::Record, status);
         }
         let index = self.state.queue.current_position;
