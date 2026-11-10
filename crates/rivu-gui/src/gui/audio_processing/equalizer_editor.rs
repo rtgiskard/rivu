@@ -4464,7 +4464,7 @@ mod tests {
             owner.finish_equalizer_command(success);
             owner.reconcile(owner.context.snapshot(), cx);
             if graph_command {
-                owner.graph_ack(success, true, cx);
+                owner.graph_ack(ack.status, true, cx);
             }
             if let Some(field) = submission.equalizer_field {
                 owner.finish_equalizer_field(field, success, cx);
@@ -5366,7 +5366,15 @@ mod tests {
             owner.pending = owner.pending.saturating_sub(1);
             owner.finish_equalizer_command(success);
             owner.reconcile(owner.context.snapshot(), cx);
-            owner.graph_ack(success, true, cx);
+            owner.graph_ack(
+                if success {
+                    rivu_protocol::response::AckStatus::Succeeded
+                } else {
+                    rivu_protocol::response::AckStatus::Failed
+                },
+                true,
+                cx,
+            );
         });
         cx.run_until_parked();
     }

@@ -36,6 +36,7 @@ struct PendingEdit {
     equalizer_target: Option<u64>,
     accepted: bool,
     observed: bool,
+    observation_after: Option<u64>,
     select_after: Option<u64>,
 }
 
@@ -284,6 +285,26 @@ impl AudioProcessing {
             }
             self.graph_editor.revision = Some(revision);
         }
+        // An unavailable ACK read cannot attribute a later revision to this edit.
+        // Retire on the next publication, but preserve drafts and discard history
+        // rather than inventing an undo entry or replaying the mutation.
+        if self.graph_editor.pending.as_ref().is_some_and(|pending| {
+            pending
+                .observation_after
+                .is_some_and(|publication| self.state.system.revision > publication)
+        }) {
+            let pending = self
+                .graph_editor
+                .pending
+                .take()
+                .expect("pending graph edit");
+            self.graph_editor.undo.clear();
+            self.graph_editor.redo.clear();
+            equalizer_completed = pending
+                .equalizer_submitted
+                .map(|submission| (submission, false));
+            pending_completed = true;
+        }
         if let Some(pending) = self.graph_editor.pending.as_ref()
             && pending.accepted
             && pending.observed
@@ -420,18 +441,29 @@ impl AudioProcessing {
         }
     }
 
-    pub(super) fn graph_ack(&mut self, success: bool, refreshed: bool, cx: &mut Context<Self>) {
+    pub(super) fn graph_ack(
+        &mut self,
+        status: rivu_protocol::response::AckStatus,
+        refreshed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use rivu_protocol::response::AckStatus;
+        let success = status == AckStatus::Succeeded;
         if let Some(pending) = self.graph_editor.pending.as_mut() {
             pending.accepted = success;
             pending.observed = refreshed;
-        }
-        // Owner acceptance is retained even when no post-command read exists;
-        // only a fresh observation may settle drafts or edit history.
-        if !refreshed {
-            return;
+            if !refreshed && matches!(status, AckStatus::Succeeded | AckStatus::Unknown) {
+                // Include publications already available at ACK delivery in the
+                // baseline: re-rendering cached state is not a fresh observation.
+                pending.observation_after = Some(self.context.snapshot().system.revision);
+                return;
+            }
         }
         if !success && let Some(pending) = self.graph_editor.pending.take() {
-            if pending.before.revision != self.state.system.config.processing_graph.revision {
+            if status == AckStatus::Unknown
+                || (status == AckStatus::Failed && !refreshed)
+                || pending.before.revision != self.state.system.config.processing_graph.revision
+            {
                 self.graph_editor.undo.clear();
                 self.graph_editor.redo.clear();
             }
@@ -504,6 +536,7 @@ impl AudioProcessing {
             equalizer_target,
             accepted: false,
             observed: false,
+            observation_after: None,
             select_after,
         });
         self.send(
@@ -1595,6 +1628,7 @@ mod tests {
                 equalizer_target: None,
                 accepted: false,
                 observed: false,
+                observation_after: None,
                 select_after: None,
             });
             // A previously seen publication is not a post-command observation.
@@ -1603,7 +1637,7 @@ mod tests {
                 .processing_graph
                 .revision = before.revision + 1;
             this.state = Rc::new(state);
-            this.graph_ack(true, false, cx);
+            this.graph_ack(rivu_protocol::response::AckStatus::Succeeded, false, cx);
             this.reconcile_graph(cx);
             let pending = this.graph_editor.pending.as_ref().unwrap();
             assert!(pending.accepted);
@@ -1611,6 +1645,109 @@ mod tests {
             assert_eq!(this.graph_editor.undo.len(), 1);
             assert!(this.graph_editor.redo.is_empty());
         });
+    }
+
+    fn stage_pending_draft(
+        this: &mut AudioProcessing,
+        cx: &mut Context<AudioProcessing>,
+    ) -> FieldKey {
+        let before = this.state.system.config.processing_graph.clone();
+        let key = FieldKey::Graph(NodeField::new(
+            before.node(3).unwrap(),
+            GraphField::Neural(NeuralField::Threads),
+        ));
+        this.graph_editor.selected = Some(3);
+        this.field(key, "Threads", "7".into(), cx);
+        this.fields.get_mut(&key).unwrap().dirty = true;
+        this.graph_editor.draft_stamps.insert(
+            key,
+            DraftStamp {
+                revision: before.revision,
+                generation: 1,
+            },
+        );
+        this.graph_editor.undo.push_back(before.clone());
+        this.graph_editor.redo.push_back(before.clone());
+        this.graph_editor.pending = Some(PendingEdit {
+            before,
+            action: HistoryAction::Undo,
+            submitted: vec![SubmittedField {
+                key,
+                text: "7".into(),
+                generation: 1,
+            }],
+            equalizer_submitted: None,
+            equalizer_target: None,
+            accepted: false,
+            observed: false,
+            observation_after: None,
+            select_after: None,
+        });
+        key
+    }
+
+    #[gpui::test]
+    fn failed_graph_ack_without_refresh_retires_pending_and_preserves_draft(
+        cx: &mut TestAppContext,
+    ) {
+        use rivu_protocol::response::AckStatus;
+        let (_directory, runtime, processing, _window) = fixture(cx);
+        let core_revision = runtime.handle.config_snapshot().processing_graph.revision;
+        for status in [AckStatus::NotAdmitted, AckStatus::Failed] {
+            processing.update(cx, |this, cx| {
+                let key = stage_pending_draft(this, cx);
+                this.graph_ack(status, false, cx);
+                assert!(!this.graph_busy());
+                assert!(this.fields[&key].dirty);
+                assert_eq!(this.fields[&key].input.read(cx).text(), "7");
+                assert!(this.graph_editor.draft_stamps.contains_key(&key));
+                assert!(this.graph_editor.field_errors.contains_key(&key));
+                if status == AckStatus::Failed {
+                    assert!(this.graph_editor.undo.is_empty());
+                    assert!(this.graph_editor.redo.is_empty());
+                }
+            });
+        }
+        assert_eq!(
+            runtime.handle.config_snapshot().processing_graph.revision,
+            core_revision
+        );
+    }
+
+    #[gpui::test]
+    fn unobserved_graph_ack_settles_on_later_snapshot_without_replaying_or_claiming_undo(
+        cx: &mut TestAppContext,
+    ) {
+        use rivu_protocol::response::AckStatus;
+        let (_directory, runtime, processing, _window) = fixture(cx);
+        let core_revision = runtime.handle.config_snapshot().processing_graph.revision;
+        for status in [AckStatus::Succeeded, AckStatus::Unknown] {
+            for advance in [0, 1, 2] {
+                processing.update(cx, |this, cx| {
+                    this.state = this.context.snapshot();
+                    let key = stage_pending_draft(this, cx);
+                    this.graph_ack(status, false, cx);
+                    this.reconcile_graph(cx);
+                    assert!(this.graph_busy());
+                    let mut state = (*this.state).clone();
+                    state.system.revision += 1;
+                    Arc::make_mut(&mut state.system.config)
+                        .processing_graph
+                        .revision += advance;
+                    this.reconcile(Rc::new(state), cx);
+                    assert!(!this.graph_busy());
+                    assert!(this.graph_editor.undo.is_empty());
+                    assert!(this.graph_editor.redo.is_empty());
+                    assert!(this.fields[&key].dirty);
+                    assert_eq!(this.fields[&key].input.read(cx).text(), "7");
+                    assert!(this.graph_editor.draft_stamps.contains_key(&key));
+                });
+            }
+        }
+        assert_eq!(
+            runtime.handle.config_snapshot().processing_graph.revision,
+            core_revision
+        );
     }
 
     #[gpui::test]

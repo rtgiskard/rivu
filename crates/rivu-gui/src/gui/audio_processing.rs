@@ -1051,7 +1051,7 @@ impl AudioProcessing {
                     this.reconcile(this.context.snapshot(), cx);
                 }
                 if graph_command {
-                    this.graph_ack(success, refreshed, cx);
+                    this.graph_ack(ack.ack.status, refreshed, cx);
                 }
                 if refreshed {
                     if success && let Some(submitted) = submitted {
