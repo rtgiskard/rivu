@@ -908,6 +908,7 @@ impl WindowView {
             self.content_resolution.cancel();
         }
         let changed = state.revisions.changed_since(self.state.revisions);
+        let error_changed = state.system.last_error != self.state.system.last_error;
         let same_track = match (&state.current_track, &self.state.current_track) {
             (Some(next), Some(previous)) => Arc::ptr_eq(next, previous),
             (None, None) => true,
@@ -996,7 +997,7 @@ impl WindowView {
                 .update(cx, |waveform, _| waveform.set_seek_enabled(false));
         }
         self.sync_analysis(cx);
-        if !transport_only && !changed.is_empty() {
+        if error_changed || (!transport_only && !changed.is_empty()) {
             cx.notify();
         }
     }
@@ -1364,6 +1365,94 @@ mod state_tests {
     };
     use rivu_protocol::pcm::{PcmHeader, PcmState};
     use std::time::{Duration, Instant};
+
+    #[gpui::test]
+    fn local_error_changes_notify_root_without_core_revisions(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use crate::test_support::{ConfigFixture, CoreRuntime};
+        use std::cell::Cell;
+
+        cx.executor().allow_parking();
+        cx.update(rivu_ui::input::Input::init);
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config)
+        .unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
+        let save = layout::persistence::LayoutPersistence::new(
+            layout::persistence::LoadedLayouts::load(directory.path().join("layouts.json")),
+        );
+        let save_handle = save.handle();
+        let handle = runtime.handle.clone();
+        let source = handle.clone();
+        let artwork = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+            directory.path(),
+        ));
+        let window = cx.add_window(move |window, cx| {
+            let mut app = WindowView::new(
+                handle,
+                save_handle,
+                artwork,
+                Default::default(),
+                Arc::new(Localizer::new("en-US")),
+                window,
+                cx,
+            );
+            app.handle.set_wakeup(|| {});
+            app.window_visible = false;
+            app.reconcile_feature_demand(cx);
+            app
+        });
+        let app = window.root(cx).unwrap();
+        let notifications = Rc::new(Cell::new(0));
+        let count = Rc::clone(&notifications);
+        let _observer = cx.new(|cx| {
+            cx.observe(&app, move |_: &mut (), _, _| {
+                count.set(count.get() + 1);
+            })
+            .detach();
+        });
+        let revisions = source.gui_snapshot().revisions;
+        for error in [Some("command rejected"), Some("another rejection"), None] {
+            notifications.set(0);
+            source.publish_local_error(error.map(str::to_owned));
+            app.update(cx, |app, cx| app.refresh(cx));
+            assert_eq!(source.gui_snapshot().revisions, revisions);
+            assert!(
+                notifications.get() > 0,
+                "error change must invalidate the root"
+            );
+            app.read_with(cx, |app, _| {
+                assert_eq!(app.state.system.last_error.as_deref(), error);
+            });
+        }
+        notifications.set(0);
+        app.update(cx, |app, cx| {
+            // A local publication with no visible change must stay suppressed.
+            let previous = Rc::make_mut(&mut app.state);
+            previous.system.revision = previous.system.revision.wrapping_sub(1);
+            app.refresh(cx);
+        });
+        assert_eq!(notifications.get(), 0);
+        app.update(cx, |app, cx| {
+            // Simulate only a playback token advancing in the next snapshot.
+            let previous = Rc::make_mut(&mut app.state);
+            previous.system.revision = previous.system.revision.wrapping_sub(1);
+            previous.revisions.playback = previous.revisions.playback.wrapping_sub(1);
+            app.refresh(cx);
+        });
+        assert_eq!(
+            notifications.get(),
+            0,
+            "transport-only updates must not notify root"
+        );
+    }
 
     #[test]
     fn analysis_staging_releases_hidden_styles_and_waits_for_restored_publication() {

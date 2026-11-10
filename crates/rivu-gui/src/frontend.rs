@@ -70,6 +70,7 @@ struct Shared {
     wakeup: RwLock<Option<Wakeup>>,
     disconnect: Mutex<ConnectionState>,
     visual: Arc<VisualClient>,
+    shutdown_admitted: Mutex<bool>,
 }
 
 fn analysis_invalidated_by_config(previous: &Config, next: &Config) -> bool {
@@ -320,6 +321,7 @@ pub(crate) struct FrontendRuntime {
 pub(crate) struct FrontendHandle {
     shared: Arc<Shared>,
     commands: Sender<CommandRequest>,
+    shutdown: Sender<CommandRequest>,
     queries: Sender<QueryRequest>,
     query_timeout: Option<QueryTimeout>,
     pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
@@ -363,6 +365,7 @@ impl FrontendRuntime {
             wakeup: RwLock::new(None),
             disconnect: Mutex::new(ConnectionState::default()),
             visual: Arc::clone(&visual),
+            shutdown_admitted: Mutex::new(false),
         });
         let weak = Arc::downgrade(&shared);
         visual.set_wakeup(Arc::new(move || {
@@ -377,11 +380,14 @@ impl FrontendRuntime {
             }
         }));
         let (commands, command_rx) = async_channel::bounded(QUEUE_CAPACITY);
+        // Quit has its own single admission slot, independent of edit pressure.
+        let (shutdown, shutdown_rx) = async_channel::bounded(1);
         let (queries, query_rx) = async_channel::bounded(QUEUE_CAPACITY);
         let mut runtime = Self {
             handle: FrontendHandle {
                 shared: Arc::clone(&shared),
                 commands,
+                shutdown,
                 queries,
                 query_timeout: None,
                 analysis: Arc::clone(&visual.analysis),
@@ -391,7 +397,7 @@ impl FrontendRuntime {
         };
         let session = runtime.handle.session()?;
         runtime.spawn("rivu-gui-command", move |shared| {
-            command_worker(shared, session, command_rx)
+            command_worker(shared, session, command_rx, shutdown_rx)
         })?;
         for _ in 0..QUERY_WORKERS {
             let session = runtime.handle.session()?;
@@ -442,6 +448,7 @@ impl FrontendRuntime {
 
     pub(crate) fn shutdown(&mut self) -> Result<()> {
         self.handle.commands.close();
+        self.handle.shutdown.close();
         self.handle.queries.close();
         self.handle.shared.disconnected();
         for worker in self.workers.drain(..) {
@@ -464,8 +471,12 @@ fn command_worker(
     shared: Arc<Shared>,
     mut session: ClientSession,
     receiver: Receiver<CommandRequest>,
+    shutdown_receiver: Receiver<CommandRequest>,
 ) {
-    while let Ok(request) = receiver.recv_blocking() {
+    while let Ok(request) = futures_lite::future::block_on(futures_lite::future::or(
+        shutdown_receiver.recv(),
+        receiver.recv(),
+    )) {
         if shared.stop.is_cancelled() {
             break;
         }
@@ -473,6 +484,7 @@ fn command_worker(
         if matches!(request.command, AppCommand::Core(Command::DismissError)) {
             shared.dismiss_error();
         }
+        let mut instance_error = None;
         let ack = match session.request_ack(request.command) {
             Ok(ack) => ack,
             Err(error) => {
@@ -480,7 +492,7 @@ fn command_worker(
                     .downcast_ref::<CommandFailure>()
                     .map_or(AckStatus::Unknown, |failure| failure.status);
                 if error.downcast_ref::<InstanceChanged>().is_some() {
-                    shared.error(format!("GUI instance changed: {error:#}"), true);
+                    instance_error = Some(format!("GUI instance changed: {error:#}"));
                 }
                 shared.ack_error(
                     status,
@@ -488,30 +500,59 @@ fn command_worker(
                 )
             }
         };
-        let delivery = CommandDelivery::observe(ack, shutdown, || {
-            anyhow::ensure!(
-                !shared.stop.is_cancelled(),
-                "GUI disconnected before authoritative refresh"
-            );
-            shared.refresh_after_operation(&mut session)
-        });
-        if let CommandObservation::Unavailable(message) = &delivery.observation
-            && !shared.stop.is_cancelled()
-        {
-            shared.error(message.clone(), true);
-        }
-        if let Some(reply) = request.reply {
-            let _ = reply.send(delivery);
-        } else if !delivery.ack.is_success() {
-            shared.error(
-                delivery
-                    .ack
-                    .error
-                    .unwrap_or_else(|| "GUI command failed".into()),
-                false,
-            );
+        let shutdown_complete = finish_command(
+            &shared,
+            shutdown,
+            request.reply,
+            ack,
+            instance_error,
+            || {
+                anyhow::ensure!(
+                    !shared.stop.is_cancelled(),
+                    "GUI disconnected before authoritative refresh"
+                );
+                shared.refresh_after_operation(&mut session)
+            },
+        );
+        if shutdown_complete {
+            break;
         }
     }
+}
+
+fn finish_command(
+    shared: &Shared,
+    shutdown: bool,
+    reply: Option<oneshot::Sender<CommandDelivery>>,
+    ack: Ack,
+    instance_error: Option<String>,
+    refresh: impl FnOnce() -> Result<()>,
+) -> bool {
+    if shutdown && ack.status == AckStatus::NotAdmitted {
+        *shared.shutdown_admitted.lock() = false;
+    }
+    if let Some(message) = instance_error {
+        shared.error(message, true);
+    }
+    let shutdown_complete = shutdown && ack.is_success();
+    let delivery = CommandDelivery::observe(ack, shutdown, refresh);
+    if let CommandObservation::Unavailable(message) = &delivery.observation
+        && !shared.stop.is_cancelled()
+    {
+        shared.error(message.clone(), true);
+    }
+    if let Some(reply) = reply {
+        let _ = reply.send(delivery);
+    } else if !delivery.ack.is_success() {
+        shared.error(
+            delivery
+                .ack
+                .error
+                .unwrap_or_else(|| "GUI command failed".into()),
+            false,
+        );
+    }
+    shutdown_complete
 }
 
 fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Receiver<QueryRequest>) {
@@ -600,7 +641,25 @@ impl FrontendHandle {
         self.send_app(command.into())
     }
     pub(crate) fn request_shutdown(&self) -> Result<()> {
-        self.send_app(AppCommand::Shutdown)
+        let result: Result<()> = (|| {
+            anyhow::ensure!(self.is_connected(), "GUI is disconnected from Core");
+            let mut admitted = self.shared.shutdown_admitted.lock();
+            if !*admitted {
+                self.shutdown
+                    .try_send(CommandRequest {
+                        command: AppCommand::Shutdown,
+                        reply: None,
+                    })
+                    .context("GUI shutdown worker stopped; shutdown not sent")?;
+                *admitted = true;
+            }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.shared
+                .error(format!("GUI quit failed: {error:#}"), false);
+        }
+        result
     }
     fn send_app(&self, command: AppCommand) -> Result<()> {
         anyhow::ensure!(self.is_connected(), "GUI is disconnected from Core");
@@ -763,6 +822,13 @@ impl FrontendHandle {
     pub(crate) fn query(&self, query: Query) -> QueryResponse {
         futures::executor::block_on(self.query_for_gui(query))
     }
+    #[cfg(test)]
+    pub(crate) fn publish_local_error(&self, message: Option<String>) {
+        match message {
+            Some(message) => self.shared.error(message, false),
+            None => self.shared.dismiss_error(),
+        }
+    }
     pub(crate) fn gui_snapshot(&self) -> GuiSnapshot {
         let state = self.shared.published.read();
         state.gui_snapshot()
@@ -839,6 +905,136 @@ mod tests {
         let runtime =
             crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
         (directory, runtime)
+    }
+
+    #[test]
+    fn rejected_shutdown_allows_explicit_retry_without_automatic_retry() {
+        let (_directory, runtime) = fixture();
+        let mut handle = runtime.handle.clone();
+        let (shutdown, requests) = async_channel::bounded(1);
+        handle.shutdown = shutdown;
+        handle.request_shutdown().unwrap();
+        let request = requests.try_recv().unwrap();
+        let shared = Arc::clone(&handle.shared);
+        let (notice, notices) = std::sync::mpsc::sync_channel(1);
+        let test_thread = thread::current().id();
+        *handle.shared.wakeup.write() = Some(Arc::new(move || {
+            if thread::current().id() != test_thread {
+                return;
+            }
+            let admitted = shared
+                .shutdown_admitted
+                .try_lock()
+                .expect("shutdown admission mutex held during notification");
+            notice.try_send(*admitted).unwrap();
+        }));
+        assert!(!finish_command(
+            &handle.shared,
+            matches!(request.command, AppCommand::Shutdown),
+            request.reply,
+            Ack::new(AckStatus::NotAdmitted, Some("rejected".into()), 1),
+            None,
+            || panic!("shutdown must not refresh"),
+        ));
+        assert!(!notices.try_recv().unwrap());
+        assert!(
+            requests.is_empty(),
+            "rejected shutdown automatically retried"
+        );
+        handle.clear_wakeup();
+        handle.request_shutdown().unwrap();
+        handle.request_shutdown().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests.try_recv().unwrap().command,
+            AppCommand::Shutdown
+        ));
+    }
+
+    #[test]
+    fn shutdown_retains_admission_after_failed_unknown_or_successful_ack() {
+        let (_directory, runtime) = fixture();
+        for status in [AckStatus::Failed, AckStatus::Unknown, AckStatus::Succeeded] {
+            let mut handle = runtime.handle.clone();
+            let (shutdown, requests) = async_channel::bounded(1);
+            handle.shutdown = shutdown;
+            handle.request_shutdown().unwrap();
+            let request = requests.try_recv().unwrap();
+            let (reply, delivery) = oneshot::channel();
+            assert_eq!(
+                finish_command(
+                    &handle.shared,
+                    matches!(request.command, AppCommand::Shutdown),
+                    Some(reply),
+                    Ack::new(status, None, 1),
+                    None,
+                    || panic!("shutdown must not refresh"),
+                ),
+                status == AckStatus::Succeeded,
+            );
+            assert_eq!(
+                futures::executor::block_on(delivery).unwrap().ack.status,
+                status
+            );
+            assert!(*handle.shared.shutdown_admitted.lock());
+            handle.request_shutdown().unwrap();
+            assert!(requests.is_empty());
+            *handle.shared.shutdown_admitted.lock() = false;
+        }
+    }
+
+    #[test]
+    fn shutdown_bypasses_full_command_queue_and_is_admitted_only_once() {
+        let (_directory, runtime) = fixture();
+        let mut handle = runtime.handle.clone();
+        let (commands, receiver) = async_channel::bounded(QUEUE_CAPACITY);
+        let (shutdown, shutdown_receiver) = async_channel::bounded(1);
+        handle.commands = commands;
+        handle.shutdown = shutdown;
+        for _ in 0..QUEUE_CAPACITY {
+            handle.send(Command::DismissError).unwrap();
+        }
+        assert!(handle.send(Command::DismissError).is_err());
+        handle.request_shutdown().unwrap();
+        handle.request_shutdown().unwrap();
+        assert_eq!(handle.shutdown.len(), 1);
+        let (finished, completion) = std::sync::mpsc::sync_channel(1);
+        handle.set_disconnect_callback(move || {
+            let _ = finished.send(());
+        });
+        let session = handle.session().unwrap();
+        let shared = Arc::clone(&handle.shared);
+        let pending = receiver.clone();
+        let worker = thread::spawn(move || {
+            command_worker(shared, session, receiver, shutdown_receiver);
+        });
+        completion
+            .recv_timeout(Duration::from_secs(5))
+            .expect("priority shutdown did not reach Core");
+        assert_eq!(pending.len(), QUEUE_CAPACITY);
+        assert!(handle.shutdown.is_empty());
+        handle.commands.close();
+        handle.shutdown.close();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn unavailable_shutdown_worker_publishes_visible_failure() {
+        let (_directory, runtime) = fixture();
+        let mut handle = runtime.handle.clone();
+        let (shutdown, receiver) = async_channel::bounded(1);
+        handle.shutdown = shutdown;
+        drop(receiver);
+        assert!(handle.request_shutdown().is_err());
+        assert!(
+            handle
+                .gui_snapshot()
+                .system
+                .last_error
+                .unwrap()
+                .contains("GUI quit failed")
+        );
+        assert!(!*handle.shared.shutdown_admitted.lock());
     }
 
     fn publish_track_metadata(shared: &Shared, track_id: i64) {
