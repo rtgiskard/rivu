@@ -199,7 +199,7 @@ impl CoreRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    /// Start a standalone core without installing or owning process logging.
+    /// Start a standalone core without process logging or host device enumeration.
     pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
         let tasks = TaskRuntime::start()?;
         let mut runtime = Self::start_inner(
@@ -209,6 +209,7 @@ impl CoreRuntime {
             None,
             Arc::clone(&tasks.handle),
             Arc::clone(&tasks.workers),
+            Core::initialize_state,
         )?;
         runtime._test_tasks = Some(tasks);
         Ok(runtime)
@@ -230,6 +231,7 @@ impl CoreRuntime {
             Some(logging),
             executor,
             workers,
+            Core::initialize,
         )
     }
 
@@ -240,6 +242,7 @@ impl CoreRuntime {
         logging: Option<rivu_utils::logging::Control>,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
+        initialize: fn(&mut Core),
     ) -> Result<Self> {
         // An existing file establishes an effective, normalized baseline without
         // rewriting user formatting or materializing omitted defaults at startup.
@@ -326,7 +329,7 @@ impl CoreRuntime {
                 // Local ownership ensures unwind drops Core before publishing
                 // completion, on this thread rather than the shared reactor.
                 let mut core = core;
-                core.initialize();
+                initialize(&mut core);
                 core.run(receiver, shutdown_receiver, &worker_control);
             })?;
         Ok(Self {

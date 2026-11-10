@@ -279,6 +279,10 @@ impl Core {
             self.workers.clone(),
             enumerate,
         ));
+        self.initialize_state();
+    }
+
+    pub(super) fn initialize_state(&mut self) {
         let started = Instant::now();
         tracing::debug!("initial_load_started");
         if let Err(error) = self.load_initial_state() {

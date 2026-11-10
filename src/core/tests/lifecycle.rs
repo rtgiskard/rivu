@@ -885,7 +885,7 @@ fn owner_failure_retires_background_work_without_blocking_executor() {
             if during_request {
                 core.run(receiver, shutdown, &worker_control);
             } else {
-                core.initialize();
+                core.initialize_state();
             }
         });
         entering.recv_timeout(Duration::from_secs(5)).unwrap();

@@ -218,7 +218,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let server =
         Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
     let mut client = client_session(directory.path());
-    // Fence initial database projection; optional device discovery remains independent.
+    // Fence the initial database projection before comparing business state.
     client.query(Query::ScanTask { id: 0 }).unwrap();
     for target in [
         rivu_protocol::model::TaskTarget::Scan { id: u64::MAX },
