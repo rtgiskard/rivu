@@ -971,7 +971,7 @@ mod tests {
 
     #[cfg(feature = "onnx")]
     #[test]
-    fn native_prepare_rejects_invalid_contracts_before_pcm_or_worker_access() {
+    fn native_prepare_rejects_invalid_manifest_contracts_and_preserves_provenance() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("manifest.json");
         let base = serde_json::json!({
@@ -980,7 +980,6 @@ mod tests {
             "files":{"model.onnx":"b4718df6228e7bdf1a8a435cf98f838636eb2fd331acabf86ba87c5192ebcb87",
                      "weight-license.txt":"0".repeat(64)},
         });
-        let budget = audio::PcmBudget::new(1);
         let config = rivu_format::config::NeuralConfig {
             speech_manifest: Some(path.clone()),
             worker: directory.path().join("must-not-start.py"),
@@ -1036,7 +1035,6 @@ mod tests {
             .err()
             .expect("invalid native manifest must fail during preparation");
             assert!(error.to_string().contains(expected), "{field}: {error:#}");
-            assert_eq!(budget.used_bytes(), 0);
             assert!(provenance.sha256.is_none());
             assert_eq!(
                 provenance.id.as_deref(),

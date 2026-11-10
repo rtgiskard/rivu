@@ -377,24 +377,17 @@ mod tests {
         );
         assert_eq!(budget.used_bytes(), 0);
 
-        let longer = directory.path().join("longer.wav");
-        let mut writer = hound::WavWriter::create(
-            &longer,
-            hound::WavSpec {
-                channels: 2,
-                sample_rate: 8000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
+        let longer = crate::source::tests::constant_flac_file(0, 12);
+        let renderer = SourceRenderer::open(
+            longer.path(),
+            None,
+            DecoderHint::Native,
+            1,
+            false,
+            &cancelled,
         )
         .unwrap();
-        for _ in 0..40_000 {
-            writer.write_sample(0.25_f32).unwrap();
-        }
-        writer.finalize().unwrap();
-        let mut renderer =
-            SourceRenderer::open(&longer, None, DecoderHint::Native, 1, false, &cancelled).unwrap();
-        renderer.format.duration = None;
+        assert_eq!(renderer.format().duration, None);
         let budget = super::super::PcmBudget::new(40 * 1024);
         assert!(
             renderer
@@ -402,7 +395,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(budget.used_bytes(), 0);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 
         let renderer =
             SourceRenderer::open(&source, None, DecoderHint::Native, 1, false, &cancelled).unwrap();

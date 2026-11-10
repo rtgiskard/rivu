@@ -2419,6 +2419,10 @@ mod content_menu_keyboard_tests {
         );
         key(handle, "enter", cx);
         assert!(app.read_with(cx, |app, _| app.content_menu.is_none()));
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
         let ViewResponse::PlaylistSummaries(page) = runtime
             .handle
             .query(Query::PlaylistSummaries {
@@ -2528,6 +2532,10 @@ mod content_menu_keyboard_tests {
                 .is_some()
         );
         key(handle, "enter", cx);
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
         let ViewResponse::PlaylistEntries(entries) = runtime
             .handle
             .query(Query::PlaylistEntries {
@@ -2589,6 +2597,10 @@ mod content_menu_keyboard_tests {
         // Explicitly selecting the replacement makes its own stable ID eligible.
         key(handle, "home", cx);
         key(handle, "enter", cx);
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
         let ViewResponse::PlaylistEntries(entries) = runtime
             .handle
             .query(Query::PlaylistEntries {
@@ -2879,6 +2891,10 @@ mod content_menu_keyboard_tests {
         assert!(app.read_with(cx, |app, cx| {
             app.playlists.read(cx).playlist_action.is_none()
         }));
+        let ack =
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack;
+        assert!(ack.is_success());
         let after = entries();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, before[0].id);

@@ -1412,7 +1412,8 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
 }
 
 #[test]
-fn retained_remote_query_retires_after_logical_timeout_without_releasing_its_physical_slot() {
+fn retained_remote_query_owner_cancellation_keeps_its_physical_reply_until_completion() {
+    use rivu_protocol::{query_tracking::QueryEpoch, response::QueryError};
     use std::time::Duration;
     let directory = socket_test_directory();
     let config_path = directory.path().join("config.toml");
@@ -1429,31 +1430,47 @@ fn retained_remote_query_retires_after_logical_timeout_without_releasing_its_phy
     let app = AppHandle::new(&runtime, directory.path());
     let server = Server::start(&owner, handle, app.clone(), runtime.test_executor()).unwrap();
     let mut session = client_session(directory.path());
+    let mut query_owner = QueryEpoch::default();
+    let ticket = query_owner.ticket();
     let (completed, result) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         completed
-            .send(session.query_retained(Query::Track { track_id: 42 }))
-            .unwrap()
+            .send(session.query_retained_until(Query::Track { track_id: 42 }, ticket.cancelled()))
+            .unwrap();
+        session.query(Query::Track { track_id: 43 }).unwrap()
     });
     let reply = async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
+    assert!(reply.ticket_is_current());
+    query_owner.cancel();
+    async_io::block_on(timeout(Duration::from_secs(2), reply.owner_cancelled())).unwrap();
+    assert!(!reply.ticket_is_current());
     assert!(matches!(
-        result.recv_timeout(Duration::from_millis(20)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        result.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-    assert!(!reply.is_cancelled());
+    assert!(
+        !reply.is_cancelled(),
+        "logical cancellation must retain the Core reply receiver"
+    );
     reply.respond(QueryResponse {
         revisions: Default::default(),
-        result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+        result: Err(QueryError::Cancelled),
     });
-    assert!(
+    assert_eq!(
         result
             .recv_timeout(Duration::from_secs(2))
             .unwrap()
             .unwrap()
             .result
-            .is_ok()
+            .unwrap_err(),
+        QueryError::Cancelled
     );
-    worker.join().unwrap();
+    let next = async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
+    next.respond(QueryResponse {
+        revisions: Default::default(),
+        result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+    });
+    assert!(worker.join().unwrap().result.is_ok());
     drop(server);
     app.request_shutdown().unwrap();
     runtime.join().unwrap();

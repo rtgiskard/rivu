@@ -1235,16 +1235,20 @@ mod tests {
                     None,
                     &shutdown,
                 ));
-                assert!(waiting.as_mut().now_or_never().is_none());
+                // Admission is polled before expiry, even if this task resumes
+                // after its deadline. Do not require that first poll to pend.
+                let first_poll = waiting.as_mut().now_or_never();
                 let reply = timeout(Duration::from_secs(2), queries.receive())
                     .await
                     .unwrap();
-                assert!(
-                    timeout(Duration::from_secs(2), waiting)
+                let result = match first_poll {
+                    Some(result) => result,
+                    None => timeout(Duration::from_secs(2), waiting.as_mut())
                         .await
-                        .unwrap()
-                        .is_err()
-                );
+                        .unwrap(),
+                };
+                drop(waiting);
+                assert!(result.is_err());
                 assert!(reply.is_cancelled());
                 assert_eq!(reader.deadline, deadline);
                 assert_eq!(reader.pending.len(), bytes.len());

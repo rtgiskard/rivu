@@ -1596,11 +1596,20 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
 
 #[test]
 fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
+    if crate::test_support::run_in_subprocess(
+        "core::tests::settings::ffmpeg_external_load_result_survives_runtime_disable_and_reenable",
+        Duration::from_secs(20),
+    ) {
+        return;
+    }
+    #[cfg(feature = "ffmpeg")]
+    assert_eq!(audio::ffmpeg_status().unwrap(), "not loaded");
     let (directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
     edit_preferences(&mut core, |config| config.ffmpeg_enabled = false);
     core.state.system.ffmpeg_status = "disabled".into();
     let (handle, control, worker, _publications) = navigation_runtime(core);
+    #[cfg(feature = "ffmpeg")]
     let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     let configure = |enabled| {
         let mut config = handle.config_snapshot().as_ref().clone();
@@ -1615,21 +1624,39 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     };
 
     configure(true);
-    // An enhanced probe attempts the same process-wide load as GUI waveform
-    // work, without an audio-engine event. A missing file avoids decoder I/O;
-    // both successful and failed library loads must become terminal status.
-    assert!(audio::probe_details(&directory.path().join("missing.wav"), true, true).is_err());
-    let expected = audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"));
-    assert_ne!(expected, "not loaded");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while handle.state.read().system.ffmpeg_status != expected {
-        futures::executor::block_on(rivu_protocol::transport::timeout_at(
-            deadline,
-            changes.recv(),
-        ))
-        .expect("external decoder load result must reach core state before deadline")
-        .expect("core revision subscription must remain connected");
-    }
+    #[cfg(feature = "ffmpeg")]
+    let expected = {
+        assert_eq!(handle.state.read().system.ffmpeg_status, "not loaded");
+        while changes.try_recv().is_ok() {}
+        // An enhanced probe attempts the same process-wide load as GUI waveform
+        // work, without an audio-engine event. A missing file avoids decoder I/O;
+        // both successful and failed library loads must notify Core.
+        assert!(audio::probe_details(&directory.path().join("missing.wav"), true, true).is_err());
+        let expected =
+            audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"));
+        assert_ne!(expected, "not loaded");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            futures::executor::block_on(rivu_protocol::transport::timeout_at(
+                deadline,
+                changes.recv(),
+            ))
+            .expect("external decoder load result must notify core before deadline")
+            .expect("core revision subscription must remain connected");
+            if handle.state.read().system.ffmpeg_status == expected {
+                break;
+            }
+        }
+        expected
+    };
+    #[cfg(not(feature = "ffmpeg"))]
+    let expected = {
+        let expected = format!("unavailable: {:#}", audio::ffmpeg_status().unwrap_err());
+        assert_eq!(handle.state.read().system.ffmpeg_status, expected);
+        assert!(audio::probe_details(&directory.path().join("missing.wav"), true, true).is_err());
+        assert_eq!(handle.state.read().system.ffmpeg_status, expected);
+        expected
+    };
 
     configure(false);
     assert_eq!(handle.state.read().system.ffmpeg_status, "disabled");

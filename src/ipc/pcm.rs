@@ -311,6 +311,12 @@ mod tests {
 
     #[test]
     fn malformed_hello_is_rejected_before_registration_or_welcome() {
+        if crate::test_support::run_in_subprocess(
+            "ipc::pcm::tests::malformed_hello_is_rejected_before_registration_or_welcome",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
         for index in 1..8 {
             let (handle, _queries) = CoreHandle::test_query_port();
             let initial = handle.pcm.state();

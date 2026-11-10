@@ -21,9 +21,27 @@ fn master_bypass_wire_requires_explicit_boolean_and_preserves_direction() {
         };
         assert!(matches!(Command::try_from(command).unwrap(),
             Command::ProcessingBypass { bypassed: actual } if actual == bypassed));
+        let json = serde_json::json!({
+            "command": "processing_bypass",
+            "bypassed": bypassed,
+        });
+        assert!(matches!(serde_json::from_value::<Command>(json).unwrap(),
+            Command::ProcessingBypass { bypassed: actual } if actual == bypassed));
     }
-    assert!(serde_json::from_str::<Command>("\"ProcessingBypass\"").is_err());
-    assert!(serde_json::from_str::<Command>(r#"{"ProcessingBypass":{}}"#).is_err());
+    assert!(serde_json::from_str::<Command>(r#"{"command":"processing_bypass"}"#).is_err());
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!("true"),
+        serde_json::json!(1),
+    ] {
+        assert!(
+            serde_json::from_value::<Command>(serde_json::json!({
+                "command": "processing_bypass",
+                "bypassed": invalid,
+            }))
+            .is_err()
+        );
+    }
 }
 
 #[test]
