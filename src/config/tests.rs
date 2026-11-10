@@ -718,7 +718,12 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         processing_graph: Default::default(),
     };
     config.save(&path).unwrap();
-    assert_eq!(Config::load(&path).unwrap(), config);
+    let cwd = std::env::current_dir().unwrap();
+    let expected = Config {
+        library_roots: vec![cwd.join("Music/Live recordings"), cwd.join("音楽")],
+        ..config
+    };
+    assert_eq!(Config::load(&path).unwrap(), expected);
     assert_eq!(entries(&parent), vec![path.clone()]);
     #[cfg(unix)]
     {
