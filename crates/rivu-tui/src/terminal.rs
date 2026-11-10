@@ -235,6 +235,7 @@ where
     let mut redraw = true;
     let mut immediate_redraw = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
+    let mut size = terminal.size()?;
     // Reuse the input loop's existing bounded wait; signals need no extra worker
     // or periodic wakeup and are observed even before the IPC handshake finishes.
     while !terminating.load(Ordering::Relaxed) {
@@ -262,7 +263,12 @@ where
         }
         let Some(tui) = &mut tui else {
             if redraw {
-                terminal.draw(|frame| draw_loading(frame, &i18n))?;
+                terminal.draw(|frame| {
+                    let area = frame.area();
+                    size.width = area.width;
+                    size.height = area.height;
+                    draw_loading(frame, &i18n);
+                })?;
                 redraw = false;
             }
             if let Some(event) = next_event(Duration::from_millis(50))? {
@@ -274,7 +280,11 @@ where
                     {
                         break;
                     }
-                    Event::Resize(_, _) => redraw = true,
+                    Event::Resize(width, height) => {
+                        size.width = width;
+                        size.height = height;
+                        redraw = true;
+                    }
                     _ => {}
                 }
             }
@@ -296,7 +306,6 @@ where
             redraw = true;
             immediate_redraw = true;
         }
-        let size = terminal.size()?;
         render::commit_layout(
             ratatui::layout::Rect::new(0, 0, size.width, size.height),
             &mut tui.ui,
@@ -334,14 +343,22 @@ where
             immediate_redraw = true;
         }
         if redraw && (immediate_redraw || last_draw.elapsed() >= Duration::from_millis(100)) {
-            terminal.draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))?;
+            terminal.draw(|frame| {
+                let area = frame.area();
+                size.width = area.width;
+                size.height = area.height;
+                render::commit_layout(area, &mut tui.ui);
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })?;
             last_draw = Instant::now();
             redraw = false;
             immediate_redraw = false;
         }
         if let Some(event) = next_event(Duration::from_millis(50))? {
             match event {
-                Event::Resize(_, _) => {
+                Event::Resize(width, height) => {
+                    size.width = width;
+                    size.height = height;
                     redraw = true;
                     immediate_redraw = true;
                 }
