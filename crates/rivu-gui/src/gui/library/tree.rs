@@ -1092,6 +1092,16 @@ impl DirectoryTree {
         requests
     }
 
+    pub(super) fn remember_range(
+        &mut self,
+        rows: HashMap<super::LibraryNode, (TreeBranch, usize)>,
+    ) {
+        self.selected_locations.extend(
+            rows.into_iter()
+                .map(|(node, (branch, index))| ((node, branch), index)),
+        );
+    }
+
     pub(in crate::gui) fn remember_selection(
         &mut self,
         nodes: &HashSet<super::LibraryNode>,
@@ -1192,22 +1202,13 @@ impl DirectoryTree {
             .map(|segment| segment.start + index - segment.offset)
     }
 
-    pub(in crate::gui) fn index_of(&self, node: &super::LibraryNode) -> Option<usize> {
-        self.focused
-            .as_ref()
-            .filter(|(focused, _)| focused == node)
-            .and_then(|key| {
-                self.selected_locations
-                    .get(key)
-                    .and_then(|index| self.location_index(&key.1, *index))
-            })
-            .or_else(|| {
-                self.selected_locations
-                    .iter()
-                    .filter(|((candidate, _), _)| candidate == node)
-                    .filter_map(|((_, key), index)| self.location_index(key, *index))
-                    .min()
-            })
+    /// Action ordering uses the first occurrence, not keyboard focus.
+    pub(super) fn first_index_of(&self, node: &super::LibraryNode) -> Option<usize> {
+        self.selected_locations
+            .iter()
+            .filter(|((candidate, _), _)| candidate == node)
+            .filter_map(|((_, key), index)| self.location_index(key, *index))
+            .min()
     }
 
     /// Keep the clicked occurrence distinct from the deduplicated action selection.
@@ -2293,9 +2294,11 @@ mod tests {
         tree.remember_selection(&nodes, &HashSet::new());
         tree.focus_selection(&directory, 3);
         assert_eq!(tree.selected_index(), Some(3));
+        assert_eq!(tree.first_index_of(&directory), Some(1));
         assert_eq!(tree.parent_index(tree.selected_index().unwrap()), None);
         tree.focus_selection(&leaf, 4);
         assert_eq!(tree.selected_index(), Some(4));
+        assert_eq!(tree.first_index_of(&leaf), Some(2));
         assert_eq!(tree.parent_index(tree.selected_index().unwrap()), Some(3));
         tree.collapse(&root);
         assert_eq!(tree.selected_index(), Some(2));
@@ -2489,11 +2492,11 @@ mod tests {
         tree.focus_selection(&focused, 3);
         tree.collapse(&root);
         assert!(tree.branches.contains_key(&root));
-        assert_eq!(tree.index_of(&selected), None);
+        assert_eq!(tree.first_index_of(&selected), None);
         assert_eq!(tree.selected_index(), Some(2));
         assert!(tree.focused.is_some());
         tree.expand(&root);
-        assert_eq!(tree.index_of(&selected), Some(1));
+        assert_eq!(tree.first_index_of(&selected), Some(1));
         assert_eq!(tree.selected_index(), Some(3));
         tree.collapse(&root);
         tree.remember_selection(&HashSet::from([focused]), &HashSet::new());

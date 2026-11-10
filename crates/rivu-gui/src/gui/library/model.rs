@@ -10,7 +10,7 @@ use std::{collections::HashSet, ops::Range, sync::Arc};
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
     nodes: &mut HashSet<LibraryNode>,
-    range: HashSet<LibraryNode>,
+    range: impl IntoIterator<Item = LibraryNode>,
     additive: bool,
 ) {
     if !additive {
@@ -708,6 +708,26 @@ impl LibraryBrowser {
             .collect()
     }
 
+    pub(super) fn drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
+        let mut ids = nodes
+            .iter()
+            .filter_map(|node| match node {
+                LibraryNode::Track(id) => Some(*id),
+                LibraryNode::Directory(_) | LibraryNode::OtherTracks => None,
+            })
+            .collect::<Vec<_>>();
+        ids.sort_by_cached_key(|id| {
+            (
+                self.tree
+                    .first_index_of(&LibraryNode::Track(*id))
+                    .unwrap_or(usize::MAX),
+                *id,
+            )
+        });
+        ids.dedup();
+        ids
+    }
+
     pub(super) fn tree_active(&self) -> bool {
         self.tree_active
     }
@@ -765,16 +785,6 @@ impl LibraryBrowser {
                 }
             }
         }
-        self.remember_selection();
-    }
-
-    pub(super) fn apply_range(&mut self, nodes: HashSet<LibraryNode>, additive: bool) {
-        merge_selection(
-            &mut self.selected,
-            &mut self.selected_nodes,
-            nodes,
-            additive,
-        );
         self.remember_selection();
     }
 
@@ -1396,10 +1406,9 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let folder =
             LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new("/music/album")));
-        library.apply_range(
-            HashSet::from([folder.clone(), LibraryNode::Track(1), LibraryNode::Track(2)]),
-            false,
-        );
+        library.select_node(&folder, false);
+        library.select_node(&LibraryNode::Track(1), true);
+        library.select_node(&LibraryNode::Track(2), true);
         for source in [&folder, &LibraryNode::Track(1)] {
             let nodes = library.drag_nodes(source);
             assert_eq!(nodes.len(), 3);
@@ -1830,17 +1839,21 @@ mod tests {
     #[test]
     fn replacing_large_selection_releases_capacity_and_preserves_additive_semantics() {
         let mut library = LibraryBrowser::default();
-        let range = (0..512)
-            .flat_map(|id| {
-                [
-                    LibraryNode::Track(id),
-                    LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new(&format!(
-                        "/music/{id}"
-                    )))),
-                ]
-            })
-            .collect();
-        library.apply_range(range, false);
+        let range = (0..512).flat_map(|id| {
+            [
+                LibraryNode::Track(id),
+                LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new(&format!(
+                    "/music/{id}"
+                )))),
+            ]
+        });
+        merge_selection(
+            &mut library.selected,
+            &mut library.selected_nodes,
+            range,
+            false,
+        );
+        library.remember_selection();
         assert_eq!(library.selected.len(), 512);
         assert_eq!(library.selected_nodes.len(), 512);
         library.select_node(&LibraryNode::Track(7), false);

@@ -515,7 +515,7 @@ impl Library {
                                 };
                                 if !selected { this.select_library_row(menu_node.clone(), index, false, false, (*menu_scope).clone(), cx); }
                                 let nodes = this.library.drag_nodes(&menu_node);
-                                let track_ids = this.library_drag_track_ids(&nodes);
+                                let track_ids = this.library.drag_track_ids(&nodes);
                                 let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
                                 let play = match &menu_node { LibraryNode::Track(track_id) => Some(Command::Play { track_id: *track_id }), _ => None };
                                 let remove = only_tracks.then(|| Command::RemoveTracks { track_ids: track_ids.clone() });

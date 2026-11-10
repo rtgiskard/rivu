@@ -148,7 +148,8 @@ only matching, favorite, or missing tracks, select and drag the track rows.
 Click selects one row; Ctrl/Command-click toggles it. Shift-click selects a range
 from the original anchor; Ctrl/Command-Shift-click adds that range. Range selection
 includes unloaded rows, disabling selection actions and dragging until loading
-finishes. Changing search or filters cancels a loading range.
+finishes. Track transfers follow display order, independent of which pages are
+cached. Changing search or filters cancels a loading range.
 
 Right-clicking a selected track preserves its group; right-clicking an unselected
 track selects that track alone. Track menus offer Play, Append to queue,

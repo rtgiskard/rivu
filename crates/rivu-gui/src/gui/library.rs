@@ -424,27 +424,6 @@ impl Library {
 }
 
 impl Library {
-    pub(super) fn library_drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
-        let mut ids = nodes
-            .iter()
-            .filter_map(|node| match node {
-                LibraryNode::Track(id) => Some(*id),
-                LibraryNode::Directory(_) | LibraryNode::OtherTracks => None,
-            })
-            .collect::<Vec<_>>();
-        ids.sort_by_cached_key(|id| {
-            (
-                self.library
-                    .tree()
-                    .index_of(&LibraryNode::Track(*id))
-                    .unwrap_or(usize::MAX),
-                *id,
-            )
-        });
-        ids.dedup();
-        ids
-    }
-
     pub(super) fn resolve_library_drag(
         &mut self,
         nodes: &[LibraryNode],
@@ -463,7 +442,7 @@ impl Library {
             .collect::<Vec<_>>();
         directories.sort();
         directories.dedup();
-        let track_ids = self.library_drag_track_ids(nodes);
+        let track_ids = self.library.drag_track_ids(nodes);
         let other_tracks = nodes.contains(&LibraryNode::OtherTracks);
         match destination {
             super::DragDestination::Queue => self.send(

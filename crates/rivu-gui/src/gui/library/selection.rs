@@ -10,7 +10,7 @@ use rivu_protocol::{
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ops::Range,
     sync::Arc,
 };
@@ -54,7 +54,7 @@ pub(in crate::gui) struct LibraryCommit {
     scope: Scope,
     endpoint: LibraryNode,
     index: usize,
-    selected: Option<HashSet<LibraryNode>>,
+    selected: Option<HashMap<LibraryNode, (TreeBranch, usize)>>,
     multi: bool,
     scroll: bool,
 }
@@ -172,7 +172,7 @@ struct RangeJob {
     token: u64,
     scope: Scope,
     slices: VecDeque<Slice>,
-    selected: HashSet<LibraryNode>,
+    selected: HashMap<LibraryNode, (TreeBranch, usize)>,
     endpoint: LibraryNode,
     endpoint_index: usize,
     additive: bool,
@@ -200,7 +200,12 @@ impl RangeJob {
         }
     }
 
-    fn add_row(&mut self, slice: &Slice, row: &DirectoryRow) -> Result<(), SelectionError> {
+    fn add_row(
+        &mut self,
+        slice: &Slice,
+        index: usize,
+        row: &DirectoryRow,
+    ) -> Result<(), SelectionError> {
         if let Some(expected) = &slice.check {
             if !matches!(row, DirectoryRow::Directory { path } if !expected.is_other_tracks() && path == expected.path())
                 && !(matches!(row, DirectoryRow::OtherTracks) && expected.is_other_tracks())
@@ -208,15 +213,26 @@ impl RangeJob {
                 return Err(SelectionError::Message("gl-library-tree-changed"));
             }
         } else {
-            self.selected.insert(match row {
-                DirectoryRow::OtherTracks => LibraryNode::OtherTracks,
-                DirectoryRow::Directory { path } => {
-                    LibraryNode::Directory(Arc::from(path.as_path()))
-                }
-                DirectoryRow::Track(track) => LibraryNode::Track(track.id),
-            });
+            self.add_node(
+                slice,
+                index,
+                match row {
+                    DirectoryRow::OtherTracks => LibraryNode::OtherTracks,
+                    DirectoryRow::Directory { path } => {
+                        LibraryNode::Directory(Arc::from(path.as_path()))
+                    }
+                    DirectoryRow::Track(track) => LibraryNode::Track(track.id),
+                },
+            );
         }
         Ok(())
+    }
+
+    fn add_node(&mut self, slice: &Slice, index: usize, node: LibraryNode) {
+        let (Source::Flat(branch) | Source::Tree(branch)) = &slice.source;
+        self.selected
+            .entry(node)
+            .or_insert_with(|| (branch.clone(), slice.offset + index));
     }
 
     fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), SelectionError> {
@@ -247,13 +263,14 @@ impl RangeJob {
             (Source::Flat(_), ViewResponse::LibraryPage(page))
             | (Source::Tree(_), ViewResponse::LibraryPage(page)) => {
                 Self::validate_page(slice, page.total, page.rows.len())?;
-                self.selected
-                    .extend(page.rows.into_iter().map(|row| LibraryNode::Track(row.id)));
+                for (index, row) in page.rows.into_iter().enumerate() {
+                    self.add_node(slice, index, LibraryNode::Track(row.id));
+                }
             }
             (Source::Tree(_), ViewResponse::DirectoryPage(page)) => {
                 Self::validate_page(slice, page.total, page.rows.len())?;
-                for row in &page.rows {
-                    self.add_row(slice, row)?;
+                for (index, row) in page.rows.iter().enumerate() {
+                    self.add_row(slice, index, row)?;
                 }
             }
             _ => return Err(SelectionError::Message("gl-library-range-response")),
@@ -396,7 +413,14 @@ impl LibraryBrowser {
         self.range_selection.target = None;
         self.range_selection.intent = None;
         if let Some(selected) = commit.selected {
-            self.apply_range(selected, commit.multi);
+            super::model::merge_selection(
+                &mut self.selected,
+                &mut self.selected_nodes,
+                selected.keys().cloned(),
+                commit.multi,
+            );
+            self.tree.remember_range(selected);
+            self.remember_selection();
             if !self
                 .range_selection
                 .anchor
@@ -480,7 +504,7 @@ impl LibraryBrowser {
             token: self.range_selection.projection.generation(),
             scope,
             slices,
-            selected: HashSet::new(),
+            selected: HashMap::new(),
             endpoint: node.clone(),
             endpoint_index: index,
             additive: multi,
@@ -541,7 +565,9 @@ impl LibraryBrowser {
                             .tree
                             .cached_rows(branch, slice.offset..slice.offset + slice.len)
                         {
-                            rows.iter().try_for_each(|row| job.add_row(&slice, row))
+                            rows.iter()
+                                .enumerate()
+                                .try_for_each(|(index, row)| job.add_row(&slice, index, row))
                         } else {
                             super::tree::forest_page(
                                 roots,
@@ -551,7 +577,8 @@ impl LibraryBrowser {
                             )
                             .rows
                             .iter()
-                            .try_for_each(|row| job.add_row(&slice, row))
+                            .enumerate()
+                            .try_for_each(|(index, row)| job.add_row(&slice, index, row))
                         }
                     }
                     Source::Tree(branch) | Source::Flat(branch) => self
@@ -559,7 +586,8 @@ impl LibraryBrowser {
                         .cached_rows(branch, slice.offset..slice.offset + slice.len)
                         .expect("cached range rows")
                         .iter()
-                        .try_for_each(|row| job.add_row(&slice, row)),
+                        .enumerate()
+                        .try_for_each(|(index, row)| job.add_row(&slice, index, row)),
                 };
                 if let Err(error) = result {
                     self.range_selection.cancel(true);
@@ -835,6 +863,7 @@ impl Library {
 mod tests {
     use super::*;
     use rivu_protocol::model::{LibraryRow, Page};
+    use std::collections::HashSet;
 
     fn revisions(library: u64, structure: u64) -> QueryRevisions {
         QueryRevisions {
@@ -1325,6 +1354,114 @@ mod tests {
         assert!(!library.range_pending());
         assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
     }
+
+    #[test]
+    fn transfer_order_survives_uncached_range_loading_and_payload_eviction() {
+        for flat in [false, true] {
+            let mut library = LibraryBrowser::default();
+            if flat {
+                library.toggle_view();
+            }
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let forest = TreeBranch::default();
+            library.prepare_directory(forest.clone(), 0, 2, 1);
+            library.accept_directory(
+                &forest,
+                1,
+                super::super::tree::forest_page(&roots, false, 0, 2),
+            );
+            let super::super::tree::TreeItem::Entry(root) = library.tree.item(0).unwrap() else {
+                panic!("root header");
+            };
+            let branch = root.branch.unwrap();
+            if !flat {
+                library.expand_directory(&branch, true);
+            }
+            // IDs deliberately run opposite to display order.
+            let track_id = |offset: usize| 10_000 - offset as i64;
+            let load = |library: &mut LibraryBrowser, offset: usize, generation: u64| {
+                library.prepare_directory(branch.clone(), offset, 2, generation);
+                library.accept_directory(
+                    &branch,
+                    generation,
+                    Page {
+                        total: 1000,
+                        rows: (offset..offset + 2)
+                            .map(|index| DirectoryRow::Track(row(track_id(index))))
+                            .collect(),
+                    },
+                );
+            };
+            load(&mut library, 0, 2);
+            load(&mut library, 30, 3);
+            publish_row(&mut library, LibraryNode::Track(track_id(0)), 1);
+            library
+                .start_range_selection(
+                    &LibraryNode::Track(track_id(31)),
+                    32,
+                    false,
+                    revisions(7, 3),
+                    2,
+                )
+                .unwrap();
+            loop {
+                match library.advance_range(revisions(7, 3), &roots).unwrap() {
+                    RangeStep::Query { token, slice } => {
+                        let rows = (slice.offset..slice.offset + slice.len)
+                            .map(|index| row(track_id(index)));
+                        let result = if flat {
+                            ViewResponse::LibraryPage(Page {
+                                total: 1000,
+                                rows: rows.collect(),
+                            })
+                        } else {
+                            ViewResponse::DirectoryPage(Page {
+                                total: 1000,
+                                rows: rows.map(DirectoryRow::Track).collect(),
+                            })
+                        };
+                        library
+                            .complete_range(
+                                token,
+                                &slice,
+                                QueryResponse {
+                                    revisions: revisions(7, 3),
+                                    result: Ok(result),
+                                },
+                                revisions(7, 3),
+                            )
+                            .unwrap();
+                    }
+                    RangeStep::Selected(commit) => {
+                        library.publish_selection(commit);
+                        break;
+                    }
+                    RangeStep::Idle => panic!("range must finish"),
+                }
+            }
+            assert!(library.tree.cached_row(&branch, 10).is_none());
+            let nodes = library.drag_nodes(&LibraryNode::Track(track_id(31)));
+            let expected = (0..32).map(track_id).collect::<Vec<_>>();
+            assert_eq!(library.drag_track_ids(&nodes), expected, "flat={flat}");
+            load(&mut library, 10, 4);
+            assert_eq!(library.drag_track_ids(&nodes), expected);
+            for offset in (40..100).step_by(2) {
+                load(&mut library, offset, offset as u64);
+            }
+            assert!(library.tree.cached_row(&branch, 0).is_none());
+            assert!(library.tree.cached_row(&branch, 30).is_none());
+            assert_eq!(library.drag_track_ids(&nodes), expected);
+            library.select_node(&LibraryNode::Track(track_id(10)), true);
+            let nodes = library.drag_nodes(&LibraryNode::Track(track_id(31)));
+            assert_eq!(
+                library.drag_track_ids(&nodes),
+                expected
+                    .into_iter()
+                    .filter(|id| *id != track_id(10))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
     #[test]
     fn grouped_shift_range_includes_headers_across_pages_and_overlapping_roots() {
         let (mut library, root, mut roots) = grouped(3, 2);
@@ -1472,7 +1609,7 @@ mod tests {
                 total: 10_000,
                 check: None,
             }]),
-            selected: HashSet::new(),
+            selected: HashMap::new(),
             endpoint: LibraryNode::Track(end as i64 - 1),
             endpoint_index: end - 1,
             additive,
@@ -1556,7 +1693,7 @@ mod tests {
                     total: expected.len(),
                     check: None,
                 }]),
-                selected: HashSet::new(),
+                selected: HashMap::new(),
                 endpoint: LibraryNode::Track(*expected.last().unwrap()),
                 endpoint_index: expected.len() - 1,
                 additive: false,
@@ -1587,7 +1724,7 @@ mod tests {
                 .unwrap();
             }
             assert_eq!(
-                job.selected,
+                job.selected.into_keys().collect::<HashSet<_>>(),
                 expected.into_iter().map(LibraryNode::Track).collect()
             );
         }
@@ -1740,7 +1877,10 @@ mod tests {
             batches += 1;
             assert!(batches <= 21, "bounded range batches must converge");
         }
-        assert_eq!(job.selected, (4001..4042).map(LibraryNode::Track).collect());
+        assert_eq!(
+            job.selected.into_keys().collect::<HashSet<_>>(),
+            (4001..4042).map(LibraryNode::Track).collect()
+        );
     }
 
     #[test]
@@ -1864,7 +2004,7 @@ mod tests {
                 .into_iter()
                 .map(|span| Slice::tree(span, None))
                 .collect(),
-            selected: HashSet::new(),
+            selected: HashMap::new(),
             endpoint: LibraryNode::Track(239),
             endpoint_index: tree.row_count() - 1,
             additive: false,
@@ -1915,8 +2055,8 @@ mod tests {
             .unwrap();
         }
         assert_eq!(job.selected.len(), 81);
-        assert!(job.selected.contains(&LibraryNode::Track(101)));
-        assert!(job.selected.contains(&LibraryNode::Track(239)));
+        assert!(job.selected.contains_key(&LibraryNode::Track(101)));
+        assert!(job.selected.contains_key(&LibraryNode::Track(239)));
     }
 
     #[test]
@@ -1958,7 +2098,7 @@ mod tests {
                 },
             },
             slices: VecDeque::from([slice.clone()]),
-            selected: HashSet::new(),
+            selected: HashMap::new(),
             endpoint: LibraryNode::Directory(Arc::from(std::path::Path::new("/a"))),
             endpoint_index: 0,
             additive: false,
