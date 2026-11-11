@@ -32,8 +32,8 @@ and playlist tracks use library-track playback; Queue rows use occurrence playba
 Whole-album and whole-playlist Play replace the queue with the complete saved
 order and start its first entry; Append adds the complete collection without
 changing playback. CLI `rivu playlist play PLAYLIST_ID` does not ask for confirmation.
-The GUI asks before replacing a nonempty queue by default; Cancel or Esc preserves
-queue and playback. Configure `interface.confirm_queue_replace` under
+The GUI and TUI ask before replacing a nonempty queue by default; cancelling
+preserves queue and playback. Configure `interface.confirm_queue_replace` under
 link:01_config.adoc#volume-and-playback-controls[Volume and playback controls].
 
 [source,sh]
@@ -412,6 +412,8 @@ context such as a directory path or playlist name, not another copy of the tab.
 occurrence. In Library track lists and playlist details, `e` enqueues the selected
 track. `Alt+e` enqueues the selected Library directory or the complete Other
 collection, regardless of filters. Selecting a row alone does not change playback.
+Whole-playlist playback asks on the status line before replacing a nonempty queue:
+`y` or Enter confirms; `n` or Esc cancels.
 
 Outside search editing, help, and details, press `:` to open the command line on
 the bottom row. Enter executes; Escape cancels. Submitted search results remain

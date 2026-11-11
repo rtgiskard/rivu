@@ -403,7 +403,7 @@ macro_rules! config_fields {
         pub shuffle: bool,
         pub repeat: RepeatMode,
         pub play_count_threshold_percent: f64,
-        /// Confirm GUI album and playlist actions that replace a non-empty queue.
+        /// Confirm GUI and TUI actions that replace a non-empty queue.
         pub confirm_queue_replace: bool,
         pub tray_enabled: bool,
         pub mpris_enabled: bool,

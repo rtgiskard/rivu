@@ -91,6 +91,8 @@ impl TuiSnapshot {
             && self.system.library_roots == previous.system.library_roots
             && self.system.query_batch_size == previous.system.query_batch_size
             && self.system.ui_theme == previous.system.ui_theme
+            && self.configuration.confirm_queue_replace
+                == previous.configuration.confirm_queue_replace
     }
 }
 

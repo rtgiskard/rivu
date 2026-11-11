@@ -383,6 +383,10 @@ where
                                 redraw = true;
                                 immediate_redraw = true;
                             }
+                            if tui.ui.local_revision != local_revision {
+                                redraw = true;
+                                immediate_redraw = true;
+                            }
                             continue;
                         }
                         KeyAction::Ignored => {

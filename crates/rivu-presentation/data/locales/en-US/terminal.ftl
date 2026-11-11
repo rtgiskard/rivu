@@ -8,6 +8,7 @@ terminal-command-unknown = Unknown command
 terminal-unexpected-response = Unexpected view response
 terminal-queue-added = Added to queue
 terminal-queue-removed = Removed from queue
+terminal-confirm-queue-replace = Replace queue and play “{ $name }”? y/Enter: confirm · n/Esc: cancel
 terminal-connecting = Connecting to core…
 terminal-nothing-playing = Nothing playing
 terminal-keys = Keys

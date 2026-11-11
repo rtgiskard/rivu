@@ -8,6 +8,7 @@ terminal-command-unknown = 未知命令
 terminal-unexpected-response = 响应内容异常
 terminal-queue-added = 已加入队列
 terminal-queue-removed = 已移出队列
+terminal-confirm-queue-replace = 替换队列并播放“{ $name }”？y/Enter 确认 · n/Esc 取消
 terminal-connecting = 正在连接核心…
 terminal-nothing-playing = 暂无播放
 terminal-keys = 快捷键

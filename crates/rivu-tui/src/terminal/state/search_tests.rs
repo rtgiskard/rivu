@@ -554,6 +554,10 @@ fn playlist_summary_search_keeps_enter_action_and_clears_on_expansion() {
     assert!(ui.apply_query(&state, &request, Ok(response(&request, 2))));
     assert!(matches!(
         key(&mut ui, &state, KeyCode::Enter),
+        KeyAction::Ignored
+    ));
+    assert!(matches!(
+        key(&mut ui, &state, KeyCode::Enter),
         KeyAction::Command(Command::PlayPlaylist { playlist_id: 0 })
     ));
     key(&mut ui, &state, KeyCode::Right);
@@ -1135,6 +1139,10 @@ fn container_revision_refresh_preserves_identity_and_activation_in_visible_and_h
                 _ => unreachable!(),
             }
             if catalog {
+                assert!(matches!(
+                    key(&mut tui.ui, &next, KeyCode::Enter),
+                    KeyAction::Ignored
+                ));
                 assert!(matches!(
                     key(&mut tui.ui, &next, KeyCode::Enter),
                     KeyAction::Command(Command::PlayPlaylist { playlist_id: 1 })

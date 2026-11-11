@@ -18,6 +18,149 @@ fn type_command(ui: &mut UiState, state: &TuiSnapshot, command: &str) -> KeyActi
     ui.key_action(KeyEvent::from(KeyCode::Enter), state)
 }
 
+pub(in crate::terminal) fn queue_replace_tui() -> TuiState {
+    let mut state = query_snapshot();
+    state.queue.total = 2;
+    let mut tui = TuiState::new(state, Arc::new(Localizer::for_terminal("en-US")));
+    let mut rows = PagedList::default();
+    rows.set_viewport(2);
+    rows.insert(
+        0,
+        2,
+        2,
+        vec![
+            PlaylistSummary {
+                id: 1,
+                name: "first collection".into(),
+                entry_count: 2,
+            },
+            PlaylistSummary {
+                id: 2,
+                name: "second collection".into(),
+                entry_count: 2,
+            },
+        ],
+    );
+    tui.ui.view = View::Playlists(rows);
+    tui
+}
+
+#[test]
+fn playlist_replacement_confirmation_owns_input_and_commits_bound_identity() {
+    for confirm in [KeyCode::Enter, KeyCode::Char('y')] {
+        let mut tui = queue_replace_tui();
+        let selected = match &tui.ui.view {
+            View::Playlists(rows) => rows.selected().unwrap().id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            tui.ui
+                .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot),
+            KeyAction::Ignored
+        ));
+        assert!(tui.ui.queue_replace.is_some());
+        for code in [
+            KeyCode::Char(':'),
+            KeyCode::Char('/'),
+            KeyCode::Down,
+            KeyCode::Char(' '),
+        ] {
+            assert!(matches!(
+                tui.ui.key_action(KeyEvent::from(code), &tui.snapshot),
+                KeyAction::Ignored
+            ));
+            assert!(tui.ui.command_input.is_none());
+            assert!(!tui.ui.search.editing);
+            assert!(tui.ui.queue_replace.is_some());
+        }
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(confirm), &tui.snapshot),
+            KeyAction::Command(Command::PlayPlaylist { playlist_id }) if playlist_id == selected
+        ));
+        assert!(tui.ui.queue_replace.is_none());
+    }
+}
+
+#[test]
+fn playlist_replacement_cancels_on_escape_no_tab_and_exit_and_bypasses_when_unneeded() {
+    for cancel in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Tab] {
+        let mut tui = queue_replace_tui();
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot);
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(cancel), &tui.snapshot),
+            KeyAction::Ignored
+        ));
+        assert!(tui.ui.queue_replace.is_none());
+        assert_eq!(tui.snapshot.queue.total, 2);
+        if cancel == KeyCode::Tab {
+            assert!(!matches!(tui.ui.view, View::Playlists(_)));
+        }
+    }
+    for empty in [false, true] {
+        let mut tui = queue_replace_tui();
+        if empty {
+            tui.snapshot.queue.total = 0;
+        } else {
+            Arc::make_mut(&mut tui.snapshot.configuration).confirm_queue_replace = false;
+        }
+        assert!(matches!(
+            tui.ui
+                .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot),
+            KeyAction::Command(Command::PlayPlaylist { .. })
+        ));
+        assert!(tui.ui.queue_replace.is_none());
+    }
+    let mut tui = queue_replace_tui();
+    tui.ui
+        .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot);
+    assert!(matches!(
+        tui.ui.key_action(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tui.snapshot
+        ),
+        KeyAction::Quit
+    ));
+    assert!(tui.ui.queue_replace.is_none());
+}
+
+#[test]
+fn playlist_replacement_retires_stale_queue_target_and_configuration_intents() {
+    for change in 0..4 {
+        let mut tui = queue_replace_tui();
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot);
+        let target = tui.ui.queue_replace.as_ref().unwrap().playlist_id;
+        let mut next = tui.snapshot.clone();
+        match change {
+            0 => next.queue.revision += 1,
+            1 => {
+                Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&target);
+            }
+            2 => {
+                *Arc::make_mut(&mut next.library.playlist_entry_revisions)
+                    .entry(target)
+                    .or_default() += 1;
+            }
+            _ => Arc::make_mut(&mut next.configuration).confirm_queue_replace = false,
+        }
+        tui.apply_snapshot(next);
+        assert!(tui.ui.queue_replace.is_none());
+        assert!(matches!(
+            tui.ui
+                .key_action(KeyEvent::from(KeyCode::Char('y')), &tui.snapshot),
+            KeyAction::Ignored
+        ));
+    }
+    let mut tui = queue_replace_tui();
+    tui.ui
+        .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot);
+    let mut next = tui.snapshot.clone();
+    next.playback.position += 1.0;
+    tui.apply_snapshot(next);
+    assert!(tui.ui.queue_replace.is_some());
+}
+
 #[test]
 fn colon_commands_distinguish_local_exit_shutdown_and_help() {
     let state = TuiSnapshot::default();

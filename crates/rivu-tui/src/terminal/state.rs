@@ -75,6 +75,15 @@ impl TuiState {
             self.ui.set_notice(message, NoticeKind::Success);
         }
         self.snapshot = next;
+        if self
+            .ui
+            .queue_replace
+            .as_ref()
+            .is_some_and(|pending| !pending.valid(&self.ui, &self.snapshot))
+        {
+            self.ui.queue_replace = None;
+            self.ui.mark_local_change();
+        }
         self.ui.reconcile_read(&self.snapshot);
     }
 }
@@ -102,6 +111,33 @@ pub(super) struct Notice {
     pub(super) text: String,
     pub(super) kind: NoticeKind,
     pub(super) expires_at: Instant,
+}
+
+pub(super) struct QueueReplaceConfirmation {
+    playlist_id: i64,
+    queue_revision: u64,
+    playlist_revision: Option<u64>,
+    pub(super) prompt: String,
+}
+
+impl QueueReplaceConfirmation {
+    fn valid(&self, ui: &UiState, state: &TuiSnapshot) -> bool {
+        state.configuration.confirm_queue_replace
+            && state.queue.total != 0
+            && state.queue.revision == self.queue_revision
+            && state
+                .library
+                .playlist_entry_revisions
+                .get(&self.playlist_id)
+                .copied()
+                == self.playlist_revision
+            && matches!(&ui.view, View::Playlists(rows)
+                if rows.selected().is_some_and(|row| row.id == self.playlist_id))
+            && !ui.search.editing
+            && !ui.show_help
+            && !ui.details_active
+            && ui.command_input.is_none()
+    }
 }
 
 #[derive(Default)]
@@ -1025,6 +1061,7 @@ pub(super) struct UiState {
     pub(super) help_scroll: usize,
     pub(super) help_layout: Option<super::render::HelpLayout>,
     pub(super) message: Option<Notice>,
+    pub(super) queue_replace: Option<QueueReplaceConfirmation>,
     // Started only after the initial IPC snapshot; None is permanently dismissed.
     pub(super) startup_hint_deadline: Option<Instant>,
     pub(super) details: Details,
@@ -1050,6 +1087,7 @@ impl UiState {
             help_scroll: 0,
             help_layout: None,
             message: None,
+            queue_replace: None,
             startup_hint_deadline: Some(Instant::now() + Duration::from_secs(4)),
             details: Details::default(),
             details_active: false,
@@ -1547,7 +1585,37 @@ impl UiState {
     pub(super) fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         // Global terminal exit wins over editors and modal input ownership.
         if resolve_key(key, KeyboardContext::TuiHelp) == Some(Action::Close) {
+            self.queue_replace = None;
             return KeyAction::Quit;
+        }
+        if let Some(pending) = self.queue_replace.take() {
+            self.mark_local_change();
+            if !pending.valid(self, state) {
+                return KeyAction::Ignored;
+            }
+            if key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            ) {
+                self.queue_replace = Some(pending);
+                return KeyAction::Ignored;
+            }
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                    return KeyAction::Command(Command::PlayPlaylist {
+                        playlist_id: pending.playlist_id,
+                    });
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => return KeyAction::Ignored,
+                KeyCode::Tab | KeyCode::BackTab => {}
+                _ => {
+                    self.queue_replace = Some(pending);
+                    return KeyAction::Ignored;
+                }
+            }
         }
         if self.command_input.is_some() {
             return self.command_key(key);
@@ -1971,9 +2039,29 @@ impl UiState {
                         }
                     }
                     Action::Activate => {
-                        command = playlists.selected().map(|playlist| Command::PlayPlaylist {
-                            playlist_id: playlist.id,
-                        })
+                        if let Some(playlist) = playlists.selected() {
+                            if state.configuration.confirm_queue_replace && state.queue.total != 0 {
+                                self.queue_replace = Some(QueueReplaceConfirmation {
+                                    playlist_id: playlist.id,
+                                    queue_revision: state.queue.revision,
+                                    playlist_revision: state
+                                        .library
+                                        .playlist_entry_revisions
+                                        .get(&playlist.id)
+                                        .copied(),
+                                    prompt: self.i18n.format(
+                                        "terminal-confirm-queue-replace",
+                                        &[("name", playlist.name.as_str().into())],
+                                    ),
+                                });
+                                self.startup_hint_deadline = None;
+                                changed = true;
+                            } else {
+                                command = Some(Command::PlayPlaylist {
+                                    playlist_id: playlist.id,
+                                });
+                            }
+                        }
                     }
                     _ => changed = playlists.navigate_action(action, page_size),
                 }

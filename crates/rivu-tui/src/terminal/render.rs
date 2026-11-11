@@ -1019,7 +1019,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Paragraph::new(time).style(Style::default().fg(colors.secondary)),
         progress[1],
     );
-    draw_status(frame, status, state, colors);
+    draw_status(frame, status, state, ui, colors);
     let messages = Rect {
         y: outer[3].bottom().saturating_sub(1),
         height: 1.min(outer[3].height),
@@ -1070,8 +1070,17 @@ fn draw_status(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     state: &TuiSnapshot,
+    ui: &UiState,
     colors: TerminalColors,
 ) {
+    if let Some(pending) = &ui.queue_replace {
+        frame.render_widget(
+            Paragraph::new(cell_text(&pending.prompt, area.width as usize, false))
+                .style(Style::default().fg(colors.warning)),
+            area,
+        );
+        return;
+    }
     let volume = (state.playback.volume * 100.0).round() as u8;
     let volume_icon = if state.playback.volume == 0.0 {
         "󰖁"

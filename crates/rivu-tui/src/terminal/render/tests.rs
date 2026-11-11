@@ -12,6 +12,47 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
+fn queue_replacement_confirmation_uses_status_row_without_hiding_notices() {
+    let mut tui = queue_replace_tui();
+    tui.ui
+        .set_notice("retained error".into(), NoticeKind::Error);
+    tui.ui
+        .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot);
+    tui.ui.queue_replace.as_mut().unwrap().prompt = "pending collection intent".into();
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let mut terminal = Terminal::new(TestBackend::new(80, 2)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_status(
+                frame,
+                Rect::new(0, 0, 80, 1),
+                &tui.snapshot,
+                &tui.ui,
+                colors,
+            );
+            draw_messages(
+                frame,
+                Rect::new(0, 1, 80, 1),
+                &tui.ui,
+                &tui.snapshot,
+                colors,
+            );
+        })
+        .unwrap();
+    let rendered = terminal_text(&terminal);
+    assert!(rendered.contains("pending collection intent"));
+    assert!(rendered.contains("retained error"));
+    tui.ui
+        .key_action(KeyEvent::from(KeyCode::Esc), &tui.snapshot);
+    terminal
+        .draw(|frame| {
+            draw_status(frame, frame.area(), &tui.snapshot, &tui.ui, colors);
+        })
+        .unwrap();
+    assert!(!terminal_text(&terminal).contains("pending collection intent"));
+}
+
+#[test]
 fn current_error_overrides_retained_scan_but_not_active_scan_or_notice() {
     use rivu_protocol::model::{ScanPhase, ScanProgress};
 
