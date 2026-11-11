@@ -494,12 +494,19 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     let schema: i64 = conn
         .pragma_query_value(None, "schema_version", |row| row.get(0))
         .unwrap();
-    let changes = conn.total_changes();
+    // Check opens its own connection; observe commits rather than local changes.
+    let data_version: i64 = conn
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .unwrap();
     let checked = execute(&options, Mode::Check).unwrap();
     assert!(checked.needs_changes);
     assert!(checked.backups.is_empty());
     assert_eq!(format_version(&conn), source_version);
-    assert_eq!(conn.total_changes(), changes);
+    assert_eq!(
+        conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        data_version
+    );
     assert_eq!(
         conn.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
             .unwrap(),
