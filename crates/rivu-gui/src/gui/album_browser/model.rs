@@ -619,6 +619,8 @@ fn sync_pages<T>(
     }
     if identity_changed {
         pages.clear();
+    } else if matches!(query, Query::Albums { .. }) {
+        pages.refresh();
     } else {
         // Keep viewport geometry until the refreshed page supplies its real total.
         pages.invalidate();
@@ -636,6 +638,45 @@ mod tests {
     use super::*;
     use crate::gui::paged;
     use rivu_protocol::model::Page;
+
+    #[test]
+    fn only_album_cards_retain_read_only_presentation_across_data_revisions() {
+        for query in queries() {
+            let mut projection = QueryTracker::default();
+            let mut pages = paged::PagedRows::default();
+            let revisions = QueryRevisions::default();
+            sync_pages(&mut projection, &mut pages, &query, revisions);
+            pages.begin(0, 2);
+            pages.accept(Page {
+                total: 2,
+                rows: vec![7, 9],
+            });
+            sync_pages(
+                &mut projection,
+                &mut pages,
+                &query,
+                QueryRevisions {
+                    album: 1,
+                    ..revisions
+                },
+            );
+            assert_eq!(pages.get(0), None);
+            assert_eq!(
+                pages.display(0),
+                matches!(query, Query::Albums { .. }).then_some(&7),
+            );
+            assert_eq!(pages.demand(0..2, 2), Some(0));
+            let changed = Query::Albums {
+                query: Some("another album".into()),
+                sort: AlbumSort::default(),
+                offset: 0,
+                limit: 2,
+            };
+            sync_pages(&mut projection, &mut pages, &changed, revisions);
+            assert_eq!(pages.display(0), None);
+        }
+    }
+
     #[test]
     fn obsolete_pages_park_until_fresh_authority_or_retry_without_releasing_worker() {
         for tracks in [false, true] {

@@ -7,6 +7,8 @@ const MAX_PAGES: usize = 8;
 /// Payload is bounded independently of the result total; evicted rows are fetched again.
 pub(super) struct PagedRows<T> {
     pages: BTreeMap<usize, Vec<T>>,
+    // Opt-in, display-only rows while the same query is being refreshed.
+    retained: BTreeMap<usize, Vec<T>>,
     total: Option<usize>,
     // Retained geometry is not an authoritative count after a data revision.
     layout_len: usize,
@@ -22,6 +24,7 @@ impl<T> Default for PagedRows<T> {
     fn default() -> Self {
         Self {
             pages: BTreeMap::new(),
+            retained: BTreeMap::new(),
             total: None,
             layout_len: 1,
             page_size: 1,
@@ -51,6 +54,15 @@ impl<T> PagedRows<T> {
     pub(super) fn get(&self, index: usize) -> Option<&T> {
         let offset = index / self.page_size * self.page_size;
         self.pages.get(&offset)?.get(index - offset)
+    }
+    pub(super) fn display(&self, index: usize) -> Option<&T> {
+        if index >= self.len() {
+            return None;
+        }
+        self.get(index).or_else(|| {
+            let offset = index / self.page_size * self.page_size;
+            self.retained.get(&offset)?.get(index - offset)
+        })
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
         self.pages.values().flatten()
@@ -82,8 +94,17 @@ impl<T> PagedRows<T> {
         self.pinned = None;
         self.clear_pages();
     }
+    /// Keep only viewport presentation; get/iter/position remain authoritative.
+    pub(super) fn refresh(&mut self) {
+        let mut retained = std::mem::take(&mut self.retained);
+        retained.append(&mut self.pages);
+        self.invalidate();
+        self.retained = retained;
+        self.trim_retained();
+    }
     fn clear_pages(&mut self) {
         self.pages.clear();
+        self.retained.clear();
         self.pending = None;
         self.failures.clear();
     }
@@ -112,6 +133,7 @@ impl<T> PagedRows<T> {
     pub(super) fn retire_pending(&mut self) {
         self.pending = None;
         self.retired = true;
+        self.retained.clear();
     }
     pub(super) fn accept(&mut self, page: Page<T>) {
         let Some(offset) = self.pending.take() else {
@@ -120,6 +142,8 @@ impl<T> PagedRows<T> {
         self.set_total(page.total);
         self.failures.remove(&offset);
         self.pages.retain(|start, _| *start < page.total);
+        self.retained
+            .retain(|start, _| *start < page.total && *start != offset);
         if offset < page.total {
             self.pages.insert(offset, page.rows);
         }
@@ -132,6 +156,7 @@ impl<T> PagedRows<T> {
     pub(super) fn fail(&mut self, error: String) {
         if let Some(offset) = self.pending.take() {
             self.failures.insert(offset, error);
+            self.retained.remove(&offset);
             // Failed requests are bounded too; a new viewport may retry an evicted failure.
             while self.failures.len() > self.capacity() {
                 let key = self.farthest(self.failures.keys().copied()).unwrap();
@@ -174,6 +199,12 @@ impl<T> PagedRows<T> {
                 && !self.failures.contains_key(offset)
         })
     }
+    fn trim_retained(&mut self) {
+        let first = self.visible.start / self.page_size * self.page_size;
+        let end = self.visible.end;
+        self.retained
+            .retain(|offset, _| *offset >= first && *offset < end);
+    }
     fn farthest(&self, offsets: impl Iterator<Item = usize>) -> Option<usize> {
         offsets
             .filter(|offset| !self.wanted(*offset))
@@ -203,6 +234,7 @@ impl<T> PagedRows<T> {
         MAX_PAGES.max(visible_pages + 3)
     }
     fn trim(&mut self) {
+        self.trim_retained();
         while self.pages.len() > self.capacity() {
             let offset = self.farthest(self.pages.keys().copied()).unwrap();
             self.pages.remove(&offset);
@@ -220,6 +252,67 @@ mod tests {
             rows: (offset..(offset + 20).min(total)).collect(),
         });
     }
+
+    #[test]
+    fn refresh_retains_display_without_authorizing_rows_or_skipping_reload() {
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 100);
+        fill(&mut rows, 20, 100);
+        rows.demand(0..30, 20);
+        rows.refresh();
+        assert_eq!(rows.display(3), Some(&3));
+        assert_eq!(rows.display(23), Some(&23));
+        assert_eq!(rows.get(3), None);
+        assert_eq!(rows.iter().next(), None);
+        assert_eq!(rows.position(|row| *row == 3), None);
+        assert_eq!(rows.total(), None);
+        assert_eq!(rows.demand(0..30, 20), Some(0));
+        rows.begin(0, 20);
+        rows.accept(Page {
+            total: 100,
+            rows: (100..120).collect(),
+        });
+        assert_eq!(rows.display(3), Some(&103));
+        assert_eq!(rows.display(23), Some(&23));
+        rows.refresh();
+        assert_eq!(rows.display(3), Some(&103));
+        assert_eq!(rows.display(23), Some(&23));
+        assert_eq!(rows.demand(60..70, 20), Some(60));
+        assert_eq!(rows.display(3), None);
+        assert_eq!(rows.display(23), None);
+    }
+
+    #[test]
+    fn refresh_does_not_mask_failure_removal_or_query_reset() {
+        for failure in [false, true] {
+            let mut rows = PagedRows::default();
+            fill(&mut rows, 0, 100);
+            rows.refresh();
+            rows.begin(0, 20);
+            if failure {
+                rows.fail("unavailable".into());
+                assert_eq!(rows.error(3), Some("unavailable"));
+            } else {
+                rows.accept(Page {
+                    total: 0,
+                    rows: vec![],
+                });
+                assert_eq!(rows.total(), Some(0));
+            }
+            assert_eq!(rows.display(3), None);
+        }
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 100);
+        rows.refresh();
+        rows.clear();
+        assert_eq!(rows.display(3), None);
+        fill(&mut rows, 0, 100);
+        rows.refresh();
+        rows.begin(0, 20);
+        rows.retire_pending();
+        assert_eq!(rows.display(3), None);
+    }
+
     #[test]
     fn retired_page_keeps_rows_and_geometry_without_replaying_unchanged_demand() {
         let mut rows = PagedRows::default();

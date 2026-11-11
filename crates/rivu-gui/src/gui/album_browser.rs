@@ -401,7 +401,6 @@ impl AlbumBrowser {
         if change.albums {
             self.album_search
                 .update(cx, |search, cx| search.clear_counts(cx));
-            self.clear_covers(cx);
         }
         if change.tracks {
             self.tracks_search
@@ -458,6 +457,7 @@ impl AlbumBrowser {
                         }
                         let data = this.model.timeout(&query, generation, response, revisions);
                         this.apply_data_change(data, cx);
+                        this.sync_covers(cx);
                         cx.notify();
                     });
                 },
@@ -481,9 +481,7 @@ impl AlbumBrowser {
                     );
                     let published = completion.published;
                     this.apply_completion(completion, cx);
-                    if published == Published::Albums {
-                        this.sync_covers(cx);
-                    }
+                    this.sync_covers(cx);
                     let count = if published != Published::None {
                         this.model.prepare_count(&query, generation)
                     } else {
@@ -507,6 +505,7 @@ impl AlbumBrowser {
                     }
                     let completion = this.model.complete_count(&count, response, revisions);
                     this.apply_completion(completion, cx);
+                    this.sync_covers(cx);
                     cx.notify();
                 });
             }
@@ -708,7 +707,7 @@ impl AlbumBrowser {
         let albums = self.model.albums();
         let changed = self.covers.sync(
             self.demand.clone(),
-            |index| albums.get(index).map(|album| &album.representative),
+            |index| albums.display(index).map(|album| &album.representative),
             &self.manager,
             &self.images,
             cx,
@@ -779,7 +778,8 @@ impl AlbumBrowser {
 
     fn card(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let Some(album) = self.model.albums().get(index) else {
+        let current = self.model.albums().get(index).is_some();
+        let Some(album) = self.model.albums().display(index) else {
             return self
                 .loading_row(index, cx)
                 .flex_1()
@@ -865,43 +865,45 @@ impl AlbumBrowser {
             .h_full()
             .p_2()
             .gap_0()
-            .cursor_pointer()
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if !hovered && this.dismissed_actions.as_ref() == Some(&hover_key) {
-                    this.dismissed_actions = None;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                if event.click_count() == 2 {
-                    this.open(key.clone(), cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(ContentMenuRequest {
-                        source: TrackSource::Album {
-                            key: menu_key.clone(),
-                            revision: this.snapshots.read().library.album_revision,
-                        },
-                        position: event.position,
-                        play: Some(Command::PlayAlbum {
-                            key: menu_key.clone(),
+            .when(current, |view| {
+                view.cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if !hovered && this.dismissed_actions.as_ref() == Some(&hover_key) {
+                            this.dismissed_actions = None;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.click_count() == 2 {
+                            this.open(key.clone(), cx);
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ContentMenuRequest {
+                                source: TrackSource::Album {
+                                    key: menu_key.clone(),
+                                    revision: this.snapshots.read().library.album_revision,
+                                },
+                                position: event.position,
+                                play: Some(Command::PlayAlbum {
+                                    key: menu_key.clone(),
+                                }),
+                            });
                         }),
-                    });
-                }),
-            )
-            .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
-                drag.initialize(TrackSource::Album {
-                    key: drag_key.clone(),
-                    revision: drag_snapshots.read().library.album_revision,
-                });
-                rivu_ui::begin_list_drag(window, cx);
-                cx.new(|_| rivu_ui::ListDragPreview {
-                    label: drag_label.clone(),
-                })
+                    )
+                    .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
+                        drag.initialize(TrackSource::Album {
+                            key: drag_key.clone(),
+                            revision: drag_snapshots.read().library.album_revision,
+                        });
+                        rivu_ui::begin_list_drag(window, cx);
+                        cx.new(|_| rivu_ui::ListDragPreview {
+                            label: drag_label.clone(),
+                        })
+                    })
             })
             .rounded_md()
             .hover(|style| style.bg(rgb(theme.highlight)))
@@ -981,7 +983,7 @@ impl AlbumBrowser {
                 .justify_center()
                 .flex_shrink_0(),
             )
-            .child(actions)
+            .when(current, |view| view.child(actions))
             .into_any_element()
     }
 }
@@ -1403,6 +1405,28 @@ mod tests {
     use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader};
     use crate::test_support::artwork_track as track;
     use rivu_metadata::artwork::{ArtworkIdentity, ArtworkManager, test_support::tagged_wav};
+
+    #[gpui::test]
+    fn removed_presentation_releases_cover_demand(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cover.wav");
+        tagged_wav(&path);
+        let source = track(path);
+        let manager = ArtworkManager::new(directory.path());
+        let loaded = manager.load(crate::artwork_source(&source)).unwrap();
+        let mut covers = AlbumCovers::default();
+        cx.update(|cx| {
+            let images = ArtworkImageRegistry::default();
+            covers.sync(0..1, |_| Some(&source), &manager, &images, cx);
+            assert!(covers.views[&0].view.image(cx).is_some());
+            // Failed/retired pages remove display rows without changing the viewport.
+            covers.sync(0..1, |_| None, &manager, &images, cx);
+            assert!(covers.views.is_empty());
+            assert!(covers.sources.is_empty());
+            assert!(covers.pending.is_empty());
+        });
+        drop(loaded);
+    }
 
     #[gpui::test]
     fn pending_album_tracks_expose_failure_copy_and_retry(cx: &mut gpui::TestAppContext) {

@@ -229,6 +229,16 @@ cannot authorize counts, ranges, or navigation; tree ranges also need current
 ancestor counts. Unfiltered Queue state can supply a current total immediately;
 filtered Queue needs its own result.
 
+The album grid additionally retains the current viewport's card payload and cover
+leases while the same query refreshes. Retained cards are display-only: playback,
+opening, menus, and dragging require a current page. Fresh pages replace that
+presentation without releasing unchanged artwork; source changes still replace
+the cover. Scrolling sheds retained offscreen pages, and query changes, page
+failures, or rejected authority discard the affected presentation rather than
+masking loading or errors with stale results. Page deadlines and both page and
+count completions reconcile cover demand, including failed or rejected results,
+so cards removed from presentation also release their image leases.
+
 Page-size changes clear boundary-dependent pages, failures, and reservations, not
 totals, geometry, or identity selections. Hiding and logical cancellation preserve
 accepted data and failures. Current page failures require explicit retry until
