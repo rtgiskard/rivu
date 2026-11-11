@@ -63,7 +63,12 @@ impl Core {
         self.state.queue.current_position = None;
         self.state.current_track = None;
         self.state.playback.stopped_source_generation = None;
-        self.reload_queue()
+        let result = self.reload_queue();
+        if changed {
+            result.context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")
+        } else {
+            result
+        }
     }
 
     pub(in crate::core) fn clear_queue(&mut self) -> Result<()> {
@@ -210,11 +215,16 @@ impl Core {
         {
             self.stop()?;
         }
-        if self.store.remove_prepared_queue_entries(selection)? {
+        let changed = self.store.remove_prepared_queue_entries(selection)?;
+        if changed {
             self.advance_queue_revision();
         }
-        self.reload_queue()?;
-        Ok(())
+        let result = self.reload_queue();
+        if changed {
+            result.context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")
+        } else {
+            result
+        }
     }
 
     pub(in crate::core) fn move_queue_entries(
@@ -233,7 +243,7 @@ impl Core {
         self.ensure_queue_control_ready()?;
         if self.store.move_queue_entries(queue_ids, index)? {
             self.advance_queue_revision();
-            self.refresh_queue_projection()?;
+            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
         }
         Ok(())
     }
@@ -245,7 +255,7 @@ impl Core {
         self.ensure_queue_control_ready()?;
         if self.store.enqueue_tracks(ids)? {
             self.advance_queue_revision();
-            self.refresh_queue_projection()?;
+            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
         }
         Ok(())
     }
@@ -261,7 +271,7 @@ impl Core {
         order.shuffle(rng);
         if self.store.reorder_queue(&order)? {
             self.advance_queue_revision();
-            self.refresh_queue_projection()?;
+            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
         }
         Ok(())
     }
@@ -270,7 +280,7 @@ impl Core {
         self.ensure_queue_control_ready()?;
         if self.store.deduplicate_queue()? {
             self.advance_queue_revision();
-            self.reload_queue()?;
+            self.reload_queue().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
         }
         Ok(())
     }

@@ -430,7 +430,13 @@ impl Store {
             [],
             |row| integer(row, 0),
         )?;
-        let insertion = i64::try_from(index.min(total - selected.len()))?;
+        // Index is an insertion slot after removing the distinct selection.
+        // The last slot appends; larger destinations are invalid, not clamped.
+        ensure!(
+            index <= total - selected.len(),
+            "Queue target position out of range"
+        );
+        let insertion = i64::try_from(index)?;
         let changed = move_selection(&tx, 0, &selected, insertion)?;
         tx.commit()?;
         Ok(changed)
@@ -509,7 +515,19 @@ mod tests {
             store.queue_existing_ids(&[ids[0], ids[0], u64::MAX])?,
             HashSet::from([ids[0]])
         );
-        assert!(store.move_queue_entries(&[ids[2], ids[0], ids[2]], usize::MAX)?);
+        assert!(
+            store
+                .move_queue_entries(&[ids[2], ids[0], ids[2]], usize::MAX)
+                .is_err()
+        );
+        assert_eq!(store.queue_ids()?, ids);
+        assert!(
+            store
+                .move_queue_entries(&[ids[2], ids[0], ids[2]], 3)
+                .is_err()
+        );
+        assert_eq!(store.queue_ids()?, ids);
+        assert!(store.move_queue_entries(&[ids[2], ids[0], ids[2]], 2)?);
         assert_eq!(store.queue_ids()?, [ids[1], ids[3], ids[0], ids[2]]);
         assert_compact(&store)?;
         assert!(store.prepare_queue_removal(&[ids[0], u64::MAX]).is_err());

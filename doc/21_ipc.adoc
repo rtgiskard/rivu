@@ -1008,14 +1008,17 @@ but widely scattered moves can touch a list-length span. Business owners retain
 validation, playback effects, and revision publication.
 
 `MoveQueue` and `MoveQueueEntries` carry the queue `expected_revision` observed
-when choosing their target index. Core rejects stale revisions before changing
-positions; clients must refresh and choose a new target rather than replaying
-the old index. A successful move advances the queue revision only if order changes.
+when choosing their target index. The index is an insertion slot after removing
+the distinct selection, in `0..=total-selected_count`; larger values are rejected.
+Core rejects stale revisions before changing positions; clients must refresh and
+choose a new target rather than replaying the old index. A successful move advances
+the queue revision only if order changes.
 
 After a confirmed structural queue commit, Core advances its in-memory content
 revision once, before refreshing projections. Store transactions do not persist
 or issue that token; rollback and no-op mutations leave it unchanged. Metadata
-invalidation remains field-sensitive.
+invalidation remains field-sensitive. A post-commit refresh failure reports that
+the queue modification is saved; refresh the view rather than repeat the mutation.
 
 `RemovePlaylistEntries {playlist_id, entry_ids, expected_revision}` removes a
 selection atomically and closes its position gaps. `MovePlaylistEntries

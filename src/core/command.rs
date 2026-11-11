@@ -317,7 +317,9 @@ impl Core {
                     .enqueue_sources(&directories, &track_ids, roots)?
                 {
                     self.advance_queue_revision();
-                    self.refresh_queue_projection()?;
+                    self.refresh_queue_projection().context(
+                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
+                    )?;
                 }
             }
             Command::InsertQueue {
@@ -329,7 +331,9 @@ impl Core {
                 self.check_queue_insertion(index, expected_revision)?;
                 if self.store.insert_queue_tracks(&track_ids, index)? != 0 {
                     self.advance_queue_revision();
-                    self.refresh_queue_projection()?;
+                    self.refresh_queue_projection().context(
+                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
+                    )?;
                 }
             }
             Command::InsertQueueSources {
@@ -349,7 +353,9 @@ impl Core {
                 )?;
                 if count != 0 {
                     self.advance_queue_revision();
-                    self.refresh_queue_projection()?;
+                    self.refresh_queue_projection().context(
+                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
+                    )?;
                 }
             }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
@@ -359,11 +365,6 @@ impl Core {
                 index,
                 expected_revision,
             } => {
-                self.ensure_queue_control_ready()?;
-                ensure!(
-                    index < self.state.queue.total,
-                    "Queue target position out of range"
-                );
                 self.move_queue_entries(&[queue_id], index, expected_revision)?;
             }
             Command::MoveQueueEntries {

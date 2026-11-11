@@ -1698,19 +1698,23 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
                 .copied()
                 .filter(|id| !selected.contains(id))
                 .collect();
-            let insertion = target.min(expected.len());
-            expected.splice(insertion..insertion, selected.iter().copied());
+            let invalid = !selected.is_empty() && target > expected.len();
+            if invalid || selected.is_empty() {
+                expected = original.clone();
+            } else {
+                expected.splice(target..target, selected.iter().copied());
+            }
             let mut requested: Vec<_> = selected.iter().rev().copied().collect();
             if let Some(&id) = selected.first() {
                 requested.push(id);
             }
             let revision = core.state.queue.revision;
-            core.command(Command::MoveQueueEntries {
+            let result = core.command(Command::MoveQueueEntries {
                 queue_ids: requested,
                 index: target,
                 expected_revision: revision,
-            })
-            .unwrap();
+            });
+            assert_eq!(result.is_err(), invalid, "mask={mask} target={target}");
             assert_eq!(
                 core.store.queue_ids().unwrap(),
                 expected,
@@ -1837,7 +1841,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     assert_eq!(core.transport.history, [1, 3, 5]);
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![1, 3, 5],
-        index: usize::MAX,
+        index: core.state.queue.total - 3,
         expected_revision: core.state.queue.revision,
     })
     .unwrap();
@@ -2505,4 +2509,64 @@ fn stale_queue_move_indices_are_rejected_without_changing_order() {
     })
     .unwrap();
     assert_eq!(core.store.queue_ids().unwrap()[2], 3);
+}
+
+#[test]
+fn single_and_batch_queue_moves_share_post_removal_bounds() {
+    for batch in [false, true] {
+        let (_directory, mut core) = fixture();
+        let before = core.store.queue_ids().unwrap();
+        let revision = core.state.queue.revision;
+        let command = |index| {
+            if batch {
+                Command::MoveQueueEntries {
+                    queue_ids: vec![before[0]],
+                    index,
+                    expected_revision: revision,
+                }
+            } else {
+                Command::MoveQueue {
+                    queue_id: before[0],
+                    index,
+                    expected_revision: revision,
+                }
+            }
+        };
+        for index in [before.len(), usize::MAX] {
+            assert!(core.command(command(index)).is_err());
+            assert_eq!(core.store.queue_ids().unwrap(), before);
+            assert_eq!(core.state.queue.revision, revision);
+        }
+        core.command(command(before.len() - 1)).unwrap();
+        let mut expected = before[1..].to_vec();
+        expected.push(before[0]);
+        assert_eq!(core.store.queue_ids().unwrap(), expected);
+    }
+}
+
+#[test]
+fn clear_and_dedup_commits_recover_without_replaying_mutation() {
+    for clear in [false, true] {
+        let (directory, mut core) = fixture();
+        let connection = fail_queue_projection_after(directory.path(), "DELETE");
+        let revision = core.state.queue.revision;
+        let _commands = recording_audio(&mut core);
+        assert!(
+            core.command(if clear {
+                Command::ClearQueue
+            } else {
+                Command::DeduplicateQueue
+            })
+            .is_err()
+        );
+        let saved = core.store.queue_ids().unwrap();
+        assert!(saved.len() < 5);
+        assert_eq!(core.state.queue.revision, revision + 1);
+        assert!(core.transport.projection_stale);
+        repair_queue_projection(&connection);
+        core.ensure_queue_control_ready().unwrap();
+        assert_eq!(core.store.queue_ids().unwrap(), saved);
+        assert_eq!(core.state.queue.total, saved.len());
+        assert_eq!(core.state.queue.revision, revision + 1);
+    }
 }
