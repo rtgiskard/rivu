@@ -616,6 +616,8 @@ struct Field {
     committed: String,
     dirty: bool,
     generation: u64,
+    // The draft generation owned by a queued or active command; Enter must not repeat it.
+    submitted: Option<u64>,
     native_epoch: Option<u64>,
     _subscription: Subscription,
 }
@@ -1011,6 +1013,13 @@ impl AudioProcessing {
         }
         self.pending += 1;
         self.error = None;
+        if let Some(submitted) = &submission.field {
+            for submitted in submitted.first.iter().chain(&submitted.rest) {
+                if let Some(field) = self.fields.get_mut(&submitted.key) {
+                    field.submitted = Some(submitted.generation);
+                }
+            }
+        }
         self.commands.push_back(submission);
         self.dispatch_next(cx);
         cx.notify();
@@ -1046,6 +1055,9 @@ impl AudioProcessing {
                 if let Err(error) = result {
                     this.error = Some(error);
                 }
+                if let Some(submitted) = &submitted {
+                    this.release_parameter_fields(submitted);
+                }
                 if refreshed {
                     this.finish_equalizer_command(success);
                     this.reconcile(this.context.snapshot(), cx);
@@ -1067,6 +1079,16 @@ impl AudioProcessing {
         })
         .detach();
         cx.notify();
+    }
+
+    fn release_parameter_fields(&mut self, submitted: &SubmittedFields) {
+        for submitted in submitted.first.iter().chain(&submitted.rest) {
+            if let Some(field) = self.fields.get_mut(&submitted.key)
+                && field.submitted == Some(submitted.generation)
+            {
+                field.submitted = None;
+            }
+        }
     }
 
     fn finish_parameter_fields(&mut self, submitted: SubmittedFields, cx: &mut Context<Self>) {
@@ -1143,6 +1165,7 @@ impl AudioProcessing {
                 committed: value,
                 dirty: false,
                 generation: 0,
+                submitted: None,
                 native_epoch: Some(self.input_epoch),
                 _subscription: subscription,
             },
@@ -1278,16 +1301,25 @@ impl AudioProcessing {
             return;
         }
         let value = self.text(key, cx);
+        let Some(generation) = self
+            .fields
+            .get(&key)
+            .filter(|field| field.dirty && field.submitted != Some(field.generation))
+            .map(|field| field.generation)
+        else {
+            return;
+        };
         let result = self.field_command(key, &value);
         match result {
-            Ok(Some(command)) => {
-                let submitted = self.fields.get(&key).map(|field| SubmittedParameter {
+            Ok(Some(command)) => self.send_field(
+                command,
+                Some(SubmittedParameter {
                     key,
-                    generation: field.generation,
+                    generation,
                     text: value,
-                });
-                self.send_field(command, submitted, cx);
-            }
+                }),
+                cx,
+            ),
             Ok(None) => {}
             Err(error) => {
                 self.error = Some(error);
@@ -2106,10 +2138,12 @@ impl AudioProcessing {
                     self.tr(label),
                     cx,
                     move |this, _, cx| {
-                        this.patch_denoise(
-                            DenoiseField::Mode.patch(slug).expect("valid mode choice"),
-                            cx,
-                        )
+                        if DenoiseField::Mode.text(&this.state.system.config.denoise) != slug {
+                            this.patch_denoise(
+                                DenoiseField::Mode.patch(slug).expect("valid mode choice"),
+                                cx,
+                            )
+                        }
                     },
                 )
                 .flex_shrink_0()
@@ -2335,12 +2369,14 @@ impl AudioProcessing {
                         self.tr(label),
                         cx,
                         move |this, _, cx| {
-                            this.patch_neural(
-                                NeuralField::Device
-                                    .patch(value)
-                                    .expect("valid device choice"),
-                                cx,
-                            )
+                            if NeuralField::Device.text(&this.state.system.config.neural) != value {
+                                this.patch_neural(
+                                    NeuralField::Device
+                                        .patch(value)
+                                        .expect("valid device choice"),
+                                    cx,
+                                )
+                            }
                         },
                     )
                     .when(selected_device == value, |v| v.bg(rgb(theme.selected))),
@@ -2414,16 +2450,24 @@ impl AudioProcessing {
         }) {
             return;
         }
+        // Fields already owned by a queued command keep that command's generation.
         let fields: Vec<_> = self
             .fields
             .iter()
-            .filter(|(key, field)| field.dirty && self.page_parameter_key(**key))
+            .filter(|(key, field)| {
+                field.dirty
+                    && field.submitted != Some(field.generation)
+                    && self.page_parameter_key(**key)
+            })
             .map(|(key, field)| SubmittedParameter {
                 key: *key,
                 generation: field.generation,
                 text: key.value_text(field.input.read(cx).text()).to_owned(),
             })
             .collect();
+        if fields.is_empty() {
+            return;
+        }
         match page_parameter_command(
             self.page,
             fields

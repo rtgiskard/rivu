@@ -294,14 +294,16 @@ separate from Model configuration; advanced runtime options are nested under
 the latter. The post-filter is explicitly labeled DeepFilterNet3-only: enabling
 it with another speech model reports an error, not a fallback. Environment/model
 paths and numeric fields still require Enter or Apply; toggles and device choices
-submit directly. Worker script, device and threads are shared by Speech and
-Separation. Collapsing an advanced section preserves its drafts.
+submit directly, and choosing the current mode or device sends nothing. Worker
+script, device and threads are shared by Speech and Separation. Collapsing an
+advanced section preserves its drafts.
 Applying a non-graph restoration or neural page parses all dirty fields before
 submission, then sends one sparse patch. Core validates and saves the combined
 candidate atomically: invalid fields cannot leave earlier fields applied or
 persisted. Acknowledgements clear only the exact submitted drafts; edits made
 while submission is pending remain drafts even when the text returns to its
-submitted value. Enter still applies only its field.
+submitted value. Enter still applies only its field. A draft generation already
+owned by a pending command is not submitted again by repeated Enter or Apply.
 
 
 [source,shell]
