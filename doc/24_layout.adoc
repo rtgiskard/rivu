@@ -742,8 +742,10 @@ tree; a missing origin falls back to the layout, and a newer workspace focus
 choice supersedes deferred restoration. Panel removal hands focus back when its
 removed control owned it and routes panel commands to a surviving active panel.
 
-Monitor EQ popovers have one panel owner and shared keyboard scope. Dismissal
-restores the live trigger only while the popup still owns focus; outside presses
+Monitor EQ popovers have one panel owner and shared keyboard scope. Preset
+choice surfaces and their focus containers stay out of layout flow, so opening
+or closing a list does not reflow the editor. Dismissal restores the live trigger
+only while the popup still owns focus; outside presses
 do not activate underlying controls. Hiding or invalidating owner geometry
 retires the popup, and disabled EQ removes preset actions from traversal.
 Popup/name changes invalidate affected editors rather than every processing view.

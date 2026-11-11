@@ -6203,7 +6203,11 @@ mod tests {
             });
             self.scope
                 .surface(div().id("preset-test").size_full())
-                .child(panel)
+                .child(
+                    panel
+                        .id("preset-controls")
+                        .debug_selector(|| "preset-controls".to_owned()),
+                )
                 .child(
                     button("preset-outside", "Outside action", cx, |this, _, _| {
                         this.outside_clicks.set(this.outside_clicks.get() + 1);
@@ -6241,6 +6245,71 @@ mod tests {
                     Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name }, .. } if name == "Second"));
             });
         }).unwrap();
+    }
+
+    #[gpui::test]
+    fn preset_popup_keeps_controls_and_following_content_in_place(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, _editor, old_handle) = fixture_with_owner(cx);
+        cx.update_window(old_handle, |_, window, _| window.remove_window())
+            .unwrap();
+        let scope = cx.update(rivu_ui::FocusScope::new);
+        let window = cx.open_window(size(px(800.), px(600.)), {
+            let owner = owner.clone();
+            let scope = scope.clone();
+            move |_, cx| {
+                let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
+                PresetWindow {
+                    owner,
+                    scope,
+                    outside_clicks: Rc::new(Cell::new(0)),
+                    panel: Rc::new(Cell::new(7)),
+                    _subscription: subscription,
+                }
+            }
+        });
+        let handle = window.into();
+        for names in [&[][..], &["First", "Second"][..]] {
+            owner.update(cx, |owner, cx| {
+                let mut state = (*owner.state).clone();
+                Arc::make_mut(&mut state.system.config).equalizer_presets = names
+                    .iter()
+                    .map(|name| rivu_format::config::EqualizerPreset {
+                        name: (*name).into(),
+                        config: Default::default(),
+                    })
+                    .collect();
+                owner.reconcile(Rc::new(state), cx);
+            });
+            draw(cx, handle);
+            let bounds = |cx: &mut TestAppContext| {
+                let mut visual = VisualTestContext::from_window(handle, cx);
+                (
+                    visual.debug_bounds("preset-controls").unwrap(),
+                    visual.debug_bounds("preset-outside").unwrap(),
+                )
+            };
+            let closed = bounds(cx);
+            cx.update_window(handle, |_, window, cx| {
+                window.activate_window();
+                scope.handle().focus(window, cx);
+                scope.advance(false, window, cx);
+            })
+            .unwrap();
+            press(cx, handle, "enter");
+            assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_some()));
+            assert_eq!(
+                bounds(cx),
+                closed,
+                "opening presets must not reflow content"
+            );
+            press(cx, handle, "escape");
+            assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+            assert_eq!(
+                bounds(cx),
+                closed,
+                "closing presets must not reflow content"
+            );
+        }
     }
 
     #[gpui::test]

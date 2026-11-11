@@ -1889,7 +1889,7 @@ impl AudioProcessing {
             };
             content = content.child(
                 scope
-                    .surface(div().id(("eq-preset-choice-scope", panel)))
+                    .surface(div().id(("eq-preset-choice-scope", panel)).absolute())
                     .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         match this
                             .preset_choices
