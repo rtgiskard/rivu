@@ -909,6 +909,10 @@ pub enum Command {
     ProcessingBypass {
         bypassed: bool,
     },
+    /// Toggle the owner's current value, without depending on a client snapshot.
+    ToggleProcessing {
+        target: ProcessingToggle,
+    },
     EqualizerEdit {
         /// Observed `StateRevisions::configuration`; checked before any edit side effects.
         expected_revision: u64,

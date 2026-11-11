@@ -68,6 +68,11 @@ revokes pending automatic audition, and late results cannot cancel bypass.
 Explicit audition requires cancelling bypass first. Retained audition audio
 remains session-owned rather than being persisted with the bypass preference.
 
+The footer bypass button, Restoration hum/impulse checkboxes and Speech
+post-filter checkbox send toggle intents. Core flips its current value when each
+queued action executes, so repeated clicks accumulate even before the display
+refreshes. Interleaved explicit settings are applied in the same execution order.
+
 Use `rivu processing bypass on` to enter bypass and
 `rivu processing bypass off` to resume processing. Both are explicit, idempotent
 state requests rather than toggles, so multiple clients do not race a stale

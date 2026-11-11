@@ -6,6 +6,16 @@ pub use rivu_format::config::processing_graph::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Immediate processing controls, resolved against Core's settings at execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingToggle {
+    Bypass,
+    Hum,
+    Impulse,
+    SpeechPostFilter,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphExecutionMode {

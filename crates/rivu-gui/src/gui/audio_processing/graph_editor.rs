@@ -2374,7 +2374,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn master_switch_uses_persisted_flag_independently_of_eq(cx: &mut TestAppContext) {
+    fn master_switch_queues_relative_intents_independently_of_eq(cx: &mut TestAppContext) {
         cx.update(Input::init);
         let (_directory, _runtime, processing, _) = fixture(cx);
         processing.update(cx, |this, _| this.command_active = true);
@@ -2395,15 +2395,82 @@ mod tests {
                 .debug_bounds("processing-bypass-7")
                 .unwrap()
                 .center();
-            press(cx, handle, position);
-            release(cx, handle, position);
+            for _ in 0..2 {
+                press(cx, handle, position);
+                release(cx, handle, position);
+            }
             processing.update(cx, |this, _| {
-                assert_eq!(this.commands.len(), 1);
-                assert!(matches!(
-                    this.commands.pop_front().unwrap().command,
-                    Command::ProcessingBypass { bypassed: next } if next == !bypassed
-                ));
+                assert_eq!(this.commands.len(), 2);
+                for queued in this.commands.drain(..) {
+                    assert!(matches!(
+                        queued.command,
+                        Command::ToggleProcessing {
+                            target: ProcessingToggle::Bypass
+                        }
+                    ));
+                }
+                assert_eq!(this.state.system.config.processing_bypassed, bypassed);
                 assert_eq!(this.state.system.config.equalizer.enabled, eq_enabled);
+                this.pending = 0;
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn effect_switches_queue_relative_intents_from_one_projection(cx: &mut TestAppContext) {
+        cx.update(Input::init);
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        processing.update(cx, |this, _| {
+            this.command_active = true;
+            let config = Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config);
+            config.denoise.hum.enabled = false;
+            config.denoise.impulse.enabled = false;
+            config.neural.speech_post_filter = false;
+        });
+        let window = cx.open_window(size(px(1000.), px(1400.)), {
+            let processing = processing.clone();
+            move |_, _| WorkbenchWindow(processing)
+        });
+        let handle = window.into();
+        for (page, selector, target) in [
+            (
+                Page::Restoration,
+                "restoration-enable-processing-hum-7",
+                ProcessingToggle::Hum,
+            ),
+            (
+                Page::Restoration,
+                "restoration-enable-processing-impulse-7",
+                ProcessingToggle::Impulse,
+            ),
+            (
+                Page::Speech,
+                "speech-post-filter",
+                ProcessingToggle::SpeechPostFilter,
+            ),
+        ] {
+            processing.update(cx, |this, cx| {
+                this.page = page;
+                cx.notify();
+            });
+            draw(cx, handle);
+            let position = gpui::VisualTestContext::from_window(handle, cx)
+                .debug_bounds(selector)
+                .unwrap()
+                .center();
+            for _ in 0..2 {
+                press(cx, handle, position);
+                release(cx, handle, position);
+            }
+            processing.update(cx, |this, _| {
+                assert_eq!(this.commands.len(), 2);
+                for queued in this.commands.drain(..) {
+                    assert!(matches!(queued.command,
+                        Command::ToggleProcessing { target: actual } if actual == target));
+                }
+                assert!(!this.state.system.config.denoise.hum.enabled);
+                assert!(!this.state.system.config.denoise.impulse.enabled);
+                assert!(!this.state.system.config.neural.speech_post_filter);
                 this.pending = 0;
             });
         }

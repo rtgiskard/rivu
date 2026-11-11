@@ -745,6 +745,131 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
         -18.5
     );
 }
+
+#[test]
+fn processing_toggle_intents_compose_with_stale_projection_and_absolute_edits() {
+    for initial in [false, true] {
+        for target in [
+            ProcessingToggle::Bypass,
+            ProcessingToggle::Hum,
+            ProcessingToggle::Impulse,
+            ProcessingToggle::SpeechPostFilter,
+        ] {
+            let (_directory, mut core) = fixture();
+            let _commands = recording_audio(&mut core);
+            let absolute = |value| match target {
+                ProcessingToggle::Bypass => Command::ProcessingBypass { bypassed: value },
+                ProcessingToggle::Hum => Command::DenoiseEdit {
+                    patch: Box::new(DenoisePatch {
+                        hum_enabled: Some(value),
+                        ..Default::default()
+                    }),
+                },
+                ProcessingToggle::Impulse => Command::DenoiseEdit {
+                    patch: Box::new(DenoisePatch {
+                        impulse_enabled: Some(value),
+                        ..Default::default()
+                    }),
+                },
+                ProcessingToggle::SpeechPostFilter => Command::NeuralEdit {
+                    patch: Box::new(NeuralPatch {
+                        speech_post_filter: Some(value),
+                        ..Default::default()
+                    }),
+                },
+            };
+            core.command(absolute(initial)).unwrap();
+            core.publish();
+            let projected = core.shared.read().configuration.config.clone();
+            let baseline = core.preferences.settings().clone();
+            // Both intents were queued against exactly the same projection.
+            let queued = [
+                Command::ToggleProcessing { target },
+                Command::ToggleProcessing { target },
+            ];
+            for command in queued {
+                core.command(command).unwrap();
+            }
+            assert_eq!(core.preferences.settings(), &baseline);
+            assert_eq!(core.shared.read().configuration.config, projected);
+            assert_eq!(
+                Config::load(&core.state.configuration.config_path).unwrap(),
+                *baseline
+            );
+
+            // The absolute edit resets the value between the relative intents.
+            for command in [
+                Command::ToggleProcessing { target },
+                absolute(initial),
+                Command::ToggleProcessing { target },
+            ] {
+                core.command(command).unwrap();
+            }
+            let current = core.preferences.settings();
+            let value = match target {
+                ProcessingToggle::Bypass => current.processing_bypassed,
+                ProcessingToggle::Hum => current.denoise.hum.enabled,
+                ProcessingToggle::Impulse => current.denoise.impulse.enabled,
+                ProcessingToggle::SpeechPostFilter => current.neural.speech_post_filter,
+            };
+            assert_eq!(value, !initial);
+            let expected = current.clone();
+            core.command(absolute(!initial)).unwrap();
+            core.command(absolute(!initial)).unwrap();
+            assert_eq!(core.preferences.settings(), &expected);
+            assert_eq!(core.shared.read().configuration.config, projected);
+            assert_eq!(
+                Config::load(&core.state.configuration.config_path).unwrap(),
+                *expected
+            );
+        }
+    }
+}
+
+#[test]
+fn processing_toggle_audio_rejection_does_not_commit_or_consume_the_toggle() {
+    let (_directory, mut core) = fixture();
+    let _commands = recording_audio(&mut core);
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::Enabled(true),
+    )
+    .unwrap();
+    core.publish();
+    let baseline = core.preferences.settings().clone();
+    let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+    let (commands, receive) = async_channel::bounded(1);
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
+    let _previous_commands = core.engine.replace_commands(commands);
+    core.command(Command::ToggleProcessing {
+        target: ProcessingToggle::Bypass,
+    })
+    .unwrap_err();
+    assert_eq!(core.preferences.settings(), &baseline);
+    assert_eq!(
+        std::fs::read(&core.state.configuration.config_path).unwrap(),
+        saved
+    );
+    assert!(matches!(
+        receive.try_recv().unwrap().command,
+        AudioCommand::Volume(0.5)
+    ));
+    assert!(receive.try_recv().is_err());
+    core.command(Command::ToggleProcessing {
+        target: ProcessingToggle::Bypass,
+    })
+    .unwrap();
+    assert_eq!(
+        core.preferences.settings().processing_bypassed,
+        !baseline.processing_bypassed
+    );
+    assert!(matches!(receive.try_recv().unwrap().command,
+        AudioCommand::Equalizer(config) if !config.enabled));
+}
 #[test]
 fn page_parameter_patches_reject_all_fields_without_writing_partial_values() {
     use rivu_protocol::model::NeuralPatch;

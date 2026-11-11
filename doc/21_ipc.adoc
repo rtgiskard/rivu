@@ -1403,6 +1403,14 @@ remain unchanged. For neural manifests, explicit JSON `null` clears the selected
 manifest, whereas an omitted manifest leaves it unchanged; the binary adapter
 preserves the same three-way intent.
 
+`ToggleProcessing { target }` carries one of `bypass`, `hum`, `impulse` or
+`speech_post_filter`. Core flips the current setting at execution time, not the
+client's last displayed value, then uses the same admission and persistence path
+as explicit settings. Desktop immediate switches use this intent; patch fields
+and CLI bypass on/off remain absolute assignments. Queued toggles and absolute
+edits compose in execution order. Audio-capacity rejection leaves settings and
+the saved configuration unchanged.
+
 `ProcessingBypass { bypassed }` explicitly sets the persisted master playback
 bypass flag independently of Monitor EQ enablement. Entering bypass restores
 Original and revokes pending automatic audition without cancelling render/export

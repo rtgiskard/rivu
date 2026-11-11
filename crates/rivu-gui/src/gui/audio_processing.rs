@@ -7,7 +7,7 @@ use rivu_dsp::denoise::{DenoiseConfig, DenoiseMode};
 use rivu_format::config::{NeuralConfig, NeuralDevice};
 use rivu_protocol::model::{
     AuditionMode, Command, DenoisePatch, EqualizerEdit, NeuralPatch, NoiseSelection,
-    ProcessingOperation, ProcessingPhase, Track,
+    ProcessingOperation, ProcessingPhase, ProcessingToggle, Track,
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, Popover, activate_control, button, caption,
@@ -2174,7 +2174,7 @@ impl AudioProcessing {
             (
                 "processing-hum",
                 config.hum.enabled,
-                DenoiseField::HumEnabled,
+                ProcessingToggle::Hum,
                 &[
                     DenoiseField::HumFundamentalHz,
                     DenoiseField::HumHarmonics,
@@ -2184,7 +2184,7 @@ impl AudioProcessing {
             (
                 "processing-impulse",
                 config.impulse.enabled,
-                DenoiseField::ImpulseEnabled,
+                ProcessingToggle::Impulse,
                 &[
                     DenoiseField::ImpulseMaxWidth,
                     DenoiseField::ImpulseThreshold,
@@ -2199,19 +2199,19 @@ impl AudioProcessing {
                 .pt_2()
                 .border_t_1()
                 .border_color(rgb(theme.border))
-                .child(checkbox(
-                    SharedString::from(format!("restoration-enable-{group}-{panel}")),
-                    self.tr(group),
-                    enabled,
-                    true,
-                    cx,
-                    move |this, enabled, cx| {
-                        this.patch_denoise(
-                            toggle.patch(&enabled.to_string()).expect("boolean toggle"),
-                            cx,
-                        );
-                    },
-                ));
+                .child(
+                    checkbox(
+                        SharedString::from(format!("restoration-enable-{group}-{panel}")),
+                        self.tr(group),
+                        enabled,
+                        true,
+                        cx,
+                        move |this, _, cx| {
+                            this.send(Command::ToggleProcessing { target: toggle }, cx);
+                        },
+                    )
+                    .debug_selector(move || format!("restoration-enable-{group}-{panel}")),
+                );
             if enabled {
                 section = section.child(self.parameter_controls(panel, fields, cx));
             }
@@ -2273,16 +2273,16 @@ impl AudioProcessing {
                     neural.speech_post_filter,
                     true,
                     cx,
-                    |this, value, cx| {
-                        this.patch_neural(
-                            NeuralPatch {
-                                speech_post_filter: Some(value),
-                                ..Default::default()
+                    |this, _, cx| {
+                        this.send(
+                            Command::ToggleProcessing {
+                                target: ProcessingToggle::SpeechPostFilter,
                             },
                             cx,
                         )
                     },
                 )
+                .debug_selector(|| "speech-post-filter".to_owned())
                 .aria_label(self.tr("processing-speech-post-filter")),
             ));
         }
@@ -2818,8 +2818,8 @@ impl AudioProcessing {
                 cx,
                 |this, _, cx| {
                     this.send(
-                        Command::ProcessingBypass {
-                            bypassed: !this.state.system.config.processing_bypassed,
+                        Command::ToggleProcessing {
+                            target: ProcessingToggle::Bypass,
                         },
                         cx,
                     );

@@ -45,6 +45,42 @@ fn master_bypass_wire_requires_explicit_boolean_and_preserves_direction() {
 }
 
 #[test]
+fn processing_toggle_intents_preserve_typed_targets_on_wire_and_json() {
+    use crate::model::ProcessingToggle;
+    let mut encoded = Vec::new();
+    for (target, name, position) in [
+        (ProcessingToggle::Bypass, "bypass", 0),
+        (ProcessingToggle::Hum, "hum", 1),
+        (ProcessingToggle::Impulse, "impulse", 2),
+        (ProcessingToggle::SpeechPostFilter, "speech_post_filter", 3),
+    ] {
+        assert_eq!(postcard::to_allocvec(&target).unwrap(), [position]);
+        let command = Command::ToggleProcessing { target };
+        let json = serde_json::json!({"command": "toggle_processing", "target": name});
+        assert_eq!(serde_json::to_value(&command).unwrap(), json);
+        assert!(matches!(serde_json::from_value::<Command>(json).unwrap(),
+            Command::ToggleProcessing { target: actual } if actual == target));
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(command)),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected processing toggle");
+        };
+        assert!(matches!(Command::try_from(wire).unwrap(),
+            Command::ToggleProcessing { target: actual } if actual == target));
+    }
+    for json in [
+        r#"{"command":"toggle_processing"}"#,
+        r#"{"command":"toggle_processing","target":"equalizer"}"#,
+        r#"{"command":"toggle_processing","target":true}"#,
+    ] {
+        assert!(serde_json::from_str::<Command>(json).is_err());
+    }
+}
+
+#[test]
 fn exact_playlist_summary_round_trips_ids_and_optional_results() {
     use crate::{model::PlaylistSummary, response::ViewResponse};
     let mut encoded = Vec::new();

@@ -2,6 +2,21 @@ use super::*;
 use anyhow::ensure;
 
 impl Core {
+    pub(in crate::core) fn toggle_processing(&mut self, target: ProcessingToggle) -> Result<()> {
+        if target == ProcessingToggle::Bypass {
+            return self.processing_bypass(!self.preferences.settings().processing_bypassed);
+        }
+        let mut config = self.preferences.checkpoint();
+        let enabled = match target {
+            ProcessingToggle::Bypass => unreachable!(),
+            ProcessingToggle::Hum => &mut config.denoise.hum.enabled,
+            ProcessingToggle::Impulse => &mut config.denoise.impulse.enabled,
+            ProcessingToggle::SpeechPostFilter => &mut config.neural.speech_post_filter,
+        };
+        *enabled = !*enabled;
+        self.commit_processing_config(config)
+    }
+
     pub(in crate::core) fn processing_bypass(&mut self, bypassed: bool) -> Result<()> {
         if self.preferences.settings().processing_bypassed == bypassed {
             return Ok(());
