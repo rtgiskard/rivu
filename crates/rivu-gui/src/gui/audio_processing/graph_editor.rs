@@ -2477,6 +2477,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mode_and_device_choices_preserve_queued_return_to_published_selection(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Input::init);
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        processing.update(cx, |this, _| {
+            // Hold dispatch so every click sees the same published configuration.
+            this.command_active = true;
+            this.speech_advanced = true;
+            this.separation_advanced = true;
+            let config = Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config);
+            DenoiseField::Mode
+                .apply(&mut config.denoise, "off")
+                .unwrap();
+            NeuralField::Device
+                .apply(&mut config.neural, "cpu")
+                .unwrap();
+        });
+        let window = cx.open_window(size(px(1000.), px(1400.)), {
+            let processing = processing.clone();
+            move |_, _| WorkbenchWindow(processing)
+        });
+        let handle = window.into();
+        let mode_choices = [
+            ("off", "denoise-mode-off"),
+            ("stationary", "denoise-mode-stationary"),
+            ("off", "denoise-mode-off"),
+        ];
+        let device_choices = [
+            ("cpu", "neural-device-cpu"),
+            ("cuda", "neural-device-cuda"),
+            ("cpu", "neural-device-cpu"),
+        ];
+        for (page, choices) in [
+            (Page::Restoration, mode_choices),
+            (Page::Speech, device_choices),
+            (Page::Separation, device_choices),
+        ] {
+            processing.update(cx, |this, cx| {
+                this.page = page;
+                cx.notify();
+            });
+            draw(cx, handle);
+            for (_, selector) in choices {
+                let position = gpui::VisualTestContext::from_window(handle, cx)
+                    .debug_bounds(selector)
+                    .unwrap()
+                    .center();
+                press(cx, handle, position);
+                release(cx, handle, position);
+            }
+            processing.update(cx, |this, _| {
+                assert_eq!(this.commands.len(), 3, "every absolute selection is queued");
+                for (queued, (choice, _)) in this.commands.drain(..).zip(choices) {
+                    match queued.command {
+                        Command::DenoiseEdit { patch } if page == Page::Restoration => {
+                            assert_eq!(patch.mode, DenoiseField::Mode.patch(choice).unwrap().mode);
+                        }
+                        Command::NeuralEdit { patch } if page != Page::Restoration => {
+                            assert_eq!(
+                                patch.device,
+                                NeuralField::Device.patch(choice).unwrap().device
+                            );
+                        }
+                        command => panic!("unexpected selection command: {command:?}"),
+                    }
+                }
+                assert_eq!(
+                    DenoiseField::Mode.text(&this.state.system.config.denoise),
+                    "off"
+                );
+                assert_eq!(
+                    NeuralField::Device.text(&this.state.system.config.neural),
+                    "cpu"
+                );
+                this.pending = 0;
+            });
+        }
+    }
+
+    #[gpui::test]
     fn bypass_blocks_auditions_but_keeps_calculation_and_export(cx: &mut TestAppContext) {
         cx.update(Input::init);
         let (_directory, _runtime, processing, _) = fixture(cx);

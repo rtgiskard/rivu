@@ -2138,14 +2138,13 @@ impl AudioProcessing {
                     self.tr(label),
                     cx,
                     move |this, _, cx| {
-                        if DenoiseField::Mode.text(&this.state.system.config.denoise) != slug {
-                            this.patch_denoise(
-                                DenoiseField::Mode.patch(slug).expect("valid mode choice"),
-                                cx,
-                            )
-                        }
+                        this.patch_denoise(
+                            DenoiseField::Mode.patch(slug).expect("valid mode choice"),
+                            cx,
+                        )
                     },
                 )
+                .debug_selector(move || format!("denoise-mode-{slug}"))
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .when(selected_mode == slug, |view| view.bg(rgb(theme.selected))),
@@ -2369,16 +2368,15 @@ impl AudioProcessing {
                         self.tr(label),
                         cx,
                         move |this, _, cx| {
-                            if NeuralField::Device.text(&this.state.system.config.neural) != value {
-                                this.patch_neural(
-                                    NeuralField::Device
-                                        .patch(value)
-                                        .expect("valid device choice"),
-                                    cx,
-                                )
-                            }
+                            this.patch_neural(
+                                NeuralField::Device
+                                    .patch(value)
+                                    .expect("valid device choice"),
+                                cx,
+                            )
                         },
                     )
+                    .debug_selector(move || format!("neural-device-{value}"))
                     .when(selected_device == value, |v| v.bg(rgb(theme.selected))),
                 );
             }
