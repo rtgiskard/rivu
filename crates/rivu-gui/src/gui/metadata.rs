@@ -1309,17 +1309,14 @@ impl Metadata {
                                         if this.metadata.editor_identity() != editor_identity {
                                             return;
                                         }
-                                        let Some((track_id, favorite)) = this
-                                            .metadata
-                                            .track()
-                                            .map(|track| (track.id, track.favorite))
+                                        let Some(track_id) =
+                                            this.metadata.track().map(|track| track.id)
                                         else {
                                             return;
                                         };
                                         this.send(
-                                            Command::SetFavorite {
+                                            Command::ToggleFavorite {
                                                 track_ids: vec![track_id],
-                                                favorite: !favorite,
                                             },
                                             cx,
                                         );

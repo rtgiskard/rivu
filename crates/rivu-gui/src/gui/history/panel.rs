@@ -88,9 +88,8 @@ impl History {
             cx,
             move |this, _, cx| {
                 this.send(
-                    Command::SetFavorite {
+                    Command::ToggleFavorite {
                         track_ids: vec![track_id],
-                        favorite: !favorite,
                     },
                     cx,
                 );
