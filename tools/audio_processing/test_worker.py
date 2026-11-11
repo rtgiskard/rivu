@@ -121,6 +121,7 @@ class ProducerIdentityTests(unittest.TestCase):
     def test_reference_completion_does_not_hash_replacement_after_inference(self):
         import io
         import sys
+        import scipy.signal
         from contextlib import redirect_stdout
         from types import SimpleNamespace
         import reference
@@ -148,6 +149,34 @@ class ProducerIdentityTests(unittest.TestCase):
             self.assertEqual(report["source_sha256"], expected_digest)
             self.assertNotEqual(report["source_sha256"], digest(source))
             self.assertEqual(report["frames"], 2)
+
+    def test_reference_preserves_destination_created_during_inference(self):
+        import sys
+        import scipy.signal
+        from types import SimpleNamespace
+        import reference
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self.make_sources(root, rate=48000)
+            manifest = root / "manifest.json"
+            manifest.write_text('{"operation":"speech"}')
+            destination = root / "reference.wav"
+            sentinel = b"created by another operation during inference"
+            fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
+                set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
+                backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
+            def infer(base, audio, device):
+                destination.write_bytes(sentinel)
+                return audio
+            argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
+                    "--output", str(destination)]
+            with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
+                 patch.object(reference, "validate_manifest", return_value={"operation":"speech", "id":"MossFormer2_SE_48K"}), \
+                 patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
+                 patch.object(reference, "upstream_moss", side_effect=infer):
+                with self.assertRaises(FileExistsError):
+                    reference.main()
+            self.assertEqual(destination.read_bytes(), sentinel)
 
 class ProvisionTests(unittest.TestCase):
     def test_initial_construction_then_reprovision_preserves_source(self):

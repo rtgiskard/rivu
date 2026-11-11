@@ -120,7 +120,8 @@ def main():
     result=result[:len(audio)]
     if result.shape!=audio.shape or not np.isfinite(result).all():
         raise ValueError("reference changed shape or produced nonfinite audio")
-    sf.write(args.output,result,rate,format="WAV",subtype="FLOAT")
+    with args.output.open("xb") as output:
+        sf.write(output,result,rate,format="WAV",subtype="FLOAT")
     print(json.dumps({"output":str(args.output.resolve()),"sha256":digest(args.output),"source_sha256":source_sha256,
                       "manifest_sha256":digest(args.model_manifest),"command":sys.argv,"frames":len(result),"rate":rate}))
 
