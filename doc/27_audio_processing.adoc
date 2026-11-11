@@ -236,6 +236,30 @@ and reads remain bounded if the file grows. A/B swaps with the alternate; the
 first swap saves the current configuration and selects the disabled, zero-gain,
 empty-band default. Save a preset if both alternatives must be retained.
 
+When `equalizer_presets` is absent from `config.toml`, the default list contains
+Flat, Vocal Clarity, Acoustic & OST, Punch, Soft Focus, and Quiet Listening.
+These are ordinary editable presets, not a separate read-only catalog. An explicit
+list replaces the defaults; `equalizer_presets = []` at the top level keeps the
+list empty. Saved edits and deletions are not merged with factory presets on reload.
+Version updates do not replace an explicitly saved list.
+Factory curves are compiled from
+link:../crates/rivu-format/data/presets/equalizer.toml[`data/presets/equalizer.toml`]
+(a repository symlink). Changing them requires rebuilding; personal presets remain
+in `config.toml`.
+Factory entries place `name`, `preamp_db`, `output_gain_db` and `bands` directly
+under `[[equalizer_presets]]`; EQ enable state is controlled by Core.
+User configuration and JSON import/export retain the `{ name, config }` structure.
+
+The curves are broad tonal starting points, not measured headphone corrections
+or genre-specific mastering. Vocal Clarity emphasizes presence; Acoustic & OST
+gently adds body and brightness; Punch emphasizes bass and attack; Soft Focus
+reduces treble for background listening; Quiet Listening boosts bass and some
+treble at low listening levels, without automatic volume tracking. Neither is a
+night-time dynamic limiter. Positive-gain presets include conservative preamp
+attenuation for headroom, not loudness matching or a guarantee against clipping.
+Flat is neutral Monitor EQ only; it does not bypass other processing. Providing
+presets does not select one: the active EQ still defaults to disabled and neutral.
+
 
 [source,shell]
 ----

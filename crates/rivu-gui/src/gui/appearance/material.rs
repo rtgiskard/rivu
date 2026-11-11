@@ -402,7 +402,6 @@ pub(in crate::gui) enum CompositionFamily {
 pub(in crate::gui) struct MaterialSpec {
     pub id: MaterialPreset,
     pub menu_label: &'static str,
-    pub defaults: MaterialParameters,
     pub family: CompositionFamily,
     pub artwork_root: bool,
     pub artwork_playback: bool,
@@ -446,7 +445,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Original,
         menu_label: "material-original",
-        defaults: MaterialParameters::preset(MaterialPreset::Original),
         family: CompositionFamily::Original,
         artwork_root: false,
         artwork_playback: false,
@@ -454,7 +452,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Satin,
         menu_label: "material-satin",
-        defaults: MaterialParameters::preset(MaterialPreset::Satin),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: false,
@@ -462,7 +459,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Atmosphere,
         menu_label: "material-atmosphere",
-        defaults: MaterialParameters::preset(MaterialPreset::Atmosphere),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: true,
@@ -470,7 +466,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Glass,
         menu_label: "material-glass",
-        defaults: MaterialParameters::preset(MaterialPreset::Glass),
         family: CompositionFamily::Surface,
         artwork_root: true,
         artwork_playback: false,
@@ -478,7 +473,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Stage,
         menu_label: "material-stage",
-        defaults: MaterialParameters::preset(MaterialPreset::Stage),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: true,
@@ -486,7 +480,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Mist,
         menu_label: "material-mist",
-        defaults: MaterialParameters::preset(MaterialPreset::Mist),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: false,
@@ -494,7 +487,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Spring,
         menu_label: "material-spring",
-        defaults: MaterialParameters::preset(MaterialPreset::Spring),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: false,
@@ -502,7 +494,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Glint,
         menu_label: "material-glint",
-        defaults: MaterialParameters::preset(MaterialPreset::Glint),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: false,
@@ -510,7 +501,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Ripple,
         menu_label: "material-ripple",
-        defaults: MaterialParameters::preset(MaterialPreset::Ripple),
         family: CompositionFamily::Surface,
         artwork_root: false,
         artwork_playback: false,
@@ -518,7 +508,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Mirror,
         menu_label: "material-mirror",
-        defaults: MaterialParameters::preset(MaterialPreset::Mirror),
         family: CompositionFamily::Surface,
         artwork_root: true,
         artwork_playback: false,
@@ -526,7 +515,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Gradient,
         menu_label: "material-gradient",
-        defaults: MaterialParameters::preset(MaterialPreset::Gradient),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -534,7 +522,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Feather,
         menu_label: "material-feather",
-        defaults: MaterialParameters::preset(MaterialPreset::Feather),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -542,7 +529,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Sheen,
         menu_label: "material-sheen",
-        defaults: MaterialParameters::preset(MaterialPreset::Sheen),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -550,7 +536,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::EdgeFade,
         menu_label: "material-edge-fade",
-        defaults: MaterialParameters::preset(MaterialPreset::EdgeFade),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -558,7 +543,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Aura,
         menu_label: "material-aura",
-        defaults: MaterialParameters::preset(MaterialPreset::Aura),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -566,7 +550,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Water,
         menu_label: "material-water",
-        defaults: MaterialParameters::preset(MaterialPreset::Water),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -574,7 +557,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Grain,
         menu_label: "material-grain",
-        defaults: MaterialParameters::preset(MaterialPreset::Grain),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -582,7 +564,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Dissolve,
         menu_label: "material-dissolve",
-        defaults: MaterialParameters::preset(MaterialPreset::Dissolve),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -590,7 +571,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Frost,
         menu_label: "material-frost",
-        defaults: MaterialParameters::preset(MaterialPreset::Frost),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: false,
@@ -598,7 +578,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Storybook,
         menu_label: "material-storybook",
-        defaults: MaterialParameters::preset(MaterialPreset::Storybook),
         family: CompositionFamily::Image,
         artwork_root: true,
         artwork_playback: true,
@@ -606,7 +585,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::CgWater,
         menu_label: "material-cg-water",
-        defaults: MaterialParameters::preset(MaterialPreset::CgWater),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -614,7 +592,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::StillWater,
         menu_label: "material-still-water",
-        defaults: MaterialParameters::preset(MaterialPreset::StillWater),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -622,7 +599,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Stream,
         menu_label: "material-stream",
-        defaults: MaterialParameters::preset(MaterialPreset::Stream),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -630,7 +606,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Lake,
         menu_label: "material-lake",
-        defaults: MaterialParameters::preset(MaterialPreset::Lake),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -638,7 +613,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Rain,
         menu_label: "material-rain",
-        defaults: MaterialParameters::preset(MaterialPreset::Rain),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -646,7 +620,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Garden,
         menu_label: "material-garden",
-        defaults: MaterialParameters::preset(MaterialPreset::Garden),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -654,7 +627,6 @@ pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
     MaterialSpec {
         id: MaterialPreset::Crystal,
         menu_label: "material-crystal",
-        defaults: MaterialParameters::preset(MaterialPreset::Crystal),
         family: CompositionFamily::ProceduralWater,
         artwork_root: false,
         artwork_playback: false,
@@ -697,7 +669,7 @@ impl Default for MaterialSession {
         Self {
             enabled: false,
             material: MaterialPreset::Satin,
-            settings: MaterialPreset::Satin.spec().defaults,
+            settings: MaterialParameters::preset(MaterialPreset::Satin),
             saved: [None; MATERIALS.len()],
             pending: 0,
         }
@@ -723,8 +695,8 @@ impl MaterialSession {
         for (&preset, &parameters) in &preferences.presets {
             self.saved[material_slot(preset)] = Some(parameters);
         }
-        self.settings =
-            self.saved[material_slot(self.material)].unwrap_or(self.material.spec().defaults);
+        self.settings = self.saved[material_slot(self.material)]
+            .unwrap_or_else(|| MaterialParameters::preset(self.material));
     }
 
     pub(in crate::gui) fn reconcile(&mut self, preferences: &MaterialPreferences) {
@@ -794,12 +766,12 @@ impl MaterialSession {
                 }
                 self.saved[material_slot(self.material)] = Some(self.settings);
                 self.material = material;
-                self.settings =
-                    self.saved[material_slot(material)].unwrap_or(material.spec().defaults);
+                self.settings = self.saved[material_slot(material)]
+                    .unwrap_or_else(|| MaterialParameters::preset(material));
                 true
             }
             MaterialIntent::Reset(material) if material == self.material => {
-                let defaults = material.spec().defaults;
+                let defaults = MaterialParameters::preset(material);
                 let changed = self.settings != defaults;
                 self.settings = defaults;
                 changed
@@ -833,7 +805,7 @@ pub(in crate::gui) struct MaterialSnapshot {
 
 impl MaterialSnapshot {
     pub fn modified(&self) -> bool {
-        let defaults = self.material.spec().defaults;
+        let defaults = MaterialParameters::preset(self.material);
         self.material.spec().controls().any(|parameter| {
             (parameter.value(self.settings) - parameter.value(defaults)).abs()
                 > parameter.limits().2 * 0.0001
@@ -982,10 +954,6 @@ mod tests {
         let mut preferences = MaterialPreferences::default();
         for (index, material) in MaterialPreset::ALL.into_iter().enumerate() {
             assert_eq!(material.spec().id, material);
-            assert_eq!(
-                material.spec().defaults,
-                MaterialParameters::preset(material)
-            );
             let mut parameters = MaterialParameters::preset(material);
             parameters.panel_alpha = (index + 1) as f32 / 100.;
             preferences.presets.insert(material, parameters);
@@ -1097,7 +1065,7 @@ mod tests {
         let theme = rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
         let frame = MaterialFrame {
             material: MaterialPreset::Stage,
-            settings: MaterialPreset::Stage.spec().defaults,
+            settings: MaterialParameters::preset(MaterialPreset::Stage),
             motion: false,
             previous: None,
             current: None,
@@ -1189,7 +1157,7 @@ mod tests {
 
     #[test]
     fn requested_backdrop_radius_resolves_at_the_physical_backend_boundary() {
-        let mut settings = MaterialPreset::Frost.spec().defaults;
+        let mut settings = MaterialParameters::preset(MaterialPreset::Frost);
         settings.backdrop_blur = 32.;
         for scale in [1., 1.25, 2., 3.] {
             assert_eq!(settings.effective_backdrop_blur(scale) * scale, 32.);
@@ -1453,7 +1421,7 @@ mod tests {
         draw(window);
         window.run_until_parked();
         draw(window);
-        let duration = MaterialPreset::Dissolve.spec().defaults.transition_seconds;
+        let duration = MaterialParameters::preset(MaterialPreset::Dissolve).transition_seconds;
         window
             .executor()
             .advance_clock(Duration::from_secs_f32(duration * 0.5));

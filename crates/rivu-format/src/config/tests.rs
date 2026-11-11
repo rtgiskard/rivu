@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn preset_overrides_and_deletions_survive_configuration_reload() {
+    let original = "[equalizer]\nenabled = true\npreamp_db = -8.0\n";
+    let baseline = from_toml(original).unwrap();
+    baseline.validate_settings().unwrap();
+    assert_eq!(baseline.equalizer.preamp_db, -8.0);
+    assert!(baseline.equalizer.enabled);
+    let mut edited = baseline.clone();
+    let removed = edited.equalizer_presets.remove(0).name;
+    edited.equalizer_presets[0].config.preamp_db = -9.0;
+    let saved = update_toml(original, Some(&baseline), &edited).unwrap();
+    let reloaded = from_toml(&saved).unwrap();
+    assert_eq!(reloaded, edited);
+    assert!(reloaded.equalizer_presets.iter().all(|p| p.name != removed));
+    assert_eq!(reloaded.equalizer, baseline.equalizer);
+    edited.equalizer_presets.clear();
+    let saved = update_toml(&saved, Some(&reloaded), &edited).unwrap();
+    assert!(from_toml(&saved).unwrap().equalizer_presets.is_empty());
+    let custom = from_toml("equalizer_presets = [{ name = 'Mine', config = {} }]").unwrap();
+    assert_eq!(custom.equalizer_presets.len(), 1);
+    assert_eq!(custom.equalizer_presets[0].name, "Mine");
+    assert_eq!(from_toml("").unwrap().equalizer, EqualizerConfig::default());
+    assert_eq!(from_toml(original).unwrap(), baseline);
+}
+
+#[test]
 fn master_bypass_defaults_false_and_roundtrips_independently_of_eq() {
     let original = "# preserve\n[playback]\nvolume_percent = 45\n";
     let baseline = from_toml(original).unwrap();

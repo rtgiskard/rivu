@@ -573,7 +573,7 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
     };
     core.equalizer_edit(core.state.revisions.configuration, export(path.clone()))
         .unwrap();
-    let expected = serde_json::to_vec_pretty(&configuration.equalizer_presets[0].config).unwrap();
+    let expected = serde_json::to_vec_pretty(&configuration.equalizer).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), expected);
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
 
@@ -974,7 +974,12 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
     )
     .unwrap();
     assert_eq!(
-        core.preferences.settings().equalizer_presets[0]
+        core.preferences
+            .settings()
+            .equalizer_presets
+            .iter()
+            .find(|preset| preset.name == name)
+            .unwrap()
             .config
             .preamp_db,
         -6.0
@@ -1011,16 +1016,18 @@ fn preset_creation_and_replacement_have_explicit_non_upsert_preconditions() {
         core.state.revisions.configuration,
         EqualizerEdit::ImportPreset {
             path,
-            name,
+            name: name.clone(),
             overwrite: true,
         },
     )
     .unwrap();
-    assert_eq!(core.preferences.settings().equalizer_presets.len(), 1);
-    assert_eq!(
-        core.preferences.settings().equalizer_presets[0].config,
-        imported
-    );
+    let mut expected = baseline.equalizer_presets.clone();
+    expected
+        .iter_mut()
+        .find(|preset| preset.name == name)
+        .unwrap()
+        .config = imported;
+    assert_eq!(core.preferences.settings().equalizer_presets, expected);
 }
 
 #[test]

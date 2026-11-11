@@ -295,7 +295,10 @@ impl FileConfig {
             self.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION),
             CONFIG_SCHEMA_VERSION
         );
-        let mut config = Config::default();
+        let mut config = Config::default_with_equalizer_presets(
+            self.equalizer_presets
+                .unwrap_or_else(default_equalizer_presets),
+        );
         self.library.apply(&mut config);
         self.playback.apply(&mut config);
         self.interface.apply(&mut config);
@@ -316,9 +319,6 @@ impl FileConfig {
                 edges: value.edges,
                 next_id: value.next_id,
             };
-        }
-        if let Some(value) = self.equalizer_presets {
-            config.equalizer_presets = value;
         }
         config.equalizer_ab = self.equalizer_ab;
         self.visualizations.apply(&mut config);

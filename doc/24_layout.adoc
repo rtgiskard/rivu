@@ -482,10 +482,12 @@ effect immediately and save automatically, independently of the Settings draft.
 They do not change semantic theme colors, playback, queue state or saved-layout
 syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
 
-The GUI projects the saved preferences into its material state.
-A static material specification supplies preset defaults, control capabilities and
-the composition recipe; the selector and controls consume the same catalog. Selection,
-reset and parameter edits commit through window coordination. The window-local
+The GUI projects the saved preferences into its material state. Factory defaults
+are compiled from
+link:../crates/rivu-format/data/presets/material.toml[`data/presets/material.toml`];
+personal overrides remain in `config.toml`. The static GUI catalog supplies control
+capabilities and composition recipes. Selection, reset and parameter edits commit
+through window coordination. The window-local
 atmosphere runtime reconciles material identity, transition policy, track and
 visibility in one resource-demand update. Material actions update only that
 demand, not unrelated features; track, layout and window lifecycle changes use

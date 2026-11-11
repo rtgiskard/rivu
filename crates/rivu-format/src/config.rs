@@ -113,6 +113,50 @@ pub struct EqualizerPreset {
     pub config: EqualizerConfig,
 }
 
+fn default_equalizer_presets() -> Vec<EqualizerPreset> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FactoryPresets {
+        equalizer_presets: Vec<FactoryPreset>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FactoryPreset {
+        name: String,
+        #[serde(default)]
+        preamp_db: f64,
+        #[serde(default)]
+        output_gain_db: f64,
+        #[serde(default)]
+        bands: Vec<rivu_dsp::equalizer::config::EqBand>,
+    }
+
+    static PRESETS: std::sync::LazyLock<Vec<EqualizerPreset>> = std::sync::LazyLock::new(|| {
+        let presets: FactoryPresets =
+            toml::from_str(include_str!("../data/presets/equalizer.toml"))
+                .expect("embedded EQ presets must be valid TOML");
+        presets
+            .equalizer_presets
+            .into_iter()
+            .map(|preset| {
+                let config = EqualizerConfig {
+                    enabled: true,
+                    preamp_db: preset.preamp_db,
+                    output_gain_db: preset.output_gain_db,
+                    bands: preset.bands,
+                };
+                config.validate().expect("embedded EQ preset must be valid");
+                EqualizerPreset {
+                    name: preset.name,
+                    config,
+                }
+            })
+            .collect()
+    });
+    PRESETS.clone()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtworkStyle {
@@ -523,6 +567,12 @@ config_fields!(config_type);
 
 impl Default for Config {
     fn default() -> Self {
+        Self::default_with_equalizer_presets(default_equalizer_presets())
+    }
+}
+
+impl Config {
+    fn default_with_equalizer_presets(equalizer_presets: Vec<EqualizerPreset>) -> Self {
         Self {
             library_roots: Vec::new(),
             scan_max_depth: DEFAULT_SCAN_MAX_DEPTH,
@@ -611,7 +661,7 @@ impl Default for Config {
             denoise: DenoiseConfig::default(),
             neural: NeuralConfig::default(),
             processing_graph: ProcessingGraph::default(),
-            equalizer_presets: Vec::new(),
+            equalizer_presets,
             equalizer_ab: None,
         }
     }

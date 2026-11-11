@@ -1,0 +1,352 @@
+# Factory material parameters. Each preset is complete; user overrides remain in config.toml.
+
+[original]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[satin]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[atmosphere]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[glass]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[stage]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[mist]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[spring]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[glint]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[ripple]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[mirror]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[gradient]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[feather]
+panel_alpha = 0.5
+feather = 0.62
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[sheen]
+panel_alpha = 0.68
+feather = 0.0
+highlight = 0.64
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[edge_fade]
+panel_alpha = 0.72
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.55
+transition_seconds = 0.0
+speed = 1.0
+
+[aura]
+panel_alpha = 0.54
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 18.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[water]
+panel_alpha = 0.52
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 7.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[grain]
+panel_alpha = 0.82
+feather = 0.0
+highlight = 0.0
+grain = 0.18
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[dissolve]
+panel_alpha = 0.58
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.85
+speed = 1.0
+
+[frost]
+panel_alpha = 0.28
+feather = 0.0
+highlight = 0.0
+grain = 0.0
+color_steps = 0.0
+wave = 0.0
+cover_blur = 0.0
+backdrop_blur = 20.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[storybook]
+panel_alpha = 0.78
+feather = 0.0
+highlight = 0.0
+grain = 0.1
+color_steps = 5.0
+wave = 1.2
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.55
+
+[cg_water]
+panel_alpha = 0.72
+feather = 0.0
+highlight = 0.65
+grain = 0.0
+color_steps = 0.0
+wave = 7.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 1.0
+
+[still_water]
+panel_alpha = 0.45
+feather = 0.0
+highlight = 0.32
+grain = 0.0
+color_steps = 0.0
+wave = 4.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.55
+
+[stream]
+panel_alpha = 0.4
+feather = 0.0
+highlight = 0.55
+grain = 0.0
+color_steps = 0.0
+wave = 6.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.8
+
+[lake]
+panel_alpha = 0.38
+feather = 0.0
+highlight = 0.4
+grain = 0.0
+color_steps = 0.0
+wave = 4.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.5
+
+[rain]
+panel_alpha = 0.42
+feather = 0.0
+highlight = 0.45
+grain = 0.0
+color_steps = 0.0
+wave = 5.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.85
+
+[garden]
+panel_alpha = 0.4
+feather = 0.0
+highlight = 0.4
+grain = 0.0
+color_steps = 0.0
+wave = 4.5
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.55
+
+[crystal]
+panel_alpha = 0.32
+feather = 0.0
+highlight = 0.5
+grain = 0.0
+color_steps = 0.0
+wave = 4.0
+cover_blur = 0.0
+backdrop_blur = 0.0
+edge_fade = 0.0
+transition_seconds = 0.0
+speed = 0.6

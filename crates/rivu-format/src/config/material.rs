@@ -53,101 +53,20 @@ pub struct MaterialParameters {
 }
 
 impl MaterialParameters {
-    pub const fn preset(material: MaterialPreset) -> Self {
-        let mut settings = Self {
-            panel_alpha: 0.58,
-            feather: 0.,
-            highlight: 0.,
-            grain: 0.,
-            color_steps: 0.,
-            wave: 0.,
-            cover_blur: 0.,
-            backdrop_blur: 0.,
-            edge_fade: 0.,
-            transition_seconds: 0.,
-            speed: 1.,
-        };
-        match material {
-            MaterialPreset::Feather => {
-                settings.panel_alpha = 0.50;
-                settings.feather = 0.62;
-            }
-            MaterialPreset::Sheen => {
-                settings.panel_alpha = 0.68;
-                settings.highlight = 0.64;
-            }
-            MaterialPreset::EdgeFade => {
-                settings.panel_alpha = 0.72;
-                settings.edge_fade = 0.55;
-            }
-            MaterialPreset::Aura => {
-                settings.panel_alpha = 0.54;
-                settings.cover_blur = 18.;
-            }
-            MaterialPreset::Water => {
-                settings.panel_alpha = 0.52;
-                settings.wave = 7.;
-            }
-            MaterialPreset::CgWater => {
-                settings.panel_alpha = 0.72;
-                settings.wave = 7.;
-                settings.highlight = 0.65;
-            }
-            MaterialPreset::StillWater => {
-                settings.panel_alpha = 0.45;
-                settings.wave = 4.;
-                settings.highlight = 0.32;
-                settings.speed = 0.55;
-            }
-            MaterialPreset::Stream => {
-                settings.panel_alpha = 0.40;
-                settings.wave = 6.;
-                settings.highlight = 0.55;
-                settings.speed = 0.8;
-            }
-            MaterialPreset::Lake => {
-                settings.panel_alpha = 0.38;
-                settings.wave = 4.;
-                settings.highlight = 0.4;
-                settings.speed = 0.5;
-            }
-            MaterialPreset::Rain => {
-                settings.panel_alpha = 0.42;
-                settings.wave = 5.;
-                settings.highlight = 0.45;
-                settings.speed = 0.85;
-            }
-            MaterialPreset::Garden => {
-                settings.panel_alpha = 0.40;
-                settings.wave = 4.5;
-                settings.highlight = 0.40;
-                settings.speed = 0.55;
-            }
-            MaterialPreset::Crystal => {
-                settings.panel_alpha = 0.32;
-                settings.wave = 4.;
-                settings.highlight = 0.50;
-                settings.speed = 0.6;
-            }
-            MaterialPreset::Grain => {
-                settings.panel_alpha = 0.82;
-                settings.grain = 0.18;
-            }
-            MaterialPreset::Dissolve => settings.transition_seconds = 0.85,
-            MaterialPreset::Frost => {
-                settings.panel_alpha = 0.28;
-                settings.backdrop_blur = 20.;
-            }
-            MaterialPreset::Storybook => {
-                settings.panel_alpha = 0.78;
-                settings.grain = 0.10;
-                settings.color_steps = 5.;
-                settings.wave = 1.2;
-                settings.speed = 0.55;
-            }
-            _ => {}
-        }
-        settings
+    pub fn preset(material: MaterialPreset) -> Self {
+        static PRESETS: std::sync::LazyLock<BTreeMap<MaterialPreset, MaterialParameters>> =
+            std::sync::LazyLock::new(|| {
+                let presets: BTreeMap<MaterialPreset, MaterialParameters> =
+                    toml::from_str(include_str!("../../data/presets/material.toml"))
+                        .expect("embedded material presets must be valid TOML");
+                for parameters in presets.values() {
+                    parameters
+                        .validate()
+                        .expect("embedded material preset must be valid");
+                }
+                presets
+            });
+        PRESETS[&material]
     }
 
     pub fn validate(&self) -> Result<()> {

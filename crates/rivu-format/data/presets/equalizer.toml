@@ -1,0 +1,49 @@
+# Factory Monitor EQ presets. Peak Q is intentionally broad; shelf slope defaults to 1.
+# Preamp attenuation reserves headroom, not loudness matching.
+
+[[equalizer_presets]]
+name = "Flat"
+
+[[equalizer_presets]]
+name = "Vocal Clarity"
+preamp_db = -4.0
+bands = [
+    { kind = "peak", frequency_hz = 250.0, gain_db = -1.5, q = 0.8 },
+    { kind = "peak", frequency_hz = 2500.0, gain_db = 2.0, q = 0.8 },
+    { kind = "high_shelf", frequency_hz = 9000.0, gain_db = 1.0, q = 0.8 },
+]
+
+[[equalizer_presets]]
+name = "Acoustic & OST"
+preamp_db = -4.0
+bands = [
+    { kind = "low_shelf", frequency_hz = 120.0, gain_db = 1.5, q = 0.8 },
+    { kind = "peak", frequency_hz = 300.0, gain_db = -0.8, q = 0.8 },
+    { kind = "high_shelf", frequency_hz = 10000.0, gain_db = 1.0, q = 0.8 },
+]
+
+[[equalizer_presets]]
+name = "Punch"
+preamp_db = -6.0
+bands = [
+    { kind = "low_shelf", frequency_hz = 90.0, gain_db = 3.0, q = 0.8 },
+    { kind = "peak", frequency_hz = 300.0, gain_db = -1.0, q = 0.8 },
+    { kind = "peak", frequency_hz = 3000.0, gain_db = 1.0, q = 0.8 },
+    { kind = "high_shelf", frequency_hz = 8000.0, gain_db = 1.5, q = 0.8 },
+]
+
+[[equalizer_presets]]
+name = "Soft Focus"
+preamp_db = -2.0
+bands = [
+    { kind = "low_shelf", frequency_hz = 120.0, gain_db = 1.0, q = 0.8 },
+    { kind = "high_shelf", frequency_hz = 3000.0, gain_db = -2.5, q = 0.8 },
+]
+
+[[equalizer_presets]]
+name = "Quiet Listening"
+preamp_db = -7.0
+bands = [
+    { kind = "low_shelf", frequency_hz = 100.0, gain_db = 4.0, q = 0.8 },
+    { kind = "high_shelf", frequency_hz = 8000.0, gain_db = 2.0, q = 0.8 },
+]
