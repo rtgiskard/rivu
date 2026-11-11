@@ -159,7 +159,9 @@ drafts. Committing composition submits once; Escape cancels it. Newer typed text
 survives acknowledgements, and Enter on unchanged displayed text does not round
 the stored value. Numeric controls retain the latest local intent while a command
 is pending; unrelated graph revisions do not inherit it. Accepted edits are not
-rolled back when a slider gesture is cancelled.
+rolled back when a slider gesture is cancelled. Focused-node arrow steps edit the
+same frequency/gain drafts, so held keys accumulate locally and coalesce behind
+the pending command instead of queuing separate edits.
 
 The band count precedes the grouped input/output gains, separated by a divider,
 and remains visible with no bands. Enter 0–32 and press Enter. Increasing appends

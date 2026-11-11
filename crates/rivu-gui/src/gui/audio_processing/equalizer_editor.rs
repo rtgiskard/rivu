@@ -2090,25 +2090,26 @@ impl EqualizerEditor {
             cx.stop_propagation();
             return;
         }
-        let field = match event.keystroke.key.as_str() {
+        // Keys update the selected band's live draft, so held repeats coalesce
+        // behind the in-flight command instead of queuing stale step edits.
+        let (field, value) = match event.keystroke.key.as_str() {
             "left" | "right" => {
-                let Some((minimum, maximum, _)) =
-                    self.band_numeric_range(&EqField::Band(index, BandField::FrequencyHz))
-                else {
+                let key = EqField::Band(index, BandField::FrequencyHz);
+                let Some((minimum, maximum, _)) = self.band_numeric_range(&key) else {
                     return;
                 };
-                let steps = if event.keystroke.key == "left" { -1 } else { 1 };
-                if maximum < 20. {
-                    EqBandEdit::FrequencyHz(
-                        (band.frequency_hz * 2.0_f64.powf(f64::from(steps) / 12.))
-                            .clamp(minimum, maximum),
-                    )
+                let steps = if event.keystroke.key == "left" {
+                    -1.
                 } else {
-                    EqBandEdit::FrequencySteps {
-                        steps,
-                        maximum_hz: self.maximum_frequency,
-                    }
-                }
+                    1.
+                };
+                let minimum = minimum.max(graph_minimum_frequency(self.maximum_frequency));
+                let maximum = maximum.min(self.maximum_frequency).max(minimum);
+                let current = self.live_number(&key, cx).unwrap_or(band.frequency_hz);
+                (
+                    key,
+                    (current * 2.0_f64.powf(steps / 12.)).clamp(minimum, maximum),
+                )
             }
             "up" | "down"
                 if matches!(
@@ -2116,7 +2117,14 @@ impl EqualizerEditor {
                     FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
                 ) =>
             {
-                EqBandEdit::GainSteps(if event.keystroke.key == "up" { 1 } else { -1 })
+                let key = EqField::Band(index, BandField::GainDb);
+                let step = if event.keystroke.key == "up" {
+                    0.5
+                } else {
+                    -0.5
+                };
+                let current = self.live_number(&key, cx).unwrap_or(band.gain_db);
+                (key, (current + step).clamp(-24., 24.))
             }
             "enter" | "space" => {
                 self.band = index;
@@ -2133,8 +2141,15 @@ impl EqualizerEditor {
         self.cancel_pointer(cx);
         self.band = index;
         self.sync_fields(cx);
-        self.band_edit(index, field, cx);
+        self.set_live_value(&field, value, cx);
         cx.stop_propagation();
+    }
+
+    /// The current draft, not the last render, is the base for repeated steps.
+    fn live_number(&self, key: &EqField, cx: &App) -> Option<f64> {
+        let field = self.fields.get(key).filter(|field| field.dirty)?;
+        let value = field.input.read(cx).text().trim().parse::<f64>().ok()?;
+        value.is_finite().then_some(value)
     }
 
     fn move_node(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -4917,6 +4932,51 @@ mod tests {
             assert!(editor.fields[&EqField::PreampDb].dirty);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+    }
+
+    #[gpui::test]
+    fn held_node_keys_coalesce_behind_one_command_and_keep_every_step(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, _| owner.command_active = true);
+        click(cx, handle, "eq-node-7-0");
+        for _ in 0..3 {
+            press(cx, handle, "up");
+        }
+        for _ in 0..2 {
+            press(cx, handle, "right");
+        }
+        // The first step is in flight; later repeats only update the drafts.
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.commands.len(), 1);
+            assert!(matches!(
+                &owner.commands.front().unwrap().command,
+                Command::EqualizerEdit {
+                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::GainDb(gain) },
+                    ..
+                } if *gain == -7.5
+            ));
+        });
+        editor.read_with(cx, |editor, cx| {
+            let text = |name| {
+                editor.fields[&EqField::Band(0, name)]
+                    .input
+                    .read(cx)
+                    .text()
+                    .to_owned()
+            };
+            assert_eq!(text(BandField::GainDb), "-6.5");
+            assert_eq!(text(BandField::FrequencyHz), "89.8");
+        });
+        while owner.read_with(cx, |owner, _| !owner.commands.is_empty()) {
+            acknowledge_front(cx, &runtime, &owner, true);
+        }
+        let band = runtime.handle.gui_snapshot().system.config.equalizer.bands[0].clone();
+        assert_eq!(band.gain_db, -6.5);
+        assert!((band.frequency_hz - 89.8).abs() < 1e-9);
+        editor.read_with(cx, |editor, _| {
+            assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
+            assert!(!editor.fields[&EqField::Band(0, BandField::FrequencyHz)].dirty);
+        });
     }
 
     #[gpui::test]
