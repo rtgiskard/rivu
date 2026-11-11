@@ -630,6 +630,16 @@ GUI replacement retires after a frame boundary; MPRIS retains published results
 until replacement/shutdown and returned properties until the next read/shutdown.
 There is no visited-file registry.
 
+Cold positive embedded probes with a supplied fingerprint hash the full opened
+source using BLAKE3 and check metadata stability across parsing and hashing before
+associating the image with that identity. Parsing and hashing use the same opened
+file, not a second path lookup. A mismatch or interrupted verification leaves no
+retained lookup result, allowing a later explicit load to retry. Cache hits do not
+rehash; sources without a fingerprint retain best-effort lookup semantics.
+
+This adds a full-source read to cold positive embedded acquisition, using a fixed
+64 KiB hashing buffer. It does not add playback work or a source-size admission cap.
+
 Embedded covers can survive a move preserving track ID and fingerprint. Directory
 covers, misses, and failures belong to the attempted path; a path change retries
 discovery, even with unchanged ID/fingerprint, without resetting panel rotation.

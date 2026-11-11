@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -125,18 +125,27 @@ struct CachedArtwork {
 enum ArtworkSource {
     Embedded(Arc<ArtworkFile>),
     Directory(Option<Arc<ArtworkFile>>),
+    Rejected,
+}
+
+enum EmbeddedError {
+    Read,
+    Identity,
 }
 
 struct ArtworkLookup {
     image: Option<Arc<ArtworkFile>>,
     source_path: Option<PathBuf>,
+    rejected: bool,
 }
 
 impl ArtworkLookup {
     fn applies_to(&self, path: &Path) -> bool {
-        self.source_path
-            .as_deref()
-            .is_none_or(|source_path| source_path == path)
+        !self.rejected
+            && self
+                .source_path
+                .as_deref()
+                .is_none_or(|source_path| source_path == path)
     }
 }
 
@@ -291,9 +300,7 @@ impl ArtworkManager {
 
     /// Blocking singleflight load; a late old version never replaces its successor.
     pub fn load(&self, source: Source<'_>) -> Option<Artwork> {
-        self.load_with(source, || {
-            self.source_uri(source.path, self.max_image_bytes)
-        })
+        self.load_with(source, || self.source_uri(source, self.max_image_bytes))
     }
 
     fn load_with(
@@ -324,12 +331,28 @@ impl ArtworkManager {
                 }
             };
             let lookup = cached.lookup.get_or_init(|| {
-                let (image, source_path) = match probe.take().expect("one source probe")() {
-                    ArtworkSource::Embedded(image) => (Some(image), None),
-                    ArtworkSource::Directory(image) => (image, Some(source.path.to_owned())),
+                let (image, source_path, rejected) = match probe.take().expect("one source probe")()
+                {
+                    ArtworkSource::Embedded(image) => (Some(image), None, false),
+                    ArtworkSource::Directory(image) => (image, Some(source.path.to_owned()), false),
+                    ArtworkSource::Rejected => (None, Some(source.path.to_owned()), true),
                 };
-                ArtworkLookup { source_path, image }
+                ArtworkLookup {
+                    source_path,
+                    image,
+                    rejected,
+                }
             });
+            if lookup.rejected {
+                let mut cache = self.entries.lock();
+                cache
+                    .items
+                    .retain(|_, entry| !Arc::ptr_eq(&entry.lookup, &cached.lookup));
+                cache
+                    .insertion_order
+                    .retain(|entry| !Arc::ptr_eq(&entry.lookup, &cached.lookup));
+                return None;
+            }
             // A concurrent request may have shared an unfinished old-path probe.
             // Only embedded content is reusable without checking the new directory.
             if !lookup.applies_to(source.path) {
@@ -447,11 +470,13 @@ impl ArtworkManager {
         }
     }
 
-    fn source_uri(&self, path: &Path, limit: usize) -> ArtworkSource {
-        if let Ok(Some(image)) = self.embedded_uri(path, limit) {
-            ArtworkSource::Embedded(image)
-        } else {
-            ArtworkSource::Directory(self.directory_uri(path, limit))
+    fn source_uri(&self, source: Source<'_>, limit: usize) -> ArtworkSource {
+        match self.embedded_uri(source, limit) {
+            Ok(Some(image)) => ArtworkSource::Embedded(image),
+            Err(EmbeddedError::Identity) => ArtworkSource::Rejected,
+            Ok(None) | Err(EmbeddedError::Read) => {
+                ArtworkSource::Directory(self.directory_uri(source.path, limit))
+            }
         }
     }
 
@@ -513,11 +538,54 @@ impl ArtworkManager {
         None
     }
 
-    fn embedded_uri(&self, path: &Path, limit: usize) -> Result<Option<Arc<ArtworkFile>>, ()> {
-        let file = rivu_utils::regular_file::open_regular_file(path).map_err(|_| ())?;
-        crate::read_artwork(file, limit, |bytes| self.image_uri(bytes, limit)).map_err(|error| {
-            tracing::debug!(path = %path.display(), error = %error, "Reading embedded artwork");
-        })
+    fn embedded_uri(
+        &self,
+        source: Source<'_>,
+        limit: usize,
+    ) -> Result<Option<Arc<ArtworkFile>>, EmbeddedError> {
+        let mut file = rivu_utils::regular_file::open_regular_file(source.path)
+            .map_err(|_| EmbeddedError::Read)?;
+        let before = file.metadata().map_err(|_| EmbeddedError::Identity)?;
+        let image = crate::read_artwork(file.try_clone().map_err(|_| EmbeddedError::Identity)?, limit, |bytes| {
+            self.image_uri(bytes, limit)
+        }).map_err(|error| {
+            tracing::debug!(path = %source.path.display(), error = %error, "Reading embedded artwork");
+            EmbeddedError::Read
+        })?;
+        let Some(image) = image else {
+            return Ok(None);
+        };
+        // A stable stat alone cannot identify the bytes requested by the library.
+        // Hash the same opened object, then reject writes overlapping parsing/hash.
+        // Only cold positive embedded probes pay this full-source read.
+        if let Some(expected) = source.fingerprint {
+            file.rewind().map_err(|_| EmbeddedError::Identity)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = [0; 64 * 1024];
+            let mut remaining = before.len();
+            while remaining != 0 {
+                let length = remaining.min(buffer.len() as u64) as usize;
+                let count = file
+                    .read(&mut buffer[..length])
+                    .map_err(|_| EmbeddedError::Identity)?;
+                if count == 0 {
+                    return Err(EmbeddedError::Identity);
+                }
+                hasher.update(&buffer[..count]);
+                remaining -= count as u64;
+            }
+            let after = file.metadata().map_err(|_| EmbeddedError::Identity)?;
+            if hasher.finalize().to_hex().as_str() != expected
+                || before.len() != after.len()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+                || before.ctime() != after.ctime()
+                || before.ctime_nsec() != after.ctime_nsec()
+            {
+                return Err(EmbeddedError::Identity);
+            }
+        }
+        Ok(Some(image))
     }
 
     fn image_uri(&self, bytes: &[u8], limit: usize) -> Option<Arc<ArtworkFile>> {

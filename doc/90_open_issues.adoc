@@ -8,25 +8,6 @@ maintained in link:91_design_decisions.adoc[Engineering conclusions and design d
 
 == Open and deferred
 
-[[artwork-cold-source-identity]]
-=== Cold embedded artwork can acquire a stale requested source identity
-
-Status: reproduced, unresolved, 2026-11-08. Investigation only; no production
-identity-policy change adopted.
-
-If an uncached library source A is replaced at its path by B before artwork is
-loaded, the manager can associate B's embedded image with the requested fingerprint
-of A. Restoring A or requesting the same identity at a missing path still returns
-B within that manager. A fresh manager reading restored A returns A; the wrong
-source association was not observed to persist across managers.
-
-This differs from intentional historical reuse: an image actually obtained from A
-remains valid for A's identity after the source moves or disappears. A correction
-must validate the cold observation's source identity without discarding this
-historical reuse. Read-before/read-after stat stability alone cannot establish that
-the opened content matches the requested fingerprint. Cache-file leases protect
-URI lifetime, not this source-to-image association.
-
 [[pipewire-context-retention]]
 === Native PipeWire context retirement retains libdbus allocations
 
@@ -126,6 +107,25 @@ its transformation under this data-directory exclusion. Database-file alias
 protection remains unresolved.
 
 == Resolved investigations
+
+[[artwork-cold-source-identity]]
+=== Cold embedded artwork can acquire a stale requested source identity
+
+Status: resolved, 2026-11-11. Cold embedded acquisition validates a supplied
+fingerprint against the opened source; historical cache hits remain reusable.
+
+Previously, replacing uncached source A at its path with B could associate B's
+embedded image with A's requested fingerprint. Restoring A or requesting A at a
+missing path still returned B within that manager. The association was not
+observed to persist across managers.
+
+The regression replaces A with a different embedded image at the same path while
+preserving file size and modification time. It rejects the association with A,
+accepts B under B's fingerprint, then recovers A after restoration. Both verified
+historical results survive source removal. Identity rejection is not retained as
+a negative result. The full-source read and fingerprintless boundary are documented
+in link:22_cache.adoc#artwork-uri-leases[Artwork lookup ownership].
+
 
 [[socket-eof-fixture-gaps]]
 === Drop-driven socket EOF isolation

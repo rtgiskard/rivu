@@ -24,9 +24,44 @@ impl TestSource {
 fn source_fixture(path: PathBuf) -> TestSource {
     TestSource {
         id: 1,
-        fingerprint: Some("original".into()),
+        fingerprint: path
+            .is_file()
+            .then(|| fs::read(&path).unwrap())
+            .map(|bytes| blake3::hash(&bytes).to_hex().to_string()),
         path,
     }
+}
+
+#[test]
+fn cold_embedded_source_mismatch_does_not_poison_requested_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("track.wav");
+    let mut original_image = DEFAULT_IMAGE.to_vec();
+    original_image.push(0);
+    tagged_wav_image(&path, &original_image);
+    let original_bytes = fs::read(&path).unwrap();
+    let original = source_fixture(path.clone());
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let manager = ArtworkManager::new(directory.path());
+    let mut other_image = DEFAULT_IMAGE.to_vec();
+    other_image.push(42);
+    tagged_wav_image(&path, &other_image);
+    File::open(&path).unwrap().set_modified(modified).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        original_bytes.len() as u64
+    );
+    let replacement = source_fixture(path.clone());
+    assert!(manager.load(original.source()).is_none());
+    assert!(manager.cached_result(original.source()).is_none());
+    let observed = manager.load(replacement.source()).unwrap();
+    assert_eq!(fs::read(observed.path()).unwrap(), other_image);
+    fs::write(&path, original_bytes).unwrap();
+    let recovered = manager.load(original.source()).unwrap();
+    assert_eq!(fs::read(recovered.path()).unwrap(), original_image);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(manager.load(original.source()), Some(recovered));
+    assert_eq!(manager.load(replacement.source()), Some(observed));
 }
 
 #[test]
@@ -535,6 +570,11 @@ fn failed_source_paths_retry_after_relocation_without_changing_content_identity(
     for old_path in ["missing.wav", "unprobeable.wav"] {
         let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
         let mut selected = source_fixture(directory.path().join(old_path));
+        selected.fingerprint = Some(
+            blake3::hash(&fs::read(&cover_source).unwrap())
+                .to_hex()
+                .to_string(),
+        );
         if old_path == "unprobeable.wav" {
             fs::write(&selected.path, b"not an audio file").unwrap();
         }
@@ -787,7 +827,7 @@ fn unfinished_directory_lookup_cannot_complete_a_relocated_request() {
             manager.load_with(original.source(), || {
                 started.send(()).unwrap();
                 released.recv().unwrap();
-                manager.source_uri(&original.path, manager.max_image_bytes)
+                manager.source_uri(original.source(), manager.max_image_bytes)
             })
         });
         loading.recv().unwrap();
@@ -820,7 +860,7 @@ fn concurrent_requests_probe_once_and_share_a_complete_image() {
                     manager
                         .load_with(selected.source(), || {
                             probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            manager.source_uri(&selected.path, manager.max_image_bytes)
+                            manager.source_uri(selected.source(), manager.max_image_bytes)
                         })
                         .unwrap()
                 })
@@ -863,7 +903,7 @@ fn cue_track_ids_share_positive_and_negative_physical_source_probes() {
                         barrier.wait();
                         manager.load_with(track.source(), || {
                             probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            manager.source_uri(&track.path, manager.max_image_bytes)
+                            manager.source_uri(track.source(), manager.max_image_bytes)
                         })
                     })
                 })
@@ -1012,18 +1052,17 @@ fn held_old_version_survives_pressure_and_late_completion_does_not_replace_new()
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
     let old_track = source_fixture(source.clone());
     let mut current = old_track.clone();
-    current.fingerprint = Some("new".into());
+    current.fingerprint = None;
     let (started, loading) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     let (old, new) = std::thread::scope(|scope| {
         let manager = &manager;
         let old_track = &old_track;
-        let source = &source;
         let loader = scope.spawn(move || {
             manager.load_with(old_track.source(), || {
                 started.send(()).unwrap();
                 released.recv().unwrap();
-                manager.source_uri(source, manager.max_image_bytes)
+                manager.source_uri(old_track.source(), manager.max_image_bytes)
             })
         });
         loading.recv().unwrap();

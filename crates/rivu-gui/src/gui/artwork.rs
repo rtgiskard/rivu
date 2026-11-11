@@ -3618,8 +3618,7 @@ mod tests {
         .map(|(name, bytes)| {
             let path = directory.path().join(name);
             cover_wave(&path, &bytes);
-            let mut track = crate::test_support::artwork_track(path);
-            track.fingerprint = Some(name.into());
+            let track = crate::test_support::artwork_track(path);
             assert!(manager.load(crate::artwork_source(&track)).is_some());
             track
         })

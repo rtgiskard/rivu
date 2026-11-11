@@ -54,10 +54,14 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 pub(crate) fn artwork_track(path: PathBuf) -> Track {
+    let fingerprint = path
+        .is_file()
+        .then(|| std::fs::read(&path).unwrap())
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
     Track {
         id: 1,
         path,
-        fingerprint: Some("original".into()),
+        fingerprint,
         cue: None,
         title: String::new(),
         artist: String::new(),

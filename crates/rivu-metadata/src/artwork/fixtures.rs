@@ -176,7 +176,7 @@ pub fn block_probe(
         let _ = manager.load_with(source, || {
             started.send(()).unwrap();
             let _ = released.recv();
-            manager.source_uri(source.path, manager.max_image_bytes)
+            manager.source_uri(source, manager.max_image_bytes)
         });
     });
     entered.recv_timeout(Duration::from_secs(5)).unwrap();

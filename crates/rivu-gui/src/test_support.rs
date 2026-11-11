@@ -59,10 +59,14 @@ impl ConfigFixture for Config {
 }
 
 pub(crate) fn artwork_track(path: std::path::PathBuf) -> rivu_protocol::model::Track {
+    let fingerprint = path
+        .is_file()
+        .then(|| std::fs::read(&path).unwrap())
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
     rivu_protocol::model::Track {
         id: 1,
         path,
-        fingerprint: Some("original".into()),
+        fingerprint,
         cue: None,
         title: String::new(),
         artist: String::new(),
