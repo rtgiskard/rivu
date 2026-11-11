@@ -2351,13 +2351,13 @@ fn incremental_queue_commits_recover_projection_before_previous() {
         } else {
             assert!(core.command(command).is_err());
         }
-        assert!(core.navigate(Navigation::Previous).is_err());
+        assert!(core.command(Command::Previous).is_err());
         assert!(commands.try_recv().is_err());
         repair_queue_projection(&connection);
         let ids = core.store.queue_ids().unwrap();
         let position = ids.iter().position(|&id| id == 5).unwrap();
         let expected = ids[position.saturating_sub(1)];
-        core.navigate(Navigation::Previous).unwrap();
+        core.command(Command::Previous).unwrap();
         assert_eq!(core.state.queue.current_id, Some(expected));
         assert_eq!(core.state.queue.total, ids.len());
         assert_eq!(core.store.queue_ids().unwrap(), ids);
@@ -2385,9 +2385,9 @@ fn removal_projection_failure_recovers_two_entry_position_and_shuffle_history() 
             .is_err()
         );
         assert_eq!(core.store.queue_ids().unwrap(), [3, 4]);
-        assert!(core.navigate(Navigation::Previous).is_err());
+        assert!(core.command(Command::Previous).is_err());
         repair_queue_projection(&connection);
-        core.navigate(Navigation::Previous).unwrap();
+        core.command(Command::Previous).unwrap();
         assert_eq!(core.state.queue.current_id, Some(3));
         assert_eq!(core.state.queue.current_position, Some(0));
         assert_eq!(core.state.queue.total, 2);
@@ -2437,7 +2437,7 @@ fn committed_append_scalar_failure_recovers_without_replaying_insertion() {
     assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
     assert!(core.transport.projection_stale);
     let commands = recording_audio(&mut core);
-    assert!(core.navigate(Navigation::Previous).is_err());
+    assert!(core.command(Command::Previous).is_err());
     assert!(commands.try_recv().is_err());
     repair_queue_projection(&connection);
     core.ensure_queue_control_ready().unwrap();

@@ -901,13 +901,30 @@ impl Core {
     }
 
     pub(in crate::core) fn resume(&mut self) -> Result<()> {
+        if self.state.playback.status == PlaybackStatus::Playing {
+            return Ok(());
+        }
         if self.state.playback.status == PlaybackStatus::Stopped {
             self.ensure_queue_control_ready()?;
             let id = match self.state.queue.current_id {
                 Some(id) => id,
-                None => self.store.queue_id_at(0)?.context("Queue is empty")?,
+                None => match self.store.queue_id_at(0)? {
+                    Some(id) => id,
+                    None => return Ok(()),
+                },
             };
-            return self.start(id, QueueHistory::Record);
+            let history = if self
+                .transport
+                .history_cursor
+                .checked_sub(1)
+                .and_then(|index| self.transport.history.get(index))
+                == Some(&id)
+            {
+                QueueHistory::Preserve
+            } else {
+                QueueHistory::Record
+            };
+            return self.start(id, history);
         }
         self.engine.send(AudioCommand::Pause(false))?;
         if let Some(session) = self.transport.session.as_mut() {
@@ -928,17 +945,6 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Paused;
         Ok(())
     }
-    pub(in crate::core) fn advance(&mut self, natural: bool) -> Result<()> {
-        self.advance_with_status(natural, PlaybackStatus::Playing)
-    }
-    pub(in crate::core) fn navigate(&mut self, direction: Navigation) -> Result<()> {
-        // Read the owner state here, after earlier queued operations have run.
-        let status = self.state.playback.status;
-        match direction {
-            Navigation::Next => self.advance_with_status(false, status),
-            Navigation::Previous => self.previous_with_status(status),
-        }
-    }
     pub(in crate::core) fn advance_with_status(
         &mut self,
         natural: bool,
@@ -953,7 +959,7 @@ impl Core {
         }
         self.ensure_queue_control_ready()?;
         if self.state.queue.total == 0 {
-            return self.stop();
+            return if natural { self.stop() } else { Ok(()) };
         }
         let current = self.state.queue.current_id;
         if natural
@@ -978,34 +984,26 @@ impl Core {
             let id = self.store.queue_id_at(0)?.context("Queue is empty")?;
             return self.start_with_status(id, QueueHistory::Record, status);
         }
-        if status == PlaybackStatus::Paused {
-            Ok(())
-        } else {
-            self.stop()
-        }
+        if natural { self.stop() } else { Ok(()) }
     }
     pub(in crate::core) fn previous(&mut self) -> Result<()> {
-        self.previous_with_status(PlaybackStatus::Playing)
-    }
-    fn previous_with_status(&mut self, status: PlaybackStatus) -> Result<()> {
-        if self.state.playback.position > 3.0 {
-            return self.seek(0.0);
-        }
+        let status = self.state.playback.status;
         self.ensure_queue_control_ready()?;
-        if self.preferences.live().shuffle
-            && let Some(index) = self.transport.history_cursor.checked_sub(
+        if self.preferences.live().shuffle {
+            if let Some(index) = self.transport.history_cursor.checked_sub(
                 if self.state.queue.current_id.is_some() {
                     2
                 } else {
                     1
                 },
-            )
-        {
-            return self.start_with_status(
-                self.transport.history[index],
-                QueueHistory::Restore(index + 1),
-                status,
-            );
+            ) {
+                return self.start_with_status(
+                    self.transport.history[index],
+                    QueueHistory::Restore(index + 1),
+                    status,
+                );
+            }
+            return Ok(());
         }
         let index = self.state.queue.current_position;
         if let Some(index) = index {
@@ -1016,16 +1014,12 @@ impl Core {
                     .context("Queue entry not found")?;
                 return self.start_with_status(id, QueueHistory::Record, status);
             }
-            return if status == PlaybackStatus::Stopped {
-                Ok(())
-            } else {
-                self.seek(0.0)
-            };
+            return Ok(());
         }
         if let Some(id) = self.store.queue_id_at(0)? {
             return self.start_with_status(id, QueueHistory::Record, status);
         }
-        bail!("Queue is empty")
+        Ok(())
     }
     pub(in crate::core) fn seek(&mut self, seconds: f64) -> Result<()> {
         audio::validate_seek_position(seconds)?;

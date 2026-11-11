@@ -716,11 +716,19 @@ pub enum Command {
     PlayPlaylist {
         playlist_id: i64,
     },
+    /// Resume the selected occurrence without recording another navigation visit.
+    /// Playing and an empty queue are no-ops; explicit Play always selects a new visit.
     Resume,
     Pause,
     Toggle,
     Stop,
+    /// Select the next occurrence, preserving Core's status at execution time.
+    /// Stopped selects without loading; paused loads paused. Use Play/Resume to start.
+    /// No target is a no-op; only natural EOF stops at an unlooped queue tail.
     Next,
+    /// Select the previous occurrence regardless of playback position.
+    /// Preserve Core's execution-time status, with the same load policy as Next.
+    /// Shuffle follows visited occurrence history only; no predecessor is a no-op.
     Previous,
     Seek {
         seconds: f64,

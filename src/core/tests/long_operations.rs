@@ -206,7 +206,7 @@ fn dispatched_mpris_seek_respects_uncertain_database_and_optimization_boundaries
         )
         .is_success()
     );
-    assert!(!operation_ack(&mut core, Operation::Navigate(Navigation::Next)).is_success());
+    assert!(!operation_ack(&mut core, Operation::Command(Command::Next)).is_success());
     assert_eq!(core.state.playback.seek_revision, revision);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     core.shutdown_optimization().unwrap().1.unwrap();

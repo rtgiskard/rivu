@@ -93,10 +93,13 @@ enum Operation {
         ticket: Option<QueryTicket>,
     },
     Command(Command),
-    Navigate(Navigation),
     MprisSeek {
         queue_id: u64,
         offset: i64,
+    },
+    MprisSetPosition {
+        queue_id: u64,
+        position: i64,
     },
     RenderSnapshot {
         source: u64,
@@ -106,12 +109,6 @@ enum Operation {
         target: TaskTarget,
         registration: u64,
     },
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum Navigation {
-    Next,
-    Previous,
 }
 
 struct Request {
@@ -360,16 +357,18 @@ impl CoreHandle {
             .await
     }
 
-    /// Navigate in one Core dispatch, preserving its status at execution time.
-    pub(crate) async fn navigate(&self, direction: Navigation) -> Ack {
-        self.operation_ack_async(Operation::Navigate(direction), REPLY_TIMEOUT)
-            .await
-    }
-
     /// Keep the relative intent and occurrence bound until Core executes it.
     pub(crate) async fn mpris_seek(&self, queue_id: u64, offset: i64) -> Ack {
         self.operation_ack_async(Operation::MprisSeek { queue_id, offset }, REPLY_TIMEOUT)
             .await
+    }
+
+    pub(crate) async fn mpris_set_position(&self, queue_id: u64, position: i64) -> Ack {
+        self.operation_ack_async(
+            Operation::MprisSetPosition { queue_id, position },
+            REPLY_TIMEOUT,
+        )
+        .await
     }
 
     async fn operation_ack_async(&self, operation: Operation, duration: Duration) -> Ack {

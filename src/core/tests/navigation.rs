@@ -38,19 +38,21 @@ fn assert_navigation_audio(commands: &Receiver<AudioCommand>, status: PlaybackSt
 }
 
 #[test]
-fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
+fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
     for status in [
         PlaybackStatus::Paused,
         PlaybackStatus::Stopped,
         PlaybackStatus::Playing,
     ] {
-        for direction in [Navigation::Next, Navigation::Previous] {
+        for command in [Command::Next, Command::Previous] {
             let (directory, mut core) = navigation_fixture(status);
+            core.state.playback.position = 4.0;
             let expected = core
                 .store
-                .queue_id_at(match direction {
-                    Navigation::Next => 2,
-                    Navigation::Previous => 0,
+                .queue_id_at(if matches!(command, Command::Next) {
+                    2
+                } else {
+                    0
                 })
                 .unwrap()
                 .unwrap();
@@ -60,7 +62,7 @@ fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
                 .path;
             let commands = recording_audio(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
-            let ack = futures::executor::block_on(handle.navigate(direction));
+            let ack = futures::executor::block_on(handle.request_ack(command));
             assert!(ack.is_success(), "{:?}", ack.error);
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.playback.status, status);
@@ -155,7 +157,7 @@ fn identical_shuffle_setter_preserves_previous_occurrence_history() {
     core.transport.history_cursor = 2;
     let _commands = recording_audio(&mut core);
     core.command(Command::Shuffle { enabled: true }).unwrap();
-    core.navigate(Navigation::Previous).unwrap();
+    core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(previous));
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.transport.history, [previous, current]);
@@ -391,7 +393,7 @@ fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
         PlaybackStatus::Playing
     );
     handle.send(Command::Pause).unwrap();
-    assert!(futures::executor::block_on(handle.navigate(Navigation::Next)).is_success());
+    assert!(futures::executor::block_on(handle.request_ack(Command::Next)).is_success());
     assert_eq!(
         handle.mpris_snapshot().playback.status,
         PlaybackStatus::Paused
@@ -419,40 +421,6 @@ fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
 }
 
 #[test]
-fn previous_resets_position_without_loading_or_changing_status() {
-    for status in [PlaybackStatus::Paused, PlaybackStatus::Playing] {
-        let (_directory, mut core) = navigation_fixture(status);
-        let current = core.state.queue.current_id;
-        core.state.playback.position = 4.0;
-        let seek_revision = core.state.playback.seek_revision;
-        let commands = recording_audio(&mut core);
-        let (handle, control, worker, publications) = navigation_runtime(core);
-        assert!(futures::executor::block_on(handle.navigate(Navigation::Previous)).is_success());
-        let snapshot = handle.mpris_snapshot();
-        assert_eq!(snapshot.playback.status, status);
-        assert_eq!(snapshot.queue.current_id, current);
-        assert_eq!(snapshot.playback.position, 0.0);
-        assert_eq!(
-            snapshot.playback.seek_revision,
-            seek_revision.wrapping_add(1)
-        );
-        assert!(
-            publications
-                .lock()
-                .iter()
-                .all(|state| state.playback.status == status)
-        );
-        assert!(matches!(
-            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AudioCommand::Seek { seconds: 0.0, .. }
-        ));
-        assert!(commands.try_recv().is_err());
-        control.request_shutdown().unwrap();
-        worker.join().unwrap();
-    }
-}
-
-#[test]
 fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
     for status in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
         let (_directory, mut core) = navigation_fixture(status);
@@ -469,7 +437,7 @@ fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
         let (handle, control, worker, publications) = navigation_runtime(core);
         for expected in [ids[2], ids[0]] {
             assert!(
-                futures::executor::block_on(handle.navigate(Navigation::Previous)).is_success()
+                futures::executor::block_on(handle.request_ack(Command::Previous)).is_success()
             );
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.queue.current_id, Some(expected));
@@ -490,27 +458,6 @@ fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
 }
 
 #[test]
-fn existing_wire_navigation_still_starts_paused_and_stopped_tracks() {
-    for status in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
-        for command in [Command::Next, Command::Previous] {
-            let (_directory, mut core) = navigation_fixture(status);
-            let commands = recording_audio(&mut core);
-            let (handle, control, worker, _) = navigation_runtime(core);
-            assert!(futures::executor::block_on(handle.request_ack(command)).is_success());
-            let snapshot = handle.mpris_snapshot();
-            assert_eq!(snapshot.playback.status, PlaybackStatus::Playing);
-            assert_navigation_audio(
-                &commands,
-                PlaybackStatus::Playing,
-                &snapshot.current_track().unwrap().path,
-            );
-            control.request_shutdown().unwrap();
-            worker.join().unwrap();
-        }
-    }
-}
-
-#[test]
 fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection() {
     for status in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
         for (shuffle, repeat) in [
@@ -526,7 +473,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
             } else if repeat == RepeatMode::All {
                 core.store.queue_id_at(0).unwrap().unwrap()
             } else {
-                // Manual Next ignores Repeat One, just like the wire command.
+                // Explicit Next ignores Repeat One; natural EOF honors it.
                 core.store.queue_id_at(2).unwrap().unwrap()
             };
             let current = if shuffle {
@@ -545,7 +492,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
             edit_preferences(&mut core, |config| config.repeat = repeat);
             let commands = recording_audio(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
-            assert!(futures::executor::block_on(handle.navigate(Navigation::Next)).is_success());
+            assert!(futures::executor::block_on(handle.request_ack(Command::Next)).is_success());
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.queue.current_id, Some(expected));
             assert_eq!(snapshot.playback.status, status);
@@ -563,24 +510,30 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
 }
 
 #[test]
-fn stopped_shuffle_previous_without_history_at_first_occurrence_is_noop() {
-    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
-    let current = core.store.queue_id_at(0).unwrap().unwrap();
-    pending(&mut core, current);
-    core.transport.session = None;
-    core.state.playback.status = PlaybackStatus::Stopped;
-    edit_preferences(&mut core, |config| config.shuffle = true);
-    let commands = recording_audio(&mut core);
-    let (handle, control, worker, _) = navigation_runtime(core);
-    assert!(futures::executor::block_on(handle.navigate(Navigation::Previous)).is_success());
-    assert_eq!(handle.mpris_snapshot().queue.current_id, Some(current));
-    assert_eq!(
-        handle.mpris_snapshot().playback.status,
-        PlaybackStatus::Stopped
-    );
-    assert!(commands.try_recv().is_err());
-    control.request_shutdown().unwrap();
-    worker.join().unwrap();
+fn previous_without_predecessor_preserves_position_and_status() {
+    for status in [
+        PlaybackStatus::Stopped,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Playing,
+    ] {
+        for shuffle in [false, true] {
+            let (_directory, mut core) = navigation_fixture(status);
+            let current = core.store.queue_id_at(0).unwrap().unwrap();
+            pending(&mut core, current);
+            core.state.playback.status = status;
+            if status == PlaybackStatus::Stopped {
+                core.transport.session = None;
+            }
+            core.state.playback.position = 4.0;
+            edit_preferences(&mut core, |config| config.shuffle = shuffle);
+            let commands = recording_audio(&mut core);
+            core.command(Command::Previous).unwrap();
+            assert_eq!(core.state.queue.current_id, Some(current));
+            assert_eq!(core.state.playback.status, status);
+            assert_eq!(core.state.playback.position, 4.0);
+            assert!(commands.try_recv().is_err());
+        }
+    }
 }
 
 #[test]
@@ -654,6 +607,8 @@ fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
     .unwrap();
     edit_preferences(&mut core, |config| config.shuffle = true);
     edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    // EOF stopped playback above; model an active singleton before explicit Next.
+    playing(&mut core, 1);
     core.transport.history = vec![1];
     core.transport.history_cursor = 1;
     missing(&mut core, Command::Next, 1);
@@ -933,7 +888,7 @@ fn stale_queue_navigation_operation_recovers_order_before_selecting() {
     repair_queue_scalar(&connection);
     let _commands = recording_audio(&mut core);
     let (handle, control, worker, _publications) = navigation_runtime(core);
-    let ack = futures::executor::block_on(handle.navigate(Navigation::Next));
+    let ack = futures::executor::block_on(handle.request_ack(Command::Next));
     assert!(ack.is_success(), "{:?}", ack.error);
     let state = handle.mpris_snapshot();
     assert_eq!(state.queue.current_id, Some(4));
@@ -978,7 +933,7 @@ fn stale_queue_shuffle_previous_prunes_deleted_occurrences_before_reading_cursor
     core.transport.history_cursor = 4;
     let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
     repair_queue_scalar(&connection);
-    core.navigate(Navigation::Previous).unwrap();
+    core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(1));
     assert_eq!(core.transport.history, [1, 4, 5]);
     assert_eq!(core.transport.history_cursor, 1);
@@ -990,7 +945,7 @@ fn stopped_navigation_write_failure_preserves_new_occurrence_until_dedup_can_com
     let commands = recording_audio(&mut core);
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(core.navigate(Navigation::Next).is_err());
+    assert!(core.command(Command::Next).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(2));
     assert_eq!(core.state.current_track().unwrap().id, 2);
@@ -1022,7 +977,7 @@ fn authoritative_queue_removal_retires_unsaved_selection_without_resurrecting_it
         let _commands = recording_audio(&mut core);
         let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert!(core.navigate(Navigation::Next).is_err());
+        assert!(core.command(Command::Next).is_err());
         assert_eq!(core.state.queue.current_id, Some(3));
         lock.execute_batch("ROLLBACK").unwrap();
         core.command(if clear {
@@ -1051,7 +1006,7 @@ fn authoritative_queue_replacement_supersedes_unsaved_old_selection() {
     let _commands = recording_audio(&mut core);
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(core.navigate(Navigation::Next).is_err());
+    assert!(core.command(Command::Next).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
     lock.execute_batch("ROLLBACK").unwrap();
     core.command(Command::PlayPlaylist { playlist_id }).unwrap();
@@ -1133,16 +1088,257 @@ fn shuffle_previous_commits_history_cursor_before_a_selection_save_can_fail() {
         "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
          BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
     ).unwrap();
-    assert!(core.navigate(Navigation::Previous).is_err());
+    assert!(core.command(Command::Previous).is_err());
     assert_eq!(core.state.queue.current_id, Some(4));
     assert_eq!(core.transport.history_cursor, 2);
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
     core.ensure_queue_control_ready().unwrap();
-    core.navigate(Navigation::Previous).unwrap();
+    core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(5));
     assert_eq!(core.transport.history_cursor, 1);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     drop(commands);
+}
+
+#[test]
+fn manual_tail_next_preserves_source_while_natural_eof_stops() {
+    for status in [
+        PlaybackStatus::Playing,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Stopped,
+    ] {
+        let (_directory, mut core) = navigation_fixture(status);
+        let tail = core
+            .store
+            .queue_id_at(core.state.queue.total - 1)
+            .unwrap()
+            .unwrap();
+        pending(&mut core, tail);
+        core.state.playback.status = status;
+        if status == PlaybackStatus::Stopped {
+            core.transport.session = None;
+        }
+        core.state.playback.position = 4.0;
+        let generation = core.transport.generation;
+        let commands = recording_audio(&mut core);
+        core.command(Command::Next).unwrap();
+        assert_eq!(core.state.queue.current_id, Some(tail));
+        assert_eq!(core.state.playback.status, status);
+        assert_eq!(core.state.playback.position, 4.0);
+        assert_eq!(core.transport.generation, generation);
+        assert!(commands.try_recv().is_err());
+        if status != PlaybackStatus::Stopped {
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                completed_duration: Some(10.0),
+                bitrate_bps: None,
+            })
+            .unwrap();
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.playback.position, 0.0);
+            assert_eq!(core.state.queue.current_id, Some(tail));
+        }
+    }
+}
+
+#[test]
+fn empty_navigation_and_resume_do_not_send_audio_commands() {
+    let (_directory, mut core) = fixture();
+    core.command(Command::ClearQueue).unwrap();
+    let generation = core.transport.generation;
+    let commands = recording_audio(&mut core);
+    for command in [Command::Next, Command::Previous, Command::Resume] {
+        let ack = operation_ack(&mut core, Operation::Command(command));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, None);
+        assert_eq!(core.transport.generation, generation);
+        assert!(core.state.system.last_error.is_none());
+        assert!(commands.try_recv().is_err());
+    }
+}
+
+#[test]
+fn shuffle_history_exhaustion_never_falls_back_to_physical_predecessor() {
+    for status in [
+        PlaybackStatus::Playing,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Stopped,
+    ] {
+        for recorded in [false, true] {
+            let (_directory, mut core) = navigation_fixture(status);
+            let current = core.state.queue.current_id.unwrap();
+            assert!(core.state.queue.current_position.unwrap() > 0);
+            edit_preferences(&mut core, |config| config.shuffle = true);
+            if recorded {
+                core.transport.record_history(current);
+            }
+            core.state.playback.position = 4.0;
+            let generation = core.transport.generation;
+            let commands = recording_audio(&mut core);
+            core.command(Command::Previous).unwrap();
+            assert_eq!(core.state.queue.current_id, Some(current));
+            assert_eq!(core.state.playback.status, status);
+            assert_eq!(core.state.playback.position, 4.0);
+            assert_eq!(core.transport.generation, generation);
+            assert!(commands.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn stopped_resume_preserves_history_cursor_and_forward_visits_but_explicit_play_records() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
+    let ids = core.store.queue_ids().unwrap();
+    edit_preferences(&mut core, |config| config.shuffle = true);
+    core.transport.history = vec![ids[4], ids[1], ids[3]];
+    core.transport.history_cursor = 2;
+    let commands = recording_audio(&mut core);
+    for _ in 0..2 {
+        core.command(Command::Resume).unwrap();
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.transport.history, [ids[4], ids[1], ids[3]]);
+        assert_eq!(core.transport.history_cursor, 2);
+        core.command(Command::Stop).unwrap();
+    }
+    core.command(Command::Previous).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(ids[4]));
+    core.command(Command::PlayQueue { queue_id: ids[4] })
+        .unwrap();
+    assert_eq!(core.transport.history, [ids[4], ids[4]]);
+    assert_eq!(core.transport.history_cursor, 2);
+    drop(commands);
+}
+
+#[test]
+fn queued_resume_uses_execution_status_and_playing_resume_is_a_noop() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+    let commands = recording_audio(&mut core);
+    let (handle, control, worker, _) = navigation_runtime(core);
+    handle.send(Command::Pause).unwrap();
+    assert!(futures::executor::block_on(handle.request_ack(Command::Resume)).is_success());
+    assert_eq!(
+        handle.mpris_snapshot().playback.status,
+        PlaybackStatus::Playing
+    );
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Pause(true)
+    ));
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Pause(false)
+    ));
+    assert!(futures::executor::block_on(handle.request_ack(Command::Resume)).is_success());
+    assert!(commands.try_recv().is_err());
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occurrences() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let queue_id = core.state.queue.current_id.unwrap();
+    let commands = recording_audio(&mut core);
+    let intent = Operation::MprisSetPosition {
+        queue_id,
+        position: 5_000_001,
+    };
+    // Decoder duration replaces the 10-second library estimate before execution.
+    started(&mut core, Some(5.0)).unwrap();
+    let revision = core.state.playback.seek_revision;
+    assert!(operation_ack(&mut core, intent).is_success());
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert!(commands.try_recv().is_err());
+    for position in [-1, 5_000_001, i64::MAX] {
+        let ack = operation_ack(
+            &mut core,
+            Operation::MprisSetPosition { queue_id, position },
+        );
+        assert!(ack.is_success(), "{:?}", ack.error);
+        assert_eq!(core.state.playback.seek_revision, revision);
+        assert!(commands.try_recv().is_err());
+    }
+    for position in [1_250_000, 5_000_000] {
+        let ack = operation_ack(
+            &mut core,
+            Operation::MprisSetPosition { queue_id, position },
+        );
+        assert!(ack.is_success(), "{:?}", ack.error);
+        let seconds = position as f64 / 1_000_000.0;
+        assert_eq!(core.state.playback.position, seconds);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Seek { seconds: actual, .. } if actual == seconds
+        ));
+    }
+    // Ordinary CLI seeks retain decoder authority instead of estimate clamping.
+    core.command(Command::Seek { seconds: 25.0 }).unwrap();
+    assert_eq!(core.state.playback.position, 25.0);
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 25.0, .. }
+    ));
+    core.command(Command::Next).unwrap();
+    assert_ne!(core.state.queue.current_id, Some(queue_id));
+    let current = core.state.queue.current_id.unwrap();
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    let revision = core.state.playback.seek_revision;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSetPosition {
+                queue_id,
+                position: 1_000_000,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.seek_revision, revision);
+    core.command(Command::Stop).unwrap();
+    let revision = core.state.playback.seek_revision;
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSetPosition {
+                queue_id: current,
+                position: 1_000_000,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.seek_revision, revision);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+}
+
+#[test]
+fn mpris_set_position_allows_unknown_duration_without_queue_recovery() {
+    let (_directory, mut core) = fixture_with_duration(None);
+    pending(&mut core, 1);
+    core.state.playback.status = PlaybackStatus::Paused;
+    core.transport.selection_pending = true;
+    core.transport.projection_stale = true;
+    let commands = recording_audio(&mut core);
+    assert!(
+        operation_ack(
+            &mut core,
+            Operation::MprisSetPosition {
+                queue_id: 1,
+                position: 1_250_000,
+            },
+        )
+        .is_success()
+    );
+    assert_eq!(core.state.playback.position, 1.25);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    assert!(core.transport.selection_pending);
+    assert!(core.transport.projection_stale);
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::Seek { seconds: 1.25, .. }
+    ));
+    assert!(commands.try_recv().is_err());
 }

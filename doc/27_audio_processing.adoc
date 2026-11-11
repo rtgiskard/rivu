@@ -48,6 +48,8 @@ not been revoked and the playback generation has not changed in the meantime.
 Return to original addresses the currently selected audition, even when the latest
 task belongs to a different run. Invalid node/port requests leave the prior
 selection unchanged; playback retirement clears it.
+Selecting an audition preserves Playing; paused or stopped playback loads it paused.
+Preparing a mix leaves the current source unchanged until the result is ready.
 
 [[playback-bypass]]
 The footer's bypass icon temporarily routes playback to Original without changing

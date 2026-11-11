@@ -751,10 +751,10 @@ fn committed_external_queue_projection_failure_recovers_before_navigation() {
         assert!(status.library_committed);
         assert_eq!(status.progress.phase, ScanPhase::Failed);
         let commands = recording_audio(&mut core);
-        assert!(core.navigate(Navigation::Previous).is_err());
+        assert!(core.command(Command::Previous).is_err());
         assert!(commands.try_recv().is_err());
         repair_queue_projection(&connection);
-        core.navigate(Navigation::Previous).unwrap();
+        core.command(Command::Previous).unwrap();
         assert_eq!(core.state.queue.current_id, Some(4));
         assert_eq!(core.state.queue.total, 6);
         assert_queue_saved(&core);

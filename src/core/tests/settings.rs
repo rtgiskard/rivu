@@ -1688,7 +1688,7 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
     core.start(next, QueueHistory::Record).unwrap();
     core.command(Command::Pause).unwrap();
     core.command(Command::Configure { config }).unwrap();
-    core.navigate(Navigation::Previous).unwrap();
+    core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(first));
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
 }

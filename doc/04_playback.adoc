@@ -73,17 +73,23 @@ panel for covers.
 Hover or focus the volume control to see its percentage. The title's crosshair
 locates the current queue occurrence; see <<queue,Queue>>.
 
-Repeat cycles Off, All, and One. Previous restarts the current entry when its
-position exceeds three seconds; at or before three seconds it navigates back,
-using playback history when shuffling.
+Next and Previous preserve Core's playback state when the command executes,
+across CLI, TUI, GUI, tray, and MPRIS controls. Playing continues on the selected
+occurrence; paused navigation loads it paused; stopped navigation selects it
+without opening a decoder. Use Play or Resume to explicitly start playback.
+An earlier queued Pause or Stop therefore also governs a later Next or Previous.
+
+Repeat cycles Off, All, and One. Manual Next or Previous without a target leaves
+the current occurrence and position unchanged. Previous ignores playback position
+and follows queue order, or navigation history when shuffling.
 With Shuffle enabled, each Next independently chooses a queue occurrence with
 equal probability, including the current one. Immediate repeats are expected;
 duplicate occurrences increase their track's chances. Previous follows playback
 history, retaining up to 4096 occurrences during the running session; Next draws
 afresh even after Previous. Changing Shuffle, including through configuration,
 starts a new history at the current occurrence. Setting Shuffle to its current
-value preserves that history. Repeat One repeats the current occurrence at
-natural EOF but does not constrain explicit Next.
+value and resuming the same stopped occurrence preserve that history. Repeat One
+repeats the current occurrence at natural EOF but does not constrain explicit Next.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
 synthesize silence absent from the source.
@@ -608,9 +614,8 @@ and seeking beyond the queue tail does nothing. Out-of-range or stale `SetPositi
 is ignored. `OpenUri` is rejected: import media first. `Raise` requires a Core built
 with GUI support; `Quit` also works without it.
 
-MPRIS Next/Previous preserve paused or stopped state; stopped navigation selects
-without opening a decoder. CLI, TUI, and GUI navigation instead starts playback
-when moving to another occurrence. Protocol and database-admission details:
+MPRIS uses the same Next/Previous commands and execution-time playback-state
+semantics as the other controls. Protocol and database-admission details:
 link:21_ipc.adoc[IPC].
 
 == Equalizer and processed audition

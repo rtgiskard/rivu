@@ -1448,6 +1448,9 @@ fn rejected_mix_audition_retires_new_pcm_without_releasing_retained_stems() {
     prepare_mix(&mut core);
     let _commands = recording_audio(&mut core);
     let retained = core.processing.memory_bytes();
+    let original_status = core.state.playback.status;
+    let original_selection = core.state.queue.current_id;
+    let original_generation = core.transport.generation;
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
@@ -1467,6 +1470,9 @@ fn rejected_mix_audition_retires_new_pcm_without_releasing_retained_stems() {
     );
     assert!(core.processing.audition_projection().is_none());
     assert!(receive.try_recv().is_err());
+    assert_eq!(core.state.playback.status, original_status);
+    assert_eq!(core.state.queue.current_id, original_selection);
+    assert_eq!(core.transport.generation, original_generation);
     assert_eq!(core.processing.memory_bytes(), rendered);
     core.engine.replace_commands(previous);
     release.send(()).unwrap();
@@ -1498,7 +1504,7 @@ fn audition_starts_original_queue_identity_without_creating_processed_tracks() {
     core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
         .unwrap();
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
-    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.store.track_count().unwrap(), before);
     let command = loop {
         let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1511,6 +1517,7 @@ fn audition_starts_original_queue_identity_without_creating_processed_tracks() {
         AudioCommand::Audition {
             start_seconds: 0.0,
             listened_seconds: 0.0,
+            paused: true,
             ..
         }
     ));
@@ -4635,5 +4642,166 @@ fn cancelled_and_failed_mix_receipts_retain_stem_audition_capabilities() {
         );
         assert_eq!(core.processing_status(1).unwrap(), receipt);
         assert_eq!(core.processing.audition_projection().unwrap().id, 1);
+    }
+}
+
+#[test]
+fn standalone_audition_preserves_playing_and_opens_other_states_paused() {
+    for status in [
+        PlaybackStatus::Playing,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Stopped,
+    ] {
+        for same_source in [false, true] {
+            let (directory, mut core) = fixture();
+            source(directory.path());
+            write_pcm_frames(&directory.path().join("2.wav"), 100);
+            prepare_mix(&mut core);
+            edit_preferences(&mut core, |config| config.shuffle = true);
+            let commands = recording_audio(&mut core);
+            let queue_id = if same_source {
+                core.enqueue(&[1]).unwrap();
+                core.store
+                    .queue_id_at(core.state.queue.total - 1)
+                    .unwrap()
+                    .unwrap()
+            } else {
+                2
+            };
+            core.start_with_status(queue_id, QueueHistory::Record, status)
+                .unwrap();
+            assert_navigation_source_ready(&commands, status);
+            let expected = if status == PlaybackStatus::Playing {
+                PlaybackStatus::Playing
+            } else {
+                PlaybackStatus::Paused
+            };
+            for mode in [
+                AuditionMode::Denoised,
+                AuditionMode::Vocals,
+                AuditionMode::Accompaniment,
+                AuditionMode::Original,
+            ] {
+                core.audition_processing(1, mode, 0.0, 0.0).unwrap();
+                assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
+                if same_source {
+                    assert_eq!(core.state.queue.current_id, Some(queue_id));
+                }
+                assert_eq!(core.state.playback.status, expected);
+                loop {
+                    match commands.recv_timeout(Duration::from_secs(2)).unwrap() {
+                        AudioCommand::Load { paused, .. } => {
+                            assert_eq!(paused, expected == PlaybackStatus::Paused);
+                        }
+                        AudioCommand::Audition { paused, .. } => {
+                            assert_eq!(paused, expected == PlaybackStatus::Paused);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            core.previous().unwrap();
+            assert_eq!(core.state.queue.current_id, Some(queue_id));
+            assert_eq!(core.state.playback.status, expected);
+        }
+    }
+}
+
+fn assert_navigation_source_ready(commands: &Receiver<AudioCommand>, status: PlaybackStatus) {
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::StopAndSnapshot(_)
+    ));
+    if status != PlaybackStatus::Stopped {
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Load { .. }
+        ));
+    }
+}
+
+#[test]
+fn mix_preparation_preserves_current_source_until_successful_handoff() {
+    for status in [
+        PlaybackStatus::Playing,
+        PlaybackStatus::Paused,
+        PlaybackStatus::Stopped,
+    ] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        write_pcm_frames(&directory.path().join("2.wav"), 100);
+        prepare_mix(&mut core);
+        let commands = recording_audio(&mut core);
+        core.start_with_status(2, QueueHistory::Record, status)
+            .unwrap();
+        assert_navigation_source_ready(&commands, status);
+        let generation = core.transport.generation;
+        let selection = core.state.queue.current_id;
+        core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(core.transport.generation, generation);
+        assert_eq!(core.state.queue.current_id, selection);
+        assert_eq!(core.state.playback.status, status);
+        assert!(commands.try_recv().is_err());
+        let event = mix_completion(&mut core);
+        core.processing_event(event);
+        let expected = if status == PlaybackStatus::Playing {
+            PlaybackStatus::Playing
+        } else {
+            PlaybackStatus::Paused
+        };
+        assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
+        assert_eq!(core.state.playback.status, expected);
+        assert_eq!(core.processing.audition_id(), Some(1));
+        loop {
+            if let AudioCommand::Audition { paused, .. } =
+                commands.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                assert_eq!(paused, expected == PlaybackStatus::Paused);
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_cancelled_or_revoked_mix_preparation_never_opens_its_source() {
+    for action in ["failure", "cancel", "stop", "source", "bypass"] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        write_pcm_frames(&directory.path().join("2.wav"), 100);
+        prepare_mix(&mut core);
+        let commands = recording_audio(&mut core);
+        core.processing.panic_after_mix = action == "failure";
+        core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+            .unwrap();
+        assert!(commands.try_recv().is_err());
+        let event = mix_completion(&mut core);
+        match action {
+            "cancel" => core.cancel_processing(1).unwrap(),
+            "stop" => core.command(Command::Stop).map(|_| ()).unwrap(),
+            "source" => core
+                .command(Command::PlayQueue { queue_id: 2 })
+                .map(|_| ())
+                .unwrap(),
+            "bypass" => core.processing_bypass(true).unwrap(),
+            "failure" => {}
+            _ => unreachable!(),
+        }
+        let generation = core.transport.generation;
+        let selection = core.state.queue.current_id;
+        let status = core.state.playback.status;
+        core.processing_event(event);
+        assert_eq!(core.transport.generation, generation, "{action}");
+        assert_eq!(core.state.queue.current_id, selection, "{action}");
+        assert_eq!(core.state.playback.status, status, "{action}");
+        assert!(core.processing.audition_id().is_none(), "{action}");
+        if action == "source" {
+            assert_navigation_source_ready(&commands, PlaybackStatus::Playing);
+        } else if action == "stop" {
+            assert_navigation_source_ready(&commands, PlaybackStatus::Stopped);
+        }
+        assert!(commands.try_recv().is_err(), "{action}");
     }
 }

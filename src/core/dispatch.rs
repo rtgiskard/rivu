@@ -320,7 +320,7 @@ impl Core {
     pub(super) fn dispatch_request(&mut self, request: Request) {
         if matches!(
             &request.operation,
-            Operation::Query { .. } | Operation::Command(_) | Operation::Navigate(_)
+            Operation::Query { .. } | Operation::Command(_)
         ) {
             self.recover_projections_on_demand();
         }
@@ -395,15 +395,21 @@ impl Core {
                     let _ = reply.send(CoreResponse::Ack(ack));
                 }
             }
-            operation @ (Operation::Navigate(_) | Operation::MprisSeek { .. }) => {
-                let result = match operation {
-                    Operation::MprisSeek { queue_id, offset } => self.mpris_seek(queue_id, offset),
-                    _ if self.database_maintenance_active() => Err(anyhow::anyhow!(
-                        "Database maintenance is in progress; this operation was not executed"
-                    )),
-                    Operation::Navigate(direction) => self.navigate(direction),
-                    _ => unreachable!("operation matched above"),
-                };
+            Operation::MprisSeek { queue_id, offset } => {
+                let result = self.mpris_seek(queue_id, offset);
+                if let Err(error) = &result {
+                    self.state.system.last_error = Some(format!("{error:#}"));
+                }
+                self.publish();
+                if let Some(reply) = request.reply {
+                    let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+                        result,
+                        self.state.system.revision,
+                    )));
+                }
+            }
+            Operation::MprisSetPosition { queue_id, position } => {
+                let result = self.mpris_set_position(queue_id, position);
                 if let Err(error) = &result {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }

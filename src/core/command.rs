@@ -45,8 +45,7 @@ impl Core {
             .duration
             .is_some_and(|duration| target > duration)
         {
-            // MPRIS Seek beyond the end is Next, including its no-op at the
-            // queue tail. Keep both decisions inside the occurrence check.
+            // A known tail needs no queue access, including during maintenance.
             if self.preferences.live().shuffle
                 || self.preferences.live().repeat == RepeatMode::All
                 || self
@@ -55,12 +54,35 @@ impl Core {
                     .current_position
                     .is_none_or(|index| index + 1 < self.state.queue.total)
             {
-                self.navigate(Navigation::Next)?;
+                self.command(Command::Next)?;
             }
             Ok(())
         } else {
             self.seek(target)
         }
+    }
+
+    pub(in crate::core) fn mpris_set_position(
+        &mut self,
+        queue_id: u64,
+        position: i64,
+    ) -> Result<()> {
+        if self.state.queue.current_id != Some(queue_id)
+            || self.state.playback.status == PlaybackStatus::Stopped
+            || position < 0
+        {
+            return Ok(());
+        }
+        let seconds = position as f64 / 1_000_000.0;
+        if self
+            .state
+            .playback
+            .duration
+            .is_some_and(|duration| seconds > duration)
+        {
+            return Ok(());
+        }
+        self.seek(seconds)
     }
 
     pub(in crate::core) fn command(
@@ -255,7 +277,8 @@ impl Core {
                 );
             }
             Command::Stop => self.stop()?,
-            Command::Next => self.advance(false)?,
+            // Resolve status on the owner after earlier queued commands have run.
+            Command::Next => self.advance_with_status(false, self.state.playback.status)?,
             Command::Previous => self.previous()?,
             Command::Seek { seconds } => self.seek(seconds)?,
             Command::SeekRelative { queue_id, delta } => {

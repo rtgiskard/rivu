@@ -7,7 +7,7 @@ use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
 
 use crate::{
     app::AppHandle,
-    core::{CoreHandle, Navigation, RevisionInterest},
+    core::{CoreHandle, RevisionInterest},
     execution::BlockingExecutor,
     projection::MprisSnapshot,
 };
@@ -527,26 +527,14 @@ struct Player {
     artwork_result: parking_lot::Mutex<Option<Artwork>>,
 }
 
-impl Player {
-    async fn navigate(&self, direction: Navigation) -> fdo::Result<()> {
-        acknowledge(self.handle.navigate(direction).await)
-    }
-}
-
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
 impl Player {
     async fn next(&self) -> fdo::Result<()> {
-        if !can_go_next(&self.handle.mpris_snapshot()) {
-            return Ok(());
-        }
-        self.navigate(Navigation::Next).await
+        request(&self.handle, Command::Next).await
     }
 
     async fn previous(&self) -> fdo::Result<()> {
-        if !can_go_previous(&self.handle.mpris_snapshot()) {
-            return Ok(());
-        }
-        self.navigate(Navigation::Previous).await
+        request(&self.handle, Command::Previous).await
     }
 
     async fn pause(&self) -> fdo::Result<()> {
@@ -562,46 +550,28 @@ impl Player {
     }
 
     async fn play(&self) -> fdo::Result<()> {
-        let state = self.handle.mpris_snapshot();
-        if state.queue.total == 0 || state.playback.status == PlaybackStatus::Playing {
-            return Ok(());
-        }
         request(&self.handle, Command::Resume).await
     }
 
     async fn seek(&self, offset: i64) -> fdo::Result<()> {
-        let state = self.handle.mpris_snapshot();
-        if !can_seek(&state) {
+        let Some(queue_id) = self.handle.mpris_snapshot().queue.current_id else {
             return Ok(());
-        }
-        acknowledge(
-            self.handle
-                .mpris_seek(
-                    state
-                        .queue
-                        .current_id
-                        .expect("seekable track has a queue entry"),
-                    offset,
-                )
-                .await,
-        )
+        };
+        acknowledge(self.handle.mpris_seek(queue_id, offset).await)
     }
 
     async fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> fdo::Result<()> {
-        let state = self.handle.mpris_snapshot();
-        if !can_seek(&state) {
-            return Ok(());
-        }
-        let Some(queue_id) = state.queue.current_id else {
+        let Some(queue_id) = track_id
+            .as_str()
+            .strip_prefix("/org/mpris/MediaPlayer2/track/q")
+            .and_then(|id| id.parse::<u64>().ok())
+        else {
             return Ok(());
         };
         if track_id.as_str() != track_path(queue_id) {
             return Ok(());
         }
-        let Some(seconds) = absolute_seek(position, state.playback.duration) else {
-            return Ok(());
-        };
-        request(&self.handle, Command::SeekQueue { queue_id, seconds }).await
+        acknowledge(self.handle.mpris_set_position(queue_id, position).await)
     }
 
     fn open_uri(&self, uri: &str) -> fdo::Result<()> {
@@ -798,10 +768,9 @@ fn can_go_previous(state: &MprisSnapshot) -> bool {
     if state.queue.total == 0 {
         return false;
     }
-    // A loaded track can restart; with stopped playback the first queue
-    // occurrence cannot seek and has no predecessor. Shuffle history belongs
-    // to the core, so unknown navigation availability is true per MPRIS.
-    if can_seek(state) || state.playback.shuffle {
+    // Shuffle history belongs to the core, so unknown navigation availability
+    // is true per MPRIS.
+    if state.playback.shuffle {
         return true;
     }
     state.queue.current_position.is_none_or(|index| index > 0)
@@ -812,18 +781,6 @@ fn microseconds(seconds: f64) -> i64 {
         return 0;
     }
     (seconds * MICROS_PER_SECOND) as i64
-}
-
-fn absolute_seek(position: i64, duration: Option<f64>) -> Option<f64> {
-    if position < 0 {
-        return None;
-    }
-    let seconds = position as f64 / MICROS_PER_SECOND;
-    if duration.is_some_and(|length| seconds > length) {
-        None
-    } else {
-        Some(seconds)
-    }
 }
 
 fn track_path(queue_id: u64) -> String {
@@ -1636,7 +1593,7 @@ mod tests {
                 }),
         )
         .unwrap();
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
 
         // Hold the only execution slot: even cancelling an unstarted artwork
         // load must await that slot and its physical completion boundary.
@@ -1915,11 +1872,11 @@ mod tests {
         )
         .unwrap();
         // Navigation while stopped selects metadata without opening audio output.
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let selected = runtime.handle.mpris_snapshot();
         assert_eq!(selected.playback.status, PlaybackStatus::Stopped);
         let selected_track = selected.current_track().unwrap();
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let other = runtime
             .handle
             .mpris_snapshot()
@@ -1927,7 +1884,7 @@ mod tests {
             .unwrap()
             .clone();
         assert_ne!(other.id, selected_track.id);
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Previous)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Previous)).is_success());
         let artwork = Arc::new(
             ArtworkManager::new(directory.path())
                 .with_default_image(rivu_presentation::DEFAULT_IMAGE),
@@ -1981,7 +1938,7 @@ mod tests {
                         Arc::clone(&artwork),
                         crate::artwork_source(&other),
                     );
-                    assert!(runtime.handle.navigate(Navigation::Next).await.is_success());
+                    assert!(runtime.handle.request_ack(Command::Next).await.is_success());
                     let changed = next_metadata(&mut signals).await;
                     assert_eq!(
                         changed["mpris:trackid"],
@@ -2030,12 +1987,12 @@ mod tests {
                             .await
                             .is_success()
                     );
-                    assert!(runtime.handle.navigate(Navigation::Next).await.is_success());
+                    assert!(runtime.handle.request_ack(Command::Next).await.is_success());
                 } else {
                     assert!(
                         runtime
                             .handle
-                            .navigate(Navigation::Previous)
+                            .request_ack(Command::Previous)
                             .await
                             .is_success()
                     );
@@ -2126,10 +2083,10 @@ mod tests {
                 }),
         )
         .unwrap();
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let old = runtime.handle.mpris_snapshot();
         let identity = ArtworkIdentity::new(crate::artwork_source(old.current_track().unwrap()));
-        assert!(async_io::block_on(runtime.handle.navigate(Navigation::Next)).is_success());
+        assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let current = runtime.handle.mpris_snapshot();
         assert_ne!(old.queue.current_id, current.queue.current_id);
         let artwork = ArtworkManager::new(directory.path())
@@ -2328,6 +2285,38 @@ mod tests {
     }
 
     #[test]
+    fn previous_availability_depends_on_predecessor_not_playback_status() {
+        let mut state = MprisSnapshot {
+            queue: QueueState {
+                total: 2,
+                current_id: Some(1),
+                current_position: Some(0),
+                ..QueueState::default()
+            },
+            current_track: Some(Arc::new(track(7))),
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        for status in [
+            PlaybackStatus::Stopped,
+            PlaybackStatus::Paused,
+            PlaybackStatus::Playing,
+        ] {
+            state.playback.status = status;
+            state.playback.position = 4.0;
+            state.queue.current_position = Some(0);
+            assert!(!can_go_previous(&state));
+            state.queue.current_position = Some(1);
+            assert!(can_go_previous(&state));
+        }
+        state.queue.current_position = Some(0);
+        state.playback.shuffle = true;
+        assert!(can_go_previous(&state));
+        state.queue.total = 0;
+        assert!(!can_go_previous(&state));
+    }
+
+    #[test]
     fn can_pause_requires_a_valid_current_track() {
         let mut state = MprisSnapshot {
             queue: QueueState {
@@ -2353,10 +2342,6 @@ mod tests {
     }
     #[test]
     fn seek_boundaries_use_microseconds() {
-        assert_eq!(absolute_seek(-1, Some(10.0)), None);
-        assert_eq!(absolute_seek(10_000_000, Some(10.0)), Some(10.0));
-        assert_eq!(absolute_seek(10_000_001, Some(10.0)), None);
-        assert_eq!(absolute_seek(1_250_000, None), Some(1.25));
         assert_eq!(microseconds(1.25), 1_250_000);
         assert_eq!(microseconds(f64::INFINITY), i64::MAX);
     }

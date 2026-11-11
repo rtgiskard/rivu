@@ -1313,6 +1313,21 @@ Interactive playback changes use execution-time intent commands:
 and clamps the result to 0..1; `CycleRepeat` cycles Off → All → One → Off;
 `ToggleShuffle` flips the core's current setting. Queued commands are applied in
 order rather than deriving absolute targets from a frontend's earlier snapshot.
+`Next` and `Previous` likewise preserve Playing, Paused, or Stopped as observed
+by Core when executing the command, not a caller's published snapshot. Playing
+loads the selected occurrence for playback; Paused loads it with `paused=true`;
+Stopped selects and publishes metadata without loading audio. Manual navigation
+without a target leaves the current occurrence and position unchanged. `Previous`
+selects the preceding queue occurrence or shuffle-history entry, regardless of position.
+Use `Play`, `PlayQueue`, `PlayPlaylist`, or `Resume` to explicitly start playback.
+All frontends, including MPRIS, use these standard commands. Natural EOF remains
+a separate transition: it honors Repeat One and stops at queue end with Repeat
+Off, while explicit Next ignores Repeat One. Shuffle draws and occurrence history
+are shared with the existing queue selection rules.
+This navigation contract does not change command fields or wire encoding, so it
+does not require a protocol-version change; upgrade Core and clients together to
+avoid relying on the former implicit-start behavior of explicit navigation.
+
 `SeekRelative { queue_id, delta }` adds finite signed seconds to the core's current
 position, bounded below by zero and by an explicit CUE end, not estimated metadata
 duration. A different current occurrence or stopped playback makes it a no-op.
