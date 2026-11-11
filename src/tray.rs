@@ -457,28 +457,6 @@ impl MenuLayout {
             children,
         }
     }
-
-    fn item(id: i32, label: impl Into<String>) -> Self {
-        let mut properties = HashMap::new();
-        properties.insert("label".to_owned(), owned_value(label.into()));
-        properties.insert("enabled".to_owned(), OwnedValue::from(true));
-        properties.insert("visible".to_owned(), OwnedValue::from(true));
-        Self {
-            id,
-            properties,
-            children: Vec::new(),
-        }
-    }
-
-    fn separator(id: i32) -> Self {
-        let mut properties = HashMap::new();
-        properties.insert("type".to_owned(), owned_value("separator".to_owned()));
-        Self {
-            id,
-            properties,
-            children: Vec::new(),
-        }
-    }
 }
 
 impl From<MenuLayout> for Value<'static> {
@@ -647,53 +625,34 @@ impl DbusMenu {
 
 fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
     (2..=9)
-        .map(|id| {
-            let (label, item_type) = menu_entry(snapshot, id, i18n).expect("known menu item");
-            if item_type == "separator" {
-                MenuLayout::separator(id)
-            } else {
-                MenuLayout::item(id, label)
-            }
+        .map(|id| MenuLayout {
+            id,
+            properties: menu_properties(snapshot, id, &[], i18n).expect("known menu item"),
+            children: Vec::new(),
         })
         .collect()
 }
 
-fn menu_entry<'a>(
-    snapshot: &TraySnapshot,
-    id: i32,
-    i18n: &'a Localizer,
-) -> Option<(&'a str, &'static str)> {
-    Some(match id {
-        2 => (
-            i18n.text(if snapshot.status == PlaybackStatus::Playing {
-                "core-pause"
-            } else {
-                "playback-play"
-            }),
-            "standard",
-        ),
-        3 => (i18n.text("core-previous"), "standard"),
-        4 => (i18n.text("core-next"), "standard"),
-        5 | 8 => ("", "separator"),
-        6 => (
-            i18n.text(if snapshot.shuffle {
-                "core-shuffle-on"
-            } else {
-                "core-shuffle"
-            }),
-            "standard",
-        ),
-        7 => (
-            i18n.text(if snapshot.repeat == RepeatMode::Off {
-                "core-repeat"
-            } else {
-                "core-repeat-on"
-            }),
-            "standard",
-        ),
-        9 => (i18n.text("app-quit"), "standard"),
+fn menu_entry<'a>(snapshot: &TraySnapshot, id: i32, i18n: &'a Localizer) -> Option<&'a str> {
+    let label = match id {
+        2 => i18n.text(if snapshot.status == PlaybackStatus::Playing {
+            "core-pause"
+        } else {
+            "playback-play"
+        }),
+        3 => i18n.text("core-previous"),
+        4 => i18n.text("core-next"),
+        5 | 8 => "",
+        6 => i18n.text("core-shuffle"),
+        7 => i18n.text(match snapshot.repeat {
+            RepeatMode::Off => "core-repeat-off",
+            RepeatMode::All => "core-repeat-all",
+            RepeatMode::One => "core-repeat-one",
+        }),
+        9 => i18n.text("app-quit"),
         _ => return None,
-    })
+    };
+    Some(label)
 }
 
 fn menu_properties(
@@ -702,11 +661,21 @@ fn menu_properties(
     requested: &[String],
     i18n: &Localizer,
 ) -> Option<HashMap<String, OwnedValue>> {
-    let (label, item_type) = menu_entry(snapshot, id, i18n)?;
+    let item_type = match id {
+        5 | 8 => "separator",
+        2..=9 => "standard",
+        _ => return None,
+    };
     let all = requested.is_empty();
     let mut properties = HashMap::new();
     if all || requested.iter().any(|name| name == "label") {
-        properties.insert("label".to_owned(), owned_value(label.to_owned()));
+        let label = menu_entry(snapshot, id, i18n)?;
+        let label = if id == 6 && snapshot.shuffle {
+            format!("{label} ✓")
+        } else {
+            label.to_owned()
+        };
+        properties.insert("label".to_owned(), owned_value(label));
     }
     if all || requested.iter().any(|name| name == "type") {
         properties.insert("type".to_owned(), owned_value(item_type.to_owned()));
