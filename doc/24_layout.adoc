@@ -940,8 +940,10 @@ The window arbitrates pointer sessions; Playback owns seek identity, preview and
 commit/cancellation. Keyboard takeover cancels a live pointer session before
 dispatch, preventing a later release from overwriting it. Transport buttons keep
 circular backgrounds as typography changes. Volume appears in a hover hint or
-an immediate tooltip-styled value during drag/focus, without taking layout space
-or maintaining a second volume model.
+an immediate tooltip-styled value during drag/focus, without taking layout space.
+Pointer volume keeps one command in flight and replaces its single waiting target;
+the slider shows that target until acknowledgement, and a volume key discards
+an unsent pointer target rather than racing it.
 
 ==== Integration and showcase
 

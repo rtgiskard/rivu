@@ -77,11 +77,50 @@ fn slider_command(
     }
 }
 
+/// Pointer volume is absolute: keep one command in flight and only its latest successor.
+#[derive(Default)]
+struct VolumeIntent {
+    in_flight: Option<f32>,
+    next: Option<f32>,
+}
+
+impl VolumeIntent {
+    /// Returns the value to send now; later values wait as one replaceable target.
+    fn request(&mut self, value: f32) -> Option<f32> {
+        match self.in_flight {
+            None => {
+                self.in_flight = Some(value);
+                Some(value)
+            }
+            Some(sent) => {
+                self.next = (value != sent).then_some(value);
+                None
+            }
+        }
+    }
+
+    /// Completion of the in-flight command releases the latest waiting target.
+    fn finish(&mut self) -> Option<f32> {
+        self.in_flight = self.next.take();
+        self.in_flight
+    }
+
+    /// A relative key intent must not be overwritten by an older unsent pointer value.
+    fn discard_next(&mut self) {
+        self.next = None;
+    }
+
+    fn target(&self) -> Option<f32> {
+        self.next.or(self.in_flight)
+    }
+}
+
 pub(super) struct Playback {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
     seek_preview: Option<f64>,
     dragging: Option<Dragging>,
+    volume: VolumeIntent,
 }
 
 impl EventEmitter<PlaybackEvent> for Playback {}
@@ -94,6 +133,7 @@ impl Playback {
             state,
             seek_preview: None,
             dragging: None,
+            volume: VolumeIntent::default(),
         }
     }
 
@@ -155,7 +195,35 @@ impl Playback {
     }
 
     pub(super) fn set_volume(&mut self, value: f32, cx: &mut Context<Self>) {
-        self.send(Command::Volume { value }, cx);
+        if self.displayed_volume() == value {
+            return;
+        }
+        if let Some(value) = self.volume.request(value) {
+            self.dispatch_volume(value, cx);
+        }
+        cx.notify();
+    }
+
+    fn displayed_volume(&self) -> f32 {
+        self.volume.target().unwrap_or(self.state.playback.volume)
+    }
+
+    fn dispatch_volume(&mut self, value: f32, cx: &mut Context<Self>) {
+        let handle = self.context.handle().clone();
+        cx.spawn(async move |this, cx| {
+            let delivery = handle.request_ack(Command::Volume { value }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = delivery.observed_result() {
+                    cx.emit(PlaybackEvent::Error(error));
+                }
+                if let Some(next) = this.volume.finish() {
+                    this.dispatch_volume(next, cx);
+                }
+                this.reconcile(this.context.snapshot(), cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn slider_key(
@@ -166,6 +234,9 @@ impl Playback {
         cx: &mut Context<Self>,
     ) {
         self.reconcile(self.context.snapshot(), cx);
+        if matches!(slider, Dragging::Volume(_)) {
+            self.volume.discard_next();
+        }
         if let Some(command) = slider_command(
             slider,
             key,
@@ -240,11 +311,12 @@ impl Playback {
             .read(cx)
             .clone();
         let volume_dragging = matches!(self.dragging, Some(Dragging::Volume(id)) if id == panel_id);
+        let displayed_volume = self.displayed_volume();
         let show_volume_value = volume_dragging
             || (volume_focus.is_focused(window) && window.last_input_was_keyboard());
         let volume = Slider::new(
             ("volume", panel_id),
-            self.state.playback.volume,
+            displayed_volume,
             self.context.tr("gl-volume-level"),
         )
         .dragging(volume_dragging)
@@ -262,7 +334,7 @@ impl Playback {
                     .child(
                         rivu_ui::tooltip_surface(window, cx, 8.)
                             .whitespace_nowrap()
-                            .child(format!("{:.0}%", self.state.playback.volume * 100.)),
+                            .child(format!("{:.0}%", displayed_volume * 100.)),
                     ),
             ))
         });
@@ -406,7 +478,7 @@ impl Playback {
             .when(!show_volume_value, |control| {
                 control.tooltip(rivu_ui::text_tooltip(format!(
                     "{:.0}%",
-                    self.state.playback.volume * 100.
+                    displayed_volume * 100.
                 )))
             });
         let scroll = self
@@ -620,6 +692,33 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_volume_keeps_one_command_in_flight_and_delivers_the_latest_target() {
+        let mut intent = VolumeIntent::default();
+        assert_eq!(intent.request(0.2), Some(0.2));
+        for value in [0.3, 0.4, 0.5] {
+            assert_eq!(intent.request(value), None);
+        }
+        assert_eq!(intent.target(), Some(0.5));
+        // Only the latest waiting value follows the acknowledged command.
+        assert_eq!(intent.finish(), Some(0.5));
+        assert_eq!(intent.finish(), None);
+        assert_eq!(intent.target(), None);
+
+        // Returning to the in-flight value leaves nothing extra to send.
+        assert_eq!(intent.request(0.6), Some(0.6));
+        assert_eq!(intent.request(0.7), None);
+        assert_eq!(intent.request(0.6), None);
+        assert_eq!(intent.finish(), None);
+
+        // A key intent supersedes an unsent pointer value, not the active command.
+        assert_eq!(intent.request(0.1), Some(0.1));
+        assert_eq!(intent.request(0.9), None);
+        intent.discard_next();
+        assert_eq!(intent.target(), Some(0.1));
+        assert_eq!(intent.finish(), None);
+    }
 
     #[test]
     fn seek_keys_require_queue_identity_and_finite_positive_duration() {
