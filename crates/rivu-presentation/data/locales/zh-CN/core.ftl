@@ -30,6 +30,10 @@ core-state-track = { $status }：{ $artist } — { $title }  { $position }/{ $du
 core-state-empty = { $status } · { $tracks } 首 · 队列 { $queued } 首
 core-ffmpeg = FFmpeg 扩展音频解码：{ $status }
 core-scan-progress = 扫描：{ $phase } · { $processed }/{ $total } · { $errors } 个错误
+core-scan-library-committed = 曲库修改已保存（提交已确认）。
+core-scan-library-unconfirmed = 尚无曲库提交确认；重试前请检查任务详情和曲库。
+core-scan-playlist-created = 已创建播放列表 ID：{ $id }
+core-scan-saved-warning = 部分修改已经保存，但任务或显示同步失败；请先检查已保存的结果，避免重复操作。
 core-probe = { $path }
       标题：{ $title }
       艺人：{ $artist }

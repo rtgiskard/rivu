@@ -235,11 +235,48 @@ fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bo
             }
         )?;
         show_scan(i18n, &task.progress)?;
-        if let Some(error) = &task.error {
+        write_scan_outcome(&mut output, i18n, task)?;
+        if let Some(error) = &task.error
+            && error != &task.message
+        {
             writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
     output.flush()?;
+    Ok(())
+}
+
+fn write_scan_outcome(
+    output: &mut impl Write,
+    i18n: &Localizer,
+    task: &ScanTaskStatus,
+) -> Result<()> {
+    if !task.message.is_empty() {
+        writeln!(output, "{}", TerminalEscaped(&task.message))?;
+    }
+    if task.library_committed {
+        writeln!(output, "{}", i18n.text("core-scan-library-committed"))?;
+    } else if matches!(
+        task.progress.phase,
+        ScanPhase::Failed | ScanPhase::Cancelled
+    ) {
+        writeln!(output, "{}", i18n.text("core-scan-library-unconfirmed"))?;
+    }
+    if let Some(id) = task.playlist_id {
+        writeln!(
+            output,
+            "{}",
+            i18n.format(
+                "core-scan-playlist-created",
+                &[("id", id.to_string().into())]
+            )
+        )?;
+    }
+    if (task.library_committed || task.playlist_id.is_some())
+        && (task.error.is_some() || task.progress.phase == ScanPhase::Failed)
+    {
+        writeln!(output, "{}", i18n.text("core-scan-saved-warning"))?;
+    }
     Ok(())
 }
 

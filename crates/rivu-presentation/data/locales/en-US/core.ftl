@@ -30,6 +30,10 @@ core-state-track = { $status }: { $artist } — { $title }  { $position }/{ $dur
 core-state-empty = { $status } · { $tracks } tracks · { $queued } queued
 core-ffmpeg = FFmpeg extension audio decoding: { $status }
 core-scan-progress = Scan: { $phase } · { $processed }/{ $total } · { $errors } errors
+core-scan-library-committed = Library changes saved (commit confirmed).
+core-scan-library-unconfirmed = No library commit confirmation is available; inspect the task details and library before retrying.
+core-scan-playlist-created = Created playlist ID: { $id }
+core-scan-saved-warning = Some changes are already saved, but the task or display synchronization failed; inspect the saved results before retrying.
 core-probe = { $path }
       title: { $title }
       artist: { $artist }
