@@ -765,6 +765,90 @@ class PreparedQualityTests(unittest.TestCase):
                 self.assertEqual(row["estimate"], quality.identity(row["estimate"]["path"]))
             json.dumps(report, allow_nan=False)
 
+    def test_classical_same_named_corpora_and_case_stems_keep_all_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "renderer"
+            binary.write_bytes(b"test renderer identity")
+            argv = ["run_classical.py", "--binary", str(binary),
+                    "--output", str(root / "results"), "--repeats", "2"]
+            expected = {}
+            reference_by_source = {}
+            for corpus_index in range(2):
+                corpus = root / str(corpus_index) / "same-corpus"
+                corpus.mkdir(parents=True)
+                reference = np.array([-0.25, 0.25, -0.125, 0.125]) / (corpus_index + 1)
+                reference_path = corpus / "clean.wav"
+                sf.write(reference_path, reference, 8000, subtype="FLOAT")
+                cases = []
+                for case_index in range(2):
+                    source = corpus / str(case_index) / "same-stem.wav"
+                    source.parent.mkdir()
+                    noisy = reference + (case_index + 1) * np.array([0.03125, 0.03125, -0.03125, -0.03125])
+                    sf.write(source, noisy, 8000, subtype="FLOAT")
+                    cases.append({"path":str(source), "name":f"noise-{case_index}", "snr_db":0})
+                (corpus / "manifest.json").write_text(json.dumps({
+                    "reference":str(reference_path), "provenance":"test corpus",
+                    "shared_reference_rms":0.08, "cases":cases}))
+                for case in [{"path":str(reference_path), "name":"clean"}, *cases]:
+                    source = Path(case["path"])
+                    reference_by_source[str(source)] = reference
+                    for mode in ("stationary", "profile", "adaptive"):
+                        expected[(str(reference_path), case["name"], mode)] = quality.identity(source)
+                argv.extend(["--corpus", str(corpus)])
+            outputs = {}
+            configs = set()
+            profiles = set()
+            repeats = {}
+            def render(command, **kwargs):
+                _, source, estimate, config_path, *profile = command
+                config = json.loads(Path(config_path).read_text())
+                key = (source, config["mode"])
+                repeat = repeats.get(key, 0)
+                repeats[key] = repeat + 1
+                if repeat == 0:
+                    self.assertNotIn(config_path, configs)
+                    configs.add(config_path)
+                    if profile:
+                        self.assertNotIn(profile[0], profiles)
+                        profiles.add(profile[0])
+                input_audio, rate = sf.read(source, always_2d=True)
+                if config["mode"] == "profile":
+                    profile_audio, profile_rate = sf.read(profile[0], always_2d=True)
+                    self.assertEqual(profile_rate, rate)
+                    np.testing.assert_array_equal(profile_audio, input_audio - reference_by_source[source][:, None])
+                self.assertFalse(Path(estimate).exists())
+                factor = {"stationary":1.0, "profile":0.75, "adaptive":0.5}[config["mode"]] - repeat * 0.125
+                sf.write(estimate, input_audio * factor, rate, subtype="FLOAT")
+                outputs[estimate] = quality.identity(estimate)
+                return subprocess.CompletedProcess(command, 0, json.dumps({"core_seconds":repeat + 1}), "")
+            with patch.object(sys, "argv", argv), patch.object(run_classical.subprocess, "run", side_effect=render), patch("builtins.print"):
+                run_classical.main()
+            report = json.loads((root / "results" / "report.json").read_text())
+            self.assertEqual(len(report["reports"]), len(expected))
+            self.assertEqual(len(outputs), len(expected) * 2)
+            self.assertEqual(len(configs), len(expected))
+            self.assertEqual(len(profiles), 6)
+            self.assertEqual(set(repeats.values()), {2})
+            self.assertEqual({mode:summary["cases"] for mode, summary in report["summary"].items()},
+                             {"stationary":4, "profile":4, "adaptive":4})
+            seen = set()
+            for row in report["reports"]:
+                key = (row["reference"]["path"], row["noise_kind"], row["mode"])
+                self.assertNotIn(key, seen)
+                seen.add(key)
+                self.assertEqual(row["noisy_baseline"], expected[key])
+                self.assertEqual(row["reference"], quality.identity(key[0]))
+                self.assertEqual(row["estimate"], outputs[row["estimate"]["path"]])
+                baseline, rate = sf.read(row["noisy_baseline"]["path"])
+                estimate, estimate_rate = sf.read(row["estimate"]["path"])
+                self.assertEqual(estimate_rate, rate)
+                factor = {"stationary":1.0, "profile":0.75, "adaptive":0.5}[row["mode"]] - 0.125
+                np.testing.assert_array_equal(estimate, baseline * factor)
+            self.assertEqual(seen, set(expected))
+            for path, identity in outputs.items():
+                self.assertEqual(quality.identity(path), identity)
+
 
 class BenchmarkRepeatTests(unittest.TestCase):
     def benchmark_inputs(self, root):

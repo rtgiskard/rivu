@@ -51,33 +51,38 @@ def main():
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     reports = []
-    for corpus_name in args.corpus:
+    for corpus_index, corpus_name in enumerate(args.corpus):
         corpus = Path(corpus_name).resolve(strict=True)
+        corpus_output = output / f"corpus-{corpus_index}"
+        corpus_output.mkdir(exist_ok=False)
         manifest = json.loads((corpus / "manifest.json").read_text())
         reference = ReferenceEvaluation(manifest["reference"])
         clean, rate = reference.audio.data, reference.audio.rate
         cases = [{"path": reference.audio.identity["path"], "name": "clean", "snr_db": None}, *manifest["cases"]]
-        for case in cases:
+        for case_index, case in enumerate(cases):
             source = Path(case["path"])
+            case_output = corpus_output / f"case-{case_index}"
+            case_output.mkdir(exist_ok=False)
             baseline = reference.baseline(source)
             snr = case["snr_db"]
             for mode in ("stationary", "profile", "adaptive"):
-                stem = f"{corpus.name}-{source.stem}-{mode}"
                 config = {"mode": mode}
                 if mode == "stationary":
                     config["stationary_noise_dbfs"] = -90.0 if snr is None else 20 * math.log10(manifest["shared_reference_rms"]) - snr
-                config_path = output / f"{stem}.json"
-                config_path.write_text(json.dumps(config) + "\n")
+                config_path = case_output / f"{mode}.json"
+                with config_path.open("x") as stream:
+                    stream.write(json.dumps(config) + "\n")
                 profile_args = []
                 if mode == "profile":
                     noisy = baseline.audio.data
-                    profile = output / f"{stem}-noise.wav"
-                    sf.write(profile, noisy - clean, rate, subtype="FLOAT")
+                    profile = case_output / "profile-noise.wav"
+                    with profile.open("xb") as stream:
+                        sf.write(stream, noisy - clean, rate, format="WAV", subtype="FLOAT")
                     profile_args.append(str(profile))
                 timings = []
                 estimate = None
                 for repeat in range(args.repeats):
-                    estimate = output / f"{stem}-{repeat}.wav"
+                    estimate = case_output / f"{mode}-{repeat}.wav"
                     command = [str(binary), str(source), str(estimate), str(config_path), *profile_args]
                     if identity(source) != baseline.audio.identity:
                         raise ValueError("classical input changed before rendering: " + str(source))

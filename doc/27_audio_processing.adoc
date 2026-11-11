@@ -1082,6 +1082,13 @@ Prepare a new corpus if its manifest lacks the required prepared-file identities
 incomplete legacy manifests are rejected. Keep recorded measurements bound to
 their original corpus and timing definitions.
 
+`tools/audio_quality/run_classical.py` requires a new output root and isolates each
+corpus occurrence and case in its own numbered subdirectory, so repeated corpus
+names and source stems do not share configurations, noise profiles or rendered
+WAVs. Numbering is only an output namespace, not source identity. Consumers should
+read the root `report.json` and follow each row's `estimate.path`; `reference` and
+`noisy_baseline` retain the actual source paths and content identities.
+
 Automatic metrics and actual listening are distinct evidence. No automated
 analysis is reported as human listening. Missing listening approval remains an
 explicit acceptance gap, even when objective and integration checks pass.
