@@ -40,10 +40,19 @@ impl QueueDrag {
 }
 
 impl Queue {
-    fn send_queue_row_action(&mut self, revision: u64, command: Command, cx: &mut Context<Self>) {
+    fn send_queue_position_action(
+        &mut self,
+        revision: u64,
+        command: Command,
+        cx: &mut Context<Self>,
+    ) {
         self.refresh(cx);
         if self.state.queue.revision == revision {
             self.send(command, cx);
+        } else {
+            cx.emit(QueueEvent::Error(
+                self.context.i18n.text("li-source-changed").to_owned(),
+            ));
         }
     }
 
@@ -85,6 +94,11 @@ impl Queue {
     ) {
         self.refresh(cx);
         let Some(index) = self.queue_drop_index(drag, target_id, cx.entity().entity_id()) else {
+            if drag.revision != self.state.queue.revision {
+                cx.emit(QueueEvent::Error(
+                    self.context.i18n.text("li-source-changed").to_owned(),
+                ));
+            }
             return;
         };
         self.send(
@@ -117,7 +131,12 @@ impl Queue {
             {
                 (Some(index), Some(revision))
             }
-            _ => return,
+            _ => {
+                cx.emit(QueueEvent::Error(
+                    self.context.i18n.text("li-source-changed").to_owned(),
+                ));
+                return;
+            }
         };
         self.send(
             Command::QueueExternalPaths {
@@ -433,8 +452,7 @@ impl Queue {
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
-                                                    this.send_queue_row_action(
-                                                        revision,
+                                                    this.send(
                                                         Command::PlayQueue { queue_id: id },
                                                         cx,
                                                     )
@@ -456,7 +474,7 @@ impl Queue {
                                                     )
                                                 },
                                             )
-                                            .button(
+                                            .button_with(
                                                 IconButton::new(
                                                     ("queue-entry-remove", id),
                                                     "",
@@ -464,16 +482,20 @@ impl Queue {
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
-                                                    this.send_queue_row_action(
-                                                        revision,
+                                                    this.send(
                                                         Command::RemoveQueueEntries {
                                                             queue_ids: vec![id],
                                                         },
                                                         cx,
                                                     )
                                                 },
+                                                |control| {
+                                                    control.debug_selector(|| {
+                                                        "queue-entry-remove".into()
+                                                    })
+                                                },
                                             )
-                                            .button(
+                                            .button_with(
                                                 IconButton::new(
                                                     ("queue-entry-up", id),
                                                     "",
@@ -483,7 +505,7 @@ impl Queue {
                                                 cx,
                                                 move |this, _, cx| {
                                                     if position > 0 {
-                                                        this.send_queue_row_action(
+                                                        this.send_queue_position_action(
                                                             revision,
                                                             Command::MoveQueue {
                                                                 queue_id: id,
@@ -493,6 +515,10 @@ impl Queue {
                                                             cx,
                                                         );
                                                     }
+                                                },
+                                                |control| {
+                                                    control
+                                                        .debug_selector(|| "queue-entry-up".into())
                                                 },
                                             )
                                             .button(
@@ -505,7 +531,7 @@ impl Queue {
                                                 cx,
                                                 move |this, _, cx| {
                                                     if can_move_down {
-                                                        this.send_queue_row_action(
+                                                        this.send_queue_position_action(
                                                             revision,
                                                             Command::MoveQueue {
                                                                 queue_id: id,
@@ -532,6 +558,12 @@ impl Queue {
                                                     || rows.is_empty()
                                                 {
                                                     cx.stop_propagation();
+                                                    cx.emit(QueueEvent::Error(
+                                                        this.context
+                                                            .i18n
+                                                            .text("li-source-changed")
+                                                            .to_owned(),
+                                                    ));
                                                     return;
                                                 }
                                                 if !this.model.contains(&id) {
@@ -830,6 +862,10 @@ impl Queue {
             cx.emit(QueueEvent::DropPlaylist(
                 RefCell::new(Some(drag.track_ids())),
                 destination,
+            ));
+        } else {
+            cx.emit(QueueEvent::Error(
+                self.context.i18n.text("li-source-changed").to_owned(),
             ));
         }
     }

@@ -521,6 +521,7 @@ li-favorite = 收藏
 li-unfavorite = 取消收藏
 li-replace-queue = 播放／替换队列…
 li-confirm-remove = 移除这些选中项？
+li-confirm-remove-library = 从音乐库移除选中的 { $count } 首曲目？队列和播放列表中的对应项也会移除；若包含当前曲目，将停止播放。磁盘文件保留。
 li-remove-root = 移除库目录…
 li-confirm-remove-root = 将此目录从库目录配置中移除？已入库曲目和磁盘文件均会保留。
 li-remove-root-confirm = 移除库目录

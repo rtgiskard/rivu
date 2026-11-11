@@ -15,6 +15,9 @@ mod model;
 mod queries;
 mod view;
 
+#[cfg(test)]
+mod action_tests;
+
 use crate::{
     gui::{
         components::search::{SearchScope, new_search},

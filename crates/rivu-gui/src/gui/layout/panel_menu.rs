@@ -684,13 +684,11 @@ impl WindowView {
                                     cx,
                                     |this, _, cx| {
                                         this.panel_menu = None;
-                                        this.queue
-                                            .update(cx, |queue, cx| queue.clear_selection(cx));
-
                                         this.send(Command::ClearQueue, cx);
                                         cx.notify();
                                     },
-                                ),
+                                )
+                                .debug_selector(|| "confirm-clear-queue".into()),
                             )),
                     );
             }

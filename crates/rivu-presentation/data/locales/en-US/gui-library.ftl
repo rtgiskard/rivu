@@ -569,6 +569,10 @@ li-favorite = Favorite
 li-unfavorite = Unfavorite
 li-replace-queue = Play / replace queue…
 li-confirm-remove = Remove these selected items?
+li-confirm-remove-library = Remove { $count } selected { $count ->
+        [one] track
+       *[other] tracks
+    } from the library? Their queue and playlist entries will also be removed. Playback stops if the current track is removed. Files on disk are kept.
 li-remove-root = Remove library folder…
 li-confirm-remove-root = Remove this folder from the configured library roots? Indexed tracks and files on disk will be kept.
 li-remove-root-confirm = Remove library folder

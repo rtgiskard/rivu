@@ -431,8 +431,6 @@ impl WindowView {
         if queue_ids.is_empty() {
             return;
         }
-        self.queue.update(cx, |owner, cx| owner.clear_selection(cx));
-
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
     pub(super) fn new(

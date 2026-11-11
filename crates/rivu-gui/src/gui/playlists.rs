@@ -140,6 +140,8 @@ impl Playlists {
                 },
                 cx,
             );
+        } else if !self.can_move_catalog(drag) {
+            self.report_error(self.i18n.text("li-source-changed").to_owned(), cx);
         }
     }
 
@@ -589,6 +591,7 @@ impl Playlists {
     ) {
         self.refresh(cx);
         if !self.can_transfer_content(drag, destination) {
+            self.report_error(self.i18n.text("li-source-changed").to_owned(), cx);
             return;
         }
         if let Some(source) = drag
@@ -655,6 +658,9 @@ impl Playlists {
     ) {
         self.refresh(cx);
         if !self.can_drop_playlist_row(value, destination, anchor) {
+            if !self.can_transfer_content(value, destination) {
+                self.report_error(self.i18n.text("li-source-changed").to_owned(), cx);
+            }
             return;
         }
         if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
@@ -748,6 +754,13 @@ impl Playlists {
     ) {
         self.refresh(cx);
         if !self.can_drop_playlist_entries(drag, target_id) {
+            if self.browser.playlists().selected() != Some(drag.playlist_id)
+                || self.browser.playlists().entry_generation() != drag.entry_generation
+                || self.playlist_occurrence_stamp(drag.playlist_id) != drag.stamp
+                || self.playlist_revision(drag.playlist_id) != drag.revision
+            {
+                self.report_error(self.i18n.text("li-source-changed").to_owned(), cx);
+            }
             return;
         }
         if let Some(command) = drag.command(target_id, after) {
@@ -977,9 +990,6 @@ impl Playlists {
                                         rendered_action,
                                         move |this, window, cx| {
                                             this.dismiss_playlist_action(window, cx);
-                                            if this.browser.playlists().selected() == Some(id) {
-                                                this.browser.remove_playlist_selection();
-                                            }
                                             this.send(
                                                 Command::DeletePlaylist { playlist_id: id },
                                                 cx,
@@ -1609,7 +1619,7 @@ impl Playlists {
                                             )
                                         },
                                     )
-                                    .button(
+                                    .button_with(
                                         IconButton::new(
                                             ("playlist-entry-remove", id as u64),
                                             "",
@@ -1623,6 +1633,10 @@ impl Playlists {
                                                 || this.playlist_occurrence_stamp(playlist_id)
                                                     != stamp
                                             {
+                                                this.report_error(
+                                                    this.i18n.text("li-source-changed").to_owned(),
+                                                    cx,
+                                                );
                                                 return;
                                             }
                                             this.send(
@@ -1633,6 +1647,10 @@ impl Playlists {
                                                 },
                                                 cx,
                                             );
+                                        },
+                                        |control| {
+                                            control
+                                                .debug_selector(|| "playlist-entry-remove".into())
                                         },
                                     )
                                     .into_div(),
@@ -1661,6 +1679,10 @@ impl Playlists {
                                             || rows.is_empty()
                                         {
                                             cx.stop_propagation();
+                                            this.report_error(
+                                                this.i18n.text("li-source-changed").to_owned(),
+                                                cx,
+                                            );
                                             return;
                                         }
                                         if !this.browser.playlists().track_selection.contains(id) {
@@ -2256,6 +2278,7 @@ mod content_menu_keyboard_tests {
         Entity<WindowView>,
         AnyWindowHandle,
     ) {
+        cx.executor().allow_parking();
         cx.update(rivu_ui::input::Input::init);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -2291,23 +2314,34 @@ mod content_menu_keyboard_tests {
         let artwork = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
             directory.path(),
         ));
-        let window = cx.add_window(move |window, cx| {
-            let mut app = WindowView::new(
-                handle,
-                save_handle,
-                artwork,
-                Default::default(),
-                Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
-                window,
-                cx,
-            );
-            // Drive snapshots explicitly: the real core thread must not wake GPUI's
-            // single-threaded deterministic scheduler.
-            app.handle.set_wakeup(|| {});
-            // Supply deterministic sparse pages, without racing real catalog reads.
-            app.window_visible = false;
-            app.reconcile_feature_demand(cx);
-            app
+        let window = cx.update(|cx| {
+            cx.open_window(
+                gpui::WindowOptions {
+                    show: false,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let mut app = WindowView::new(
+                            handle,
+                            save_handle,
+                            artwork,
+                            Default::default(),
+                            Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
+                            window,
+                            cx,
+                        );
+                        // Drive snapshots explicitly: the real core thread must not wake GPUI's
+                        // single-threaded deterministic scheduler.
+                        app.handle.set_wakeup(|| {});
+                        // Supply deterministic sparse pages, without racing real catalog reads.
+                        app.window_visible = false;
+                        app.reconcile_feature_demand(cx);
+                        app
+                    })
+                },
+            )
+            .unwrap()
         });
         let app = window.root(cx).unwrap();
         (directory, runtime, save, app, window.into())
@@ -2744,6 +2778,12 @@ mod content_menu_keyboard_tests {
     #[gpui::test]
     fn playlist_old_delete_confirmation_cannot_delete_reopened_target(cx: &mut TestAppContext) {
         let (_directory, runtime, _save, app, handle) = fixture(cx);
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, _| {
+                playlists.browser.playlists.select(1, "Target 1".into(), 0);
+                playlists.browser.playlists.prepare_entries(1);
+            });
+        });
         open_row_menu(&app, 1, cx);
         draw(handle, cx);
         let delete = VisualTestContext::from_window(handle, cx)
@@ -2809,6 +2849,141 @@ mod content_menu_keyboard_tests {
         };
         assert_eq!(page.total, 71);
         assert!(page.rows.iter().all(|row| row.id != 1));
+        app.update(cx, |app, cx| app.refresh(cx));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.playlists.read(cx).browser.playlists().selected(), None);
+        });
+    }
+
+    fn select_source_entry(
+        app: &Entity<WindowView>,
+        runtime: &crate::test_support::CoreRuntime,
+        cx: &mut TestAppContext,
+    ) -> i64 {
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![1],
+            }))
+            .ack
+            .is_success()
+        );
+        let ViewResponse::PlaylistEntries(page) = runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 20,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist entries");
+        };
+        let entry = page.rows[0].id;
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists.refresh(cx);
+                playlists.browser.playlists.select(1, "Target 1".into(), 0);
+                playlists.browser.playlists.prepare_entries(1);
+                playlists.browser.playlists.prepare_page(true, 0, 20);
+                playlists.browser.playlists.accept_entries(page);
+                playlists.browser.playlists.select_entry(entry, 0);
+                playlists
+                    .browser
+                    .sync_entry_projection(playlists.state.query_revisions(Some(1)));
+                cx.notify();
+            });
+            cx.notify();
+        });
+        entry
+    }
+
+    #[gpui::test]
+    fn rejected_playlist_deletion_keeps_selected_playlist_and_entry(cx: &mut TestAppContext) {
+        let (_directory, mut runtime, _save, app, handle) = fixture(cx);
+        let entry = select_source_entry(&app, &runtime, cx);
+        open_row_menu(&app, 1, cx);
+        draw(handle, cx);
+        let delete = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-row-delete")
+            .unwrap()
+            .center();
+        click_row(handle, delete, cx);
+        draw(handle, cx);
+        let confirm = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-action-confirm")
+            .unwrap()
+            .center();
+        runtime.disconnect_frontend();
+        click_row(handle, confirm, cx);
+        app.read_with(cx, |app, cx| {
+            assert!(app.error.is_some());
+            let playlists = app.playlists.read(cx).browser.playlists();
+            assert_eq!(playlists.selected(), Some(1));
+            assert_eq!(playlists.entries().playlist_id, Some(1));
+            assert_eq!(playlists.selected_entry(), Some(entry));
+            assert_eq!(playlists.entries().rows.get(0).unwrap().id, entry);
+        });
+    }
+
+    struct PlaylistWindow(Entity<Playlists>);
+
+    impl Render for PlaylistWindow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0
+                .update(cx, |playlists, cx| playlists.render_panel(1, window, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn stale_playlist_remove_reports_failure_without_removing_entry(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        let entry = select_source_entry(&app, &runtime, cx);
+        let owner = app.read_with(cx, |app, _| app.playlists.clone());
+        cx.update_window(handle, |_, window, cx| {
+            window.replace_root(cx, |_, cx| {
+                cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                PlaylistWindow(owner)
+            });
+        })
+        .unwrap();
+        draw(handle, cx);
+        let remove = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("playlist-entry-remove")
+            .unwrap()
+            .center();
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![1],
+            }))
+            .ack
+            .is_success()
+        );
+        click_row(handle, remove, cx);
+        assert!(app.read_with(cx, |app, _| app.error.is_some()));
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
+                .ack
+                .is_success()
+        );
+        let ViewResponse::PlaylistEntries(page) = runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 20,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist entries");
+        };
+        assert_eq!(page.total, 2);
+        assert_eq!(page.rows[0].id, entry);
     }
 
     #[gpui::test]

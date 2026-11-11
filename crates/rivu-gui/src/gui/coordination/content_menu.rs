@@ -776,8 +776,18 @@ impl WindowView {
                     ContentAction::RemoveLibraryRoot,
                 ),
             };
+            let description = if target == RemoveTarget::Selection
+                && let Some(Command::RemoveTracks { track_ids }) = &state.remove
+            {
+                self.i18n.format(
+                    "li-confirm-remove-library",
+                    &[("count", track_ids.len().into())],
+                )
+            } else {
+                self.i18n.text(description).to_owned()
+            };
             menu = menu
-                .child(caption(theme, self.tr(description)))
+                .child(caption(theme, description))
                 .child(menu_item(
                     "content-cancel-remove",
                     self.tr("action-cancel"),
