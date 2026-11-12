@@ -251,6 +251,7 @@ impl Library {
                                     false,
                                     row_height,
                                 )
+                                .border_0()
                                 .bg(crate::gui::appearance::material::row_background(theme, false, false, cx))
                                 .gap_0()
                                 .overflow_hidden()
@@ -484,6 +485,9 @@ impl Library {
                             });
                         let menu_node = id.clone();
                         let menu_root = path.filter(|path| this.state.system.config.library_roots.contains(path)).cloned();
+                        let located = matches!(entry, DirectoryRow::Track(track)
+                            if this.library.locate.highlight.is_some_and(|(id, started)|
+                                id == track.id && started.elapsed() < std::time::Duration::from_secs(2)));
                         let row_view = lazy_row_tooltip(
                             rivu_ui::tree_row(
                                 theme,
@@ -492,19 +496,20 @@ impl Library {
                                 selected,
                                 row_height,
                             )
+                            .border_0()
                             .bg(crate::gui::appearance::material::row_background(theme, selected, false, cx))
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")
                             .relative()
-                            .when(focused_index == Some(index), |view| {
-                                view.border_color(gpui::rgb(theme.accent))
+                            .when(focused_index == Some(index) || located, |view| {
+                                view.child(
+                                    div().absolute().inset_0()
+                                        .border_1()
+                                        .border_color(gpui::rgb(theme.accent)),
+                                )
                             })
-                            .when(matches!(entry, DirectoryRow::Track(track)
-                                if this.library.locate.highlight.is_some_and(|(id, started)|
-                                    id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
-                                view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
-                            })
+                            .when(located, |view| view.bg(gpui::rgb(theme.highlight)))
                             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 if !this.library_row_scope_valid(&menu_scope) { cx.stop_propagation(); return; }
                                 cx.emit(LibraryEvent::Focus);
