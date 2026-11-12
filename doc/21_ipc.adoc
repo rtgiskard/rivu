@@ -744,6 +744,10 @@ completion is accepted only for the corresponding data versions. State reads and
 Watch remain cache-only, and recovery completion never schedules another attempt
 by itself. Unrelated catalog changes need not reload queue structure or decode
 the current Track; control decisions retain their own authoritative identity.
+Queue queries recover stale structure before returning rows, preserving surviving
+selection without replaying mutations. Pause, Stop and in-occurrence seeking
+remain independent; an MPRIS over-end seek needs current structure to establish
+a known-tail no-op. Maintenance and uncertain-outcome admission still apply.
 Scan and external-admission transactions report recent-entry impact separately
 from full Track changes. Effective title changes on previously played identities
 refresh recent entries; probe, codec, bitrate and other unrelated changes do not

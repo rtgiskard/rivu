@@ -335,6 +335,31 @@ impl Core {
     fn apply_request(&mut self, request: Request) {
         match request.operation {
             Operation::Query { query, ticket } => {
+                if self.transport.projection_stale
+                    && matches!(
+                        &query,
+                        Query::QueuePage { .. }
+                            | Query::QueueBatch { .. }
+                            | Query::QueueEntries { .. }
+                    )
+                    && !self.database_maintenance_active()
+                    && !self.database_unavailable
+                    && ticket.as_ref().is_none_or(QueryTicket::is_current)
+                {
+                    // Reconcile selection and publish before capturing the read's
+                    // revisions or allowing its reply to expose committed rows.
+                    let result = self.reload_queue();
+                    self.publish();
+                    if let Err(error) = result {
+                        if let Some(reply) = request.reply {
+                            let _ = reply.send(CoreResponse::Query(QueryResponse {
+                                revisions: self.state.query_revisions_for(&query),
+                                result: Err(error.context("Refreshing queue projection").into()),
+                            }));
+                        }
+                        return;
+                    }
+                }
                 if self.projections.playlist_tokens
                     && (matches!(
                         rivu_protocol::response::QueryRevisionScope::for_query(&query),

@@ -2308,6 +2308,99 @@ fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
 }
 
 #[test]
+fn queue_queries_recover_committed_structure_before_reply_without_replaying_mutations() {
+    for worker in [false, true] {
+        for kind in ["page", "batch", "entries"] {
+            let (directory, mut core) = fixture();
+            pending(&mut core, 5);
+            let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+            let revision = core.state.queue.revision;
+            let generation = core.transport.generation;
+            let commands = recording_audio(&mut core);
+            core.publish();
+            if worker {
+                core.read_queries = Some(
+                    query_worker::ReadQueries::start(
+                        directory.path().join("library.db"),
+                        Arc::clone(&core.shared),
+                    )
+                    .unwrap(),
+                );
+            }
+            let query = match kind {
+                "page" => Query::QueuePage {
+                    query: None,
+                    offset: 0,
+                    limit: 10,
+                },
+                "batch" => Query::QueueBatch {
+                    query: None,
+                    after: None,
+                    limit: 10,
+                    expected: Some(core.state.query_revisions()),
+                },
+                _ => Query::QueueEntries {
+                    query: None,
+                    queue_ids: vec![1, 4, 5],
+                },
+            };
+            for repaired in [false, true] {
+                if repaired {
+                    repair_queue_scalar(&connection);
+                    // Recovery must reconcile runtime selection, not replace it
+                    // with the database selection captured by a prior read.
+                    core.store.set_queue_current(Some(1)).unwrap();
+                    core.transport.selection_pending = true;
+                }
+                let (reply, response) = oneshot::channel();
+                core.dispatch_request(Request {
+                    operation: Operation::Query {
+                        query: query.clone(),
+                        ticket: None,
+                    },
+                    reply: Some(reply),
+                });
+                // This must be published before even a worker-backed read can
+                // deliver rows, rather than recovered after submitting it.
+                assert_eq!(core.shared.read().queue.total, if repaired { 3 } else { 5 });
+                assert_eq!(core.transport.projection_stale, !repaired);
+                let CoreResponse::Query(response) = futures::executor::block_on(async {
+                    rivu_protocol::transport::timeout(Duration::from_secs(5), response)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                }) else {
+                    panic!("expected queue response");
+                };
+                assert_eq!(response.revisions.queue, revision);
+                if repaired {
+                    let rows = match response.result.unwrap() {
+                        ViewResponse::QueuePage(page) => {
+                            assert_eq!(page.total, 3);
+                            page.rows
+                        }
+                        ViewResponse::QueueBatch(batch) => batch.rows,
+                        ViewResponse::QueueEntries(rows) => rows,
+                        _ => panic!("expected queue rows"),
+                    };
+                    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 4, 5]);
+                    assert_eq!(core.shared.read().queue.current_id, Some(5));
+                    assert_eq!(core.shared.read().queue.current_position, Some(2));
+                    assert!(!core.transport.selection_pending);
+                    assert_queue_saved(&core);
+                } else {
+                    assert!(response.result.is_err());
+                }
+                assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
+                assert_eq!(core.state.queue.revision, revision);
+                assert_eq!(core.transport.generation, generation);
+                assert!(commands.try_recv().is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn incremental_queue_commits_recover_projection_before_previous() {
     let cases = [
         ("INSERT", Command::Enqueue { track_ids: vec![1] }),

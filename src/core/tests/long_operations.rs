@@ -139,8 +139,12 @@ fn dispatched_mpris_seek_during_saving_only_gates_navigation() {
     assert!(core.transport.selection_pending);
     assert!(core.transport.projection_stale);
 
-    // A known tail is a no-op, but shuffle and repeat-all still require Next.
+    // A stale tail cannot bypass maintenance; only a known tail is a no-op.
     core.state.queue.current_position = Some(core.state.queue.total - 1);
+    assert!(!seek(&mut core, queue_id, i64::MAX).is_success());
+    assert!(core.transport.selection_pending);
+    assert!(core.transport.projection_stale);
+    core.transport.projection_stale = false;
     assert!(seek(&mut core, queue_id, i64::MAX).is_success());
     edit_preferences(&mut core, |config| config.shuffle = true);
     assert!(!seek(&mut core, queue_id, i64::MAX).is_success());

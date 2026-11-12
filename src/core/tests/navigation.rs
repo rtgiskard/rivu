@@ -858,6 +858,88 @@ fn mpris_over_end_seek_is_occurrence_bound_next_with_tail_noop() {
 }
 
 #[test]
+fn mpris_over_end_seek_recovers_an_appended_old_tail_without_replaying_enqueue() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        let (directory, mut core) = navigation_fixture(status);
+        pending(&mut core, 5);
+        core.state.playback.status = status;
+        let connection = fail_queue_projection_after(directory.path(), "INSERT");
+        let error = core
+            .command(Command::Enqueue { track_ids: vec![1] })
+            .unwrap_err();
+        assert!(error.to_string().contains("do not repeat"));
+        assert_eq!(core.state.queue.current_position, Some(4));
+        assert_eq!(core.state.queue.total, 5);
+        assert!(core.transport.projection_stale);
+        let saved = core.store.queue_ids().unwrap();
+        assert_eq!(saved.len(), 6);
+        let revision = core.state.queue.revision;
+        let commands = recording_audio(&mut core);
+        let seek = |core: &mut Core, offset| {
+            operation_ack(
+                core,
+                Operation::MprisSeek {
+                    queue_id: 5,
+                    offset,
+                },
+            )
+        };
+        // A broken queue projection cannot affect a local seek, but the old
+        // scalar tail must not suppress an over-end recovery failure.
+        assert!(seek(&mut core, 1_000_000).is_success());
+        assert_eq!(core.state.playback.position, 1.0);
+        assert!(!seek(&mut core, i64::MAX).is_success());
+        assert_eq!(core.state.queue.current_id, Some(5));
+        assert_eq!(core.state.playback.status, status);
+        assert!(core.transport.projection_stale);
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AudioCommand::Seek { seconds: 1.0, .. }
+        ));
+        assert!(commands.try_recv().is_err());
+        repair_queue_projection(&connection);
+        assert!(seek(&mut core, i64::MAX).is_success());
+        assert!(!core.transport.projection_stale);
+        assert_eq!(core.shared.read().queue.current_id, saved.last().copied());
+        assert_eq!(core.state.queue.current_position, Some(5));
+        assert_eq!(core.state.queue.total, 6);
+        assert_eq!(core.state.playback.position, 0.0);
+        assert_eq!(core.state.playback.status, status);
+        assert_eq!(core.state.queue.revision, revision);
+        assert_eq!(core.store.queue_ids().unwrap(), saved);
+        assert_navigation_audio(&commands, status, &directory.path().join("1.wav"));
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn mpris_over_end_seek_recovers_a_surviving_tail_after_committed_removal() {
+    let (directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    pending(&mut core, 5);
+    core.state.playback.status = PlaybackStatus::Paused;
+    let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
+    repair_queue_scalar(&connection);
+    let generation = core.transport.generation;
+    let commands = recording_audio(&mut core);
+    let ack = operation_ack(
+        &mut core,
+        Operation::MprisSeek {
+            queue_id: 5,
+            offset: i64::MAX,
+        },
+    );
+    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(!core.transport.projection_stale);
+    assert_eq!(core.shared.read().queue.total, 3);
+    assert_eq!(core.state.queue.current_id, Some(5));
+    assert_eq!(core.state.queue.current_position, Some(2));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
 fn stale_queue_toggle_recovers_before_stopped_selection() {
     let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
     // Select a surviving occurrence; Toggle's Resume path must recover the
