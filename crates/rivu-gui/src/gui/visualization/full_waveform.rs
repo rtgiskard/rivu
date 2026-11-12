@@ -91,6 +91,7 @@ struct FullWaveformTarget {
     path: PathBuf,
     fingerprint: Option<String>,
     cue_range: Option<(u64, Option<u64>)>,
+    decoder_hint: rivu_format::decoder_hint::DecoderHint,
 }
 
 impl FullWaveformTarget {
@@ -105,10 +106,10 @@ impl FullWaveformTarget {
         self.path == track.path
             && self.cue_range == Self::cue_range(track)
             && self.fingerprint == track.fingerprint
+            && self.decoder_hint == track.decoder_hint
     }
 
     fn matches(&self, track: &Track) -> bool {
-        // Saved hint commits retire through saved_hint_changed, not metadata sync.
         self.track_id == track.id && self.matches_source(track)
     }
 }
@@ -125,6 +126,7 @@ impl FullWaveformRequest {
             path: track.path.clone(),
             fingerprint: track.fingerprint.clone(),
             cue_range: FullWaveformTarget::cue_range(track),
+            decoder_hint: track.decoder_hint,
         });
         self.generation
     }
@@ -157,16 +159,6 @@ impl FullWaveformRequest {
         if self.target.as_ref().is_some_and(|target| {
             !visualization_enabled || track.is_none_or(|track| !target.matches(track))
         }) {
-            self.invalidate();
-        }
-    }
-
-    pub(in crate::gui) fn saved_hint_changed(&mut self, track: &Track) {
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|target| target.matches_source(track))
-        {
             self.invalidate();
         }
     }

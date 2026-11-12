@@ -49,8 +49,6 @@ pub(in crate::gui) enum MetadataEvent {
     Error(String),
 }
 
-pub(in crate::gui) struct SavedHintChanged(pub Track);
-
 /// One inline editor per window; accepted commands outlive its focus or selection.
 pub(in crate::gui) struct Metadata {
     context: FeatureContext,
@@ -64,6 +62,7 @@ pub(in crate::gui) struct Metadata {
     hint_panel: Option<u64>,
     hint_bounds: HashMap<u64, Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>>,
     visible: bool,
+    preview_demand: bool,
     error: Option<String>,
     ui_font: Font,
     artwork_manager: Arc<ArtworkManager>,
@@ -73,7 +72,6 @@ pub(in crate::gui) struct Metadata {
 }
 
 impl EventEmitter<MetadataEvent> for Metadata {}
-impl EventEmitter<SavedHintChanged> for Metadata {}
 
 impl Metadata {
     pub(in crate::gui) fn new(
@@ -97,6 +95,7 @@ impl Metadata {
             hint_panel: None,
             hint_bounds: HashMap::new(),
             visible: false,
+            preview_demand: false,
             error: None,
             ui_font,
             artwork_manager,
@@ -170,6 +169,22 @@ impl Metadata {
             self.artwork_view.replace(None, cx);
         }
         cx.notify();
+    }
+
+    /// A selected-source preview needs current Track facts, not artwork or an editor.
+    pub(in crate::gui) fn set_preview_demand(&mut self, demanded: bool, cx: &mut Context<Self>) {
+        if self.preview_demand == demanded {
+            return;
+        }
+        self.preview_demand = demanded;
+        if demanded {
+            self.refresh(cx);
+            self.demand_metadata(cx);
+        }
+    }
+
+    fn read_demand(&self) -> bool {
+        self.visible || self.preview_demand
     }
 
     pub(in crate::gui) fn retain_artwork_consumers(&mut self, visible: &[u64]) {
@@ -353,10 +368,11 @@ impl Metadata {
 
     fn demand_metadata(&mut self, cx: &mut Context<Self>) {
         self.sync_metadata_query();
-        let Some(task) =
-            self.metadata_read
-                .prepare(&mut self.metadata, self.visible, Instant::now())
-        else {
+        let Some(task) = self.metadata_read.prepare(
+            &mut self.metadata,
+            self.visible || self.preview_demand,
+            Instant::now(),
+        ) else {
             return;
         };
         cx.emit(MetadataEvent::TrackChanged);
@@ -376,7 +392,7 @@ impl Metadata {
                 .update(cx, |this, cx| {
                     this.refresh(cx);
                     let environment = ReadEnvironment {
-                        visible: this.visible,
+                        visible: this.read_demand(),
                         revisions: this.state.query_revisions_for(&read.query()),
                     };
                     let submit = this.metadata_read.submit(read, &this.metadata, environment);
@@ -398,7 +414,7 @@ impl Metadata {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         let environment = ReadEnvironment {
-                            visible: this.visible,
+                            visible: this.read_demand(),
                             revisions: this.state.query_revisions_for(&read.query()),
                         };
                         if this.metadata_read.timeout(
@@ -416,7 +432,7 @@ impl Metadata {
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let environment = ReadEnvironment {
-                    visible: this.visible,
+                    visible: this.read_demand(),
                     revisions: this.state.query_revisions_for(&read.query()),
                 };
                 match this.metadata_read.finish(
@@ -491,14 +507,6 @@ impl Metadata {
                 .as_ref()
                 .map(|edit| (serial, edit.input.read(cx).text().to_owned()))
         });
-        let hint_change = match value {
-            SavedValue::DecoderHint(hint) => self.metadata.track().map(|track| {
-                let mut track = track.clone();
-                track.decoder_hint = hint;
-                track
-            }),
-            _ => None,
-        };
         self.error = None;
         if let Some(edit) = self
             .edit
@@ -511,7 +519,7 @@ impl Metadata {
         cx.spawn(async move |this, cx| {
             let ack = handle.request_ack(command).await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_save(token, submitted, hint_change, ack, cx);
+                this.finish_save(token, submitted, ack, cx);
             });
         })
         .detach();
@@ -523,18 +531,10 @@ impl Metadata {
         &mut self,
         token: session::SaveToken,
         submitted: Option<(u64, String)>,
-        hint_change: Option<Track>,
         delivery: crate::frontend::CommandDelivery,
         cx: &mut Context<Self>,
     ) {
         let result = delivery.observed_result();
-        let ack = delivery.ack;
-        // A committed decoder change still invalidates waveform work after selection changes.
-        if ack.is_success()
-            && let Some(track) = hint_change
-        {
-            cx.emit(SavedHintChanged(track));
-        }
         if !self.metadata.complete_save(token) {
             return;
         }

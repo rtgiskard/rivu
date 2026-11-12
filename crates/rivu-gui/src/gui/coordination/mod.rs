@@ -384,15 +384,6 @@ impl WindowView {
                     MetadataEvent::Error(error) => this.feature_error(error, cx),
                 }
             }),
-            cx.subscribe(
-                &self.metadata,
-                |this, _, event: &metadata::SavedHintChanged, cx| {
-                    this.full_waveform_request.saved_hint_changed(&event.0);
-                    this.waveform
-                        .update(cx, |waveform, cx| waveform.saved_hint_changed(&event.0, cx));
-                    this.sync_waveform(cx);
-                },
-            ),
             cx.subscribe_in(&self.duplicates, window, |this, _, _, window, cx| {
                 if this.shell.is_open(shell::Surface::Settings) {
                     this.settings.read(cx).focus_handle(cx).focus(window, cx);
@@ -621,6 +612,21 @@ impl WindowView {
         self.metadata.update(cx, |owner, cx| {
             owner.set_visible(
                 self.panel_demand("metadata") || self.panel_demand("audio_processing"),
+                cx,
+            );
+            owner.set_preview_demand(
+                self.window_visible
+                    && !self.state.system.shutting_down
+                    && self.state.current_track().is_none()
+                    && self.state.system.config.visualization_enabled
+                    && self.workspace.panels.panels().any(|panel| {
+                        panel.kind == "audio_visualizer"
+                            && panel
+                                .audio_visualizer
+                                .unwrap_or_else(|| self.state.system.config.as_ref().into())
+                                .style
+                                == rivu_format::config::AudioVisualizerStyle::Waveform
+                    }),
                 cx,
             );
             owner.retain_artwork_consumers(artwork_consumers);

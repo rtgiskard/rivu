@@ -277,13 +277,7 @@ fn failure_retains_input_but_late_failure_cannot_touch_reopened_edit(cx: &mut Te
                 .metadata
                 .begin_save(&SavedValue::Title("submitted".into()))
                 .unwrap();
-            this.finish_save(
-                save,
-                Some((serial, "submitted".into())),
-                None,
-                ack(false),
-                cx,
-            );
+            this.finish_save(save, Some((serial, "submitted".into())), ack(false), cx);
             assert_eq!(
                 this.edit.as_ref().unwrap().input.read(cx).text(),
                 "submitted"
@@ -295,13 +289,7 @@ fn failure_retains_input_but_late_failure_cannot_touch_reopened_edit(cx: &mut Te
                 .unwrap();
             this.cancel_edit(cx);
             this.begin_edit(Field::Artist, window, cx);
-            this.finish_save(
-                save,
-                Some((serial, "submitted".into())),
-                None,
-                ack(false),
-                cx,
-            );
+            this.finish_save(save, Some((serial, "submitted".into())), ack(false), cx);
             assert_eq!(this.edit.as_ref().unwrap().field, Field::Artist);
             assert!(this.edit.as_ref().unwrap().error.is_none());
         })
@@ -336,7 +324,7 @@ fn successful_save_without_observation_preserves_newer_draft_and_baseline(cx: &m
             delivery.observation = crate::frontend::CommandObservation::Unavailable(
                 "read failed; do not retry".into(),
             );
-            this.finish_save(save, Some((serial, "submitted".into())), None, delivery, cx);
+            this.finish_save(save, Some((serial, "submitted".into())), delivery, cx);
             let edit = this
                 .edit
                 .as_ref()
@@ -370,13 +358,7 @@ fn fresh_success_rebases_only_the_submitted_editor_and_keeps_later_text(cx: &mut
                 .unwrap()
                 .input
                 .update(cx, |input, cx| input.set_text("later", cx));
-            this.finish_save(
-                save,
-                Some((serial, "submitted".into())),
-                None,
-                ack(true),
-                cx,
-            );
+            this.finish_save(save, Some((serial, "submitted".into())), ack(true), cx);
             let edit = this.edit.as_ref().unwrap();
             assert_eq!(edit.input.read(cx).text(), "later");
             assert_eq!(edit.baseline, "submitted");
@@ -396,7 +378,7 @@ fn save_ack_preserves_newer_details_and_refreshes_an_unchanged_projection(cx: &m
             .unwrap();
         let read = this.metadata.begin_load(7);
         assert!(this.metadata.accept_load(read, Some(track(7, "newer"))));
-        this.finish_save(save, None, None, ack(true), cx);
+        this.finish_save(save, None, ack(true), cx);
         assert_eq!(this.metadata.track().unwrap().title, "newer");
         let task = this
             .metadata_read
@@ -422,7 +404,7 @@ fn selection_epoch_rejects_old_acknowledgement(cx: &mut TestAppContext) {
             .unwrap();
         this.request_track(8, cx);
         artwork_selection(this, track(7, "returned"), cx);
-        this.finish_save(save, None, None, ack(false), cx);
+        this.finish_save(save, None, ack(false), cx);
         assert_eq!(this.metadata.track().unwrap().title, "returned");
         assert!(this.error.is_none());
     });

@@ -24,8 +24,8 @@ consumer behavior is described here; a proposal there does not change it.
 `rivu-visuals` receives immutable analysis frames, typed `VisualParameters`, and
 localized `VisualLabels`, without depending on the application root, layout tree,
 localizer or playback commands. The GUI presentation owner reconciles demand,
-accepts source/seek identities and owns scheduling; the host routes Waveform seek,
-load and decoder-hint events through existing playback and finite-render owners. Rendering
+accepts source/seek identities and owns scheduling; the host routes Waveform seek
+and load intents through existing playback and finite-render owners. Rendering
 introduces no additional analysis worker, PCM pool or animation loop. Constructors
 share configuration-projection defaults; history and GPU allocation are demand-driven.
 Frequency views ingest shared analysis while Spectrum is visible or Spectrogram
@@ -355,10 +355,14 @@ worker cancellation lifetime are authoritative in
 link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering].
 
 Explicit preview identity includes file or immutable PCM identity, optional range,
-library fingerprint and decoder hint. Changed source, content or committed hint
-retires affected requests/results; metadata-only edits and panel hiding retain
-them. A newer explicit request supersedes the previous request without clearing
-the display. Pause and hidden panels retain the bounded session summary.
+library fingerprint and the saved decoder hint from authoritative Track updates.
+Changes committed by any client retire affected requests/results; metadata-only
+edits and panel hiding retain them. An open playback source retains its decoder
+until reload, independently of the saved hint used by a new explicit preview.
+Without playback, configured Waveform panels keep the selected Track query current
+even when Details is closed, without requesting artwork or opening an editor.
+A newer explicit request supersedes the previous request without clearing the
+display. Pause and hidden panels retain the bounded session summary.
 Request and suspension generations reject stale completion. The GUI can gate
 full-load requests when visualizations are disabled; this is presentation policy,
 not a restriction of the generic audio endpoint.

@@ -301,9 +301,10 @@ fn full_query_identity_distinguishes_content_but_preserves_metadata_edits() {
     edited.title = "renamed".into();
     edited.favorite = true;
     edited.play_count += 1;
-    edited.decoder_hint = DecoderHint::Ffmpeg;
     query.retain_target(Some(&edited), true);
     assert!(query.accepts(generation, Some(&edited)));
-    query.saved_hint_changed(&edited);
+    edited.decoder_hint = DecoderHint::Ffmpeg;
+    query.retain_target(Some(&edited), true);
+    assert!(!query.accepts(generation, Some(&edited)));
     assert!(!query.accepts(generation, Some(&original)));
 }

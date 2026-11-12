@@ -48,6 +48,7 @@ struct Source {
     range: Option<PlaybackRange>,
     fingerprint: Option<String>,
     decoder_hint: DecoderHint,
+    saved_decoder_hint: DecoderHint,
 }
 
 impl Source {
@@ -58,6 +59,7 @@ impl Source {
             range: frame.range,
             fingerprint: None,
             decoder_hint: frame.decoder_hint,
+            saved_decoder_hint: frame.decoder_hint,
         })
     }
 
@@ -69,6 +71,7 @@ impl Source {
         self.path == other.path
             && self.range == other.range
             && self.fingerprint == other.fingerprint
+            && self.saved_decoder_hint == other.saved_decoder_hint
     }
 
     fn matches_target(&self, frame: &WaveformFrame) -> bool {
@@ -1028,6 +1031,7 @@ impl Waveform {
                 source.path == *path
                     && source.range == range
                     && source.fingerprint == track.fingerprint
+                    && source.saved_decoder_hint == track.decoder_hint
             }) {
                 return false;
             }
@@ -1035,6 +1039,7 @@ impl Waveform {
                 path: path.clone(),
                 range,
                 fingerprint: track.fingerprint.clone(),
+                saved_decoder_hint: track.decoder_hint,
                 decoder_hint: if active {
                     shared.decoder_hint
                 } else {
@@ -1051,29 +1056,6 @@ impl Waveform {
         self.plot.borrow_mut().clear_cache();
         self.source = target.map(Rc::new);
         true
-    }
-
-    /// A committed hint edit invalidates only this target's explicit preview.
-    /// The playback frame and its decoder identity remain untouched.
-    pub fn saved_hint_changed(&mut self, track: &Track, cx: &mut Context<Self>) {
-        if self.invalidate_saved_hint(track) {
-            cx.notify();
-        }
-    }
-
-    fn invalidate_saved_hint(&mut self, track: &Track) -> bool {
-        let matches =
-            |source: &Source| source.path == track.path && source.range == track_range(track);
-        if self
-            .manual
-            .as_ref()
-            .is_some_and(|request| matches(&request.source))
-            || self.full.as_ref().is_some_and(|full| matches(&full.source))
-        {
-            self.cancel_full();
-            return true;
-        }
-        false
     }
 
     /// Capture display identity for an authoritative remote full scan.
@@ -2331,6 +2313,7 @@ mod tests {
             range: None,
             fingerprint: None,
             decoder_hint: DecoderHint::Auto,
+            saved_decoder_hint: DecoderHint::Auto,
         };
         assert!(preview_available(&source, &frame));
         frame.decoder_hint = DecoderHint::Ffmpeg;
@@ -3008,7 +2991,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_hint_change_cancels_matching_scan_and_restores_progressive_display() {
+    fn authoritative_hint_sync_retires_pending_and_completed_previews() {
         for complete in [false, true] {
             let mut waveform = preview(frame(vec![Some(0.25), None]));
             let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
@@ -3016,9 +2999,8 @@ mod tests {
                 assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
             }
             let source = Rc::clone(waveform.source.as_ref().unwrap());
-            assert!(!waveform.invalidate_saved_hint(&track("other.flac", DecoderHint::Ffmpeg)));
-            assert!(!waveform.invalidate_saved_hint(&cue_track()));
-            assert!(waveform.invalidate_saved_hint(&track("track.flac", DecoderHint::Ffmpeg)));
+            let saved = track("track.flac", DecoderHint::Ffmpeg);
+            assert!(waveform.sync_state(Some(&saved)));
             assert!(complete || cancelled.load(Ordering::Relaxed));
             assert!(waveform.manual.is_none());
             assert!(waveform.full.is_none());
@@ -3033,32 +3015,31 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_hint_sync_does_not_change_pending_or_completed_preview() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+    fn saved_hint_and_open_decoder_are_independent_preview_facts() {
+        let mut progressive = frame(vec![Some(0.25), None]);
+        progressive.source_generation = Some(7);
+        let mut waveform = preview(progressive);
         let saved = track("track.flac", DecoderHint::Ffmpeg);
-        let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.sync_source(Some(&saved)));
+        let (generation, cancelled) = waveform.start_full(DecoderHint::Ffmpeg);
         assert!(!waveform.sync_source(Some(&saved)));
         assert!(!cancelled.load(Ordering::Relaxed));
-        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
+        let mut result = frame(vec![Some(0.5), Some(0.75)]);
+        result.decoder_hint = DecoderHint::Ffmpeg;
+        result.source_generation = Some(7);
+        assert!(waveform.finish_full(generation, Ok(result)));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         assert!(!waveform.sync_source(Some(&saved)));
         let selected = waveform.paint_frame(&source, Some(generation)).unwrap();
         let PaintFrame::Full(full) = selected else {
-            panic!("ordinary hint sync must preserve the existing full display");
+            panic!("unchanged saved hint must preserve its completed preview");
         };
         assert_eq!(full.frame.peaks, [Some(0.5), Some(0.75)]);
-        drop(selected);
-        assert!(waveform.invalidate_saved_hint(&saved));
-        assert!(!waveform.sync_source(Some(&saved)));
-        let shared = waveform.shared.read();
-        assert!(preview_available(
-            waveform.source.as_deref().unwrap(),
-            waveform.display_frame(&shared)
-        ));
         assert_eq!(
             waveform.source.as_ref().unwrap().decoder_hint,
             DecoderHint::Auto
         );
+        assert_eq!(waveform.shared.read().decoder_hint, DecoderHint::Auto);
     }
 
     #[test]
@@ -3131,7 +3112,6 @@ mod tests {
         edited.title = "renamed".into();
         edited.favorite = true;
         edited.play_count += 1;
-        edited.decoder_hint = DecoderHint::Ffmpeg;
         for complete in [false, true] {
             assert!(!waveform.sync_state(Some(&edited)));
             // These are the same owners retained by sync when no panel is visible.
@@ -3147,7 +3127,8 @@ mod tests {
                 assert_eq!(waveform.display_frame(&shared).peaks, vec![Some(0.5); 2]);
             }
         }
-        assert!(waveform.invalidate_saved_hint(&edited));
+        edited.decoder_hint = DecoderHint::Ffmpeg;
+        assert!(waveform.sync_state(Some(&edited)));
         let shared = waveform.shared.read();
         assert_eq!(shared.decoder_hint, DecoderHint::Auto);
         assert!(preview_available(
