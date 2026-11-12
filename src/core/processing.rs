@@ -160,8 +160,7 @@ impl Core {
         let track = self.processing_source(&result.track, result.stamp)?;
         if let Some(output) = result.graph_outputs.get(&node) {
             let pcm = output.pcm.clone();
-            let track_id = result.track.id;
-            self.establish_processing_source_context(track_id)?;
+            self.establish_processing_source_context(&track)?;
             self.select_cached_processing_audition(id, pcm, Some(node))
                 .map_err(|(_, error)| error)?;
             return Ok(None);
@@ -188,7 +187,14 @@ impl Core {
         mut runner: audio::GraphRunner,
     ) -> Result<()> {
         let status = self.processing_status(id).context("Unknown graph run")?;
-        self.establish_processing_source_context(status.track_id)?;
+        let result = self
+            .processing
+            .results()
+            .iter()
+            .find(|result| result.id == id)
+            .context("Graph run is no longer retained")?;
+        let track = self.processing_source(&result.track, result.stamp)?;
+        self.establish_processing_source_context(&track)?;
         let pcm = status
             .settings
             .graph_boundary
@@ -216,14 +222,22 @@ impl Core {
         self.select_live_processing_audition(id, pcm, runner)
     }
 
-    fn establish_processing_source_context(&mut self, track_id: i64) -> Result<()> {
+    fn establish_processing_source_context(&mut self, source: &Track) -> Result<()> {
         self.ensure_queue_control_ready()?;
-        let same_source = self
+        let same_track = self
             .state
             .current_track
             .as_ref()
-            .is_some_and(|track| track.id == track_id);
-        if same_source && self.state.playback.status != PlaybackStatus::Stopped {
+            .is_some_and(|track| track.id == source.id);
+        let same_loaded_source = self.transport.session.as_ref().is_some_and(|session| {
+            let loaded = &session.loaded_track;
+            loaded.id == source.id
+                && loaded.path == source.path
+                && loaded.cue == source.cue
+                && loaded.decoder_hint == source.decoder_hint
+                && loaded.fingerprint == source.fingerprint
+        });
+        if same_loaded_source && self.state.playback.status != PlaybackStatus::Stopped {
             return Ok(());
         }
         ensure!(
@@ -236,20 +250,20 @@ impl Core {
         } else {
             PlaybackStatus::Paused
         };
-        let queue_id = if same_source {
+        let queue_id = if same_track {
             self.state
                 .queue
                 .current_id
                 .context("Current source has no queue occurrence")?
-        } else if let Some(id) = self.store.queued_track(track_id)? {
+        } else if let Some(id) = self.store.queued_track(source.id)? {
             id
         } else {
-            self.enqueue(&[track_id])?;
+            self.enqueue(&[source.id])?;
             self.store
                 .queue_id_at(self.state.queue.total - 1)?
                 .context("Processing source was not queued")?
         };
-        let history = if same_source {
+        let history = if same_track {
             QueueHistory::Preserve
         } else {
             QueueHistory::Record
@@ -741,7 +755,7 @@ impl Core {
                                 .context("Processing result is no longer retained")?;
                             let track = self.processing_source(&source.track, source.stamp)?;
                             if requested {
-                                self.establish_processing_source_context(track.id)?;
+                                self.establish_processing_source_context(&track)?;
                             }
                             Ok(())
                         })();
@@ -842,7 +856,7 @@ impl Core {
             self.pending_processing_audition = Some((id, self.transport.generation));
             return Ok(Some(id));
         }
-        self.establish_processing_source_context(track.id)?;
+        self.establish_processing_source_context(&track)?;
         let result = self
             .processing
             .results()

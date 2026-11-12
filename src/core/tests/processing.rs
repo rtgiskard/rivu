@@ -4812,3 +4812,191 @@ fn failed_cancelled_or_revoked_mix_preparation_never_opens_its_source() {
         assert!(commands.try_recv().is_err(), "{action}");
     }
 }
+
+#[test]
+fn rescanned_cue_audition_reloads_validated_source_without_changing_occurrence() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        for replace_path in [false, true] {
+            for audition in ["denoised", "mix", "cached_graph", "live_graph"] {
+                let (directory, mut core) = fixture();
+                source(directory.path());
+                let original_path = directory.path().join("1.wav");
+                let replacement_path = if replace_path {
+                    let path = directory.path().join("2.wav");
+                    std::fs::copy(&original_path, &path).unwrap();
+                    path
+                } else {
+                    original_path.clone()
+                };
+                let original = CueSegment {
+                    sheet: directory.path().join("album.cue"),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(3),
+                };
+                let track_id = register_cue(
+                    &mut core,
+                    &original_path,
+                    original.clone(),
+                    "Original segment",
+                );
+                let old_id = core
+                    .start_processing(track_id, ProcessingOperation::Denoise, None)
+                    .unwrap();
+                complete(&mut core);
+                core.enqueue(&[track_id, track_id]).unwrap();
+                let queue_ids = core.store.queue_ids().unwrap();
+                let queue_id = *queue_ids.last().unwrap();
+                edit_preferences(&mut core, |config| config.shuffle = true);
+                let commands = recording_audio(&mut core);
+                core.start_with_status(queue_id, QueueHistory::Record, status)
+                    .unwrap();
+                assert_navigation_source_ready(&commands, status);
+                let history = core.transport.history.clone();
+                let history_cursor = core.transport.history_cursor;
+                let generation = core.transport.generation;
+                let changed = CueSegment {
+                    start_frame: 1,
+                    end_frame: Some(5),
+                    ..original.clone()
+                };
+                assert_eq!(
+                    register_cue(
+                        &mut core,
+                        &replacement_path,
+                        changed.clone(),
+                        "Rescanned segment",
+                    ),
+                    track_id
+                );
+                assert!(matches!(
+                    commands.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    AudioCommand::Metadata { generation: value, .. } if value == generation
+                ));
+                assert_eq!(
+                    core.transport.session.as_ref().unwrap().loaded_track.cue,
+                    Some(original)
+                );
+                let error = core
+                    .audition_processing(old_id, AuditionMode::Denoised, 0.0, 0.0)
+                    .unwrap_err();
+                assert!(error.to_string().contains("source identity changed"));
+                assert_eq!(core.transport.generation, generation);
+                assert!(commands.try_recv().is_err());
+
+                let id = if audition.ends_with("graph") {
+                    core.processing_graph_run(
+                        track_id,
+                        graph_port(2, 0),
+                        if audition == "live_graph" {
+                            GraphExecutionMode::Auto
+                        } else {
+                            GraphExecutionMode::Offline
+                        },
+                    )
+                    .unwrap()
+                } else {
+                    core.start_processing(track_id, ProcessingOperation::Denoise, None)
+                        .unwrap()
+                };
+                if audition == "mix" {
+                    let mut event = completion(&mut core);
+                    let crate::processing::Event::Finished {
+                        result: Ok(result), ..
+                    } = &mut event
+                    else {
+                        panic!("native processing did not produce PCM");
+                    };
+                    populate_stems(result);
+                    core.processing_event(event);
+                } else {
+                    complete(&mut core);
+                }
+                match audition {
+                    "cached_graph" => {
+                        core.processing_graph_audition(id, graph_port(2, 0))
+                            .unwrap();
+                    }
+                    "live_graph" => {}
+                    _ => {
+                        core.audition_processing(
+                            id,
+                            if audition == "mix" {
+                                AuditionMode::Mix
+                            } else {
+                                AuditionMode::Denoised
+                            },
+                            0.0,
+                            0.0,
+                        )
+                        .unwrap();
+                        if audition == "mix" {
+                            let event = mix_completion(&mut core);
+                            core.processing_event(event);
+                        }
+                    }
+                }
+                assert_eq!(
+                    core.processing_status(id).unwrap().phase,
+                    ProcessingPhase::Complete
+                );
+                assert_eq!(core.processing.audition_id(), Some(id), "{audition}");
+                assert!(core.pending_processing_audition.is_none());
+                assert_ne!(core.transport.generation, generation);
+                assert_eq!(core.state.playback.status, status);
+                assert_eq!(core.state.queue.current_id, Some(queue_id));
+                assert_eq!(core.store.queue_ids().unwrap(), queue_ids);
+                assert_eq!(core.transport.history, history);
+                assert_eq!(core.transport.history_cursor, history_cursor);
+                let loaded = &core.transport.session.as_ref().unwrap().loaded_track;
+                assert_eq!(loaded.path, replacement_path);
+                assert_eq!(loaded.cue, Some(changed.clone()));
+                let mut loaded_replacement = false;
+                loop {
+                    match commands.recv_timeout(Duration::from_secs(2)).unwrap() {
+                        AudioCommand::Load {
+                            path,
+                            range,
+                            paused,
+                            ..
+                        } => {
+                            assert_eq!(path, replacement_path);
+                            let range = range.unwrap();
+                            assert_eq!(range.start_seconds, changed.start_seconds());
+                            assert_eq!(range.end_seconds, changed.end_seconds());
+                            assert_eq!(paused, status == PlaybackStatus::Paused);
+                            loaded_replacement = true;
+                        }
+                        AudioCommand::Audition {
+                            path, paused, pcm, ..
+                        } => {
+                            assert!(loaded_replacement);
+                            assert_eq!(path, replacement_path);
+                            assert_eq!(paused, status == PlaybackStatus::Paused);
+                            assert!(pcm.is_some());
+                            break;
+                        }
+                        AudioCommand::GraphAudition {
+                            path,
+                            range,
+                            paused,
+                            ..
+                        } => {
+                            assert!(loaded_replacement);
+                            assert_eq!(path, replacement_path);
+                            assert_eq!(range.unwrap().start_seconds, changed.start_seconds());
+                            assert_eq!(paused, status == PlaybackStatus::Paused);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(
+                    core.audition_processing(old_id, AuditionMode::Denoised, 0.0, 0.0)
+                        .is_err()
+                );
+                assert_eq!(core.processing.audition_id(), Some(id));
+            }
+        }
+    }
+}

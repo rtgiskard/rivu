@@ -635,6 +635,9 @@ Native preparation checks cancellation between decoder calls, without a hard
 deadline for decoder/filesystem operations. Retained audition rechecks the
 registered decoder hint and media identity. Uncertain database/queue recovery
 rejects it without replacing playback or committing a late stem-mix selection.
+Audition compares the validated source with the session's loaded source, not only
+the track ID. A same-ID source or CUE-range change reloads that occurrence while
+preserving playing/paused status and navigation history; stale results remain invalid.
 
 `task cancel processing INSTANCE:ID` also returns a matching selected audition to
 Original after preparation has completed. For realtime/hybrid runs it marks the
