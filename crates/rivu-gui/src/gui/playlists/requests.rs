@@ -5,10 +5,7 @@ use rivu_protocol::{
     model::{Page, PlaylistSummary, Query},
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::gui) enum ViewRequestKind {
     Summaries,
@@ -36,37 +33,29 @@ struct ViewDemand {
 
 pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
 
+/// One lane owns logical demand and publication independently of physical occupancy.
 #[derive(Default)]
-pub(super) struct ViewRequests {
-    generation: u64,
-    generations: HashMap<ViewRequestKind, u64>,
-    projections: HashMap<ViewRequestKind, QueryTracker>,
-    workers: HashSet<ViewRequestKind>,
-    queued: HashMap<ViewRequestKind, (Query, u64)>,
+struct ViewRequestSlot {
+    generation: Option<u64>,
+    projection: QueryTracker,
+    worker_active: bool,
+    queued: Option<(Query, u64)>,
     // Latest intent outlives logical cancellation, hiding and worker completion.
-    demands: HashMap<ViewRequestKind, ViewDemand>,
-    immediate: HashSet<ViewRequestKind>,
-    selection_baseline: Option<SelectionKey>,
-    selection_failure: Option<(SelectionKey, String)>,
+    demand: Option<ViewDemand>,
+    immediate: bool,
 }
 
-impl ViewRequests {
-    fn prepare_view(
+impl ViewRequestSlot {
+    fn prepare(
         &mut self,
-        kind: ViewRequestKind,
         query: Query,
         generation: u64,
-        revisions: rivu_protocol::response::QueryRevisions,
+        revisions: QueryRevisions,
         selection_generation: u64,
         now: Instant,
     ) -> Option<(Query, Duration)> {
         let stamp = query.stamp(revisions);
-        let selection_generation = if kind == ViewRequestKind::Summaries {
-            0
-        } else {
-            selection_generation
-        };
-        let demand = self.demands.entry(kind).or_insert_with(|| ViewDemand {
+        let demand = self.demand.get_or_insert_with(|| ViewDemand {
             query: query.clone(),
             stamp,
             selection_generation,
@@ -85,7 +74,7 @@ impl ViewRequests {
                 retired: false,
             };
         }
-        if self.immediate.remove(&kind) {
+        if std::mem::take(&mut self.immediate) {
             demand.quiet_until = now;
         }
         // A rejected snapshot cannot be repaired by replaying the same demand.
@@ -95,56 +84,98 @@ impl ViewRequests {
         }
         let delay = demand.quiet_until.saturating_duration_since(now);
         let replaced = self
-            .generations
-            .get(&kind)
-            .is_some_and(|current| *current != generation);
-        self.begin(kind, generation);
-        let owner = self.projections.entry(kind).or_default();
-        if !owner.sync(&query, revisions) && replaced {
-            owner.cancel();
+            .generation
+            .replace(generation)
+            .is_some_and(|current| current != generation);
+        if !self.projection.sync(&query, revisions) && replaced {
+            self.projection.cancel();
         }
-        if !self.workers.insert(kind) {
-            self.queued.insert(kind, (query, generation));
+        if self.worker_active {
+            self.queued = Some((query, generation));
             return None;
         }
+        self.worker_active = true;
         Some((query, delay))
     }
 
-    pub(in crate::gui) fn next_generation(&mut self) -> u64 {
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == Some(generation)
+    }
+
+    fn finish(&mut self, generation: u64) -> bool {
+        if !self.is_current(generation) {
+            return false;
+        }
+        self.generation = None;
+        true
+    }
+
+    fn cancel(&mut self) {
+        self.generation = None;
+        self.queued = None;
+        self.projection.cancel();
+    }
+
+    fn release_worker(&mut self) -> bool {
+        std::mem::take(&mut self.worker_active)
+    }
+
+    fn retire(&mut self, generation: u64) {
+        if self.finish(generation) {
+            self.projection.cancel();
+            self.demand.as_mut().expect("prepared view demand").retired = true;
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ViewRequests {
+    generation: u64,
+    summaries: ViewRequestSlot,
+    entries: ViewRequestSlot,
+    selection: ViewRequestSlot,
+    selection_baseline: Option<SelectionKey>,
+    selection_failure: Option<(SelectionKey, String)>,
+}
+
+impl ViewRequests {
+    fn slot(&self, kind: ViewRequestKind) -> &ViewRequestSlot {
+        match kind {
+            ViewRequestKind::Summaries => &self.summaries,
+            ViewRequestKind::Entries => &self.entries,
+            ViewRequestKind::Selection => &self.selection,
+        }
+    }
+
+    fn slot_mut(&mut self, kind: ViewRequestKind) -> &mut ViewRequestSlot {
+        match kind {
+            ViewRequestKind::Summaries => &mut self.summaries,
+            ViewRequestKind::Entries => &mut self.entries,
+            ViewRequestKind::Selection => &mut self.selection,
+        }
+    }
+
+    fn next_generation(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    fn begin(&mut self, kind: ViewRequestKind, generation: u64) {
-        self.generations.insert(kind, generation);
-    }
-
-    pub(in crate::gui) fn is_current(&self, kind: ViewRequestKind, generation: u64) -> bool {
-        self.generations.get(&kind) == Some(&generation)
-    }
-
-    fn finish(&mut self, kind: ViewRequestKind, generation: u64) -> bool {
-        if !self.is_current(kind, generation) {
-            return false;
-        }
-        self.generations.remove(&kind);
-        true
-    }
-
-    pub(in crate::gui) fn pending(&self, kind: ViewRequestKind) -> bool {
-        self.generations.contains_key(&kind)
-    }
-
-    pub(in crate::gui) fn pending_generation(&self, kind: ViewRequestKind) -> Option<u64> {
-        self.generations.get(&kind).copied()
-    }
-
-    fn cancel(&mut self, kind: ViewRequestKind) {
-        self.generations.remove(&kind);
-        self.queued.remove(&kind);
-        if let Some(projection) = self.projections.get_mut(&kind) {
-            projection.cancel();
-        }
+    fn prepare_view(
+        &mut self,
+        kind: ViewRequestKind,
+        query: Query,
+        generation: u64,
+        revisions: QueryRevisions,
+        selection_generation: u64,
+        now: Instant,
+    ) -> Option<(Query, Duration)> {
+        let selection_generation = if kind == ViewRequestKind::Summaries {
+            0
+        } else {
+            selection_generation
+        };
+        self.slot_mut(kind)
+            .prepare(query, generation, revisions, selection_generation, now)
     }
 }
 
@@ -210,7 +241,7 @@ impl PlaylistModel {
     }
 
     pub(in crate::gui::playlists) fn view_pending(&self, kind: ViewRequestKind) -> bool {
-        self.requests.pending(kind)
+        self.requests.slot(kind).generation.is_some()
     }
 
     pub(in crate::gui::playlists) fn view_loading(
@@ -218,7 +249,7 @@ impl PlaylistModel {
         kind: ViewRequestKind,
         token: u64,
     ) -> bool {
-        self.requests.is_current(kind, token)
+        self.requests.slot(kind).is_current(token)
     }
 
     pub(in crate::gui::playlists) fn sync_active_playlist_entry(&mut self) {
@@ -292,7 +323,7 @@ impl PlaylistModel {
     fn playlist_request(&self, kind: ViewRequestKind) -> ViewRequest {
         ViewRequest {
             kind,
-            pending_generation: self.requests.pending_generation(kind),
+            pending_generation: self.requests.slot(kind).generation,
             read: None,
         }
     }
@@ -349,17 +380,17 @@ impl PlaylistModel {
         self.remove_playlist_selection();
         self.cancel_playlist_read(ViewRequestKind::Summaries);
         self.playlists.search_summaries(query);
-        self.requests.immediate.insert(ViewRequestKind::Summaries);
+        self.requests.slot_mut(ViewRequestKind::Summaries).immediate = true;
     }
 
     pub(in crate::gui) fn search_playlist_entries(&mut self, query: Option<String>) {
         self.cancel_playlist_read(ViewRequestKind::Entries);
         self.playlists.search_entries(query);
-        self.requests.immediate.insert(ViewRequestKind::Entries);
+        self.requests.slot_mut(ViewRequestKind::Entries).immediate = true;
     }
 
     pub(in crate::gui) fn cancel_playlist_read(&mut self, kind: ViewRequestKind) {
-        self.requests.cancel(kind);
+        self.requests.slot_mut(kind).cancel();
         match kind {
             ViewRequestKind::Summaries => self.playlists.cancel_page(false),
             ViewRequestKind::Entries => self.playlists.cancel_page(true),
@@ -376,7 +407,7 @@ impl PlaylistModel {
             ViewRequestKind::Entries,
             ViewRequestKind::Selection,
         ] {
-            if self.requests.pending(kind) {
+            if self.requests.slot(kind).generation.is_some() {
                 self.cancel_playlist_read(kind);
             }
         }
@@ -439,7 +470,7 @@ impl PlaylistModel {
             ViewRequestKind::Summaries
         };
         if explicit {
-            self.requests.demands.remove(&kind);
+            self.requests.slot_mut(kind).demand.take();
         }
         let query = self.playlists.prepare_page(entries, offset, page_size);
         let generation = self.requests.next_generation();
@@ -536,7 +567,11 @@ impl PlaylistModel {
         };
         if key != failed_key
             || self.playlist_lookup_failure().map(|(key, _)| key) != Some(failed_key)
-            || self.requests.pending(ViewRequestKind::Selection)
+            || self
+                .requests
+                .slot(ViewRequestKind::Selection)
+                .generation
+                .is_some()
         {
             return self.playlist_request(ViewRequestKind::Selection);
         }
@@ -565,11 +600,7 @@ impl PlaylistModel {
                 Instant::now(),
             )
             .map(|(query, delay)| {
-                let owner = self
-                    .requests
-                    .projections
-                    .get_mut(&kind)
-                    .expect("prepared view owner");
+                let owner = &mut self.requests.slot_mut(kind).projection;
                 let read = ViewRead {
                     query,
                     kind,
@@ -583,7 +614,7 @@ impl PlaylistModel {
             });
         ViewRequest {
             kind,
-            pending_generation: self.requests.pending_generation(kind),
+            pending_generation: self.requests.slot(kind).generation,
             read,
         }
     }
@@ -594,7 +625,7 @@ impl PlaylistModel {
         demanded: bool,
         revisions: QueryRevisions,
     ) -> ViewRequest {
-        let Some((query, generation)) = self.requests.queued.remove(&kind) else {
+        let Some((query, generation)) = self.requests.slot_mut(kind).queued.take() else {
             return self.playlist_request(kind);
         };
         if !demanded {
@@ -609,24 +640,20 @@ impl PlaylistModel {
         read: &ViewRead,
         revisions: QueryRevisions,
     ) -> bool {
-        if !self.requests.is_current(read.kind, read.generation)
+        if !self.requests.slot(read.kind).is_current(read.generation)
             || (read.kind != ViewRequestKind::Summaries
                 && self.playlists.selection_generation() != read.selection_generation)
         {
             return false;
         }
-        let owner = self
-            .requests
-            .projections
-            .get_mut(&read.kind)
-            .expect("prepared view owner");
+        let owner = &mut self.requests.slot_mut(read.kind).projection;
         owner.sync(&read.query, revisions);
         owner.accepts(&read.query, read.owner_generation, revisions)
     }
 
     pub(in crate::gui) fn abandon_playlist_read(&mut self, read: &ViewRead) {
-        self.requests.workers.remove(&read.kind);
-        if self.requests.is_current(read.kind, read.generation) {
+        self.requests.slot_mut(read.kind).release_worker();
+        if self.requests.slot(read.kind).is_current(read.generation) {
             self.cancel_playlist_read(read.kind);
         }
     }
@@ -637,7 +664,7 @@ impl PlaylistModel {
         current: QueryRevisions,
         response: QueryResponse,
     ) -> Option<String> {
-        self.requests.workers.remove(&read.kind);
+        self.requests.slot_mut(read.kind).release_worker();
         self.publish_playlist_read(read, current, response)
     }
 
@@ -657,7 +684,7 @@ impl PlaylistModel {
         current: QueryRevisions,
         response: QueryResponse,
     ) -> Option<String> {
-        if !self.requests.is_current(read.kind, read.generation) {
+        if !self.requests.slot(read.kind).is_current(read.generation) {
             return None;
         }
         if !self.playlist_read_current(read, current) {
@@ -681,7 +708,7 @@ impl PlaylistModel {
             &response.result,
             Err(QueryError::RevisionChanged | QueryError::Cancelled)
         ) || (expected_payload
-            && !self.requests.projections[&read.kind].accepts(
+            && !self.requests.slot(read.kind).projection.accepts(
                 &read.query,
                 read.owner_generation,
                 response.revisions,
@@ -690,7 +717,7 @@ impl PlaylistModel {
             self.retire_playlist_read(read);
             return None;
         }
-        self.requests.finish(read.kind, read.generation);
+        self.requests.slot_mut(read.kind).finish(read.generation);
         match response.result {
             Err(error) => self.fail_playlist_read(read, current, error.to_string()),
             Ok(ViewResponse::PlaylistSummaries(page))
@@ -718,13 +745,7 @@ impl PlaylistModel {
     }
 
     fn retire_playlist_read(&mut self, read: &ViewRead) {
-        self.requests.finish(read.kind, read.generation);
-        self.requests
-            .projections
-            .get_mut(&read.kind)
-            .unwrap()
-            .cancel();
-        self.requests.demands.get_mut(&read.kind).unwrap().retired = true;
+        self.requests.slot_mut(read.kind).retire(read.generation);
         match read.kind {
             ViewRequestKind::Summaries => self.playlists.cancel_page(false),
             ViewRequestKind::Entries => self.playlists.cancel_page(true),
@@ -830,12 +851,18 @@ mod tests {
         assert_eq!(browser.playlists.selected_total(), Some(100));
         assert!(browser.playlists.summaries().rows.get(0).is_some());
         assert!(browser.playlists.entries().rows.get(0).is_none());
-        assert!(browser.requests.workers.contains(&ViewRequestKind::Entries));
         assert!(
-            !browser
+            browser
                 .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
                 .queued
-                .contains_key(&ViewRequestKind::Entries)
+                .is_none()
         );
         assert!(
             browser
@@ -886,7 +913,12 @@ mod tests {
             },
         );
         assert!(browser.playlists.entries().rows.get(0).is_none());
-        assert!(!browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            !browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
         assert!(
             browser
                 .demand_playlist_entries(0..1, 20, revisions)
@@ -942,7 +974,12 @@ mod tests {
             },
         );
         assert!(browser.playlists.entries().rows.get(0).is_none());
-        assert!(!browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            !browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
     }
 
     fn lookup_error(revisions: QueryRevisions, message: &str) -> QueryResponse {
@@ -1285,12 +1322,12 @@ mod tests {
                     .is_some()
             );
             assert!(!browser.view_pending(kind));
-            assert!(browser.requests.workers.contains(&kind));
+            assert!(browser.requests.slot(kind).worker_active);
             assert_eq!(
                 browser.complete_playlist_read(&read, revisions, timeout()),
                 None
             );
-            assert!(!browser.requests.workers.contains(&kind));
+            assert!(!browser.requests.slot(kind).worker_active);
             assert!(!browser.view_pending(kind));
             match kind {
                 ViewRequestKind::Summaries => {
@@ -1358,7 +1395,12 @@ mod tests {
             .into_read()
             .unwrap();
         browser.search_playlist_entries(Some("new".into()));
-        assert!(browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
         let queued = browser.request_playlist_entries(1, 0, 20, revisions);
         assert_eq!(queued.kind(), ViewRequestKind::Entries);
         let queued_generation = queued
@@ -1380,7 +1422,7 @@ mod tests {
                 })),
             },
         );
-        assert!(browser.requests.pending(ViewRequestKind::Entries));
+        assert!(browser.view_pending(ViewRequestKind::Entries));
         assert_eq!(browser.playlists.entries().rows.total(), None);
         let (replacement, _) = browser
             .queued_playlist_read(ViewRequestKind::Entries, true, revisions)
@@ -1398,7 +1440,7 @@ mod tests {
                 })),
             },
         );
-        assert!(!browser.requests.pending(ViewRequestKind::Entries));
+        assert!(!browser.view_pending(ViewRequestKind::Entries));
         assert_eq!(browser.playlists.entries().rows.total(), Some(0));
         assert_eq!(browser.playlists.selected(), Some(1));
     }
@@ -1427,8 +1469,13 @@ mod tests {
         assert!(retained.into_read().is_none());
         assert!(browser.playlist_read_current(&catalog, revisions));
         assert!(!browser.playlist_read_current(&entries, revisions));
-        assert!(browser.requests.workers.contains(&ViewRequestKind::Entries));
-        assert!(!browser.requests.pending(ViewRequestKind::Entries));
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
+        assert!(!browser.view_pending(ViewRequestKind::Entries));
     }
 
     #[test]
@@ -1446,7 +1493,12 @@ mod tests {
             .unwrap();
         browser.configure_page_size(40);
         assert!(browser.playlist_read_current(&lookup, revisions));
-        assert!(browser.requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
         browser.abandon_playlist_read(&page);
         assert_eq!(browser.playlists.selected(), Some(1));
         let (page, _) = browser
@@ -1468,7 +1520,7 @@ mod tests {
                 })),
             },
         );
-        assert!(!browser.requests.pending(ViewRequestKind::Entries));
+        assert!(!browser.view_pending(ViewRequestKind::Entries));
         assert!(
             browser
                 .demand_playlist_entries(0..1, 40, changed)
@@ -1518,9 +1570,8 @@ mod tests {
                 )
                 .is_none()
         );
-        assert_eq!(requests.workers.len(), 1);
-        assert!(requests.workers.remove(&kind));
-        let (queued, generation) = requests.queued.remove(&kind).unwrap();
+        assert!(requests.slot_mut(kind).release_worker());
+        let (queued, generation) = requests.slot_mut(kind).queued.take().unwrap();
         let (_, delay) = requests
             .prepare_view(
                 kind,
@@ -1532,7 +1583,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delay, Duration::ZERO);
-        assert_eq!(requests.workers.len(), 1);
     }
 
     #[test]
@@ -1549,7 +1599,7 @@ mod tests {
         requests
             .prepare_view(kind, query(0), 1, revisions, 0, start)
             .unwrap();
-        let retired = requests.projections.get_mut(&kind).unwrap().ticket();
+        let retired = requests.slot_mut(kind).projection.ticket();
         assert!(
             requests
                 .prepare_view(
@@ -1563,8 +1613,8 @@ mod tests {
                 .is_none()
         );
         assert!(!retired.is_current());
-        assert!(requests.workers.remove(&kind));
-        let (queued, generation) = requests.queued.remove(&kind).unwrap();
+        assert!(requests.slot_mut(kind).release_worker());
+        let (queued, generation) = requests.slot_mut(kind).queued.take().unwrap();
         let (_, delay) = requests
             .prepare_view(
                 kind,
@@ -1577,9 +1627,9 @@ mod tests {
             .unwrap();
         assert_eq!(delay, Duration::from_millis(50));
         // Hiding cancels logical demand/reservations, never the occupied gate or deadline.
-        requests.cancel(kind);
-        assert!(requests.workers.contains(&kind));
-        assert!(requests.workers.remove(&kind));
+        requests.slot_mut(kind).cancel();
+        assert!(requests.slot(kind).worker_active);
+        assert!(requests.slot_mut(kind).release_worker());
         let (_, delay) = requests
             .prepare_view(
                 kind,
@@ -1591,8 +1641,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delay, Duration::from_millis(40));
-        requests.cancel(kind);
-        assert!(requests.workers.remove(&kind));
+        requests.slot_mut(kind).cancel();
+        assert!(requests.slot_mut(kind).release_worker());
         let (_, delay) = requests
             .prepare_view(
                 kind,
@@ -1621,7 +1671,7 @@ mod tests {
         requests
             .prepare_view(kind, query.clone(), 1, revisions, 1, start)
             .unwrap();
-        assert!(requests.workers.remove(&kind));
+        assert!(requests.slot_mut(kind).release_worker());
         let revisions = rivu_protocol::response::QueryRevisions {
             library: 1,
             ..revisions
@@ -1637,7 +1687,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delay, Duration::from_millis(80));
-        assert!(requests.workers.remove(&kind));
+        assert!(requests.slot_mut(kind).release_worker());
         let (_, delay) = requests
             .prepare_view(
                 kind,
@@ -1743,7 +1793,7 @@ mod tests {
             .into_read()
             .unwrap();
         assert_eq!(browser.playlists.entries().rows.len(), 1);
-        assert!(browser.requests.pending(kind));
+        assert!(browser.view_pending(kind));
 
         assert_eq!(
             browser.complete_playlist_read(&read, revisions, empty()),
@@ -1751,7 +1801,7 @@ mod tests {
         );
         assert_eq!(browser.playlists.selected(), Some(41));
         assert!(browser.playlists.entries().rows.is_empty());
-        assert!(!browser.requests.pending(kind));
+        assert!(!browser.view_pending(kind));
         let loaded = browser.demand_playlist_entries(0..1, 20, revisions);
         assert_eq!(loaded.pending_generation(), None);
         assert!(loaded.into_read().is_none());
@@ -1765,7 +1815,7 @@ mod tests {
             .demand_playlist_entries(0..1, 20, revisions)
             .into_read()
             .unwrap();
-        assert!(browser.requests.pending(kind));
+        assert!(browser.view_pending(kind));
         assert_eq!(
             browser.complete_playlist_read(
                 &read,
@@ -1782,7 +1832,7 @@ mod tests {
         );
         assert_eq!(browser.playlists.entries().rows.total(), None);
         assert_eq!(browser.playlists.entries().rows.len(), 1);
-        assert!(!browser.requests.pending(kind));
+        assert!(!browser.view_pending(kind));
         assert_eq!(
             browser.playlists.entries().rows.error(0),
             Some("unavailable")
@@ -1792,14 +1842,14 @@ mod tests {
             .retry_playlist_entries(20, revisions)
             .into_read()
             .unwrap();
-        assert!(browser.requests.pending(kind));
+        assert!(browser.view_pending(kind));
         assert_eq!(browser.playlists.entries().rows.error(0), None);
         assert_eq!(
             browser.complete_playlist_read(&read, revisions, empty()),
             None
         );
         assert!(browser.playlists.entries().rows.is_empty());
-        assert!(!browser.requests.pending(kind));
+        assert!(!browser.view_pending(kind));
     }
 
     #[test]
@@ -1814,12 +1864,17 @@ mod tests {
             ViewRequestKind::Selection,
             ViewRequestKind::Entries,
         ] {
-            browser.requests.begin(kind, 1);
+            browser.requests.slot_mut(kind).generation = Some(1);
         }
 
-        assert!(browser.requests.finish(ViewRequestKind::Summaries, 1));
+        assert!(
+            browser
+                .requests
+                .slot_mut(ViewRequestKind::Summaries)
+                .finish(1)
+        );
         browser.playlists.fail_page(false, "unavailable".into());
-        assert!(!browser.requests.pending(ViewRequestKind::Summaries));
+        assert!(!browser.view_pending(ViewRequestKind::Summaries));
         assert_eq!(
             browser.playlists.summaries().rows.error(0),
             Some("unavailable")
@@ -1827,8 +1882,16 @@ mod tests {
         assert_eq!(browser.playlists.selected(), Some(41));
         assert_eq!(browser.playlists.retry_page(false, 20), Some(0));
         browser.playlists.prepare_page(false, 0, 20);
-        browser.requests.begin(ViewRequestKind::Summaries, 2);
-        assert!(browser.requests.finish(ViewRequestKind::Summaries, 2));
+        browser
+            .requests
+            .slot_mut(ViewRequestKind::Summaries)
+            .generation = Some(2);
+        assert!(
+            browser
+                .requests
+                .slot_mut(ViewRequestKind::Summaries)
+                .finish(2)
+        );
         browser.accept_playlist_summaries(
             rivu_protocol::model::Page {
                 total: 0,
@@ -1845,8 +1908,8 @@ mod tests {
             ViewRequestKind::Selection,
             ViewRequestKind::Entries,
         ] {
-            assert!(!browser.requests.pending(kind));
-            assert!(!browser.requests.finish(kind, 1));
+            assert!(!browser.view_pending(kind));
+            assert!(!browser.requests.slot_mut(kind).finish(1));
         }
         assert_eq!(browser.playlists.demand_page(true, 0..1, 20), None);
     }
@@ -1858,7 +1921,7 @@ mod tests {
         browser.playlists.prepare_entries(41);
         browser.playlists.prepare_page(true, 0, 20);
         for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
-            browser.requests.begin(kind, 1);
+            browser.requests.slot_mut(kind).generation = Some(1);
         }
 
         browser.remove_playlist_selection();
@@ -1866,8 +1929,8 @@ mod tests {
         assert_eq!(browser.playlists.entries().playlist_id, None);
         assert!(browser.playlists.entries().rows.is_empty());
         for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
-            assert!(!browser.requests.pending(kind));
-            assert!(!browser.requests.finish(kind, 1));
+            assert!(!browser.view_pending(kind));
+            assert!(!browser.requests.slot_mut(kind).finish(1));
         }
     }
 
