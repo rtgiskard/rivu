@@ -27,11 +27,11 @@ impl MaterialGroup {
 }
 
 pub(in crate::gui) trait MaterialAppearance: Sized {
-    const ALL: [Self; 27];
+    const ALL: [Self; 26];
 
-    fn group(self) -> Option<MaterialGroup>;
+    fn group(self) -> MaterialGroup;
     fn spec(self) -> &'static MaterialSpec;
-    fn current(cx: &App) -> Self;
+    fn current(cx: &App) -> Option<Self>;
     fn label(self) -> &'static str;
     fn is_texture(&self) -> bool;
     fn is_procedural_water(&self) -> bool;
@@ -55,14 +55,14 @@ pub(in crate::gui) trait MaterialAppearance: Sized {
     fn floating(self, surface: Stateful<Div>, theme: &'static Palette) -> Stateful<Div>;
 }
 
-/// Only experimental materials expose the panel scene through idle application rows.
+/// Enabled materials expose the panel scene through idle application rows.
 pub(in crate::gui) fn row_background(
     theme: &'static Palette,
     selected: bool,
     hovered: bool,
     cx: &App,
 ) -> Rgba {
-    if !selected && !hovered && MaterialPreset::current(cx) != MaterialPreset::Original {
+    if !selected && !hovered && MaterialPreset::current(cx).is_some() {
         transparent_black().into()
     } else {
         rivu_ui::row_background(theme, selected, hovered)
@@ -70,24 +70,23 @@ pub(in crate::gui) fn row_background(
 }
 
 impl MaterialAppearance for MaterialPreset {
-    fn group(self) -> Option<MaterialGroup> {
+    fn group(self) -> MaterialGroup {
         match self {
-            Self::Original => None,
             Self::Satin
             | Self::Atmosphere
             | Self::Glass
             | Self::Stage
             | Self::Mist
-            | Self::Frost => Some(MaterialGroup::Texture),
+            | Self::Frost => MaterialGroup::Texture,
             Self::Ripple | Self::StillWater | Self::Stream | Self::Lake | Self::Crystal => {
-                Some(MaterialGroup::Water)
+                MaterialGroup::Water
             }
-            _ => Some(MaterialGroup::Experimental),
+            _ => MaterialGroup::Experimental,
         }
     }
 
-    const ALL: [Self; 27] = {
-        let mut ids = [Self::Original; 27];
+    const ALL: [Self; 26] = {
+        let mut ids = [MATERIALS[0].id; 26];
         let mut index = 0;
         while index < MATERIALS.len() {
             ids[index] = MATERIALS[index].id;
@@ -100,16 +99,9 @@ impl MaterialAppearance for MaterialPreset {
         &MATERIALS[material_slot(self)]
     }
 
-    fn current(cx: &App) -> Self {
+    fn current(cx: &App) -> Option<Self> {
         cx.try_global::<MaterialSession>()
-            .map(|session| {
-                if session.enabled {
-                    session.material
-                } else {
-                    Self::Original
-                }
-            })
-            .unwrap_or(Self::Original)
+            .and_then(|session| session.enabled.then_some(session.material))
     }
 
     fn label(self) -> &'static str {
@@ -185,9 +177,6 @@ impl MaterialAppearance for MaterialPreset {
         image: Option<Img>,
         motion: bool,
     ) -> Stateful<Div> {
-        if self == Self::Original {
-            return panel;
-        }
         let playback = matches!(
             PanelKind::from_key(kind),
             Some(PanelKind::Transport | PanelKind::Artwork)
@@ -265,9 +254,6 @@ impl MaterialAppearance for MaterialPreset {
     }
 
     fn floating(self, surface: Stateful<Div>, theme: &'static Palette) -> Stateful<Div> {
-        if self == Self::Original {
-            return surface;
-        }
         surface
             .bg(linear_gradient(
                 155.,
@@ -393,7 +379,6 @@ impl MaterialParameterAppearance for MaterialParameter {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::gui) enum CompositionFamily {
-    Original,
     Surface,
     Image,
     ProceduralWater,
@@ -411,44 +396,36 @@ pub(in crate::gui) struct MaterialSpec {
 /// Exhaustiveness makes adding a domain preset require a deliberate GUI mapping.
 fn material_slot(material: MaterialPreset) -> usize {
     match material {
-        MaterialPreset::Original => 0,
-        MaterialPreset::Satin => 1,
-        MaterialPreset::Atmosphere => 2,
-        MaterialPreset::Glass => 3,
-        MaterialPreset::Stage => 4,
-        MaterialPreset::Mist => 5,
-        MaterialPreset::Spring => 6,
-        MaterialPreset::Glint => 7,
-        MaterialPreset::Ripple => 8,
-        MaterialPreset::Mirror => 9,
-        MaterialPreset::Gradient => 10,
-        MaterialPreset::Feather => 11,
-        MaterialPreset::Sheen => 12,
-        MaterialPreset::EdgeFade => 13,
-        MaterialPreset::Aura => 14,
-        MaterialPreset::Water => 15,
-        MaterialPreset::Grain => 16,
-        MaterialPreset::Dissolve => 17,
-        MaterialPreset::Frost => 18,
-        MaterialPreset::Storybook => 19,
-        MaterialPreset::CgWater => 20,
-        MaterialPreset::StillWater => 21,
-        MaterialPreset::Stream => 22,
-        MaterialPreset::Lake => 23,
-        MaterialPreset::Rain => 24,
-        MaterialPreset::Garden => 25,
-        MaterialPreset::Crystal => 26,
+        MaterialPreset::Satin => 0,
+        MaterialPreset::Atmosphere => 1,
+        MaterialPreset::Glass => 2,
+        MaterialPreset::Stage => 3,
+        MaterialPreset::Mist => 4,
+        MaterialPreset::Spring => 5,
+        MaterialPreset::Glint => 6,
+        MaterialPreset::Ripple => 7,
+        MaterialPreset::Mirror => 8,
+        MaterialPreset::Gradient => 9,
+        MaterialPreset::Feather => 10,
+        MaterialPreset::Sheen => 11,
+        MaterialPreset::EdgeFade => 12,
+        MaterialPreset::Aura => 13,
+        MaterialPreset::Water => 14,
+        MaterialPreset::Grain => 15,
+        MaterialPreset::Dissolve => 16,
+        MaterialPreset::Frost => 17,
+        MaterialPreset::Storybook => 18,
+        MaterialPreset::CgWater => 19,
+        MaterialPreset::StillWater => 20,
+        MaterialPreset::Stream => 21,
+        MaterialPreset::Lake => 22,
+        MaterialPreset::Rain => 23,
+        MaterialPreset::Garden => 24,
+        MaterialPreset::Crystal => 25,
     }
 }
 
-pub(in crate::gui) const MATERIALS: [MaterialSpec; 27] = [
-    MaterialSpec {
-        id: MaterialPreset::Original,
-        menu_label: "material-original",
-        family: CompositionFamily::Original,
-        artwork_root: false,
-        artwork_playback: false,
-    },
+pub(in crate::gui) const MATERIALS: [MaterialSpec; 26] = [
     MaterialSpec {
         id: MaterialPreset::Satin,
         menu_label: "material-satin",
@@ -690,7 +667,8 @@ impl MaterialSession {
     }
 
     fn load_preferences(&mut self, preferences: &MaterialPreferences) {
-        (self.enabled, self.material) = preferences.normalized_selection();
+        self.enabled = preferences.enabled;
+        self.material = preferences.selected;
         self.saved.fill(None);
         for (&preset, &parameters) in &preferences.presets {
             self.saved[material_slot(preset)] = Some(parameters);
@@ -816,7 +794,7 @@ impl MaterialSnapshot {
 /// Render-local composition facts. Only `sample` may advance Atmosphere;
 /// consumers create fresh image elements from these shared source handles.
 pub(in crate::gui) struct MaterialFrame {
-    pub material: MaterialPreset,
+    pub material: Option<MaterialPreset>,
     pub settings: MaterialParameters,
     pub motion: bool,
     previous: Option<std::sync::Arc<RenderImage>>,
@@ -832,11 +810,10 @@ impl MaterialFrame {
         cx: &mut App,
     ) -> Self {
         let session = MaterialSession::current(cx);
-        let material = MaterialPreset::current(cx);
         let settings = session.settings;
-        if !session.enabled {
+        let Some(material) = MaterialPreset::current(cx) else {
             return Self {
-                material,
+                material: None,
                 settings,
                 motion: false,
                 previous: None,
@@ -844,7 +821,7 @@ impl MaterialFrame {
                 weight: 1.,
                 surface: None,
             };
-        }
+        };
         let motion = material.motion(settings.speed, window, cx);
         let (previous, current, weight, surface) = atmosphere.update(cx, |atmosphere, cx| {
             if material.spec().family == CompositionFamily::Image {
@@ -860,7 +837,7 @@ impl MaterialFrame {
             }
         });
         Self {
-            material,
+            material: Some(material),
             settings,
             motion,
             previous,
@@ -883,10 +860,7 @@ impl MaterialFrame {
     }
 
     pub(in crate::gui) fn backdrop(&self, theme: &'static Palette) -> Option<Div> {
-        let material = self.material;
-        if material == MaterialPreset::Original {
-            return None;
-        }
+        let material = self.material?;
         if material.is_texture() {
             return Some(super::texture_styles::backdrop(
                 material,
@@ -916,11 +890,14 @@ impl MaterialFrame {
         theme: &'static Palette,
         scale: f32,
     ) -> Stateful<Div> {
+        let Some(material) = self.material else {
+            return panel;
+        };
         let playback = matches!(
             PanelKind::from_key(kind),
             Some(PanelKind::Transport | PanelKind::Artwork)
         );
-        if self.material.is_texture() {
+        if material.is_texture() {
             let blur = self.settings.effective_backdrop_blur(scale);
             let panel = if blur > 0. {
                 panel.backdrop_blur(px(blur))
@@ -928,19 +905,19 @@ impl MaterialFrame {
                 panel
             };
             return super::texture_styles::panel(
-                self.material,
+                material,
                 self.settings,
                 panel,
                 kind,
                 theme,
-                self.images(playback && self.material.spec().artwork_playback),
+                self.images(playback && material.spec().artwork_playback),
                 self.motion,
             );
         }
-        let image = (playback && self.material.spec().artwork_playback)
+        let image = (playback && material.spec().artwork_playback)
             .then(|| self.surface.as_ref().map(|source| source.ambient_image()))
             .flatten();
-        self.material.panel(panel, kind, theme, image, self.motion)
+        material.panel(panel, kind, theme, image, self.motion)
     }
 }
 
@@ -985,21 +962,53 @@ mod tests {
     fn missing_or_disabled_material_session_never_paints_domain_default(
         cx: &mut gpui::TestAppContext,
     ) {
-        cx.update(|cx| {
-            assert_eq!(MaterialPreset::current(cx), MaterialPreset::Original);
+        use crate::gui::{appearance::ambient::Atmosphere, artwork::ArtworkImageRegistry};
+        use rivu_metadata::artwork::ArtworkManager;
+        use std::sync::Arc;
+
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let manager = Arc::new(ArtworkManager::new(directory.path()));
+        let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            let theme =
+                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
+            assert_eq!(MaterialPreset::current(cx), None);
+            let frame = MaterialFrame::sample(&atmosphere, window, cx);
+            assert!(frame.backdrop(theme).is_none());
             cx.default_global::<MaterialSession>();
-            assert_eq!(MaterialPreset::current(cx), MaterialPreset::Original);
+            assert_eq!(MaterialPreset::current(cx), None);
+            for material in MaterialPreset::ALL {
+                cx.default_global::<MaterialSession>()
+                    .apply(MaterialIntent::Select(material));
+                let frame = MaterialFrame::sample(&atmosphere, window, cx);
+                assert_eq!(frame.material, None);
+                assert!(!frame.motion);
+                assert!(frame.previous.is_none());
+                assert!(frame.current.is_none());
+                assert!(frame.surface.is_none());
+                assert!(frame.backdrop(theme).is_none());
+                let mut panel = div()
+                    .id("disabled-material")
+                    .border_color(rgb(theme.accent));
+                let border = panel.style().border_color;
+                let mut panel = frame.panel(panel, PanelKind::Transport.key(), theme, 1.);
+                assert_eq!(panel.style().border_color, border);
+            }
+            cx.default_global::<MaterialSession>()
+                .apply(MaterialIntent::Select(MaterialPreset::Satin));
             cx.default_global::<MaterialSession>()
                 .apply(MaterialIntent::SetEnabled(true));
-            assert_eq!(MaterialPreset::current(cx), MaterialPreset::Satin);
+            assert_eq!(MaterialPreset::current(cx), Some(MaterialPreset::Satin));
         });
     }
 
     #[test]
-    fn legacy_original_session_preserves_satin_overrides_without_enabling_effects() {
+    fn disabled_session_preserves_selected_overrides_when_enabling_effects() {
         let mut preferences = MaterialPreferences {
-            selected: MaterialPreset::Original,
-            enabled: true,
+            selected: MaterialPreset::Satin,
+            enabled: false,
             ..Default::default()
         };
         let mut satin = MaterialParameters::preset(MaterialPreset::Satin);
@@ -1064,7 +1073,7 @@ mod tests {
     fn registered_artwork_panel_receives_playback_stage_treatment() {
         let theme = rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
         let frame = MaterialFrame {
-            material: MaterialPreset::Stage,
+            material: Some(MaterialPreset::Stage),
             settings: MaterialParameters::preset(MaterialPreset::Stage),
             motion: false,
             previous: None,
@@ -1083,27 +1092,31 @@ mod tests {
     }
 
     #[gpui::test]
-    fn only_experimental_idle_rows_are_transparent(cx: &mut gpui::TestAppContext) {
+    fn enabled_idle_rows_are_transparent_and_disabled_rows_keep_theme_background(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             let theme =
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
-            cx.default_global::<super::MaterialSession>()
-                .apply(super::MaterialIntent::SetEnabled(true));
-            for material in MaterialPreset::ALL {
+            for enabled in [false, true, false] {
                 cx.default_global::<super::MaterialSession>()
-                    .apply(super::MaterialIntent::Select(material));
-                for (selected, hovered) in
-                    [(false, false), (false, true), (true, false), (true, true)]
-                {
-                    let background = super::row_background(theme, selected, hovered, cx);
-                    if material == MaterialPreset::Original || selected || hovered {
-                        assert_eq!(
-                            background,
-                            rivu_ui::row_background(theme, selected, hovered)
-                        );
-                        assert_eq!(background.a, 1.);
-                    } else {
-                        assert_eq!(background.a, 0.);
+                    .apply(super::MaterialIntent::SetEnabled(enabled));
+                for material in MaterialPreset::ALL {
+                    cx.default_global::<super::MaterialSession>()
+                        .apply(super::MaterialIntent::Select(material));
+                    for (selected, hovered) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                    {
+                        let background = super::row_background(theme, selected, hovered, cx);
+                        if !enabled || selected || hovered {
+                            assert_eq!(
+                                background,
+                                rivu_ui::row_background(theme, selected, hovered)
+                            );
+                            assert_eq!(background.a, 1.);
+                        } else {
+                            assert_eq!(background.a, 0.);
+                        }
                     }
                 }
             }
@@ -1221,9 +1234,9 @@ mod tests {
             value: 0.5,
         }));
         assert_eq!(session.settings, baseline);
-        session.apply(MaterialIntent::Select(MaterialPreset::Original));
+        session.apply(MaterialIntent::Select(MaterialPreset::Satin));
         assert!(!session.apply(MaterialIntent::Set {
-            material: MaterialPreset::Original,
+            material: MaterialPreset::Satin,
             parameter: MaterialParameter::Alpha,
             value: 0.5,
         }));
@@ -1257,7 +1270,7 @@ mod tests {
             let edited = session.settings;
             assert!(!session.apply(MaterialIntent::Select(material)));
             assert_eq!(session.settings, edited);
-            assert!(session.apply(MaterialIntent::Select(MaterialPreset::Original)));
+            assert!(session.apply(MaterialIntent::Select(MaterialPreset::Satin)));
             assert!(session.apply(MaterialIntent::Select(material)));
             assert_eq!(session.settings, edited);
             assert!(session.apply(MaterialIntent::Reset(material)));
@@ -1427,7 +1440,7 @@ mod tests {
             .advance_clock(Duration::from_secs_f32(duration * 0.5));
         draw(window);
         let accepted = observed.borrow_mut().take().unwrap();
-        assert_eq!(accepted.material, MaterialPreset::Dissolve);
+        assert_eq!(accepted.material, Some(MaterialPreset::Dissolve));
         let previous = accepted.previous.as_ref().unwrap().clone();
         let current = accepted.current.as_ref().unwrap().clone();
         assert!((accepted.weight - 0.5).abs() < 0.0001);
@@ -1463,9 +1476,9 @@ mod tests {
         draw(window);
         assert_eq!(
             observed.borrow().as_ref().unwrap().material,
-            MaterialPreset::Storybook
+            Some(MaterialPreset::Storybook)
         );
-        assert_eq!(accepted.material, MaterialPreset::Dissolve);
+        assert_eq!(accepted.material, Some(MaterialPreset::Dissolve));
         assert!(Arc::ptr_eq(accepted.previous.as_ref().unwrap(), &previous));
         assert!(Arc::ptr_eq(accepted.current.as_ref().unwrap(), &current));
         assert!((accepted.weight - 0.5).abs() < 0.0001);

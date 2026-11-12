@@ -471,8 +471,6 @@ turning it off renders the unmodified interface without changing the selected
 material or its edited parameters. While effects are off, preset selection,
 adjustments, Experimental expansion and Reset are read-only; the effects switch
 and outside dismissal remain available. Turning effects back on restores the selected composition.
-Legacy Original selections likewise remain disabled with Satin glass ready to
-enable; Original is not a selectable preset.
 
 The enable state, selection and per-preset parameters are saved through Core's
 configuration authority. Switching away and back restores each preset's edits;

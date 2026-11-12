@@ -218,5 +218,9 @@ link:01_config.adoc#file-access-and-external-editors[Configuration file access]:
   one `interface.animation_fps` value (`0`–`240`, default `0`), then remove both old
   keys. Choose the shared cap explicitly if the old values differ; the tool does
   not choose between them. See link:01_config.adoc#animation[Animation].
+* Replace `interface.material.selected = "original"` with a real preset such as
+  `"satin"` and set `interface.material.enabled = false` to retain no-effect
+  rendering. Remove any `[interface.material.presets.original]` table. Effects
+  enablement and the selected preset are independent; `original` is not accepted.
 
 

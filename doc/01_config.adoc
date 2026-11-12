@@ -419,10 +419,10 @@ selected = "still_water"
 Omitting this table leaves effects disabled with `satin` selected, ready to enable.
 The effects switch preserves the selected preset and its adjustments. While
 effects are off, preset selection, adjustments, Experimental expansion and Reset
-are read-only; enable effects before editing. Legacy `original` selections remain
-effect-free and prepare Satin glass for the next enable action. Preset identities are stable
+are read-only; enable effects before editing. Preset identities are stable
 snake_case names, independent of translated labels; `still_water` is displayed as
-Rain ripples. Edited parameters are stored under
+Rain ripples. No-effect rendering is controlled solely by `enabled = false`.
+Edited parameters are stored under
 `[interface.material.presets.<preset>]`; Reset restores only the selected preset.
 These preferences are independent of theme colors and GPU resource limits.
 Each saved preset table contains the complete parameter set; use the card to

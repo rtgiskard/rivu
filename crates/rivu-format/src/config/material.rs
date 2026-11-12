@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialPreset {
-    Original,
     #[default]
     Satin,
     Atmosphere,
@@ -108,19 +107,6 @@ impl Default for MaterialPreferences {
 }
 
 impl MaterialPreferences {
-    /// Read legacy no-effect selections as disabled, with Satin ready to enable.
-    pub fn normalized_selection(&self) -> (bool, MaterialPreset) {
-        match self.selected {
-            MaterialPreset::Original => (false, MaterialPreset::Satin),
-            selected => (self.enabled, selected),
-        }
-    }
-
-    /// Persist the same selection semantics exposed to preference consumers.
-    pub(super) fn normalize(&mut self) {
-        (self.enabled, self.selected) = self.normalized_selection();
-    }
-
     pub fn validate(&self) -> Result<()> {
         for parameters in self.presets.values() {
             parameters.validate()?;
@@ -242,7 +228,6 @@ pub enum MaterialChange {
 
 impl MaterialChange {
     pub fn apply_to(self, preferences: &mut MaterialPreferences) {
-        preferences.normalize();
         match self {
             Self::SetEnabled(enabled) => preferences.enabled = enabled,
             Self::Select(preset) => preferences.selected = preset,
@@ -261,7 +246,6 @@ impl MaterialChange {
                 parameter.set(parameters, value);
             }
         }
-        preferences.normalize();
     }
 }
 

@@ -218,10 +218,12 @@ impl MaterialParameterEdit for MaterialParameter {
 }
 
 fn preset_label(material: MaterialPreset, tr: &impl Fn(&str) -> SharedString) -> SharedString {
-    match material.group() {
-        Some(group) => format!("{} · {}", tr(group.label()), tr(material.label())).into(),
-        None => tr(material.label()),
-    }
+    format!(
+        "{} · {}",
+        tr(material.group().label()),
+        tr(material.label())
+    )
+    .into()
 }
 
 /// Attach after the workspace; the dialog exists only in the window that opened it.
@@ -276,12 +278,12 @@ pub(in crate::gui) fn render(
                     for group in MaterialGroup::ALL {
                         if group == MaterialGroup::Experimental
                             && !experimental_expanded
-                            && material.group() != Some(group)
+                            && material.group() != group
                         {
                             continue;
                         }
                         for candidate in MaterialPreset::ALL {
-                            if candidate.group() == Some(group)
+                            if candidate.group() == group
                                 && (group != MaterialGroup::Experimental
                                     || experimental_expanded
                                     || candidate == material)

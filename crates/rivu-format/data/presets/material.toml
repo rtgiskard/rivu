@@ -1,18 +1,5 @@
 # Factory material parameters. Each preset is complete; user overrides remain in config.toml.
 
-[original]
-panel_alpha = 0.58
-feather = 0.0
-highlight = 0.0
-grain = 0.0
-color_steps = 0.0
-wave = 0.0
-cover_blur = 0.0
-backdrop_blur = 0.0
-edge_fade = 0.0
-transition_seconds = 0.0
-speed = 1.0
-
 [satin]
 panel_alpha = 0.58
 feather = 0.0

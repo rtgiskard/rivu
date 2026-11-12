@@ -666,9 +666,10 @@ pub(in crate::gui) fn list_fade(content: impl IntoElement, cx: &App) -> Div {
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
-        .when(material.is_texture() && settings.edge_fade > 0., |view| {
-            view.group_edge_fade(px(settings.edge_fade * 48.))
-        })
+        .when(
+            material.is_some_and(|material| material.is_texture()) && settings.edge_fade > 0.,
+            |view| view.group_edge_fade(px(settings.edge_fade * 48.)),
+        )
         .child(content)
 }
 

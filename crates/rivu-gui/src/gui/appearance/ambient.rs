@@ -281,7 +281,6 @@ mod tests {
                 (MaterialPreset::Dissolve, true, false, true),
                 (MaterialPreset::Dissolve, false, false, false),
                 (MaterialPreset::Mirror, true, false, true),
-                (MaterialPreset::Original, true, true, false),
             ] {
                 this.sync(
                     Some(&tracks[0]),
@@ -932,15 +931,18 @@ mod tests {
         let window = cx.add_empty_window();
         let app = window.update(|window, cx| {
             cx.new(|cx| {
-                WindowView::new(
+                let app = WindowView::new(
                     runtime.handle.clone(),
                     save.handle(),
-                    manager,
+                    manager.clone(),
                     std::rc::Weak::new(),
                     Arc::new(Localizer::new("en-US")),
                     window,
                     cx,
-                )
+                );
+                // Real transport workers must not wake GPUI's deterministic executor.
+                app.handle.set_wakeup(|| {});
+                app
             })
         });
         app.update(cx, |app, cx| {
@@ -1009,11 +1011,7 @@ mod tests {
                 assert_eq!(session.settings, adjusted);
                 assert_eq!(
                     MaterialPreset::current(cx),
-                    if enabled {
-                        MaterialPreset::Dissolve
-                    } else {
-                        MaterialPreset::Original
-                    }
+                    enabled.then_some(MaterialPreset::Dissolve)
                 );
                 assert_eq!(app.state.revisions, revisions);
                 assert!(app.panel_demand(crate::gui::shell::panels::PanelKind::Artwork.key()));
@@ -1156,7 +1154,24 @@ mod tests {
             );
             app.material_intent_fenced(MaterialIntent::Reset(MaterialPreset::Dissolve), cx);
             assert_eq!(MaterialSession::current(cx).settings, fresh);
-            assert_eq!(MaterialPreset::current(cx), MaterialPreset::StillWater);
+            assert_eq!(
+                MaterialPreset::current(cx),
+                Some(MaterialPreset::StillWater)
+            );
+            app.material_intent_fenced(MaterialIntent::Select(MaterialPreset::Dissolve), cx);
+            app.material_intent_fenced(MaterialIntent::SetEnabled(false), cx);
+            Rc::make_mut(&mut app.state).current_track = Some(Arc::new(tracks[2].clone()));
+            app.reconcile_material_demand(cx);
+        });
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            assert!(!app.atmosphere.read(cx).enabled);
+            assert!(app.atmosphere.read(cx).source().is_none());
+            assert!(
+                manager
+                    .cached_result(crate::artwork_source(&tracks[2]))
+                    .is_none()
+            );
         });
     }
 }

@@ -74,37 +74,43 @@ fn material_preferences_round_trip_defaults_and_independent_presets() {
 }
 
 #[test]
-fn legacy_original_material_stays_disabled_with_satin_ready_to_enable() {
+fn material_effects_toggle_preserves_selection_and_parameters() {
     assert!(!MaterialPreferences::default().enabled);
     assert_eq!(
         MaterialPreferences::default().selected,
         MaterialPreset::Satin
     );
-    for enabled in [false, true] {
-        let mut config = Config::default();
-        config.material.enabled = enabled;
-        config.material.selected = MaterialPreset::Original;
-        let mut satin = MaterialParameters::preset(MaterialPreset::Satin);
-        satin.panel_alpha = 0.37;
-        config.material.presets.insert(MaterialPreset::Satin, satin);
-        let legacy = to_toml(&config).unwrap();
-        let mut loaded = from_toml(&legacy).unwrap();
-        loaded.material.normalize();
-        assert!(!loaded.material.enabled);
-        assert_eq!(loaded.material.selected, MaterialPreset::Satin);
+    let mut config = Config::default();
+    config.material.selected = MaterialPreset::StillWater;
+    let mut parameters = MaterialParameters::preset(MaterialPreset::StillWater);
+    parameters.panel_alpha = 0.37;
+    config
+        .material
+        .presets
+        .insert(MaterialPreset::StillWater, parameters);
+    for enabled in [true, false, true] {
+        MaterialChange::SetEnabled(enabled).apply_to(&mut config.material);
+        let saved = to_toml(&config).unwrap();
+        let loaded = from_toml(&saved).unwrap();
+        assert_eq!(loaded.material.enabled, enabled);
+        assert_eq!(loaded.material.selected, MaterialPreset::StillWater);
         assert_eq!(loaded.material.presets, config.material.presets);
-        MaterialChange::SetEnabled(true).apply_to(&mut loaded.material);
-        assert!(loaded.material.enabled);
-        assert_eq!(loaded.material.selected, MaterialPreset::Satin);
-        let saved = update_toml(&legacy, None, &loaded).unwrap();
-        assert_eq!(from_toml(&saved).unwrap(), loaded);
+        assert_eq!(loaded, config);
     }
 }
 
 #[test]
 fn material_preferences_reject_unknown_ids_and_invalid_parameters() {
-    assert!(from_toml("[interface.material]\nselected = 'unknown'\n").is_err());
-    assert!(from_toml("[interface.material.presets.unknown]\npanel_alpha = 0.5\n").is_err());
+    let parameters = toml::to_string(&MaterialParameters::preset(MaterialPreset::Satin)).unwrap();
+    for preset in ["unknown", "original"] {
+        assert!(from_toml(&format!("[interface.material]\nselected = '{preset}'\n")).is_err());
+        assert!(
+            from_toml(&format!(
+                "[interface.material.presets.{preset}]\n{parameters}"
+            ))
+            .is_err()
+        );
+    }
     let mut config = Config::default();
     for (parameter, value) in [
         (material::MaterialParameter::Alpha, f32::NAN),

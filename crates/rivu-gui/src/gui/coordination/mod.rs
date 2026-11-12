@@ -4,7 +4,6 @@ pub(super) mod content_menu;
 pub(super) mod manual_actions;
 pub(super) mod queue_replace;
 
-use crate::gui::appearance::material::{MaterialAppearance, MaterialParametersAppearance};
 use crate::gui::window::*;
 use manual_actions::ManualAction;
 
@@ -571,15 +570,13 @@ impl WindowView {
     }
 
     pub(super) fn reconcile_material_demand(&self, cx: &mut Context<Self>) {
-        let material = rivu_format::config::MaterialPreset::current(cx);
-        let transition_seconds =
-            rivu_format::config::MaterialParameters::current(cx).transition_seconds;
+        let material = appearance::material::MaterialSession::current(cx);
         self.atmosphere.update(cx, |atmosphere, cx| {
             atmosphere.sync(
                 self.state.current_track(),
-                material,
-                transition_seconds,
-                self.window_visible && !self.state.system.shutting_down,
+                material.material,
+                material.settings.transition_seconds,
+                material.enabled && self.window_visible && !self.state.system.shutting_down,
                 self.panel_demand(crate::gui::shell::panels::PanelKind::Transport.key())
                     || self.panel_demand(crate::gui::shell::panels::PanelKind::Artwork.key()),
                 cx,
