@@ -123,6 +123,13 @@ freshness, owner-scoped cancellation, and physical worker occupancy. Tracking
 retains neither result rows nor execution slots. Cancellation reaches only the
 corresponding Core request and does not invalidate another consumer's current data.
 
+Submission receipts identify projection epochs rather than individual physical
+reads. Latest-demand owners revoke the previous epoch on replacement, including
+offset-only changes and same-query retries. Independent Library branches can
+share an epoch while retaining their own request identities; these are different
+demand policies, not interchangeable submission APIs. See
+link:91_design_decisions.adoc#DEC-022[replacement ownership].
+
 A submitted read holds its physical slot until reply or disconnection. Replacement,
 hiding, cancellation, and logical timeout revoke publication but do not free that
 slot. Physical retirement re-drives the latest eligible demand; old completions

@@ -21,7 +21,6 @@ pub(super) struct PagedList<T> {
     pub(super) identity_lookup: Option<(ContainerIdentity, usize, usize)>,
     pub(super) columns: Option<super::render::IntrinsicColumns>,
     pub(super) failed_request: Option<std::sync::Arc<super::worker::ReadSpec>>,
-    pub(super) failed_summary: Option<std::sync::Arc<super::worker::ReadSpec>>,
 }
 
 impl<T> Default for PagedList<T> {
@@ -36,7 +35,6 @@ impl<T> Default for PagedList<T> {
             identity_lookup: None,
             columns: None,
             failed_request: None,
-            failed_summary: None,
         }
     }
 }

@@ -677,7 +677,7 @@ impl View {
         query: &'a str,
     ) -> Option<ReadDemand<'a>> {
         let limit = state.system.query_batch_size as usize;
-        let available = |kind, offset| {
+        let available = |kind, offset, failed: Option<&ReadSpec>| {
             let filter = (!matches!(
                 kind,
                 ReadKind::Search(_)
@@ -696,11 +696,10 @@ impl View {
                     limit
                 },
             };
-            let failed = self.failure(queue, matches!(kind, ReadKind::PlaylistSummary(_)));
             (!failed.is_some_and(|failed| demand.matches(failed, state))).then_some(demand)
         };
         if let Some((kind, offset)) = self.query_demand(state, queue, query, limit)
-            && let Some(demand) = available(kind, offset)
+            && let Some(demand) = available(kind, offset, self.page_failure(queue))
         {
             return Some(demand);
         }
@@ -709,7 +708,13 @@ impl View {
         };
         detail
             .summary_dirty
-            .then(|| available(ReadKind::PlaylistSummary(detail.playlist_id), 0))
+            .then(|| {
+                available(
+                    ReadKind::PlaylistSummary(detail.playlist_id),
+                    0,
+                    detail.failed_summary.as_deref(),
+                )
+            })
             .flatten()
     }
 
@@ -770,56 +775,30 @@ impl View {
         })
     }
 
-    fn failure<'a>(&'a self, queue: &'a QueuePage, summary: bool) -> Option<&'a ReadSpec> {
-        let (page, title) = match self {
-            View::Queue => (&queue.rows.failed_request, &queue.rows.failed_summary),
-            View::LibraryResults(rows) => (&rows.rows.failed_request, &rows.rows.failed_summary),
-            View::Tree(tree) => (&tree.entries.failed_request, &tree.entries.failed_summary),
-            View::Playlists(rows) => (&rows.failed_request, &rows.failed_summary),
-            View::PlaylistDetail { detail, .. } => (
-                &detail.entries.failed_request,
-                &detail.entries.failed_summary,
-            ),
-            View::Recent(recent) => (
-                &recent.entries.failed_request,
-                &recent.entries.failed_summary,
-            ),
+    fn page_failure<'a>(&'a self, queue: &'a QueuePage) -> Option<&'a ReadSpec> {
+        let page = match self {
+            Self::Queue => &queue.rows.failed_request,
+            Self::LibraryResults(rows) => &rows.rows.failed_request,
+            Self::Tree(tree) => &tree.entries.failed_request,
+            Self::Playlists(rows) => &rows.failed_request,
+            Self::PlaylistDetail { detail, .. } => &detail.entries.failed_request,
+            Self::Recent(recent) => &recent.entries.failed_request,
         };
-        if summary {
-            title.as_deref()
-        } else {
-            page.as_deref()
-        }
+        page.as_deref()
     }
 
-    fn failure_slot<'a>(
+    fn page_failure_slot<'a>(
         &'a mut self,
         queue: &'a mut QueuePage,
-        summary: bool,
     ) -> &'a mut Option<Arc<ReadSpec>> {
-        let (page, title) = match self {
-            View::Queue => (
-                &mut queue.rows.failed_request,
-                &mut queue.rows.failed_summary,
-            ),
-            View::LibraryResults(rows) => {
-                (&mut rows.rows.failed_request, &mut rows.rows.failed_summary)
-            }
-            View::Tree(tree) => (
-                &mut tree.entries.failed_request,
-                &mut tree.entries.failed_summary,
-            ),
-            View::Playlists(rows) => (&mut rows.failed_request, &mut rows.failed_summary),
-            View::PlaylistDetail { detail, .. } => (
-                &mut detail.entries.failed_request,
-                &mut detail.entries.failed_summary,
-            ),
-            View::Recent(recent) => (
-                &mut recent.entries.failed_request,
-                &mut recent.entries.failed_summary,
-            ),
-        };
-        if summary { title } else { page }
+        match self {
+            Self::Queue => &mut queue.rows.failed_request,
+            Self::LibraryResults(rows) => &mut rows.rows.failed_request,
+            Self::Tree(tree) => &mut tree.entries.failed_request,
+            Self::Playlists(rows) => &mut rows.failed_request,
+            Self::PlaylistDetail { detail, .. } => &mut detail.entries.failed_request,
+            Self::Recent(recent) => &mut recent.entries.failed_request,
+        }
     }
 }
 
@@ -1193,20 +1172,19 @@ impl UiState {
             .demand(state, &self.queue, &self.search.applied_query)
     }
 
-    fn failure_slot(&mut self, kind: ReadKind<'_>) -> &mut Option<Arc<ReadSpec>> {
-        if matches!(kind, ReadKind::Track(_)) {
-            &mut self.details.failed_request
-        } else {
-            self.view.failure_slot(
-                &mut self.queue,
-                matches!(kind, ReadKind::PlaylistSummary(_)),
-            )
-        }
-    }
-
     fn fail_query(&mut self, request: &QueryRequest, error: QueryError) -> bool {
         self.reads.requested = None;
-        *self.failure_slot(request.demand.kind()) = Some(request.demand.clone());
+        match request.demand.kind() {
+            ReadKind::Track(_) => self.details.failed_request = Some(request.demand.clone()),
+            ReadKind::PlaylistSummary(_) => {
+                if let View::PlaylistDetail { detail, .. } = &mut self.view {
+                    detail.failed_summary = Some(request.demand.clone());
+                }
+            }
+            _ => {
+                *self.view.page_failure_slot(&mut self.queue) = Some(request.demand.clone());
+            }
+        }
         // An obsolete demand is parked quietly until its identity or freshness changes.
         if matches!(error, QueryError::RevisionChanged | QueryError::Cancelled) {
             if self.details_active {
@@ -1407,13 +1385,15 @@ impl UiState {
         if self.details_active {
             self.details.failed_request = None;
         } else {
-            *self.view.failure_slot(&mut self.queue, false) = None;
+            *self.view.page_failure_slot(&mut self.queue) = None;
         }
     }
 
     fn reopen_view_queries(&mut self) {
         self.cancel_query();
-        *self.view.failure_slot(&mut self.queue, true) = None;
+        if let View::PlaylistDetail { detail, .. } = &mut self.view {
+            detail.failed_summary = None;
+        }
     }
 
     pub(super) fn open_search(&mut self) {
@@ -2026,6 +2006,7 @@ impl UiState {
                                 playlist_id: playlist.id,
                                 name: playlist.name.clone(),
                                 summary_dirty: false,
+                                failed_summary: None,
                                 entries: PagedList::default(),
                                 entry_anchor: None,
                                 selected_entry_id: None,
@@ -2139,6 +2120,7 @@ pub(super) struct PlaylistDetail {
     pub(super) playlist_id: i64,
     pub(super) name: String,
     pub(super) summary_dirty: bool,
+    pub(super) failed_summary: Option<Arc<ReadSpec>>,
     pub(super) entries: PagedList<PlaylistEntryRow>,
     pub(super) entry_anchor: Option<i64>,
     pub(super) selected_entry_id: Option<i64>,

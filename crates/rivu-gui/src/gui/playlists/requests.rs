@@ -36,83 +36,155 @@ pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
 /// One lane owns logical demand and publication independently of physical occupancy.
 #[derive(Default)]
 struct ViewRequestSlot {
-    generation: Option<u64>,
     projection: QueryTracker,
+    publishing: bool,
     worker_active: bool,
-    queued: Option<(Query, u64)>,
+    queued: bool,
     // Latest intent outlives logical cancellation, hiding and worker completion.
     demand: Option<ViewDemand>,
     immediate: bool,
 }
 
+enum ViewPublication {
+    Obsolete,
+    Cancelled,
+    Retired,
+    Publish,
+}
+
 impl ViewRequestSlot {
+    fn pending_generation(&self) -> Option<u64> {
+        self.publishing.then(|| self.projection.generation())
+    }
+
+    fn request(&self, kind: ViewRequestKind) -> ViewRequest {
+        ViewRequest {
+            kind,
+            pending_generation: self.pending_generation(),
+            read: None,
+        }
+    }
+
     fn prepare(
         &mut self,
+        kind: ViewRequestKind,
         query: Query,
-        generation: u64,
         revisions: QueryRevisions,
         selection_generation: u64,
         now: Instant,
-    ) -> Option<(Query, Duration)> {
+        explicit: bool,
+    ) -> ViewRequest {
         let stamp = query.stamp(revisions);
-        let demand = self.demand.get_or_insert_with(|| ViewDemand {
-            query: query.clone(),
-            stamp,
-            selection_generation,
-            quiet_until: now + Duration::from_millis(80),
-            retired: false,
+        let changed = self.demand.as_ref().is_none_or(|demand| {
+            demand.query != query
+                || demand.stamp != stamp
+                || demand.selection_generation != selection_generation
         });
-        if demand.query != query
-            || demand.stamp != stamp
-            || demand.selection_generation != selection_generation
-        {
-            *demand = ViewDemand {
-                query: query.clone(),
+        if changed || explicit {
+            self.demand = Some(ViewDemand {
+                query,
                 stamp,
                 selection_generation,
                 quiet_until: now + Duration::from_millis(80),
                 retired: false,
-            };
+            });
         }
+        let demand = self.demand.as_mut().expect("prepared view demand");
         if std::mem::take(&mut self.immediate) {
             demand.quiet_until = now;
         }
-        // A rejected snapshot cannot be repaired by replaying the same demand.
-        // Changed identity/freshness above, or an explicit request, reopens it.
+        // Replaying an identical rejected snapshot cannot repair it.
         if demand.retired {
-            return None;
+            return self.request(kind);
         }
-        let delay = demand.quiet_until.saturating_duration_since(now);
-        let replaced = self
-            .generation
-            .replace(generation)
-            .is_some_and(|current| current != generation);
-        if !self.projection.sync(&query, revisions) && replaced {
+        // Every new intent revokes the old ticket, including offset-only changes
+        // and same-query retries, before waiting for the physical worker.
+        if !self.projection.sync(&demand.query, revisions) {
             self.projection.cancel();
         }
-        if self.worker_active {
-            self.queued = Some((query, generation));
-            return None;
+        self.publishing = true;
+        self.queued = true;
+        self.take_read(kind, revisions, now)
+    }
+
+    fn take_read(
+        &mut self,
+        kind: ViewRequestKind,
+        revisions: QueryRevisions,
+        now: Instant,
+    ) -> ViewRequest {
+        if !self.queued || self.worker_active {
+            return self.request(kind);
         }
+        let demand = self.demand.as_mut().expect("queued view demand");
+        let stamp = demand.query.stamp(revisions);
+        if demand.stamp != stamp {
+            demand.stamp = stamp;
+            demand.quiet_until = now + Duration::from_millis(80);
+            self.projection.sync(&demand.query, revisions);
+        }
+        self.queued = false;
         self.worker_active = true;
-        Some((query, delay))
+        let read = ViewRead {
+            query: demand.query.clone(),
+            kind,
+            generation: self.projection.generation(),
+            delay: demand.quiet_until.saturating_duration_since(now),
+            selection_generation: demand.selection_generation,
+        };
+        ViewRequest {
+            kind,
+            pending_generation: self.pending_generation(),
+            read: Some((read, self.projection.ticket())),
+        }
+    }
+
+    fn dispatch_queued(
+        &mut self,
+        kind: ViewRequestKind,
+        demanded: bool,
+        revisions: QueryRevisions,
+        now: Instant,
+    ) -> (ViewRequest, bool) {
+        if !self.queued {
+            return (self.request(kind), false);
+        }
+        if !demanded {
+            self.cancel();
+            return (self.request(kind), true);
+        }
+        (self.take_read(kind, revisions, now), false)
     }
 
     fn is_current(&self, generation: u64) -> bool {
-        self.generation == Some(generation)
+        self.pending_generation() == Some(generation)
+    }
+
+    fn accepts(
+        &self,
+        read: &ViewRead,
+        revisions: QueryRevisions,
+        selection_generation: u64,
+    ) -> bool {
+        self.is_current(read.generation)
+            && (read.kind == ViewRequestKind::Summaries
+                || read.selection_generation == selection_generation)
+            && self
+                .projection
+                .accepts(&read.query, read.generation, revisions)
     }
 
     fn finish(&mut self, generation: u64) -> bool {
         if !self.is_current(generation) {
             return false;
         }
-        self.generation = None;
+        self.cancel();
         true
     }
 
     fn cancel(&mut self) {
-        self.generation = None;
-        self.queued = None;
+        self.publishing = false;
+        self.queued = false;
         self.projection.cancel();
     }
 
@@ -120,17 +192,55 @@ impl ViewRequestSlot {
         std::mem::take(&mut self.worker_active)
     }
 
-    fn retire(&mut self, generation: u64) {
-        if self.finish(generation) {
-            self.projection.cancel();
-            self.demand.as_mut().expect("prepared view demand").retired = true;
+    fn publish(
+        &mut self,
+        read: &ViewRead,
+        current: QueryRevisions,
+        selection_generation: u64,
+        response: &QueryResponse,
+    ) -> ViewPublication {
+        if !self.is_current(read.generation) {
+            return ViewPublication::Obsolete;
         }
+        let publication = if !self.accepts(read, current, selection_generation) {
+            ViewPublication::Cancelled
+        } else {
+            let expected_payload = matches!(
+                (&response.result, read.kind),
+                (
+                    Ok(ViewResponse::PlaylistSummaries(_)),
+                    ViewRequestKind::Summaries
+                ) | (
+                    Ok(ViewResponse::PlaylistEntries(_)),
+                    ViewRequestKind::Entries
+                ) | (
+                    Ok(ViewResponse::PlaylistSummary(_)),
+                    ViewRequestKind::Selection
+                )
+            );
+            if matches!(
+                &response.result,
+                Err(QueryError::RevisionChanged | QueryError::Cancelled)
+            ) || (expected_payload
+                && !self
+                    .projection
+                    .accepts(&read.query, read.generation, response.revisions))
+            {
+                self.demand.as_mut().expect("prepared view demand").retired = true;
+                ViewPublication::Retired
+            } else {
+                ViewPublication::Publish
+            }
+        };
+        // Timeout and final completion share this one-shot publication right;
+        // neither consumption nor cancellation releases physical occupancy.
+        self.finish(read.generation);
+        publication
     }
 }
 
 #[derive(Default)]
 pub(super) struct ViewRequests {
-    generation: u64,
     summaries: ViewRequestSlot,
     entries: ViewRequestSlot,
     selection: ViewRequestSlot,
@@ -155,27 +265,22 @@ impl ViewRequests {
         }
     }
 
-    fn next_generation(&mut self) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.generation
-    }
-
     fn prepare_view(
         &mut self,
         kind: ViewRequestKind,
         query: Query,
-        generation: u64,
+        explicit: bool,
         revisions: QueryRevisions,
         selection_generation: u64,
         now: Instant,
-    ) -> Option<(Query, Duration)> {
+    ) -> ViewRequest {
         let selection_generation = if kind == ViewRequestKind::Summaries {
             0
         } else {
             selection_generation
         };
         self.slot_mut(kind)
-            .prepare(query, generation, revisions, selection_generation, now)
+            .prepare(kind, query, revisions, selection_generation, now, explicit)
     }
 }
 
@@ -210,9 +315,7 @@ pub(in crate::gui) struct ViewRead {
     kind: ViewRequestKind,
     pub(in crate::gui) generation: u64,
     pub(in crate::gui) delay: Duration,
-    owner_generation: u64,
     selection_generation: u64,
-    selected_playlist: Option<i64>,
 }
 
 impl PlaylistModel {
@@ -241,7 +344,7 @@ impl PlaylistModel {
     }
 
     pub(in crate::gui::playlists) fn view_pending(&self, kind: ViewRequestKind) -> bool {
-        self.requests.slot(kind).generation.is_some()
+        self.requests.slot(kind).pending_generation().is_some()
     }
 
     pub(in crate::gui::playlists) fn view_loading(
@@ -321,11 +424,7 @@ impl PlaylistModel {
         }
     }
     fn playlist_request(&self, kind: ViewRequestKind) -> ViewRequest {
-        ViewRequest {
-            kind,
-            pending_generation: self.requests.slot(kind).generation,
-            read: None,
-        }
+        self.requests.slot(kind).request(kind)
     }
 
     pub(in crate::gui) fn select_playlist(&mut self, id: i64, name: String, index: usize) -> bool {
@@ -391,6 +490,10 @@ impl PlaylistModel {
 
     pub(in crate::gui) fn cancel_playlist_read(&mut self, kind: ViewRequestKind) {
         self.requests.slot_mut(kind).cancel();
+        self.cancel_playlist_state(kind);
+    }
+
+    fn cancel_playlist_state(&mut self, kind: ViewRequestKind) {
         match kind {
             ViewRequestKind::Summaries => self.playlists.cancel_page(false),
             ViewRequestKind::Entries => self.playlists.cancel_page(true),
@@ -407,7 +510,7 @@ impl PlaylistModel {
             ViewRequestKind::Entries,
             ViewRequestKind::Selection,
         ] {
-            if self.requests.slot(kind).generation.is_some() {
+            if self.view_pending(kind) {
                 self.cancel_playlist_read(kind);
             }
         }
@@ -464,17 +567,8 @@ impl PlaylistModel {
         explicit: bool,
         revisions: QueryRevisions,
     ) -> ViewRequest {
-        let kind = if entries {
-            ViewRequestKind::Entries
-        } else {
-            ViewRequestKind::Summaries
-        };
-        if explicit {
-            self.requests.slot_mut(kind).demand.take();
-        }
         let query = self.playlists.prepare_page(entries, offset, page_size);
-        let generation = self.requests.next_generation();
-        let request = self.prepare_playlist_read(query, generation, revisions);
+        let request = self.prepare_playlist_read(query, explicit, revisions);
         if request.pending_generation().is_none() {
             self.playlists.cancel_page(entries);
         }
@@ -553,8 +647,7 @@ impl PlaylistModel {
         }
         self.requests.selection_failure = None;
         self.requests.selection_baseline = Some(key);
-        let generation = self.requests.next_generation();
-        self.prepare_playlist_read(query, generation, revisions)
+        self.prepare_playlist_read(query, false, revisions)
     }
 
     pub(in crate::gui::playlists) fn retry_playlist_lookup(
@@ -570,53 +663,32 @@ impl PlaylistModel {
             || self
                 .requests
                 .slot(ViewRequestKind::Selection)
-                .generation
+                .pending_generation()
                 .is_some()
         {
             return self.playlist_request(ViewRequestKind::Selection);
         }
         self.requests.selection_failure = None;
         self.requests.selection_baseline = Some(key);
-        let generation = self.requests.next_generation();
-        self.prepare_playlist_read(query, generation, revisions)
+        self.prepare_playlist_read(query, false, revisions)
     }
 
     fn prepare_playlist_read(
         &mut self,
         query: Query,
-        generation: u64,
+        explicit: bool,
         revisions: QueryRevisions,
     ) -> ViewRequest {
         let kind = ViewRequestKind::for_query(&query).expect("playlist read query");
         let selection_generation = self.playlists.selection_generation();
-        let read = self
-            .requests
-            .prepare_view(
-                kind,
-                query,
-                generation,
-                revisions,
-                selection_generation,
-                Instant::now(),
-            )
-            .map(|(query, delay)| {
-                let owner = &mut self.requests.slot_mut(kind).projection;
-                let read = ViewRead {
-                    query,
-                    kind,
-                    generation,
-                    delay,
-                    owner_generation: owner.generation(),
-                    selection_generation,
-                    selected_playlist: self.playlists.selected(),
-                };
-                (read, owner.ticket())
-            });
-        ViewRequest {
+        self.requests.prepare_view(
             kind,
-            pending_generation: self.requests.slot(kind).generation,
-            read,
-        }
+            query,
+            explicit,
+            revisions,
+            selection_generation,
+            Instant::now(),
+        )
     }
 
     pub(in crate::gui) fn queued_playlist_read(
@@ -625,14 +697,17 @@ impl PlaylistModel {
         demanded: bool,
         revisions: QueryRevisions,
     ) -> ViewRequest {
-        let Some((query, generation)) = self.requests.slot_mut(kind).queued.take() else {
-            return self.playlist_request(kind);
-        };
-        if !demanded {
-            self.cancel_playlist_read(kind);
-            return self.playlist_request(kind);
+        let (request, cancelled) =
+            self.requests
+                .slot_mut(kind)
+                .dispatch_queued(kind, demanded, revisions, Instant::now());
+        if cancelled {
+            self.cancel_playlist_state(kind);
         }
-        self.prepare_playlist_read(query, generation, revisions)
+        if kind == ViewRequestKind::Selection && request.pending_generation().is_some() {
+            self.requests.selection_baseline = self.playlist_lookup(revisions).map(|(_, key)| key);
+        }
+        request
     }
 
     pub(in crate::gui) fn playlist_read_current(
@@ -640,21 +715,17 @@ impl PlaylistModel {
         read: &ViewRead,
         revisions: QueryRevisions,
     ) -> bool {
-        if !self.requests.slot(read.kind).is_current(read.generation)
-            || (read.kind != ViewRequestKind::Summaries
-                && self.playlists.selection_generation() != read.selection_generation)
-        {
-            return false;
-        }
-        let owner = &mut self.requests.slot_mut(read.kind).projection;
-        owner.sync(&read.query, revisions);
-        owner.accepts(&read.query, read.owner_generation, revisions)
+        self.requests.slot(read.kind).accepts(
+            read,
+            revisions,
+            self.playlists.selection_generation(),
+        )
     }
 
     pub(in crate::gui) fn abandon_playlist_read(&mut self, read: &ViewRead) {
         self.requests.slot_mut(read.kind).release_worker();
-        if self.requests.slot(read.kind).is_current(read.generation) {
-            self.cancel_playlist_read(read.kind);
+        if self.requests.slot_mut(read.kind).finish(read.generation) {
+            self.cancel_playlist_state(read.kind);
         }
     }
 
@@ -684,40 +755,28 @@ impl PlaylistModel {
         current: QueryRevisions,
         response: QueryResponse,
     ) -> Option<String> {
-        if !self.requests.slot(read.kind).is_current(read.generation) {
-            return None;
+        match self.requests.slot_mut(read.kind).publish(
+            read,
+            current,
+            self.playlists.selection_generation(),
+            &response,
+        ) {
+            ViewPublication::Obsolete => return None,
+            ViewPublication::Cancelled => {
+                self.cancel_playlist_state(read.kind);
+                return None;
+            }
+            ViewPublication::Retired => {
+                match read.kind {
+                    ViewRequestKind::Summaries => self.playlists.cancel_page(false),
+                    ViewRequestKind::Entries => self.playlists.cancel_page(true),
+                    // Preserve the baseline so render cannot resubmit this lookup.
+                    ViewRequestKind::Selection => {}
+                }
+                return None;
+            }
+            ViewPublication::Publish => {}
         }
-        if !self.playlist_read_current(read, current) {
-            self.cancel_playlist_read(read.kind);
-            return None;
-        }
-        let expected_payload = matches!(
-            (&response.result, read.kind),
-            (
-                Ok(ViewResponse::PlaylistSummaries(_)),
-                ViewRequestKind::Summaries
-            ) | (
-                Ok(ViewResponse::PlaylistEntries(_)),
-                ViewRequestKind::Entries
-            ) | (
-                Ok(ViewResponse::PlaylistSummary(_)),
-                ViewRequestKind::Selection
-            )
-        );
-        if matches!(
-            &response.result,
-            Err(QueryError::RevisionChanged | QueryError::Cancelled)
-        ) || (expected_payload
-            && !self.requests.slot(read.kind).projection.accepts(
-                &read.query,
-                read.owner_generation,
-                response.revisions,
-            ))
-        {
-            self.retire_playlist_read(read);
-            return None;
-        }
-        self.requests.slot_mut(read.kind).finish(read.generation);
         match response.result {
             Err(error) => self.fail_playlist_read(read, current, error.to_string()),
             Ok(ViewResponse::PlaylistSummaries(page))
@@ -733,24 +792,14 @@ impl PlaylistModel {
             Ok(ViewResponse::PlaylistSummary(summary))
                 if read.kind == ViewRequestKind::Selection =>
             {
-                if let Some(id) = read.selected_playlist {
-                    self.accept_playlist_lookup(id, summary);
+                if let Query::PlaylistSummary { playlist_id: id } = &read.query {
+                    self.accept_playlist_lookup(*id, summary);
                 }
                 None
             }
             _ => {
                 self.fail_playlist_read(read, current, "Unexpected playlist query response".into())
             }
-        }
-    }
-
-    fn retire_playlist_read(&mut self, read: &ViewRead) {
-        self.requests.slot_mut(read.kind).retire(read.generation);
-        match read.kind {
-            ViewRequestKind::Summaries => self.playlists.cancel_page(false),
-            ViewRequestKind::Entries => self.playlists.cancel_page(true),
-            // Preserve the baseline so render cannot resubmit this lookup.
-            ViewRequestKind::Selection => {}
         }
     }
 
@@ -857,13 +906,7 @@ mod tests {
                 .slot(ViewRequestKind::Entries)
                 .worker_active
         );
-        assert!(
-            browser
-                .requests
-                .slot(ViewRequestKind::Entries)
-                .queued
-                .is_none()
-        );
+        assert!(!browser.requests.slot(ViewRequestKind::Entries).queued);
         assert!(
             browser
                 .demand_playlist_entries(40..50, 20, current)
@@ -1323,8 +1366,26 @@ mod tests {
             );
             assert!(!browser.view_pending(kind));
             assert!(browser.requests.slot(kind).worker_active);
+            let late = match kind {
+                ViewRequestKind::Summaries => ViewResponse::PlaylistSummaries(Page {
+                    total: 1,
+                    rows: vec![summary(1, 99)],
+                }),
+                ViewRequestKind::Entries => ViewResponse::PlaylistEntries(Page {
+                    total: 1,
+                    rows: vec![entry(10, 0)],
+                }),
+                ViewRequestKind::Selection => ViewResponse::PlaylistSummary(Some(summary(1, 99))),
+            };
             assert_eq!(
-                browser.complete_playlist_read(&read, revisions, timeout()),
+                browser.complete_playlist_read(
+                    &read,
+                    revisions,
+                    QueryResponse {
+                        revisions,
+                        result: Ok(late),
+                    }
+                ),
                 None
             );
             assert!(!browser.requests.slot(kind).worker_active);
@@ -1336,7 +1397,11 @@ mod tests {
                 ViewRequestKind::Entries => {
                     assert!(browser.playlists.entries().rows.error(0).is_some())
                 }
-                ViewRequestKind::Selection => assert_eq!(browser.playlists.selected(), Some(1)),
+                ViewRequestKind::Selection => {
+                    assert_eq!(browser.playlists.selected(), Some(1));
+                    assert_eq!(browser.playlists.selected_total(), None);
+                    assert!(browser.playlist_lookup_failure().is_some());
+                }
             }
         }
     }
@@ -1533,7 +1598,7 @@ mod tests {
     fn queued_playlist_demand_uses_elapsed_latest_deadline() {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
-        let query = |offset| rivu_protocol::model::Query::PlaylistEntries {
+        let query = |offset| Query::PlaylistEntries {
             query: None,
             playlist_id: 1,
             offset,
@@ -1541,126 +1606,115 @@ mod tests {
         };
         let revisions = Default::default();
         let mut requests = ViewRequests::default();
-        let (_, delay) = requests
-            .prepare_view(kind, query(0), 1, revisions, 1, start)
+        let (first, ticket) = requests
+            .prepare_view(kind, query(0), false, revisions, 1, start)
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::from_millis(80));
-        assert!(
-            requests
-                .prepare_view(
-                    kind,
-                    query(20),
-                    2,
-                    revisions,
-                    1,
-                    start + Duration::from_millis(10)
-                )
-                .is_none()
+        assert_eq!(first.delay, Duration::from_millis(80));
+        let queued = requests.prepare_view(
+            kind,
+            query(20),
+            false,
+            revisions,
+            1,
+            start + Duration::from_millis(10),
         );
-        // Neither replacement nor an elapsed deadline releases the physical gate.
+        let generation = queued.pending_generation().unwrap();
+        assert!(queued.into_read().is_none());
+        assert!(!ticket.is_current());
+        // An elapsed deadline cannot release the physical gate or replace intent.
         assert!(
             requests
-                .prepare_view(
-                    kind,
-                    query(20),
-                    3,
-                    revisions,
-                    1,
-                    start + Duration::from_millis(100)
-                )
+                .slot_mut(kind)
+                .take_read(kind, revisions, start + Duration::from_millis(100))
+                .into_read()
                 .is_none()
         );
         assert!(requests.slot_mut(kind).release_worker());
-        let (queued, generation) = requests.slot_mut(kind).queued.take().unwrap();
-        let (_, delay) = requests
-            .prepare_view(
-                kind,
-                queued,
-                generation,
-                revisions,
-                1,
-                start + Duration::from_millis(100),
-            )
+        let (read, ticket) = requests
+            .slot_mut(kind)
+            .take_read(kind, revisions, start + Duration::from_millis(100))
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::ZERO);
+        assert_eq!(read.query, query(20));
+        assert_eq!(read.generation, generation);
+        assert!(ticket.is_current());
+        assert_eq!(read.delay, Duration::ZERO);
     }
 
     #[test]
     fn playlist_replacement_and_hidden_reopen_preserve_remaining_quiet_interval() {
         let start = Instant::now();
         let kind = ViewRequestKind::Summaries;
-        let query = |offset| rivu_protocol::model::Query::PlaylistSummaries {
+        let query = |offset| Query::PlaylistSummaries {
             query: None,
             offset,
             limit: 20,
         };
         let revisions = Default::default();
         let mut requests = ViewRequests::default();
-        requests
-            .prepare_view(kind, query(0), 1, revisions, 0, start)
+        let (_, retired) = requests
+            .prepare_view(kind, query(0), false, revisions, 0, start)
+            .into_read()
             .unwrap();
-        let retired = requests.slot_mut(kind).projection.ticket();
         assert!(
             requests
                 .prepare_view(
                     kind,
                     query(20),
-                    2,
+                    false,
                     revisions,
                     0,
-                    start + Duration::from_millis(20)
+                    start + Duration::from_millis(20),
                 )
+                .into_read()
                 .is_none()
         );
         assert!(!retired.is_current());
         assert!(requests.slot_mut(kind).release_worker());
-        let (queued, generation) = requests.slot_mut(kind).queued.take().unwrap();
-        let (_, delay) = requests
-            .prepare_view(
-                kind,
-                queued,
-                generation,
-                revisions,
-                0,
-                start + Duration::from_millis(50),
-            )
+        let (read, _) = requests
+            .slot_mut(kind)
+            .take_read(kind, revisions, start + Duration::from_millis(50))
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::from_millis(50));
-        // Hiding cancels logical demand/reservations, never the occupied gate or deadline.
+        assert_eq!(read.delay, Duration::from_millis(50));
+        // Hiding cancels publication, never the occupied gate or deadline.
         requests.slot_mut(kind).cancel();
         assert!(requests.slot(kind).worker_active);
         assert!(requests.slot_mut(kind).release_worker());
-        let (_, delay) = requests
+        let (read, _) = requests
             .prepare_view(
                 kind,
                 query(20),
-                3,
+                false,
                 revisions,
                 0,
                 start + Duration::from_millis(60),
             )
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::from_millis(40));
+        assert_eq!(read.delay, Duration::from_millis(40));
         requests.slot_mut(kind).cancel();
         assert!(requests.slot_mut(kind).release_worker());
-        let (_, delay) = requests
+        let (read, _) = requests
             .prepare_view(
                 kind,
                 query(20),
-                4,
+                false,
                 revisions,
                 0,
                 start + Duration::from_millis(150),
             )
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::ZERO);
+        assert_eq!(read.delay, Duration::ZERO);
     }
 
     #[test]
     fn playlist_freshness_and_identity_changes_establish_new_quiet_deadlines() {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
-        let query = rivu_protocol::model::Query::PlaylistEntries {
+        let query = Query::PlaylistEntries {
             query: None,
             playlist_id: 1,
             offset: 0,
@@ -1669,36 +1723,136 @@ mod tests {
         let mut requests = ViewRequests::default();
         let revisions = Default::default();
         requests
-            .prepare_view(kind, query.clone(), 1, revisions, 1, start)
+            .prepare_view(kind, query.clone(), false, revisions, 1, start)
+            .into_read()
             .unwrap();
         assert!(requests.slot_mut(kind).release_worker());
-        let revisions = rivu_protocol::response::QueryRevisions {
+        let revisions = QueryRevisions {
             library: 1,
             ..revisions
         };
-        let (_, delay) = requests
+        let (read, _) = requests
             .prepare_view(
                 kind,
                 query.clone(),
-                2,
+                false,
                 revisions,
                 1,
                 start + Duration::from_millis(100),
             )
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::from_millis(80));
+        assert_eq!(read.delay, Duration::from_millis(80));
         assert!(requests.slot_mut(kind).release_worker());
-        let (_, delay) = requests
+        let (read, _) = requests
             .prepare_view(
                 kind,
                 query,
-                3,
+                false,
                 revisions,
                 2,
                 start + Duration::from_millis(200),
             )
+            .into_read()
             .unwrap();
-        assert_eq!(delay, Duration::from_millis(80));
+        assert_eq!(read.delay, Duration::from_millis(80));
+    }
+
+    #[test]
+    fn same_query_offset_and_aba_intents_revoke_busy_worker_tickets() {
+        let kind = ViewRequestKind::Summaries;
+        let start = Instant::now();
+        let revisions = QueryRevisions::default();
+        let query = |offset| Query::PlaylistSummaries {
+            query: None,
+            offset,
+            limit: 20,
+        };
+        let mut requests = ViewRequests::default();
+        let (old, ticket) = requests
+            .prepare_view(kind, query(0), false, revisions, 0, start)
+            .into_read()
+            .unwrap();
+        let mut previous = old.generation;
+        for offset in [0, 20, 0] {
+            let queued = requests.prepare_view(kind, query(offset), false, revisions, 0, start);
+            let generation = queued.pending_generation().unwrap();
+            assert_ne!(generation, previous);
+            assert!(queued.into_read().is_none());
+            assert!(!ticket.is_current());
+            assert!(!requests.slot(kind).accepts(&old, revisions, 0));
+            previous = generation;
+        }
+        assert!(requests.slot_mut(kind).release_worker());
+        let (latest, _) = requests
+            .slot_mut(kind)
+            .take_read(kind, revisions, start)
+            .into_read()
+            .unwrap();
+        assert_eq!(latest.generation, previous);
+        assert_eq!(latest.query, query(0));
+    }
+
+    #[test]
+    fn queued_dispatch_rechecks_freshness_without_renewing_unchanged_intent() {
+        let kind = ViewRequestKind::Entries;
+        let start = Instant::now();
+        let revisions = QueryRevisions::default();
+        let query = |offset| Query::PlaylistEntries {
+            playlist_id: 1,
+            query: None,
+            offset,
+            limit: 20,
+        };
+        let mut requests = ViewRequests::default();
+        requests
+            .prepare_view(kind, query(0), false, revisions, 1, start)
+            .into_read()
+            .unwrap();
+        let queued = requests.prepare_view(kind, query(20), false, revisions, 1, start);
+        let generation = queued.pending_generation().unwrap();
+        assert!(queued.into_read().is_none());
+        assert!(requests.slot_mut(kind).release_worker());
+        let current = QueryRevisions {
+            library: 1,
+            ..revisions
+        };
+        let (read, ticket) = requests
+            .slot_mut(kind)
+            .take_read(kind, current, start + Duration::from_millis(100))
+            .into_read()
+            .unwrap();
+        assert_ne!(read.generation, generation);
+        assert_eq!(read.delay, Duration::from_millis(80));
+        assert!(ticket.is_current());
+        assert!(requests.slot(kind).accepts(&read, current, 1));
+        assert!(!requests.slot(kind).accepts(&read, revisions, 1));
+
+        // The selection baseline follows the same refreshed intent, so render
+        // cannot replace a just-dispatched lookup with another logical request.
+        let mut browser = PlaylistModel::default();
+        browser.select_playlist(1, "one".into(), 0);
+        let (old, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.cancel_playlist_read(ViewRequestKind::Selection);
+        let queued = browser.prepare_playlist_lookup(revisions);
+        assert!(queued.into_read().is_none());
+        browser.complete_playlist_read(&old, revisions, lookup_success(revisions, 1, 99));
+        let current = QueryRevisions {
+            playlist: 1,
+            ..revisions
+        };
+        let (lookup, ticket) = browser
+            .queued_playlist_read(ViewRequestKind::Selection, true, current)
+            .into_read()
+            .unwrap();
+        let retained = browser.prepare_playlist_lookup(current);
+        assert_eq!(retained.pending_generation(), Some(lookup.generation));
+        assert!(retained.into_read().is_none());
+        assert!(ticket.is_current());
+        assert!(browser.playlist_read_current(&lookup, current));
     }
 
     #[test]
@@ -1723,18 +1877,19 @@ mod tests {
                     limit: 20,
                 }
             };
-            let (_, delay) = model
+            let (read, _) = model
                 .requests
                 .prepare_view(
                     kind,
                     request,
-                    1,
+                    false,
                     QueryRevisions::default(),
                     0,
                     Instant::now(),
                 )
+                .into_read()
                 .unwrap();
-            assert_eq!(delay, Duration::ZERO);
+            assert_eq!(read.delay, Duration::ZERO);
         }
     }
 
@@ -1855,49 +2010,41 @@ mod tests {
     #[test]
     fn empty_catalog_releases_selected_playlist_and_pending_entry_requests() {
         let mut browser = PlaylistModel::default();
-        browser.playlists.select(41, "deleted".into(), 0);
-        browser.playlists.prepare_entries(41);
-        browser.playlists.prepare_page(true, 0, 20);
-        browser.playlists.prepare_page(false, 0, 20);
-        for kind in [
-            ViewRequestKind::Summaries,
-            ViewRequestKind::Selection,
-            ViewRequestKind::Entries,
-        ] {
-            browser.requests.slot_mut(kind).generation = Some(1);
-        }
-
-        assert!(
-            browser
-                .requests
-                .slot_mut(ViewRequestKind::Summaries)
-                .finish(1)
-        );
-        browser.playlists.fail_page(false, "unavailable".into());
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "deleted".into(), 0);
+        let (lookup, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        let (entries, _) = browser
+            .request_playlist_entries(41, 0, 20, revisions)
+            .into_read()
+            .unwrap();
+        let (catalog, _) = browser
+            .request_playlist_summaries(0, 20, revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(&catalog, revisions, lookup_error(revisions, "unavailable"));
         assert!(!browser.view_pending(ViewRequestKind::Summaries));
         assert_eq!(
             browser.playlists.summaries().rows.error(0),
             Some("unavailable")
         );
         assert_eq!(browser.playlists.selected(), Some(41));
-        assert_eq!(browser.playlists.retry_page(false, 20), Some(0));
-        browser.playlists.prepare_page(false, 0, 20);
-        browser
-            .requests
-            .slot_mut(ViewRequestKind::Summaries)
-            .generation = Some(2);
-        assert!(
-            browser
-                .requests
-                .slot_mut(ViewRequestKind::Summaries)
-                .finish(2)
-        );
-        browser.accept_playlist_summaries(
-            rivu_protocol::model::Page {
-                total: 0,
-                rows: Vec::new(),
+        let (retry, _) = browser
+            .retry_playlist_summaries(20, revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(
+            &retry,
+            revisions,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::PlaylistSummaries(Page {
+                    total: 0,
+                    rows: Vec::new(),
+                })),
             },
-            QueryRevisions::default(),
         );
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
@@ -1909,29 +2056,49 @@ mod tests {
             ViewRequestKind::Entries,
         ] {
             assert!(!browser.view_pending(kind));
-            assert!(!browser.requests.slot_mut(kind).finish(1));
         }
+        assert!(!browser.playlist_read_current(&lookup, revisions));
+        assert!(!browser.playlist_read_current(&entries, revisions));
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Selection)
+                .worker_active
+        );
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .worker_active
+        );
         assert_eq!(browser.playlists.demand_page(true, 0..1, 20), None);
     }
 
     #[test]
     fn clearing_selection_releases_entry_owner_and_outstanding_requests() {
         let mut browser = PlaylistModel::default();
-        browser.playlists.select(41, "selected".into(), 0);
-        browser.playlists.prepare_entries(41);
-        browser.playlists.prepare_page(true, 0, 20);
-        for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
-            browser.requests.slot_mut(kind).generation = Some(1);
-        }
-
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "selected".into(), 0);
+        let (lookup, lookup_ticket) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        let (entries, entries_ticket) = browser
+            .request_playlist_entries(41, 0, 20, revisions)
+            .into_read()
+            .unwrap();
         browser.remove_playlist_selection();
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
         assert!(browser.playlists.entries().rows.is_empty());
         for kind in [ViewRequestKind::Selection, ViewRequestKind::Entries] {
             assert!(!browser.view_pending(kind));
-            assert!(!browser.requests.slot_mut(kind).finish(1));
+            assert!(browser.requests.slot(kind).worker_active);
         }
+        assert!(!lookup_ticket.is_current());
+        assert!(!entries_ticket.is_current());
+        assert!(!browser.playlist_read_current(&lookup, revisions));
+        assert!(!browser.playlist_read_current(&entries, revisions));
     }
 
     fn automatic_request(

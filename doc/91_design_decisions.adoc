@@ -556,6 +556,24 @@ does not transfer mutation authority.
 Record retention and resource boundaries:
 link:27_audio_processing.adoc#_ownership_and_invariants[Ownership and invariants].
 
+[[DEC-022]]
+=== DEC-022: Query replacement belongs to the demand owner
+
+Status: implemented, 2026-11-13.
+
+A submission receipt identifies a projection epoch, not every physical read.
+Keep replacement policy local: TUI foreground demand and each GUI Playlist lane
+are latest-only, while Library branches can share a projection epoch without
+revoking one another. Making every shared tracker submission advance the epoch
+would cancel valid peer reads.
+
+Use one epoch source for a Playlist lane's publication and loading identity;
+pending publication and physical occupancy remain independent. Timeout consumes
+publication rights without releasing the worker, and a queued replacement is
+already a logical intent before it can execute. Keep payload application and
+failure recovery with their business owners rather than introducing a universal
+query scheduler. See link:22_cache.adoc#_demand_cancellation_and_physical_retirement[query ownership].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 
