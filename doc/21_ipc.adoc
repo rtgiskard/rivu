@@ -1028,6 +1028,8 @@ ID order. With `after = false`, the group goes before the target; `after = true`
 places it after the target. `before_entry_id = None` appends in either case.
 The target is a stable entry identity in the same playlist, not a row index.
 Moving onto a selected target or requesting an already-current order is a no-op.
+Single-entry moves use this same command with one selected ID; clients carry the
+observed playlist owner and entry token rather than resolving an index at dispatch.
 
 Both commands compare `expected_revision` with that playlist's current scalar
 entry token at core dispatch, before storage mutation. A nonexistent playlist,

@@ -424,8 +424,14 @@ fn batch_errors_distinguish_revision_changes_from_invalid_requests() {
         .unwrap()
         .rows[0]
         .id;
-    core.command(Command::MovePlaylistEntry { entry_id, index: 1 })
-        .unwrap();
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![entry_id],
+        before_entry_id: None,
+        after: false,
+        expected_revision: entry_expected.playlist_entries.unwrap().revision,
+    })
+    .unwrap();
     // Entry content staleness also takes priority independently of metadata.
     assert_eq!(
         core.view(&Query::PlaylistEntryBatch {
@@ -633,15 +639,21 @@ fn filtered_playlist_continuations_reject_foreign_query_metadata_and_order() {
         .unwrap()
         .rows[0]
         .id;
-    core.command(Command::MovePlaylistEntry {
-        entry_id: other,
-        index: 3,
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 2,
+        entry_ids: vec![other],
+        before_entry_id: None,
+        after: false,
+        expected_revision: core.state.library.playlist_entry_revisions[&2],
     })
     .unwrap();
     assert!(core.view(&batch(1, Some("needle"), first)).is_ok());
-    core.command(Command::MovePlaylistEntry {
-        entry_id: rows[0].id,
-        index: 3,
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![rows[0].id],
+        before_entry_id: None,
+        after: false,
+        expected_revision: core.state.library.playlist_entry_revisions[&1],
     })
     .unwrap();
     assert_eq!(

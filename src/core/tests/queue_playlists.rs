@@ -780,9 +780,12 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
         .unwrap()
         .rows[0]
         .id;
-    core.command(Command::MovePlaylistEntry {
-        entry_id: other,
-        index: 3,
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 2,
+        entry_ids: vec![other],
+        before_entry_id: None,
+        after: false,
+        expected_revision: core.state.library.playlist_entry_revisions[&2],
     })
     .unwrap();
     assert_eq!(core.state.playlist_query_revisions(1), baseline);
@@ -951,7 +954,13 @@ fn playlist_append_and_move_only_invalidate_changed_pages() {
             directories: vec![],
             track_ids: vec![],
         },
-        Command::MovePlaylistEntry { entry_id, index: 0 },
+        Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![entry_id],
+            before_entry_id: Some(entry_id),
+            after: false,
+            expected_revision: expected.playlist_entries.unwrap().revision,
+        },
     ] {
         core.command(command).unwrap();
         assert_eq!(core.state.playlist_query_revisions(1), expected);
@@ -978,33 +987,46 @@ fn playlist_append_and_move_only_invalidate_changed_pages() {
             directories: vec![],
             track_ids: vec![3, 999],
         },
-        Command::MovePlaylistEntry {
-            entry_id,
-            index: usize::MAX,
+        Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![entry_id],
+            before_entry_id: Some(i64::MAX),
+            after: false,
+            expected_revision: expected.playlist_entries.unwrap().revision,
         },
-        Command::MovePlaylistEntry {
-            entry_id: i64::MAX,
-            index: 0,
+        Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![i64::MAX],
+            before_entry_id: None,
+            after: false,
+            expected_revision: expected.playlist_entries.unwrap().revision,
         },
     ] {
         assert!(core.command(command).is_err());
         assert_eq!(core.state.playlist_query_revisions(1), expected);
         assert_eq!(core.store.playlist_track_ids(1, 10).unwrap(), [1, 2]);
     }
-    for command in [
-        Command::AddPlaylist {
-            playlist_id: 1,
-            track_ids: vec![3],
-        },
-        Command::AddPlaylistSources {
-            other_tracks: false,
-            playlist_id: 1,
-            directories: vec![],
-            track_ids: vec![4],
-        },
-        Command::MovePlaylistEntry { entry_id, index: 3 },
-    ] {
-        let reordered = matches!(command, Command::MovePlaylistEntry { .. });
+    for step in 0..3 {
+        let command = match step {
+            0 => Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![3],
+            },
+            1 => Command::AddPlaylistSources {
+                other_tracks: false,
+                playlist_id: 1,
+                directories: vec![],
+                track_ids: vec![4],
+            },
+            _ => Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![entry_id],
+                before_entry_id: None,
+                after: false,
+                expected_revision: core.state.library.playlist_entry_revisions[&1],
+            },
+        };
+        let reordered = matches!(command, Command::MovePlaylistEntries { .. });
         let before = core.state.playlist_query_revisions(1);
         let query = Query::PlaylistEntryBatch {
             query: None,
@@ -1092,9 +1114,12 @@ fn playlist_reorders_preserve_catalog_and_other_playlist_queries() {
     };
     let continuation = entries.next;
     let old_snapshot = &core.state.clone();
-    core.command(Command::MovePlaylistEntry {
-        entry_id: first_entry,
-        index: 2,
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![first_entry],
+        before_entry_id: None,
+        after: false,
+        expected_revision: core.state.library.playlist_entry_revisions[&1],
     })
     .unwrap();
     core.publish();
@@ -1173,9 +1198,17 @@ fn playlist_reorders_preserve_catalog_and_other_playlist_queries() {
         .id;
     // Two mutations may coalesce into one snapshot; both scoped tokens survive.
     for index in [2, 1] {
-        core.command(Command::MovePlaylistEntry {
-            entry_id: other_entry,
-            index,
+        let rows = core
+            .store
+            .playlist_entries_page(2, None, 0, 3)
+            .unwrap()
+            .rows;
+        core.command(Command::MovePlaylistEntries {
+            playlist_id: 2,
+            entry_ids: vec![other_entry],
+            before_entry_id: Some(rows[index].id),
+            after: index == 2,
+            expected_revision: core.state.library.playlist_entry_revisions[&2],
         })
         .unwrap();
     }
@@ -1229,9 +1262,12 @@ fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_
         (Command::DeletePlaylist { playlist_id: 1 }, 1),
     ] {
         let page = core.store.playlist_entries_page(1, None, 0, 1).unwrap();
-        core.command(Command::MovePlaylistEntry {
-            entry_id: page.rows[0].id,
-            index: page.total - 1,
+        core.command(Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![page.rows[0].id],
+            before_entry_id: None,
+            after: false,
+            expected_revision: core.state.library.playlist_entry_revisions[&1],
         })
         .unwrap();
         let expected = core.state.playlist_query_revisions(1);
@@ -2022,9 +2058,18 @@ fn collection_transfers_reject_source_changes_after_the_last_page() {
         .unwrap()
         .rows[0]
         .id;
-    core.command(Command::MovePlaylistEntry {
-        entry_id: last_entry,
-        index: 0,
+    let first_entry = core
+        .store
+        .playlist_entries_page(1, None, 0, 1)
+        .unwrap()
+        .rows[0]
+        .id;
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![last_entry],
+        before_entry_id: Some(first_entry),
+        after: false,
+        expected_revision: core.state.library.playlist_entry_revisions[&1],
     })
     .unwrap();
     let queue = core.store.queue_ids().unwrap();

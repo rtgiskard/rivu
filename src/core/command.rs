@@ -470,9 +470,6 @@ impl Core {
                 }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
-            Command::MovePlaylistEntry { entry_id, index } => {
-                self.move_playlist_entry(entry_id, index)?;
-            }
             Command::RemovePlaylistEntries {
                 playlist_id,
                 entry_ids,

@@ -19,8 +19,8 @@ renaming, saving a queue, and importing reject an existing name. Comparison is
 exact, including case and whitespace: CLI/API names retain outer whitespace,
 while the desktop name dialog trims it.
 
-Use `playlist list` for playlist IDs and `playlist show PLAYLIST_ID` for entry IDs.
-Add library track IDs; remove or move entry IDs. Move indices start at zero.
+Use `playlist list` for playlist IDs and `playlist show PLAYLIST_ID` for entry IDs
+and the observed entry revision. Add library track IDs; remove or move entry IDs.
 Removing entries or deleting a playlist leaves library tracks and already loaded
 queues intact.
 
@@ -30,8 +30,16 @@ rivu playlist create "Mix"
 rivu playlist list
 rivu playlist show PLAYLIST_ID
 rivu playlist add PLAYLIST_ID TRACK_ID...
-rivu playlist move ENTRY_ID 0
+rivu playlist move PLAYLIST_ID ENTRY_ID --before TARGET_ENTRY_ID --expected-revision REV
 ----
+
+The move requires the revision printed by `playlist show` when choosing the target.
+Use `--before ENTRY_ID` or `--after ENTRY_ID` for a stable target in that playlist;
+omit both to append. A stale revision fails without changing order: refresh the
+listing and choose again rather than replaying the old intent with a new token.
+Text listings begin with `playlist_id=ID revision=REV`. With `--json`, the result is
+`{"playlist_id":ID,"revision":REV,"entries":[...]}`, including empty playlists.
+The revision and all streamed entry pages belong to one pinned traversal.
 
 Saving a queue as a playlist is atomic: failure leaves no newly created empty
 playlist. For whole-playlist versus individual-track playback, confirmation, and

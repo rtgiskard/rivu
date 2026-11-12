@@ -231,9 +231,19 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 track_ids,
             },
             PlaylistAction::Remove { entry_id } => Command::RemovePlaylistEntry { entry_id },
-            PlaylistAction::Move { entry_id, index } => {
-                Command::MovePlaylistEntry { entry_id, index }
-            }
+            PlaylistAction::Move {
+                playlist_id,
+                entry_id,
+                before,
+                after,
+                expected_revision,
+            } => Command::MovePlaylistEntries {
+                playlist_id,
+                entry_ids: vec![entry_id],
+                before_entry_id: before.or(after),
+                after: after.is_some(),
+                expected_revision,
+            },
             PlaylistAction::Play { playlist_id } => Command::PlayPlaylist { playlist_id },
             PlaylistAction::Import {
                 path,

@@ -102,9 +102,10 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
     let page = store.playlist_entries_page(playlist, None, 0, 1).unwrap();
     assert_eq!(page.total, 501);
     assert_eq!(page.rows[0].track_id, 1000);
-    assert_eq!(
-        store.move_playlist_entry(page.rows[0].id, 500).unwrap(),
-        Some(playlist)
+    assert!(
+        store
+            .move_playlist_entries(playlist, &[page.rows[0].id], None, false)
+            .unwrap()
     );
     assert_eq!(
         store

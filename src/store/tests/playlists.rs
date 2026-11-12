@@ -24,7 +24,10 @@ fn playlist_preserves_occurrences_across_edits_and_restart() {
         vec![ids[0], ids[1], ids[0], ids[1], ids[2], ids[2]]
     );
     assert_eq!(entries[0].id, first_entry);
-    assert_eq!(s.move_playlist_entry(entries[4].id, 0).unwrap(), Some(pl));
+    assert!(
+        s.move_playlist_entries(pl, &[entries[4].id], Some(first_entry), false)
+            .unwrap()
+    );
     s.remove_playlist_entry(first_entry).unwrap();
     drop(s);
     assert_eq!(
@@ -62,9 +65,10 @@ fn deleting_tracks_keeps_playlist_reordering_contiguous() {
         .unwrap();
     let before = playlist_entries(&store, playlist);
     store.remove_tracks(&[tracks[0].id]).unwrap();
-    assert_eq!(
-        store.move_playlist_entry(before[3].id, 0).unwrap(),
-        Some(playlist)
+    assert!(
+        store
+            .move_playlist_entries(playlist, &[before[3].id], Some(before[1].id), false)
+            .unwrap()
     );
     assert_eq!(
         playlist_entries(&store, playlist)

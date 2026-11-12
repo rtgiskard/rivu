@@ -87,16 +87,6 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn move_playlist_entry(
-        &mut self,
-        entry_id: i64,
-        index: usize,
-    ) -> Result<()> {
-        if let Some(playlist_id) = self.store.move_playlist_entry(entry_id, index)? {
-            self.advance_playlist_entry_revision(playlist_id);
-        }
-        Ok(())
-    }
     pub(in crate::core) fn advance_playlist_entry_revision(&mut self, playlist_id: i64) {
         self.next_playlist_token = self
             .next_playlist_token

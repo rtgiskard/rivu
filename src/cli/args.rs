@@ -505,8 +505,15 @@ pub(super) enum PlaylistAction {
         entry_id: i64,
     },
     Move {
+        playlist_id: i64,
         entry_id: i64,
-        index: usize,
+        #[arg(long, conflicts_with = "after")]
+        before: Option<i64>,
+        #[arg(long)]
+        after: Option<i64>,
+        /// Playlist entry revision observed when choosing the target.
+        #[arg(long)]
+        expected_revision: u64,
     },
     Play {
         playlist_id: i64,
@@ -1046,6 +1053,67 @@ mod graph_tests {
         ] {
             assert!(
                 Args::try_parse_from(["rivu", "processing", "graph"].into_iter().chain(arguments))
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod playlist_move_tests {
+    use super::*;
+
+    #[test]
+    fn move_requires_owner_and_observed_revision_with_exclusive_stable_targets() {
+        for (target, before_expected, after_expected) in [
+            (vec![], None, None),
+            (vec!["--before", "43"], Some(43), None),
+            (vec!["--after", "43"], None, Some(43)),
+        ] {
+            let args = Args::try_parse_from(
+                [
+                    "rivu",
+                    "playlist",
+                    "move",
+                    "10",
+                    "42",
+                    "--expected-revision",
+                    "19",
+                ]
+                .into_iter()
+                .chain(target),
+            )
+            .unwrap();
+            let Some(Action::Playlist(PlaylistAction::Move {
+                playlist_id,
+                entry_id,
+                before,
+                after,
+                expected_revision,
+            })) = args.action
+            else {
+                panic!("expected playlist move");
+            };
+            assert_eq!((playlist_id, entry_id, expected_revision), (10, 42, 19));
+            assert_eq!((before, after), (before_expected, after_expected));
+        }
+        for arguments in [
+            vec!["42", "0"],
+            vec!["10", "42"],
+            vec!["42", "--expected-revision", "19"],
+            vec![
+                "10",
+                "42",
+                "--before",
+                "43",
+                "--after",
+                "44",
+                "--expected-revision",
+                "19",
+            ],
+        ] {
+            assert!(
+                Args::try_parse_from(["rivu", "playlist", "move"].into_iter().chain(arguments))
                     .is_err()
             );
         }

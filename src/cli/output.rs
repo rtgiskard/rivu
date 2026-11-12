@@ -21,6 +21,7 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
         i18n,
         &mut session,
         json,
+        false,
         |after, expected| Query::QueueBatch {
             query: None,
             after,
@@ -67,6 +68,7 @@ pub(super) fn list_library(
         i18n,
         &mut session,
         json,
+        false,
         |after, expected| Query::TrackBatch {
             query: query.clone(),
             favorite,
@@ -175,6 +177,7 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
         i18n,
         &mut session,
         json,
+        false,
         |after, expected| Query::PlaylistSummaryBatch {
             query: None,
             after,
@@ -217,6 +220,7 @@ pub(super) fn show_playlist(
         i18n,
         &mut session,
         json,
+        true,
         |after, expected| Query::PlaylistEntryBatch {
             query: None,
             playlist_id,
@@ -253,6 +257,7 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
     i18n: &Localizer,
     session: &mut rivu_client::ClientSession,
     json: bool,
+    include_playlist_revision: bool,
     mut query: impl FnMut(Option<C>, Option<QueryRevisions>) -> Query,
     unpack: impl Fn(ViewResponse, QueryRevisions) -> Result<Option<Batch<T, C>>>,
     mut text: impl FnMut(&mut dyn Write, &T, usize) -> Result<()>,
@@ -262,14 +267,22 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
     let mut after = None;
     let mut expected = None;
     let mut index = 0;
-    if json {
-        write!(output, "[")?;
-    }
     loop {
         let response = session.query(query(after, expected))?;
-        expected.get_or_insert(response.revisions);
         let batch = unpack(listing_result(i18n, response.result)?, response.revisions)?
             .context("Listing query returned an unexpected response")?;
+        if expected.is_none() {
+            if include_playlist_revision {
+                let revision = response
+                    .revisions
+                    .playlist_entries
+                    .context("Playlist listing omitted its entry revision")?;
+                write_playlist_heading(&mut output, json, revision)?;
+            } else if json {
+                write!(output, "[")?;
+            }
+        }
+        expected.get_or_insert(response.revisions);
         for row in &batch.rows {
             if json {
                 if index != 0 {
@@ -288,9 +301,34 @@ fn write_listing<T: serde::Serialize, C: Copy + PartialEq>(
         after = Some(next);
     }
     if json {
-        writeln!(output, "]")?;
+        if include_playlist_revision {
+            writeln!(output, "]}}")?;
+        } else {
+            writeln!(output, "]")?;
+        }
     }
     output.flush()?;
+    Ok(())
+}
+
+fn write_playlist_heading(
+    output: &mut dyn Write,
+    json: bool,
+    revision: rivu_protocol::response::PlaylistEntryRevision,
+) -> Result<()> {
+    if json {
+        write!(
+            output,
+            "{{\"playlist_id\":{},\"revision\":{},\"entries\":[",
+            revision.playlist_id, revision.revision
+        )?;
+    } else {
+        writeln!(
+            output,
+            "playlist_id={} revision={}",
+            revision.playlist_id, revision.revision
+        )?;
+    }
     Ok(())
 }
 
@@ -691,5 +729,32 @@ mod tests {
                 assert_eq!(row.played_at, entries[index].played_at);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod playlist_heading_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_show_exposes_owner_and_exact_revision_even_without_entries() {
+        let revision = rivu_protocol::response::PlaylistEntryRevision {
+            playlist_id: 10,
+            revision: u64::MAX,
+        };
+        let mut json = Vec::new();
+        write_playlist_heading(&mut json, true, revision).unwrap();
+        write!(&mut json, "]}}").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(value["playlist_id"], 10);
+        assert_eq!(value["revision"], u64::MAX);
+        assert_eq!(value["entries"], serde_json::json!([]));
+
+        let mut text = Vec::new();
+        write_playlist_heading(&mut text, false, revision).unwrap();
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            format!("playlist_id=10 revision={}\n", u64::MAX)
+        );
     }
 }

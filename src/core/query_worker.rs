@@ -1551,7 +1551,13 @@ mod tests {
             ReadQueries::start(directory.path().join("library.db"), core.shared.clone()).unwrap();
 
         for command in [
-            Command::MovePlaylistEntry { entry_id, index: 2 },
+            Command::MovePlaylistEntries {
+                playlist_id: 1,
+                entry_ids: vec![entry_id],
+                before_entry_id: None,
+                after: false,
+                expected_revision: core.state.library.playlist_entry_revisions[&1],
+            },
             Command::RemovePlaylistEntry { entry_id },
         ] {
             let captured = core.shared.read().clone();

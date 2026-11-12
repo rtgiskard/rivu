@@ -579,31 +579,6 @@ impl Store {
         tx.commit()?;
         Ok(pid)
     }
-    /// Returns the owning playlist only after an actual committed reorder.
-    pub fn move_playlist_entry(&self, id: i64, index: usize) -> Result<Option<i64>> {
-        let tx = self.conn.unchecked_transaction()?;
-        let (pid, old): (i64, i64) = tx
-            .query_row(
-                "SELECT playlist_id,position FROM playlist_entries WHERE id=? AND playlist_id>0",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| anyhow!("playlist entry {id} does not exist"))?;
-        let n: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?",
-            [pid],
-            |r| r.get(0),
-        )?;
-        if index >= n as usize {
-            bail!("playlist index out of range");
-        }
-        if !move_selection(&tx, pid, &[(id, old)], index as i64)? {
-            return Ok(None);
-        }
-        tx.commit()?;
-        Ok(Some(pid))
-    }
 
     /// Keep the first occurrence of each track without replacing surviving identities.
     pub fn deduplicate_playlist(&self, playlist_id: i64) -> Result<bool> {
@@ -810,7 +785,7 @@ mod deletion_tests {
             total: 3,
         };
         assert_eq!(store.playlist_entry(102)?, Some(expected));
-        assert_eq!(store.move_playlist_entry(102, 0)?, Some(10));
+        assert!(store.move_playlist_entries(10, &[102], Some(100), false)?);
         assert_eq!(
             store.playlist_entry(102)?,
             Some(PlaylistEntryLocation {
@@ -1155,7 +1130,7 @@ mod request_tests {
         let other = store.create_playlist_with_tracks("other", &[4, 3])?;
         let other_before = positioned_entries(&store, other)?;
         let initial = positioned_entries(&store, id)?;
-        assert_eq!(store.move_playlist_entry(initial[1].0, 3)?, Some(id));
+        assert!(store.move_playlist_entries(id, &[initial[1].0], None, false)?);
         assert_eq!(
             positioned_entries(&store, id)?,
             vec![
@@ -1165,7 +1140,7 @@ mod request_tests {
                 (initial[1].0, 2, 3)
             ]
         );
-        assert_eq!(store.move_playlist_entry(initial[1].0, 0)?, Some(id));
+        assert!(store.move_playlist_entries(id, &[initial[1].0], Some(initial[0].0), false)?);
         let moved = positioned_entries(&store, id)?;
         assert_eq!(
             moved,
@@ -1176,10 +1151,22 @@ mod request_tests {
                 (initial[3].0, 4, 3)
             ]
         );
-        assert_eq!(store.move_playlist_entry(initial[1].0, 0)?, None);
-        assert!(store.move_playlist_entry(initial[1].0, 4).is_err());
-        assert!(store.move_playlist_entry(initial[1].0, usize::MAX).is_err());
-        assert!(store.move_playlist_entry(i64::MAX, 0).is_err());
+        assert!(!store.move_playlist_entries(id, &[initial[1].0], Some(initial[0].0), false)?);
+        assert!(
+            store
+                .move_playlist_entries(id, &[initial[1].0], Some(i64::MAX), false)
+                .is_err()
+        );
+        assert!(
+            store
+                .move_playlist_entries(id, &[initial[1].0], Some(other_before[0].0), false)
+                .is_err()
+        );
+        assert!(
+            store
+                .move_playlist_entries(id, &[i64::MAX], None, false)
+                .is_err()
+        );
         assert_eq!(positioned_entries(&store, id)?, moved);
         assert_eq!(positioned_entries(&store, other)?, other_before);
         Ok(())
@@ -1503,15 +1490,6 @@ mod group_tests {
                     "mask={mask}, target={target:?}"
                 );
                 assert_eq!(order(&store, 20)?, [200]);
-                if let [id] = selected.as_slice() {
-                    let position = expected.iter().position(|entry| entry == id).unwrap();
-                    let single = fixture()?;
-                    assert_eq!(
-                        single.move_playlist_entry(*id, position)?,
-                        (expected != original).then_some(10)
-                    );
-                    assert_eq!(order(&single, 10)?, expected);
-                }
             }
         }
         Ok(())
@@ -1686,7 +1664,8 @@ mod occurrence_tests {
         let current = store.queue_ids()?[2];
         store.set_queue_current(Some(current))?;
         let late_occurrence = store.playlist_entries_page(playlist, None, 5, 1)?.rows[0].id;
-        store.move_playlist_entry(late_occurrence, 0)?;
+        let first = store.playlist_entries_page(playlist, None, 0, 1)?.rows[0].id;
+        store.move_playlist_entries(playlist, &[late_occurrence], Some(first), false)?;
         let before = store.playlist_entries_page(playlist, None, 0, 20)?.rows;
         let other_before = store.playlist_entries_page(other, None, 0, 20)?;
         let queue = store.queue_page(None, 0, 20)?;
@@ -1782,7 +1761,7 @@ mod occurrence_tests {
         );
         assert!(
             store
-                .move_playlist_entry(queue.rows[0].id as i64, 1)
+                .move_playlist_entries(0, &[queue.rows[0].id as i64], None, false)
                 .is_err()
         );
         assert!(store.remove_playlist_entries(0, &[]).is_err());

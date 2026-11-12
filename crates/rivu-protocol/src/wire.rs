@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 23;
+pub const PROTOCOL_VERSION: u8 = 24;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -409,10 +409,6 @@ pub enum WireCommand {
     },
     RemovePlaylistEntry {
         entry_id: i64,
-    },
-    MovePlaylistEntry {
-        entry_id: i64,
-        index: u64,
     },
     ImportPlaylist {
         path: PathBuf,
@@ -1275,10 +1271,6 @@ impl From<Command> for WireCommand {
                 expected_revision,
             },
             Command::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
-            Command::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
-                entry_id,
-                index: index as u64,
-            },
             Command::RemovePlaylistEntries {
                 playlist_id,
                 entry_ids,
@@ -1585,10 +1577,6 @@ impl TryFrom<WireCommand> for Command {
                 expected_revision,
             },
             WireCommand::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
-            WireCommand::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
-                entry_id,
-                index: wire_usize(index, "index")?,
-            },
             WireCommand::RemovePlaylistEntries {
                 playlist_id,
                 entry_ids,

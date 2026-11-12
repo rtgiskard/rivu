@@ -853,10 +853,6 @@ pub enum Command {
     RemovePlaylistEntry {
         entry_id: i64,
     },
-    MovePlaylistEntry {
-        entry_id: i64,
-        index: usize,
-    },
     RemovePlaylistEntries {
         playlist_id: i64,
         entry_ids: Vec<i64>,
