@@ -1134,8 +1134,13 @@ fn shutdown_retries_a_failed_runtime_selection_save() {
 fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);
-    playing(&mut core, 1);
+    pending(&mut core, 1);
+    core.transport.session.as_mut().unwrap().paused_at = Some(16);
+    started(&mut core, Some(10.0)).unwrap();
     progress(&mut core, 3.0, 3.0);
+    let session = core.transport.session.as_mut().unwrap();
+    session.paused_at = Some(17);
+    session.last_heard_at = Some(17);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(

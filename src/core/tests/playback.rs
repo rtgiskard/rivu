@@ -1906,6 +1906,48 @@ fn duplicate_queue_entries_count_as_separate_plays_but_share_recent_history() {
 }
 
 #[test]
+fn started_history_failure_keeps_admitted_playback_and_recovers_without_activity_replay() {
+    let (directory, mut core) = fixture_with_database(Some(10.0));
+    pending(&mut core, 1);
+    core.transport.session.as_mut().unwrap().paused_at = Some(17);
+    let generation = core.transport.generation;
+    let history = Arc::clone(&core.state.library.history);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_start_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;").unwrap();
+    started(&mut core, Some(10.0)).unwrap();
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert!(core.transport.session.as_ref().unwrap().started);
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.history_pending);
+    assert!(core.state.system.last_error.is_some());
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+    assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
+    progress(&mut core, 3.0, 3.0);
+    assert_eq!(play_count(&core, 1), 1);
+    connection
+        .execute_batch(
+            "DROP TRIGGER reject_start_projection;
+         UPDATE tracks SET last_played=NULL WHERE id=4;
+         UPDATE tracks SET last_played=19 WHERE id=1;
+         CREATE TRIGGER reject_replayed_activity BEFORE UPDATE OF last_played ON tracks
+         WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'activity replayed'); END;",
+        )
+        .unwrap();
+    core.flush_deferred_playback().unwrap();
+    assert!(!core.transport.history_pending);
+    assert_eq!(core.state.library.history[0].played_at, 19);
+    assert_eq!(core.state.library.history[0].play_count, 1);
+    let stored_activity: i64 = connection
+        .query_row("SELECT last_played FROM tracks WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored_activity, 19);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+}
+
+#[test]
 fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     pending(&mut core, 1);
@@ -1928,20 +1970,30 @@ fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
 
     core.transport.session.as_mut().unwrap().last_heard_at = Some(11);
     core.transport.write_deferred = true;
-    assert!(core.flush_deferred_playback().is_err());
+    core.flush_deferred_playback().unwrap();
     assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(11));
     assert!(core.transport.history_pending);
     assert!(Arc::ptr_eq(&history, &core.state.library.history));
     connection
-        .execute("UPDATE tracks SET last_played=NULL WHERE id=4", [])
+        .execute_batch(
+            "UPDATE tracks SET last_played=NULL WHERE id=4;
+             UPDATE tracks SET last_played=19 WHERE id=1;
+             CREATE TRIGGER reject_replayed_activity BEFORE UPDATE OF last_played ON tracks
+             WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'activity replayed'); END;",
+        )
         .unwrap();
-    // The retry's mark_played is now unchanged, but the failed projection fact
-    // remains pending until an authoritative history read succeeds.
-    core.transport.write_deferred = true;
+    // Recovery reads the later authoritative activity; it must not replay the
+    // already committed timestamp from this session, even as a no-op write.
     core.flush_deferred_playback().unwrap();
     assert!(!core.transport.history_pending);
     assert!(!Arc::ptr_eq(&history, &core.state.library.history));
-    assert_eq!(core.state.library.history[0].played_at, 11);
+    let stored_activity: i64 = connection
+        .query_row("SELECT last_played FROM tracks WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored_activity, 19);
+    assert_eq!(core.state.library.history[0].played_at, 19);
 }
 
 #[test]
@@ -1965,16 +2017,17 @@ fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
 
 #[test]
 fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() {
-    for failure in ["activity", "count", "history"] {
+    for failure in ["activity", "count"] {
         let (directory, mut core) = fixture_with_database(Some(10.0));
-        playing(&mut core, 1);
+        pending(&mut core, 1);
+        core.transport.session.as_mut().unwrap().paused_at = Some(16);
+        started(&mut core, Some(10.0)).unwrap();
         core.transport.session.as_mut().unwrap().paused_at = Some(17);
         core.transport.session.as_mut().unwrap().last_heard_at = Some(17);
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection.execute_batch(match failure {
             "activity" => "CREATE TRIGGER reject_stop_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(FAIL,'activity unavailable'); END;",
             "count" => "CREATE TRIGGER reject_stop_count BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(FAIL,'count unavailable'); END;",
-            "history" => "CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;",
             _ => unreachable!(),
         }).unwrap();
         let generation = core.transport.generation;
@@ -2015,7 +2068,6 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             .execute_batch(match failure {
                 "activity" => "DROP TRIGGER reject_stop_activity;",
                 "count" => "DROP TRIGGER reject_stop_count;",
-                "history" => "DROP TRIGGER reject_stop_projection; UPDATE tracks SET last_played=NULL WHERE id=4;",
                 _ => unreachable!(),
             })
             .unwrap();
@@ -2033,6 +2085,79 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             .unwrap();
         assert_eq!(core.state.current_track().unwrap().id, 2);
         assert_eq!(play_count(&core, 1), 1);
+    }
+}
+
+#[test]
+fn history_projection_failure_releases_closed_source_and_allows_next_track() {
+    for eof in [false, true] {
+        let (directory, mut core) = fixture_with_database(Some(10.0));
+        let _audio = recording_audio(&mut core);
+        write_pcm(&directory.path().join("2.wav"));
+        pending(&mut core, 1);
+        core.transport.session.as_mut().unwrap().paused_at = Some(16);
+        started(&mut core, Some(10.0)).unwrap();
+        let history = Arc::clone(&core.state.library.history);
+        let session = core.transport.session.as_mut().unwrap();
+        session.paused_at = Some(17);
+        session.last_heard_at = Some(17);
+        session.heard = 3.0;
+        let generation = core.transport.generation;
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;").unwrap();
+        if eof {
+            core.audio_event(AudioEvent::Ended {
+                generation,
+                completed_duration: None,
+                bitrate_bps: None,
+            })
+            .unwrap();
+        } else {
+            core.finish_playback(
+                Ok(Some(audio::AudioSnapshot {
+                    generation,
+                    position_seconds: 3.0,
+                    listened_seconds: 3.0,
+                })),
+                Ok(()),
+            )
+            .unwrap();
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert!(core.state.system.last_error.is_some());
+            core.command(Command::PlayQueue { queue_id: 2 }).unwrap();
+        }
+        assert!(core.transport.retired.is_none());
+        assert!(core.transport.history_pending);
+        if eof {
+            assert!(core.state.system.last_error.is_some());
+        }
+        assert_eq!(core.state.library.history.len(), history.len());
+        assert_eq!(
+            core.state.library.history[0].played_at,
+            history[0].played_at
+        );
+        assert_eq!(core.state.library.history[0].play_count, 1);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue.current_id, Some(2));
+        assert_eq!(core.transport.session.as_ref().unwrap().track_id, 2);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
+        connection
+            .execute_batch(
+                "DROP TRIGGER reject_stop_projection;
+             UPDATE tracks SET last_played=NULL WHERE id=4;
+             UPDATE tracks SET last_played=19 WHERE id=1;
+             CREATE TRIGGER reject_replayed_activity BEFORE UPDATE OF last_played ON tracks
+             WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'activity replayed'); END;",
+            )
+            .unwrap();
+        core.flush_deferred_playback().unwrap();
+        assert!(!core.transport.history_pending);
+        assert_eq!(core.state.library.history[0].track_id, 1);
+        assert_eq!(core.state.library.history[0].played_at, 19);
+        assert_eq!(core.state.library.history[0].play_count, 1);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.state.queue.current_id, Some(2));
     }
 }
 
@@ -2069,7 +2194,7 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
         .unwrap();
     let (sender, events) = async_channel::bounded(4);
     core.engine.events = Some(events);
-    sender.try_send(started_event(&core, Some(10.0))).unwrap();
+    sender.try_send(started_event(&core, Some(30.0))).unwrap();
     for heard in [3.0, 8.0] {
         sender
             .try_send(AudioEvent::Progress {
@@ -2080,10 +2205,10 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
             })
             .unwrap();
     }
-    assert!(core.finish_playback(Ok(None), Ok(())).is_err());
-    let retired = core.transport.retired.as_ref().unwrap();
-    assert_eq!(retired.stats.heard, 8.0);
-    assert!(retired.stats.counted);
+    core.finish_playback(Ok(None), Ok(())).unwrap();
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.history_pending);
+    assert!(core.state.system.last_error.is_some());
     assert_eq!(play_count(&core, 1), 1);
     connection
         .execute_batch(
@@ -2099,7 +2224,9 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
 #[test]
 fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
     let (_directory, mut core) = fixture();
-    playing(&mut core, 1);
+    pending(&mut core, 1);
+    core.transport.session.as_mut().unwrap().paused_at = Some(16);
+    started(&mut core, Some(10.0)).unwrap();
     progress(&mut core, 3.0, 3.0);
     core.transport.session.as_mut().unwrap().last_heard_at = Some(17);
     let error = core
@@ -2119,7 +2246,9 @@ fn stop_snapshot_failure_still_saves_previously_confirmed_activity() {
 fn late_stop_snapshot_finishes_accounting_once_without_refencing_or_navigation() {
     for deferred in [false, true] {
         let (_directory, mut core) = fixture();
-        playing(&mut core, 1);
+        pending(&mut core, 1);
+        core.transport.session.as_mut().unwrap().paused_at = Some(16);
+        started(&mut core, Some(10.0)).unwrap();
         progress(&mut core, 2.0, 2.0);
         let source = core.transport.generation;
         let session = core.transport.session.as_mut().unwrap();

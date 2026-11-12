@@ -76,7 +76,10 @@ impl Core {
         self.state.playback.last_heard_at = None;
         self.state.playback.status = status;
         self.state.playback.stopped_source_generation = None;
-        self.state.system.last_error = None;
+        // Admitting audio does not resolve a pending History projection failure.
+        if !self.transport.history_pending {
+            self.state.system.last_error = None;
+        }
         self.transport.select_occurrence(queue_id, history);
         // Load admission is already confirmed. A rejected durable selection
         // retains this occurrence and its listening source for later recovery.

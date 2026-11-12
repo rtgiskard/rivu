@@ -389,6 +389,118 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
 }
 
 #[test]
+fn failed_active_deferred_writes_recover_on_progress_without_replaying_commits() {
+    for failure in ["activity", "count"] {
+        let (directory, mut core, lock) = saving_with_write_lock();
+        let _audio = recording_audio(&mut core);
+        core.transport.session.as_mut().unwrap().paused_at = Some(17);
+        started(&mut core, Some(10.0)).unwrap();
+        progress(&mut core, 3.0, 3.0);
+        lock.execute_batch("ROLLBACK").unwrap();
+        while core.active_scan.is_some() {
+            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            core.scan_event(event);
+        }
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection.execute_batch(match failure {
+            "activity" => "CREATE TRIGGER reject_deferred_write BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(ABORT,'activity unavailable'); END;",
+            "count" => "CREATE TRIGGER reject_deferred_write BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(ABORT,'count unavailable'); END;",
+            _ => unreachable!(),
+        }).unwrap();
+        assert!(core.flush_deferred_playback().is_err());
+        assert!(!core.transport.write_deferred);
+        assert!(core.transport.retired.is_none());
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(play_count(&core, 1), u64::from(failure == "activity"));
+        assert_eq!(
+            core.store.track(1).unwrap().unwrap().last_played,
+            (failure == "count").then_some(17),
+        );
+        core.command(Command::Volume { value: 0.4 }).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER reject_deferred_write;")
+            .unwrap();
+        progress(&mut core, 4.0, 4.0);
+        assert_eq!(play_count(&core, 1), 1);
+        assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
+        assert!(core.transport.session.as_ref().unwrap().counted);
+        connection
+            .execute_batch(
+                "UPDATE tracks SET last_played=19 WHERE id=1;
+             CREATE TRIGGER reject_replayed_activity BEFORE UPDATE OF last_played ON tracks
+             WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'activity replayed'); END;
+             CREATE TRIGGER reject_replayed_count BEFORE UPDATE OF play_count ON tracks
+             WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'count replayed'); END;",
+            )
+            .unwrap();
+        progress(&mut core, 5.0, 5.0);
+        core.command(Command::Stop).unwrap();
+        assert!(core.transport.retired.is_none());
+        assert_eq!(play_count(&core, 1), 1);
+        let stored_activity: i64 = connection
+            .query_row("SELECT last_played FROM tracks WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_activity, 19);
+    }
+}
+
+#[test]
+fn deferred_eof_history_failure_releases_source_and_preserves_navigation() {
+    let (directory, mut core, lock) = saving_with_write_lock();
+    let _audio = recording_audio(&mut core);
+    write_pcm(&directory.path().join("2.wav"));
+    core.transport.session.as_mut().unwrap().paused_at = Some(17);
+    started(&mut core, Some(10.0)).unwrap();
+    progress(&mut core, 3.0, 3.0);
+    core.audio_event(AudioEvent::Ended {
+        generation: core.transport.generation,
+        completed_duration: None,
+        bitrate_bps: None,
+    })
+    .unwrap();
+    assert!(core.transport.retired.is_some());
+    assert_eq!(
+        core.transport.pending_navigation,
+        Some(PlaybackStatus::Playing)
+    );
+    lock.execute_batch("ROLLBACK").unwrap();
+    while core.active_scan.is_some() {
+        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        core.scan_event(event);
+    }
+    let history = Arc::clone(&core.state.library.history);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_deferred_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;").unwrap();
+    core.flush_deferred_playback().unwrap();
+    assert!(core.transport.retired.is_none());
+    assert!(core.transport.history_pending);
+    assert!(core.state.system.last_error.is_some());
+    assert!(Arc::ptr_eq(&history, &core.state.library.history));
+    assert_eq!(core.transport.pending_navigation, None);
+    assert_eq!(core.state.queue.current_id, Some(2));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
+    connection
+        .execute_batch(
+            "DROP TRIGGER reject_deferred_projection;
+         UPDATE tracks SET last_played=NULL WHERE id=4;
+         UPDATE tracks SET last_played=19 WHERE id=1;
+         CREATE TRIGGER reject_replayed_activity BEFORE UPDATE OF last_played ON tracks
+         WHEN NEW.id=1 BEGIN SELECT RAISE(ABORT,'activity replayed'); END;",
+        )
+        .unwrap();
+    core.flush_deferred_playback().unwrap();
+    assert!(!core.transport.history_pending);
+    assert_eq!(core.state.library.history[0].played_at, 19);
+    assert_eq!(core.state.library.history[0].play_count, 1);
+    assert_eq!(play_count(&core, 1), 1);
+    assert_eq!(core.state.queue.current_id, Some(2));
+}
+
+#[test]
 fn existing_playback_controls_remain_usable_while_database_is_write_locked() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     let _audio = recording_audio(&mut core);

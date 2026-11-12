@@ -109,10 +109,22 @@ pub(super) struct PlaybackSession {
     pub(super) started: bool,
     pub(super) counted: bool,
     pub(super) last_heard_at: Option<i64>,
+    // A successful activity write owns this timestamp, independently of history projection.
+    pub(super) activity_committed_at: Option<i64>,
+    // Failed active writes are retried by a related producer event, not every business event.
+    pub(super) activity_pending: bool,
     pub(super) history_removed: bool,
     pub(super) paused_at: Option<i64>,
 }
 impl PlaybackSession {
+    fn count_pending(&self, threshold_percent: f64) -> bool {
+        self.started
+            && !self.counted
+            && self
+                .duration
+                .is_some_and(|duration| self.heard > duration * threshold_percent / 100.0)
+    }
+
     fn accept_duration(&mut self, duration: Option<f64>, replace: bool) {
         if replace || self.duration.is_none() {
             self.duration = duration
@@ -194,6 +206,7 @@ fn accept_session_start(
     // A failed initial write must not accept any listening facts.
     session.started = true;
     session.last_heard_at = Some(played_at);
+    session.activity_committed_at = stats.as_ref().map(|_| played_at);
     session.accept_duration(info.duration, true);
     Ok(stats)
 }
@@ -203,12 +216,7 @@ fn persist_session_count(
     session: &mut PlaybackSession,
     threshold_percent: f64,
 ) -> Result<Option<crate::store::TrackStats>> {
-    let Some(duration) = session.duration else {
-        return Ok(None);
-    };
-    let eligible =
-        session.started && !session.counted && session.heard > duration * threshold_percent / 100.0;
-    if !eligible {
+    if !session.count_pending(threshold_percent) {
         return Ok(None);
     }
     let stats = store.increment_play_count(session.track_id)?;
@@ -219,15 +227,24 @@ fn persist_session_count(
 
 fn persist_session_activity(
     store: &Store,
-    session: &PlaybackSession,
+    session: &mut PlaybackSession,
 ) -> Result<Option<crate::store::TrackStats>> {
-    if session.started
-        && !session.history_removed
-        && let Some(at) = session.last_heard_at
-    {
-        return store.mark_played(session.track_id, at).map(Some);
-    }
-    Ok(None)
+    let at = session.last_heard_at.filter(|at| {
+        session.started
+            && !session.history_removed
+            && session
+                .activity_committed_at
+                .is_none_or(|committed| committed < *at)
+    });
+    let Some(at) = at else {
+        session.activity_pending = false;
+        return Ok(None);
+    };
+    session.activity_pending = true;
+    let stats = store.mark_played(session.track_id, at)?;
+    session.activity_committed_at = Some(at);
+    session.activity_pending = false;
+    Ok(Some(stats))
 }
 
 fn persist_session_bitrate(
@@ -508,6 +525,8 @@ impl Core {
                 started: false,
                 counted: false,
                 last_heard_at: None,
+                activity_committed_at: None,
+                activity_pending: false,
                 history_removed: false,
                 paused_at: (status == PlaybackStatus::Paused).then(now),
             });
@@ -529,7 +548,7 @@ impl Core {
             self.preferences.settings().play_count_threshold_percent,
         )?;
         if let Some(stats) = stats {
-            self.update_track_stats(track_id, stats)?;
+            self.project_playback_stats(track_id, stats);
         }
         Ok(())
     }
@@ -558,16 +577,12 @@ impl Core {
         }
         let bitrate = persist_session_bitrate(&self.store, session, deferred);
         self.transport.write_deferred |= deferred;
-        let result = (|| -> Result<()> {
-            if let Some(stats) = stats {
-                self.transport.history_pending |= stats.changed;
-                self.update_track_stats(track_id, stats)?;
-                self.refresh_playback_history().context(
-                    "Playback start committed, but refreshing history failed; previous history retained",
-                )?;
-            }
-            self.count_play()
-        })();
+        if let Some(stats) = stats {
+            self.transport.history_pending |= stats.changed;
+            self.project_playback_stats(track_id, stats);
+            self.refresh_playback_history();
+        }
+        let result = self.count_play();
         // Bitrate publication is independent of statistics projection failures.
         if let Some((bitrate, exact)) = bitrate {
             self.publish_playback_bitrate(track_id, bitrate, exact);
@@ -588,7 +603,13 @@ impl Core {
             if session.accept_progress(heard) {
                 self.state.playback.last_heard_at = session.last_heard_at;
             }
-            self.count_play()?;
+            if session.activity_pending {
+                // A producer event grants one recovery attempt. Unrelated business
+                // events cannot turn a failed activity write into an endless loop.
+                self.flush_deferred_playback()?;
+            } else {
+                self.count_play()?;
+            }
         }
         Ok(())
     }
@@ -656,18 +677,16 @@ impl Core {
         let track_id = session.track_id;
         let bitrate = persist_session_bitrate(&self.store, session, deferred);
         self.transport.write_deferred = true;
-        let projection = if let Some(stats) = stats {
+        if let Some(stats) = stats {
             self.transport.history_pending |= stats.changed;
-            self.update_track_stats(track_id, stats)
-                .and_then(|()| self.refresh_playback_history())
-        } else {
-            Ok(())
-        };
+            self.project_playback_stats(track_id, stats);
+            self.refresh_playback_history();
+        }
         if let Some((bitrate, exact)) = bitrate {
             self.publish_playback_bitrate(track_id, bitrate, exact);
         }
         // Retired events never publish duration/position or run transport controls.
-        projection.and(self.flush_deferred_playback())
+        self.flush_deferred_playback()
     }
 
     pub(in crate::core) fn retiring_audio_event(
@@ -1049,15 +1068,25 @@ impl Core {
         self.transport.history_pending = false;
     }
 
-    fn refresh_playback_history(&mut self) -> Result<()> {
+    fn project_playback_stats(&mut self, track_id: i64, stats: crate::store::TrackStats) {
+        self.update_track_stats(track_id, stats)
+            .expect("Playback statistics projection only patches in-memory state");
+    }
+
+    fn refresh_playback_history(&mut self) {
         if self.transport.history_pending {
             if let Some(attempted) = &mut self.projections.request_attempts {
                 attempted.history = true;
             }
-            let history = self.store.history(MAX_QUERY_ROWS)?;
-            self.replace_history(history);
+            match self.store.history(MAX_QUERY_ROWS) {
+                Ok(history) => self.replace_history(history),
+                Err(error) => {
+                    self.state.system.last_error = Some(format!(
+                        "Playback activity committed, but refreshing history failed; previous history retained: {error:#}"
+                    ));
+                }
+            }
         }
-        Ok(())
     }
 
     /// Replay only retained producer facts, never timed-out user commands.
@@ -1065,8 +1094,12 @@ impl Core {
         if self.database_maintenance_active() {
             return Ok(());
         }
-        let pending =
-            std::mem::take(&mut self.transport.write_deferred) || self.transport.retired.is_some();
+        let threshold = self.preferences.settings().play_count_threshold_percent;
+        let pending = std::mem::take(&mut self.transport.write_deferred)
+            || self.transport.retired.is_some()
+            || self.transport.session.as_ref().is_some_and(|session| {
+                session.activity_pending || session.count_pending(threshold)
+            });
         let result = if pending {
             debug_assert!(self.transport.retired.is_none() || self.transport.session.is_none());
             let session = self
@@ -1079,27 +1112,18 @@ impl Core {
                 let track_id = session.track_id;
                 // Independent writes both run before publication. A committed
                 // count is already fenced even if activity or projection fails.
-                let count = persist_session_count(
-                    &self.store,
-                    session,
-                    self.preferences.settings().play_count_threshold_percent,
-                );
+                let count = persist_session_count(&self.store, session, threshold);
                 let activity = persist_session_activity(&self.store, session);
                 let bitrate = persist_session_bitrate(&self.store, session, false);
-                let count = count.and_then(|stats| {
+                let count = count.map(|stats| {
                     if let Some(stats) = stats {
-                        self.update_track_stats(track_id, stats)?;
+                        self.project_playback_stats(track_id, stats);
                     }
-                    Ok(())
                 });
-                let activity = activity.and_then(|stats| {
+                let activity = activity.map(|stats| {
                     if let Some(stats) = stats {
                         self.transport.history_pending |= stats.changed;
-                        let projection = self.update_track_stats(track_id, stats);
-                        let history = self.refresh_playback_history();
-                        projection.and(history)
-                    } else {
-                        Ok(())
+                        self.project_playback_stats(track_id, stats);
                     }
                 });
                 if let Some((bitrate, exact)) = bitrate {
@@ -1124,12 +1148,17 @@ impl Core {
         if result.is_err() {
             self.transport.pending_navigation = None;
         }
-        result?;
-        if let Some(status) = self.transport.pending_navigation.take()
-            && !self.state.system.shutting_down
-        {
-            self.advance_with_status(true, status)?;
-        }
-        Ok(())
+        let result = result.and_then(|()| {
+            if let Some(status) = self.transport.pending_navigation.take()
+                && !self.state.system.shutting_down
+            {
+                self.advance_with_status(true, status)?;
+            }
+            Ok(())
+        });
+        // Publish view failures after navigation, whose successful Load clears
+        // prior errors. Projection recovery never changes the producer outcome.
+        self.refresh_playback_history();
+        result
     }
 }

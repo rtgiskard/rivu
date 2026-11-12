@@ -318,9 +318,10 @@ Up to 256 recent tracks are retained.
 
 If saving final listening statistics fails, Rivu keeps the pending facts in memory
 and retries on playback transitions and orderly shutdown, without double-counting
-an already saved play. A new playback may be blocked until recovery succeeds;
-independent controls such as volume remain available. This recovery does not
-survive process exit.
+an already saved play. A new playback may be blocked by unsaved statistics;
+independent controls such as volume remain available. A failed Recent view refresh
+retains its own recovery work without blocking new playback or resaving confirmed
+statistics. Pending in-memory recovery does not survive process exit.
 
 `rivu library history --limit N` returns up to N retained rows (default 20) in both
 text and JSON output. See <<cli-output,CLI output>> for result shapes.

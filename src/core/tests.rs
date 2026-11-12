@@ -438,6 +438,8 @@ fn pending(core: &mut Core, queue_id: u64) {
         started: false,
         counted: false,
         last_heard_at: None,
+        activity_committed_at: None,
+        activity_pending: false,
         history_removed: false,
         paused_at: None,
     });

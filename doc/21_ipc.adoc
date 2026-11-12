@@ -1373,10 +1373,12 @@ or automatic replay. Shutdown acknowledges acceptance before final stop/persiste
 later failures remain published errors, not rejection of the accepted exit.
 Audio publishes final source counters as `DecoderStopped` before replying to Stop,
 even when the reply waiter has expired. Core retains one unresolved retired source
-until physical close and statistics persistence settle. Matching late source facts
-can finish accounting, but cannot navigate, fence transport again or change a newer
-playback intent. Failed first-frame opening records its own generation and counters,
-never the previous source's stop snapshot.
+until physical close and statistics persistence settle. History projection recovery
+is independent: a failed read neither retains an otherwise settled source nor
+replays its confirmed writes. Matching late source facts can finish accounting,
+but cannot navigate, fence transport again or change a newer playback intent.
+Failed first-frame opening records its own generation and counters, never the
+previous source's stop snapshot.
 
 Core awaits the process-wide completion of the first explicit FFmpeg load,
 including loads initiated by waveform work. Success or failure publishes runtime

@@ -282,12 +282,14 @@ Do not route retiring terminal events through ordinary dispatch, which can
 recursively Stop or advance navigation. Evidence and resolution:
 link:90_open_issues.adoc#retiring-settings-failures[retiring settings failures].
 
-Accepted refinement: listening duration, heard-time, count-commit and deferred
-bitrate facts belong to their source session. Retired settlement must consume
-that session explicitly, without installing it in the current playback slot.
-Physical close and statistics persistence remain independent; a committed count
-cannot be retried because a later projection read failed. Keep at most one
-unsettled retired source rather than introducing a session queue.
+Accepted refinement: listening duration, heard-time, count-commit, activity-commit
+and deferred bitrate facts belong to their source session. Retired settlement
+consumes that session explicitly, without installing it in the current playback
+slot. Release the single retained source only after physical close and all
+required count/activity writes are confirmed. A real write failure retains that
+source and blocks replacement; a failed History SELECT does neither once those
+conditions hold. History projection recovery has its own bounded responsibility,
+so it cannot delay the next track or keep a settled source alive.
 
 [[DEC-012]]
 === DEC-012: Retire unreachable model boundaries before inference output allocation
@@ -442,6 +444,15 @@ session identity and narrow authoritative database facts, not a possibly stale
 display Track.
 External admission follows the same rule: current-track, count and history
 refreshes retain independent recovery responsibility after the write commits.
+
+Playback follows the same commit boundary: count and activity confirmations are
+accepted before preparing History. Projection failure preserves the previous
+History snapshot, reports the refresh error and retains only projection work;
+recovery reads current facts without replaying a confirmed count or activity
+timestamp. Deferred active-session write failures remain recoverable on later
+related playback events. Count and activity retain independent commit evidence,
+so retrying one cannot repeat the other. Source retirement conditions remain
+independent of projection readiness as specified in <<DEC-011>>.
 
 Manual edits and removals report History effects from transaction facts, not
 request fields or cached History membership. Removals publish exact Track and
