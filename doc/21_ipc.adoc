@@ -608,8 +608,9 @@ keep the result unknown rather than guessing that no task started.
 
 The GUI keeps command outcome and post-command observation separate in
 `CommandDelivery {ack, observation}`. Observation is `Refreshed`, `Unavailable` or
-`NotRequested`; an unavailable refresh never rewrites the owner's Ack or replays
-the command. Draft clearing, rebase, field writeback and undo require both fresh
+`NotRequested`; an unavailable refresh terminates observation without rewriting
+the owner's Ack or replaying the command. Local publications cannot restore that
+authority. Draft clearing, rebase, field writeback and undo require both fresh
 observation and the original editing identity. Shutdown needs only its admission
 Ack, not a state read from an already retiring instance.
 

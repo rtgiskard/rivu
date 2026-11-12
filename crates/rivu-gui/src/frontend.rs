@@ -1154,6 +1154,48 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_command_observation_stops_connection_without_replay_or_late_merge() {
+        let (_directory, runtime) = fixture();
+        let handle = &runtime.handle;
+        let before = handle.gui_snapshot();
+        let mut session = handle.session().unwrap();
+        let stale = session.get_state(StateSections::ALL).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        let ack = Ack::new(AckStatus::Succeeded, None, 42);
+        let mut refreshes = 0;
+        assert!(!finish_command(
+            &handle.shared,
+            false,
+            Some(reply),
+            ack,
+            None,
+            || {
+                refreshes += 1;
+                anyhow::bail!("authoritative read failed")
+            },
+        ));
+        let delivery = futures::executor::block_on(receiver).unwrap();
+        assert_eq!(refreshes, 1);
+        assert!(delivery.ack.is_success());
+        assert!(matches!(
+            delivery.observation,
+            CommandObservation::Unavailable(_)
+        ));
+        assert!(!handle.is_connected());
+        assert!(handle.shared.stop.is_cancelled());
+        assert!(!handle.shared.merge(stale));
+        let stopped = handle.gui_snapshot();
+        assert!(stopped.system.shutting_down);
+        assert!(stopped.system.revision > before.system.revision);
+        let retry = futures::executor::block_on(
+            handle.request_ack(Command::KeepTrackIndependent { track_id: 2 }),
+        );
+        assert_eq!(retry.ack.status, AckStatus::NotAdmitted);
+        assert_eq!(retry.observation, CommandObservation::NotRequested);
+        assert_eq!(refreshes, 1);
+    }
+
+    #[test]
     fn failed_ack_and_successful_observation_remain_independent() {
         let mut ack = Ack::new(AckStatus::Failed, Some("partially committed".into()), 73);
         ack.scan_id = Some(19);

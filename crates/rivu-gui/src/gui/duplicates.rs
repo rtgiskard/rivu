@@ -105,7 +105,6 @@ struct DuplicateReview {
     retired_selection: Option<(Option<i64>, Option<i64>)>,
     confirming: bool,
     busy: Option<Busy>,
-    keep_observation_after: Option<u64>,
     task_query_pending: bool,
     task_read_timed_out: bool,
     task_read_failed: Option<(u64, u64)>,
@@ -116,7 +115,6 @@ impl DuplicateReview {
     fn open(&mut self, revisions: QueryRevisions) -> Option<u64> {
         let cancel = self.task_id();
         self.busy = None;
-        self.keep_observation_after = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.open = true;
         self.reset(revisions);
@@ -129,7 +127,6 @@ impl DuplicateReview {
         self.epoch = self.epoch.wrapping_add(1);
         self.invalidate();
         self.busy = None;
-        self.keep_observation_after = None;
         cancel
     }
 
@@ -188,7 +185,6 @@ impl DuplicateReview {
         }
         if !ack.is_success() {
             self.busy = None;
-            self.keep_observation_after = None;
             self.feedback = Some(match ack.error {
                 Some(error) => ReviewFeedback::Text(error, StatusKind::Error),
                 None => ReviewFeedback::Localized("gl-review-action-failed", StatusKind::Error),
@@ -211,25 +207,9 @@ impl DuplicateReview {
         true
     }
 
-    fn await_keep_observation(&mut self, publication: u64) {
-        if self.busy == Some(Busy::Keeping) {
-            self.keep_observation_after = Some(publication);
-        }
-    }
-
-    fn observe_snapshot(&mut self, publication: u64) {
-        if self
-            .keep_observation_after
-            .is_some_and(|before| publication > before)
-        {
-            self.finish_ack_refresh();
-        }
-    }
-
     fn finish_ack_refresh(&mut self) {
         if self.busy == Some(Busy::Keeping) {
             self.busy = None;
-            self.keep_observation_after = None;
         }
     }
 
@@ -798,8 +778,6 @@ impl Duplicates {
     }
 
     pub(super) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
-        self.duplicate_review
-            .observe_snapshot(state.system.revision);
         self.state = state;
         self.sync_duplicate_review(cx);
     }
@@ -854,6 +832,9 @@ impl Duplicates {
     }
 
     fn start_duplicate_groups(&mut self, cx: &mut Context<Self>) {
+        if !self.context.handle().is_connected() {
+            return;
+        }
         let Some(ReviewRead {
             epoch,
             query,
@@ -943,6 +924,9 @@ impl Duplicates {
     }
 
     fn start_duplicate_members(&mut self, cx: &mut Context<Self>) {
+        if !self.context.handle().is_connected() {
+            return;
+        }
         let Some((
             ReviewRead {
                 epoch,
@@ -1065,6 +1049,9 @@ impl Duplicates {
     }
 
     fn sync_duplicate_review(&mut self, cx: &mut Context<Self>) {
+        if !self.context.handle().is_connected() {
+            return;
+        }
         let data_changed = self
             .duplicate_review
             .sync_queries(self.state.query_revisions(None));
@@ -1150,6 +1137,9 @@ impl Duplicates {
     }
 
     fn submit_duplicate_action(&mut self, independent: bool, cx: &mut Context<Self>) {
+        if !self.context.handle().is_connected() {
+            return;
+        }
         self.refresh_snapshot(cx);
         let Some((epoch, command)) = self.duplicate_review.submit(independent) else {
             return;
@@ -1158,31 +1148,10 @@ impl Duplicates {
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
             let delivery = ack_handle.request_ack(command).await;
-            let refreshed = matches!(
-                delivery.observation,
-                crate::frontend::CommandObservation::Refreshed
-            );
-            let ack = delivery.ack;
-            let success = ack.is_success();
-            let relocation_id = ack.relocation_id;
+            let relocation_id = delivery.ack.relocation_id;
             let accepted = this
                 .update(cx, |this, cx| {
-                    if !this.duplicate_review.accept_ack(epoch, independent, ack) {
-                        return false;
-                    }
-                    if independent && success && !refreshed {
-                        // A completed write is never replayed. Wait for a newer
-                        // publication, not another sync of the cached snapshot.
-                        let publication = this.context.snapshot().system.revision;
-                        this.duplicate_review.await_keep_observation(publication);
-                    }
-                    if refreshed {
-                        this.refresh_snapshot(cx);
-                        this.duplicate_review.finish_ack_refresh();
-                    }
-                    this.sync_duplicate_review(cx);
-                    cx.notify();
-                    true
+                    this.finish_duplicate_action(epoch, independent, delivery, cx)
                 })
                 .unwrap_or(false);
             // Closing/replacing the owner can precede the start acknowledgement.
@@ -1192,6 +1161,51 @@ impl Duplicates {
         })
         .detach();
         cx.notify();
+    }
+
+    fn finish_duplicate_action(
+        &mut self,
+        epoch: u64,
+        independent: bool,
+        delivery: crate::frontend::CommandDelivery,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let terminal = !self.context.handle().is_connected()
+            || matches!(
+                delivery.observation,
+                crate::frontend::CommandObservation::Unavailable(_)
+            );
+        if terminal {
+            if self.duplicate_review.open && self.duplicate_review.epoch == epoch {
+                // Preserve the write's ACK, but never revive actions from the last
+                // cached members or adopt an unobservable relocation task.
+                if independent || !delivery.ack.is_success() {
+                    self.duplicate_review
+                        .accept_ack(epoch, independent, delivery.ack);
+                }
+                self.duplicate_review.busy = None;
+                self.duplicate_review.invalidate();
+                cx.notify();
+            }
+            // The continuation still owns cancellation of a late relocation ID.
+            return false;
+        }
+        if !self
+            .duplicate_review
+            .accept_ack(epoch, independent, delivery.ack)
+        {
+            return false;
+        }
+        if matches!(
+            delivery.observation,
+            crate::frontend::CommandObservation::Refreshed
+        ) {
+            self.refresh_snapshot(cx);
+            self.duplicate_review.finish_ack_refresh();
+        }
+        self.sync_duplicate_review(cx);
+        cx.notify();
+        true
     }
 
     fn cancel_review_verification(&mut self, cx: &mut Context<Self>) {
@@ -2889,48 +2903,88 @@ mod tests {
         assert!(review.begin_groups().is_some());
     }
 
-    #[test]
-    fn keep_ack_without_refresh_waits_for_new_snapshot_then_releases_queries() {
-        let mut review = ready_review();
-        let (epoch, command) = review.submit(true).unwrap();
-        assert!(matches!(
-            command,
-            Command::KeepTrackIndependent { track_id: 2 }
-        ));
-        assert!(review.accept_ack(epoch, true, ack(true, None)));
-        review.await_keep_observation(10);
-        review.request_groups(0, QueryRevisions::default());
-        for publication in [9, 10] {
-            review.observe_snapshot(publication);
-            assert!(review.busy == Some(Busy::Keeping));
-            assert!(review.begin_groups().is_none());
-            assert!(review.submit(true).is_none());
-        }
-        review.observe_snapshot(11);
-        assert!(review.busy.is_none());
-        assert!(review.keep_observation_after.is_none());
-        assert!(review.begin_groups().is_some());
-        assert!(matches!(
-            review.feedback,
-            Some(ReviewFeedback::Localized("gl-kept-independent", _))
-        ));
-    }
+    #[gpui::test]
+    fn unavailable_observation_finishes_without_rearming_cached_members(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::frontend::{CommandDelivery, CommandObservation};
+        use gpui::AppContext as _;
+        use std::{rc::Rc, sync::Arc};
 
-    #[test]
-    fn old_keep_observation_cannot_release_new_review_submission() {
-        let mut review = ready_review();
-        let (epoch, _) = review.submit(true).unwrap();
-        assert!(review.accept_ack(epoch, true, ack(true, None)));
-        review.await_keep_observation(10);
-        review.close();
-        review.open(QueryRevisions::default());
-        review.busy = Some(Busy::Keeping);
-        // This newer operation has not received its own ACK yet.
-        review.observe_snapshot(11);
-        assert!(review.busy == Some(Busy::Keeping));
-        assert!(!review.accept_ack(epoch, true, ack(true, None)));
-        review.observe_snapshot(12);
-        assert!(review.busy == Some(Busy::Keeping));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&path)
+        .unwrap();
+        let mut runtime = crate::test_support::CoreRuntime::start(directory.path(), &path).unwrap();
+        let context = super::FeatureContext {
+            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            i18n: Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
+            labels: Default::default(),
+            scroll: Default::default(),
+        };
+        runtime.disconnect_frontend();
+        for independent in [false, true] {
+            for replaced in [false, true] {
+                let owner = cx.new(|cx| super::Duplicates::new(context.clone(), cx));
+                owner.update(cx, |this, cx| {
+                    this.duplicate_review = ready_review();
+                    this.duplicate_review.confirm(true);
+                    let (epoch, _) = this.duplicate_review.submit(independent).unwrap();
+                    if replaced {
+                        this.duplicate_review.close();
+                        this.duplicate_review = ready_review();
+                        this.duplicate_review.epoch = epoch.wrapping_add(1);
+                        this.duplicate_review.busy = Some(Busy::Keeping);
+                    }
+                    assert!(!this.finish_duplicate_action(
+                        epoch,
+                        independent,
+                        CommandDelivery {
+                            ack: ack(true, (!independent).then_some(7)),
+                            observation: CommandObservation::Unavailable("read failed".into()),
+                        },
+                        cx,
+                    ));
+                    if replaced {
+                        assert!(this.duplicate_review.busy == Some(Busy::Keeping));
+                        assert!(this.duplicate_review.members_current);
+                        assert!(this.duplicate_review.feedback.is_none());
+                    } else {
+                        assert!(this.duplicate_review.busy.is_none());
+                        assert!(!this.duplicate_review.members_current);
+                        assert!(this.duplicate_review.task_id().is_none());
+                        assert!(this.duplicate_review.submit(true).is_none());
+                        if independent {
+                            assert!(matches!(
+                                this.duplicate_review.feedback,
+                                Some(ReviewFeedback::Localized(
+                                    "gl-kept-independent",
+                                    StatusKind::Success
+                                ))
+                            ));
+                        }
+                    }
+                    let generation = this.duplicate_review.members_projection.generation();
+                    this.sync_duplicate_review(cx);
+                    this.submit_duplicate_action(true, cx);
+                    assert_eq!(
+                        this.duplicate_review.members_projection.generation(),
+                        generation
+                    );
+                    assert!(!this.duplicate_review.groups_pending);
+                    assert!(!this.duplicate_review.members_pending);
+                    assert!(!this.duplicate_review.task_query_pending);
+                });
+            }
+        }
     }
 
     #[test]
