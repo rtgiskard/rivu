@@ -27,6 +27,9 @@ impl Core {
     }
 
     pub(in crate::core) fn refresh_current_track(&mut self) -> Result<()> {
+        if let Some(attempted) = &mut self.projections.request_attempts {
+            attempted.current_track = true;
+        }
         self.projections.current_track = true;
         let track = self
             .state
@@ -261,6 +264,9 @@ impl Core {
             self.transport.history_pending = true;
         }
         if self.transport.history_pending {
+            if let Some(attempted) = &mut self.projections.request_attempts {
+                attempted.history = true;
+            }
             let history = self.store.history(MAX_QUERY_ROWS).context(
                 "History removal committed, but refreshing history failed; previous history retained",
             )?;

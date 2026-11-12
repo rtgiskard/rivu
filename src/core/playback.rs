@@ -1051,6 +1051,9 @@ impl Core {
 
     fn refresh_playback_history(&mut self) -> Result<()> {
         if self.transport.history_pending {
+            if let Some(attempted) = &mut self.projections.request_attempts {
+                attempted.history = true;
+            }
             let history = self.store.history(MAX_QUERY_ROWS)?;
             self.replace_history(history);
         }

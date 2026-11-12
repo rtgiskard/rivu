@@ -152,6 +152,463 @@ fn incomplete_startup_domains_recover_counts_history_and_playlist_edit_tokens() 
     }
 }
 
+fn dispatch_recovery_query(
+    core: &mut Core,
+    query: Query,
+    ticket: Option<QueryTicket>,
+) -> QueryResponse {
+    let transition = core
+        .read_queries
+        .as_ref()
+        .map(|reads| reads.fence.transition());
+    let (reply, response) = oneshot::channel();
+    core.dispatch_request(Request {
+        operation: Operation::Query { query, ticket },
+        reply: Some(reply),
+    });
+    if let Some(transition) = transition {
+        transition.finish(false);
+    }
+    let CoreResponse::Query(response) = futures::executor::block_on(response).unwrap() else {
+        panic!("expected query response");
+    };
+    response
+}
+
+#[test]
+fn first_playlist_queries_after_partial_startup_capture_recovered_tokens() {
+    for worker in [false, true] {
+        for kind in 0..4 {
+            let (directory, mut core) = fixture();
+            let playlist = core
+                .store
+                .create_playlist_with_tracks("Saved", &[1, 2, 1])
+                .unwrap();
+            let entries = core
+                .store
+                .playlist_entries_page(playlist, None, 0, 10)
+                .unwrap()
+                .rows;
+            core.state.library.playlist_entry_revisions = Arc::default();
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            connection
+                .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
+                .unwrap();
+            assert!(core.load_initial_state().is_err());
+            assert!(core.projections.playlist_tokens);
+            connection
+                .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
+                .unwrap();
+            core.publish();
+            if worker {
+                core.read_queries = Some(
+                    query_worker::ReadQueries::start(
+                        directory.path().join("library.db"),
+                        Arc::clone(&core.shared),
+                    )
+                    .unwrap(),
+                );
+            }
+            let query = match kind {
+                0 => Query::PlaylistEntries {
+                    playlist_id: playlist,
+                    query: None,
+                    offset: 0,
+                    limit: 10,
+                },
+                1 => Query::PlaylistEntryBatch {
+                    playlist_id: playlist,
+                    query: None,
+                    after: None,
+                    limit: 10,
+                    expected: None,
+                },
+                2 => Query::PlaylistEntryLocations {
+                    playlist_id: playlist,
+                    query: None,
+                    entry_ids: entries.iter().map(|entry| entry.id).collect(),
+                },
+                _ => Query::PlaylistEntry {
+                    entry_id: entries[0].id,
+                },
+            };
+            let response = dispatch_recovery_query(&mut core, query, None);
+            let revision = response.revisions.playlist_entries.unwrap();
+            assert_eq!(revision.playlist_id, playlist);
+            assert_eq!(
+                revision.revision,
+                core.state.library.playlist_entry_revisions[&playlist]
+            );
+            let actual_ids: Vec<_> = match response.result.unwrap() {
+                ViewResponse::PlaylistEntries(page) => {
+                    page.rows.into_iter().map(|entry| entry.id).collect()
+                }
+                ViewResponse::PlaylistEntryBatch(batch) => {
+                    batch.rows.into_iter().map(|entry| entry.id).collect()
+                }
+                ViewResponse::PlaylistEntryLocations(locations) => {
+                    locations.into_iter().map(|entry| entry.id).collect()
+                }
+                ViewResponse::PlaylistEntry(Some(entry)) => vec![entry.id],
+                other => panic!("unexpected playlist response: {other:?}"),
+            };
+            let expected = if kind == 3 { &entries[..1] } else { &entries };
+            assert_eq!(
+                actual_ids,
+                expected.iter().map(|entry| entry.id).collect::<Vec<_>>()
+            );
+            if kind == 1 {
+                core.add_playlist(playlist, vec![2]).unwrap();
+                core.publish();
+                let stale = dispatch_recovery_query(
+                    &mut core,
+                    Query::PlaylistEntryBatch {
+                        playlist_id: playlist,
+                        query: None,
+                        after: None,
+                        limit: 10,
+                        expected: Some(response.revisions),
+                    },
+                    None,
+                );
+                assert!(matches!(stale.result, Err(QueryError::RevisionChanged)));
+            }
+        }
+    }
+}
+
+#[test]
+fn playlist_token_recovery_failure_blocks_only_dependent_current_queries() {
+    for worker in [false, true] {
+        let (directory, mut core) = fixture();
+        let playlist = core
+            .store
+            .create_playlist_with_tracks("Saved", &[1, 2])
+            .unwrap();
+        core.state.library.playlist_entry_revisions = Arc::default();
+        core.projections.playlist_tokens = true;
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch("ALTER TABLE playlists RENAME COLUMN position TO unavailable_position")
+            .unwrap();
+        core.publish();
+        if worker {
+            core.read_queries = Some(
+                query_worker::ReadQueries::start(
+                    directory.path().join("library.db"),
+                    Arc::clone(&core.shared),
+                )
+                .unwrap(),
+            );
+        }
+        let query = Query::PlaylistEntries {
+            playlist_id: playlist,
+            query: None,
+            offset: 0,
+            limit: 10,
+        };
+        let response = dispatch_recovery_query(&mut core, query.clone(), None);
+        assert!(matches!(response.result, Err(QueryError::Message(_))));
+        assert!(core.projections.playlist_tokens);
+        let unrelated = dispatch_recovery_query(&mut core, Query::Track { track_id: 1 }, None);
+        assert!(matches!(unrelated.result, Ok(ViewResponse::Track(Some(track))) if track.id == 1));
+        let mut epoch = rivu_protocol::query_tracking::QueryEpoch::default();
+        let ticket = epoch.ticket();
+        epoch.cancel();
+        let cancelled = dispatch_recovery_query(&mut core, query.clone(), Some(ticket));
+        assert!(matches!(cancelled.result, Err(QueryError::Cancelled)));
+        connection
+            .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_position TO position")
+            .unwrap();
+        let restored = dispatch_recovery_query(&mut core, query, None);
+        assert!(restored.revisions.playlist_entries.is_some());
+        let Ok(ViewResponse::PlaylistEntries(page)) = restored.result else {
+            panic!("expected restored playlist")
+        };
+        assert_eq!(
+            page.rows
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+}
+
+#[test]
+fn synchronous_projection_refreshes_do_not_admit_duplicate_background_reads() {
+    for entry in ["edit", "remove", "history", "playlist"] {
+        let (directory, mut core) = fixture();
+        core.create_playlist_with_tracks("Existing".into(), vec![1])
+            .unwrap();
+        core.store.mark_played(1, 42).unwrap();
+        let catalog = matches!(entry, "edit" | "remove");
+        core.projections.track_total = catalog;
+        core.projections.playlist_total = catalog || entry == "playlist";
+        core.transport.history_pending = catalog || entry == "history";
+        core.publish();
+        core.read_queries = Some(
+            query_worker::ReadQueries::start(
+                directory.path().join("library.db"),
+                Arc::clone(&core.shared),
+            )
+            .unwrap(),
+        );
+        let transition = core.read_queries.as_ref().unwrap().fence.transition();
+        let command = match entry {
+            "edit" => Command::EditTrack {
+                track_id: 1,
+                title: Some("Updated".into()),
+                artist: None,
+                album: None,
+                decoder_hint: None,
+            },
+            "remove" => Command::RemoveTracks { track_ids: vec![2] },
+            "history" => Command::RemoveHistory { track_ids: vec![1] },
+            _ => Command::CreatePlaylist { name: "New".into() },
+        };
+        let ack = operation_ack(&mut core, Operation::Command(command));
+        assert!(ack.is_success(), "{entry}: {:?}", ack.error);
+        assert!(!core.projections.track_total);
+        assert!(!core.projections.playlist_total);
+        assert!(!core.transport.history_pending);
+        // The fence keeps admitted work physically pending, so this cannot
+        // mistake a fast duplicate read for an absent one.
+        assert!(!core.projections.in_flight, "{entry}");
+        assert_eq!(
+            core.state.library.track_total,
+            if entry == "remove" { 3 } else { 4 }
+        );
+        assert_eq!(
+            core.state.library.playlist_total,
+            if entry == "playlist" { 2 } else { 1 }
+        );
+        if entry == "history" {
+            assert!(core.state.library.history.is_empty());
+        } else if catalog {
+            assert_eq!(core.state.library.history[0].played_at, 42);
+        }
+        transition.finish(false);
+    }
+}
+
+#[test]
+fn remaining_dirty_domains_recover_once_and_failures_wait_for_new_demand() {
+    let (directory, mut core) = fixture();
+    core.create_playlist_with_tracks("Existing".into(), vec![1])
+        .unwrap();
+    core.store.mark_played(1, 42).unwrap();
+    core.projections.track_total = true;
+    core.projections.playlist_total = true;
+    core.transport.history_pending = true;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
+        .unwrap();
+    core.publish();
+    core.read_queries = Some(
+        query_worker::ReadQueries::start(
+            directory.path().join("library.db"),
+            Arc::clone(&core.shared),
+        )
+        .unwrap(),
+    );
+    let transition = core.read_queries.as_ref().unwrap().fence.transition();
+    let ack = operation_ack(
+        &mut core,
+        Operation::Command(Command::RemoveHistory { track_ids: vec![1] }),
+    );
+    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(core.projections.in_flight);
+    assert!(!core.transport.history_pending);
+    transition.finish(false);
+    let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ScanEvent::Projections { demand, prepared } = &event else {
+        panic!("expected projection recovery");
+    };
+    assert!(demand.track_total && demand.playlist_total);
+    assert!(!demand.history);
+    assert!(prepared.history.is_none());
+    assert!(prepared.library_total.as_ref().unwrap().is_ok());
+    assert!(prepared.playlist_total.as_ref().unwrap().is_err());
+    core.business_event(dispatch::BusinessEvent::Scan(event));
+    assert_eq!(core.shared.read().library.track_total, 4);
+    assert!(!core.projections.track_total);
+    assert!(core.projections.playlist_total);
+    assert!(!core.projections.in_flight);
+    assert!(core.scan_rx.try_recv().is_err());
+
+    connection
+        .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    let transition = core.read_queries.as_ref().unwrap().fence.transition();
+    core.business_event(dispatch::BusinessEvent::Request(Request {
+        operation: Operation::Query {
+            query: Query::LibraryStats,
+            ticket: None,
+        },
+        reply: Some(reply),
+    }));
+    assert!(core.projections.in_flight);
+    transition.finish(false);
+    assert!(matches!(
+        futures::executor::block_on(response).unwrap(),
+        CoreResponse::Query(QueryResponse { result: Ok(_), .. })
+    ));
+    let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ScanEvent::Projections { demand, .. } = &event else {
+        panic!("expected projection recovery");
+    };
+    assert!(!demand.track_total && demand.playlist_total && !demand.history);
+    core.business_event(dispatch::BusinessEvent::Scan(event));
+    assert_eq!(core.shared.read().library.playlist_total, 1);
+    assert!(!core.projections.playlist_total);
+    assert!(!core.projections.in_flight);
+    assert!(core.state.library.history.is_empty());
+}
+
+#[test]
+fn synchronous_refresh_does_not_retire_an_admitted_projection_worker() {
+    let (directory, mut core) = fixture();
+    core.projections.track_total = true;
+    core.projections.playlist_total = true;
+    core.transport.history_pending = true;
+    core.publish();
+    core.read_queries = Some(
+        query_worker::ReadQueries::start(
+            directory.path().join("library.db"),
+            Arc::clone(&core.shared),
+        )
+        .unwrap(),
+    );
+    let transition = core.read_queries.as_ref().unwrap().fence.transition();
+    core.recover_projections_on_demand();
+    assert!(core.projections.in_flight);
+    let ack = operation_ack(
+        &mut core,
+        Operation::Command(Command::RemoveTracks { track_ids: vec![2] }),
+    );
+    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(!core.projections.track_total);
+    assert!(!core.projections.playlist_total);
+    assert!(!core.transport.history_pending);
+    assert!(core.projections.in_flight);
+    transition.finish(false);
+    let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(event, ScanEvent::Projections { .. }));
+    core.business_event(dispatch::BusinessEvent::Scan(event));
+    assert!(!core.projections.in_flight);
+    assert_eq!(core.shared.read().library.track_total, 3);
+}
+
+#[test]
+fn failed_synchronous_reads_wait_for_new_demand_even_when_the_domain_was_already_dirty() {
+    for entry in ["catalog", "history"] {
+        for previously_dirty in [false, true] {
+            let (directory, mut core) = fixture();
+            core.store.mark_played(1, 42).unwrap();
+            core.replace_history(core.store.history(MAX_QUERY_ROWS).unwrap());
+            let previous = Arc::clone(&core.state.library.history);
+            core.transport.history_pending = previously_dirty;
+            // History removal leaves this unrelated domain untouched. It must
+            // still recover even when the request's history read fails.
+            core.projections.track_total = entry == "history";
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            connection
+                .execute_batch("UPDATE tracks SET last_played='unreadable' WHERE id=4")
+                .unwrap();
+            core.publish();
+            core.read_queries = Some(
+                query_worker::ReadQueries::start(
+                    directory.path().join("library.db"),
+                    Arc::clone(&core.shared),
+                )
+                .unwrap(),
+            );
+            let transition = core.read_queries.as_ref().unwrap().fence.transition();
+            let command = if entry == "catalog" {
+                Command::EditTrack {
+                    track_id: 1,
+                    title: Some("Committed title".into()),
+                    artist: None,
+                    album: None,
+                    decoder_hint: None,
+                }
+            } else {
+                Command::RemoveHistory { track_ids: vec![1] }
+            };
+            let ack = operation_ack(&mut core, Operation::Command(command));
+            assert_eq!(ack.status, AckStatus::Failed);
+            assert!(ack.error.as_ref().unwrap().contains("committed"));
+            assert!(core.transport.history_pending);
+            assert!(Arc::ptr_eq(&core.state.library.history, &previous));
+            assert!(core.projections.request_attempts.is_none());
+            if entry == "catalog" {
+                assert_eq!(
+                    core.store.track(1).unwrap().unwrap().title,
+                    "Committed title"
+                );
+                assert!(!core.projections.in_flight);
+                transition.finish(false);
+            } else {
+                assert!(core.store.track(1).unwrap().unwrap().last_played.is_none());
+                assert!(core.projections.in_flight);
+                transition.finish(false);
+                let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let ScanEvent::Projections { demand, prepared } = &event else {
+                    panic!("expected untouched count recovery");
+                };
+                assert!(demand.track_total);
+                assert!(!demand.history && !demand.playlist_total);
+                assert!(prepared.history.is_none());
+                core.business_event(dispatch::BusinessEvent::Scan(event));
+                assert!(!core.projections.track_total);
+                assert!(core.transport.history_pending);
+                assert!(!core.projections.in_flight);
+            }
+            assert!(core.scan_rx.try_recv().is_err());
+            connection
+                .execute_batch("UPDATE tracks SET last_played=NULL WHERE id=4")
+                .unwrap();
+            let (reply, response) = oneshot::channel();
+            let transition = core.read_queries.as_ref().unwrap().fence.transition();
+            core.business_event(dispatch::BusinessEvent::Request(Request {
+                operation: Operation::Query {
+                    query: Query::LibraryStats,
+                    ticket: None,
+                },
+                reply: Some(reply),
+            }));
+            assert!(core.projections.in_flight);
+            transition.finish(false);
+            assert!(matches!(
+                futures::executor::block_on(response).unwrap(),
+                CoreResponse::Query(QueryResponse { result: Ok(_), .. })
+            ));
+            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let ScanEvent::Projections { demand, .. } = &event else {
+                panic!("expected later history recovery");
+            };
+            assert!(demand.history);
+            assert!(!demand.track_total && !demand.playlist_total);
+            core.business_event(dispatch::BusinessEvent::Scan(event));
+            assert!(!core.transport.history_pending);
+            assert!(!core.projections.in_flight);
+            if entry == "catalog" {
+                assert_eq!(
+                    core.shared.read().library.history[0].title,
+                    "Committed title"
+                );
+            } else {
+                assert!(core.shared.read().library.history.is_empty());
+            }
+        }
+    }
+}
+
 fn initialize_with_pending_devices(
     mut core: Core,
 ) -> (

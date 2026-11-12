@@ -433,10 +433,13 @@ mutation; independently committed scan selection, library and playlist effects
 retain their own outcome evidence.
 
 Keep bounded pending projection work and refresh it on relevant demand or events,
-not a polling timer. Queue structure and current-track refresh dependencies must
-follow their actual inputs rather than every library change. Control decisions
-use the playback session identity and narrow authoritative database facts, not a
-possibly stale display Track.
+not a polling timer. Synchronous refresh and background recovery share a request's
+recovery opportunity: failure waits for later demand, and satisfaction rejects
+late recovery without releasing physical worker ownership.
+Queue structure and current-track refresh dependencies must follow their actual
+inputs rather than every library change. Control decisions use the playback
+session identity and narrow authoritative database facts, not a possibly stale
+display Track.
 External admission follows the same rule: current-track, count and history
 refreshes retain independent recovery responsibility after the write commits.
 

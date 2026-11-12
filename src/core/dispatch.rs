@@ -318,14 +318,46 @@ impl Core {
     }
 
     pub(super) fn dispatch_request(&mut self, request: Request) {
-        if matches!(
+        let recover = matches!(
             &request.operation,
             Operation::Query { .. } | Operation::Command(_)
-        ) {
+        );
+        self.projections.request_attempts = recover.then(projections::ProjectionAttempts::default);
+        self.apply_request(request);
+        if recover {
+            // Only untouched dirty domains receive this request's recovery
+            // attempt. A synchronous failure must wait for a later demand.
             self.recover_projections_on_demand();
         }
+        self.projections.request_attempts = None;
+    }
+
+    fn apply_request(&mut self, request: Request) {
         match request.operation {
             Operation::Query { query, ticket } => {
+                if self.projections.playlist_tokens
+                    && (matches!(
+                        rivu_protocol::response::QueryRevisionScope::for_query(&query),
+                        rivu_protocol::response::QueryRevisionScope::PlaylistEntries(_)
+                    ) || matches!(&query, Query::PlaylistEntry { .. }))
+                    && !self.database_maintenance_active()
+                    && !self.database_unavailable
+                    && ticket.as_ref().is_none_or(QueryTicket::is_current)
+                {
+                    // Capture query versions only after their authority is ready.
+                    if let Err(error) = self.recover_playlist_tokens() {
+                        if let Some(reply) = request.reply {
+                            let _ = reply.send(CoreResponse::Query(QueryResponse {
+                                revisions: self.state.query_revisions_for(&query),
+                                result: Err(error
+                                    .context("Initializing playlist entry revisions")
+                                    .into()),
+                            }));
+                        }
+                        return;
+                    }
+                    self.publish();
+                }
                 if let Some(reads) = &self.read_queries
                     && !matches!(
                         &query,

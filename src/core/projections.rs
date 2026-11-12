@@ -8,6 +8,17 @@ pub(super) struct ProjectionRecovery {
     pub(super) playlist_tokens: bool,
     pub(super) current_track: bool,
     pub(super) in_flight: bool,
+    pub(super) request_attempts: Option<ProjectionAttempts>,
+}
+
+/// A failed read consumes this request's attempt just as a successful read does.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ProjectionAttempts {
+    pub(super) track_total: bool,
+    pub(super) playlist_total: bool,
+    pub(super) playlist_tokens: bool,
+    pub(super) current_track: bool,
+    pub(super) history: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +81,11 @@ impl Core {
         &mut self,
         prepared: PreparedProjections,
     ) -> Result<()> {
+        if let Some(attempted) = &mut self.projections.request_attempts {
+            attempted.track_total |= prepared.library_total.is_some();
+            attempted.playlist_total |= prepared.playlist_total.is_some();
+            attempted.history |= prepared.history.is_some();
+        }
         let mut errors = Vec::new();
         if let Some(total) = prepared.library_total {
             match total {
@@ -111,15 +127,25 @@ impl Core {
         if self.database_maintenance_active() || self.database_unavailable {
             return;
         }
-        if self.projections.playlist_tokens && self.recover_playlist_tokens().is_ok() {
+        let attempted = self.projections.request_attempts.unwrap_or_default();
+        if self.projections.playlist_tokens
+            && !attempted.playlist_tokens
+            && self.recover_playlist_tokens().is_ok()
+        {
             self.publish();
         }
         // Metadata recovery reuses the queue control gate, without rereading its
         // structure. Never replay the catalog command that dirtied this snapshot.
-        if self.projections.current_track && self.refresh_current_track().is_ok() {
+        if self.projections.current_track
+            && !attempted.current_track
+            && self.refresh_current_track().is_ok()
+        {
             self.publish();
         }
-        let demand = self.projection_demand();
+        let mut demand = self.projection_demand();
+        demand.track_total &= !attempted.track_total;
+        demand.playlist_total &= !attempted.playlist_total;
+        demand.history &= !attempted.history;
         if !self.projections.in_flight
             && (demand.track_total || demand.playlist_total || demand.history)
             && let Some(reads) = &self.read_queries
@@ -150,13 +176,13 @@ impl Core {
             return;
         }
         let current = self.state.query_revisions();
-        if current.library != demand.revisions.library {
+        if !self.transport.history_pending || current.library != demand.revisions.library {
             prepared.history = None;
         }
-        if current.structure != demand.revisions.structure {
+        if !self.projections.track_total || current.structure != demand.revisions.structure {
             prepared.library_total = None;
         }
-        if current.playlist != demand.revisions.playlist {
+        if !self.projections.playlist_total || current.playlist != demand.revisions.playlist {
             prepared.playlist_total = None;
         }
         // Failure remains dirty, but this completion never reschedules itself.
@@ -205,6 +231,34 @@ mod tests {
                 && core.projections.playlist_total
                 && core.transport.history_pending
         );
+        assert!(!core.projections.in_flight);
+    }
+
+    #[test]
+    fn late_completion_keeps_synchronously_satisfied_domains_at_the_same_revision() {
+        let (_directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        core.store.mark_played(1, 42).unwrap();
+        core.projections.track_total = true;
+        core.projections.playlist_total = true;
+        core.transport.history_pending = true;
+        let demand = core.projection_demand();
+        core.projections.in_flight = true;
+        core.refresh_catalog_projections().unwrap();
+        assert_eq!(core.state.query_revisions(), demand.revisions);
+        assert!(core.projections.in_flight);
+        let history = Arc::clone(&core.state.library.history);
+        core.complete_projection_recovery(
+            demand,
+            PreparedProjections {
+                library_total: Some(Ok(999)),
+                history: Some(Ok(Vec::new())),
+                playlist_total: Some(Ok(999)),
+            },
+        );
+        assert_eq!(core.state.library.track_total, 4);
+        assert_eq!(core.state.library.playlist_total, 0);
+        assert!(Arc::ptr_eq(&core.state.library.history, &history));
+        assert_eq!(core.state.library.history[0].played_at, 42);
         assert!(!core.projections.in_flight);
     }
 }

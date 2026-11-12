@@ -3,6 +3,9 @@ use super::*;
 impl Core {
     pub(in crate::core) fn recover_playlist_tokens(&mut self) -> Result<()> {
         if self.projections.playlist_tokens {
+            if let Some(attempted) = &mut self.projections.request_attempts {
+                attempted.playlist_tokens = true;
+            }
             for playlist_id in self.store.playlist_ids()? {
                 if !self
                     .state
