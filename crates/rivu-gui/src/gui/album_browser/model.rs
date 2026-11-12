@@ -251,22 +251,22 @@ impl AlbumModel {
 
     pub fn retired(&self) -> bool {
         if self.selected.is_some() {
-            self.tracks.retired()
+            self.tracks.retired() || self.tracks_count_retired
         } else {
-            self.albums.retired()
+            self.albums.retired() || self.albums_count_retired
         }
     }
 
     pub fn retry(&mut self) {
         if self.selected.is_some() {
-            if self.tracks_count_retired {
-                self.tracks.invalidate_payload();
+            if self.tracks.retired() {
+                self.tracks.invalidate();
             }
             self.tracks.retry();
             self.tracks_count_retired = false;
         } else {
-            if self.albums_count_retired {
-                self.albums.invalidate_payload();
+            if self.albums.retired() {
+                self.albums.invalidate();
             }
             self.albums.retry();
             self.albums_count_retired = false;
@@ -469,7 +469,7 @@ impl AlbumModel {
         })
     }
 
-    /// A retained empty page has no payload demand to drive a replacement count.
+    /// Loaded pages need no replacement payload to recover a missing count.
     pub fn prepare_missing_count(&mut self) -> Option<CountRequest> {
         let retired = if self.selected.is_some() {
             self.tracks_count_retired
@@ -828,8 +828,10 @@ mod tests {
                             2,
                         );
                     }
-                    let next = model.prepare().unwrap();
                     let current = model.revisions;
+                    let next = model
+                        .prepare()
+                        .expect("obsolete authority requires a new page");
                     model.complete_page(
                         &next.query,
                         next.generation,
@@ -869,6 +871,64 @@ mod tests {
                     assert_eq!(completion.counts, Some((1, 3)));
                     model.retire_worker();
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn mismatched_count_retry_reloads_even_previously_empty_pages() {
+        for tracks in [false, true] {
+            for matched in [0, 1] {
+                let mut model = AlbumModel::default();
+                let revisions = QueryRevisions::default();
+                model.sync(true, revisions, 2);
+                if tracks {
+                    model.select(Some(key("A")));
+                    model.set_tracks_query(Some("needle".into()));
+                } else {
+                    model.set_query(Some("needle".into()));
+                }
+                let page = model.prepare().unwrap();
+                model.complete_page(
+                    &page.query,
+                    page.generation,
+                    response(&page, matched, revisions),
+                    revisions,
+                    "wrong response",
+                );
+                let count = model.prepare_count(&page.query, page.generation).unwrap();
+                let mismatched = QueryRevisions {
+                    album: 1,
+                    ..revisions
+                };
+                model.complete_count(&count, count_response(&count, 10, mismatched), revisions);
+                assert!(model.retired());
+                model.retry();
+                assert!(
+                    model.prepare().is_none(),
+                    "retired worker still owns its slot"
+                );
+                assert!(model.prepare_missing_count().is_none());
+                if tracks {
+                    assert_eq!(model.tracks.total(), None);
+                    assert!(model.tracks.get(0).is_none());
+                } else {
+                    assert_eq!(model.albums.total(), None);
+                    assert!(model.albums.get(0).is_none());
+                }
+                model.retire_worker();
+                let replacement = model
+                    .prepare()
+                    .expect("authority must be re-established by a page");
+                assert_ne!(replacement.generation, page.generation);
+                assert_eq!(
+                    finish(&mut model, replacement, matched).published,
+                    if tracks {
+                        Published::Tracks
+                    } else {
+                        Published::Albums
+                    }
+                );
             }
         }
     }
@@ -1574,6 +1634,195 @@ mod tests {
             if tracks {
                 assert!(model.prepare().is_some());
             }
+        }
+    }
+
+    #[test]
+    fn count_only_failure_retries_without_clearing_successful_pages() {
+        for tracks in [false, true] {
+            for empty in [false, true] {
+                let mut model = AlbumModel::default();
+                let revisions = QueryRevisions::default();
+                model.sync(true, revisions, 2);
+                if tracks {
+                    model.select(Some(key("A")));
+                    model.set_tracks_query(Some("needle".into()));
+                } else {
+                    model.set_query(Some("needle".into()));
+                }
+                let page = model.prepare().unwrap();
+                let matched = usize::from(!empty);
+                let mut result = response(&page, matched, revisions);
+                if !tracks && !empty {
+                    result.result = Ok(ViewResponse::Albums(Page {
+                        total: matched,
+                        rows: vec![summary(42)],
+                    }));
+                }
+                model.complete_page(
+                    &page.query,
+                    page.generation,
+                    result,
+                    revisions,
+                    "wrong response",
+                );
+                model.retire_worker();
+                assert!(model.prepare().is_none());
+                let count = model.prepare_missing_count().unwrap();
+                model.complete_count(
+                    &count,
+                    QueryResponse {
+                        revisions,
+                        result: Err(QueryError::Message("count failed".into())),
+                    },
+                    revisions,
+                );
+                assert!(model.retired(), "count-only error exposes Retry");
+                model.retry();
+                assert!(model.prepare().is_none());
+                assert!(
+                    model.prepare_missing_count().is_none(),
+                    "physical slot remains held"
+                );
+                model.retire_worker();
+                // Hiding/reopening must preserve the page, not replay its count failure.
+                model.sync(false, revisions, 2);
+                model.sync(true, revisions, 2);
+                assert!(model.prepare().is_none(), "no payload reload");
+                let retry = model.prepare_missing_count().unwrap();
+                assert!(model.prepare_missing_count().is_none());
+                let completion =
+                    model.complete_count(&retry, count_response(&retry, 10, revisions), revisions);
+                assert_eq!(completion.counts, Some((matched, 10)));
+                assert!(!model.retired());
+                assert_eq!(model.total(), Some(10));
+                if !empty {
+                    if tracks {
+                        assert_eq!(model.tracks.get(0).unwrap().id, 0);
+                    } else {
+                        assert_eq!(model.albums.get(0).unwrap().representative.id, 42);
+                    }
+                }
+                model.retire_worker();
+                assert!(model.prepare().is_none());
+                assert!(model.prepare_missing_count().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn count_failures_stay_parked_across_hide_and_retry_only_the_active_listing() {
+        let mut model = AlbumModel::default();
+        let revisions = QueryRevisions::default();
+        model.sync(true, revisions, 2);
+        model.set_query(Some("needle".into()));
+        let page = model.prepare().unwrap();
+        finish(&mut model, page, 0);
+        let count = model.prepare_missing_count().unwrap();
+        model.complete_count(
+            &count,
+            QueryResponse {
+                revisions,
+                result: Err(QueryError::Message("count failed".into())),
+            },
+            revisions,
+        );
+        model.retire_worker();
+        model.sync(false, revisions, 2);
+        model.sync(true, revisions, 2);
+        assert!(model.retired());
+        assert!(model.prepare().is_none());
+        assert!(model.prepare_missing_count().is_none());
+        model.select(Some(key("A")));
+        model.retry();
+        let tracks = model.prepare().unwrap();
+        finish(&mut model, tracks, 0);
+        model.select(None);
+        assert!(
+            model.retired(),
+            "track Retry cannot clear the grid count failure"
+        );
+        assert!(model.prepare_missing_count().is_none());
+        model.set_query(Some("replacement".into()));
+        assert!(
+            !model.retired(),
+            "a new query owns independent failure state"
+        );
+        let replacement = model.prepare().unwrap();
+        let completion =
+            model.complete_count(&count, count_response(&count, 99, revisions), revisions);
+        assert_eq!(completion.published, Published::None);
+        assert_eq!(model.total(), None);
+        assert!(
+            model.prepare().is_none(),
+            "replacement keeps its physical slot"
+        );
+        finish(&mut model, replacement, 0);
+    }
+
+    #[test]
+    fn page_retry_preserves_successful_rows_and_cached_count() {
+        for tracks in [false, true] {
+            let mut model = AlbumModel::default();
+            let revisions = QueryRevisions::default();
+            model.sync(true, revisions, 2);
+            if tracks {
+                model.select(Some(key("A")));
+            }
+            let first = model.prepare().unwrap();
+            let total = if tracks { 4 } else { 26 };
+            let mut page = response(&first, total, revisions);
+            if !tracks {
+                page.result = Ok(ViewResponse::Albums(Page {
+                    total: 26,
+                    rows: (0..24).map(summary).collect(),
+                }));
+            }
+            model.complete_page(
+                &first.query,
+                first.generation,
+                page,
+                revisions,
+                "wrong response",
+            );
+            model.retire_worker();
+            if tracks {
+                model.demand_tracks(2..4, model.generation());
+            } else {
+                model.demand_albums(24..26);
+            }
+            let failed = model.prepare().unwrap();
+            model.complete_page(
+                &failed.query,
+                failed.generation,
+                QueryResponse {
+                    revisions,
+                    result: Err(QueryError::Message("page failed".into())),
+                },
+                revisions,
+                "wrong response",
+            );
+            model.retire_worker();
+            assert!(
+                model.prepare().is_none(),
+                "page errors do not retry automatically"
+            );
+            model.retry();
+            assert_eq!(model.total(), Some(total));
+            if tracks {
+                assert_eq!(model.tracks.get(0).unwrap().id, 0);
+                assert_eq!(model.tracks.error(2), None);
+            } else {
+                assert_eq!(model.albums.get(0).unwrap().representative.id, 0);
+                assert_eq!(model.albums.error(24), None);
+            }
+            let retry = model.prepare().unwrap();
+            assert_eq!(retry.query, failed.query);
+            assert!(
+                model
+                    .prepare_count(&retry.query, retry.generation)
+                    .is_none()
+            );
         }
     }
 
