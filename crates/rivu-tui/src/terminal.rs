@@ -328,11 +328,8 @@ where
                 immediate_redraw = true;
             }
         }
-        let submit = tui.ui.prepare_query_request(&tui.snapshot);
-        match tui.ui.reads.requested.as_ref() {
-            Some(request) if submit => queries.request(request.clone())?,
-            None => queries.cancel(),
-            _ => {}
+        if let Some((request, ticket)) = tui.ui.prepare_query_request(&tui.snapshot) {
+            queries.request(request, ticket)?;
         }
         if tui.ui.local_revision != local_revision {
             redraw = true;

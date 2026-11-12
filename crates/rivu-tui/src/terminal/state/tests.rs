@@ -3602,12 +3602,12 @@ fn input_loop_reuses_pending_borrowed_demands_and_accepts_their_original_complet
             ui.details_active = true;
             ui.details.target = Some(2);
         }
-        assert!(ui.prepare_query_request(&state));
+        assert!(ui.prepare_query_request(&state).is_some());
         let request = ui.reads.requested.clone().unwrap();
         ui.open_search();
         ui.search.query = "unsubmitted replacement".into();
         for _ in 0..8 {
-            assert!(!ui.prepare_query_request(&state));
+            assert!(ui.prepare_query_request(&state).is_none());
         }
         let result = if kind == 6 {
             QueryResult {
@@ -3619,7 +3619,7 @@ fn input_loop_reuses_pending_borrowed_demands_and_accepts_their_original_complet
         };
         assert!(ui.apply_query(&state, &request, Ok(result)));
         if kind == 6 {
-            assert!(!ui.prepare_query_request(&state));
+            assert!(ui.prepare_query_request(&state).is_none());
             assert!(ui.reads.requested.is_none());
         }
     }
@@ -3635,13 +3635,13 @@ fn pending_directory_read_rejects_same_path_after_a_new_generation() {
         }),
         ..UiState::default()
     };
-    assert!(ui.prepare_query_request(&state));
+    assert!(ui.prepare_query_request(&state).is_some());
     let old = ui.reads.requested.clone().unwrap();
     for _ in 0..8 {
-        assert!(!ui.prepare_query_request(&state));
+        assert!(ui.prepare_query_request(&state).is_none());
     }
     ui.cancel_query();
-    assert!(ui.prepare_query_request(&state));
+    assert!(ui.prepare_query_request(&state).is_some());
     let current = ui.reads.requested.clone().unwrap();
     assert_eq!(old.demand.query(), current.demand.query());
     assert!(!ui.apply_query(&state, &old, Ok(response(&old, 12))));

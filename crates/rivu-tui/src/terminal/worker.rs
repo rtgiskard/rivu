@@ -656,10 +656,6 @@ pub(super) struct QueryWorker {
     pending: Arc<Mutex<Option<QueryJob>>>,
     latest: Arc<Mutex<Option<QueryCompletion>>>,
     liveness: Receiver<()>,
-    cancellation: rivu_protocol::query_tracking::QueryEpoch,
-    // Logical ownership only: withdrawing demand does not retire the worker's
-    // retained physical exchange, which still drains before the next job.
-    demanded: bool,
     shutdown: rivu_client::SessionCancellation,
     worker: Option<JoinHandle<()>>,
 }
@@ -691,38 +687,31 @@ impl QueryWorker {
         anyhow::bail!("TUI query worker stopped unexpectedly")
     }
 
-    pub(super) fn request(&mut self, request: QueryRequest) -> Result<()> {
-        self.cancel();
-        let ticket = self.cancellation.ticket();
+    pub(super) fn request(
+        &mut self,
+        request: QueryRequest,
+        ticket: rivu_protocol::query_tracking::QueryTicket,
+    ) -> Result<()> {
         *self.pending.lock() = Some(QueryJob { request, ticket });
-        self.demanded = true;
         let Some(sender) = &self.sender else {
-            self.cancel();
+            self.pending.lock().take();
             return self.stopped();
         };
         match sender.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => Ok(()),
             Err(TrySendError::Disconnected(())) => {
-                self.cancel();
+                self.pending.lock().take();
                 self.stopped()
             }
-        }
-    }
-
-    pub(super) fn cancel(&mut self) {
-        if self.demanded {
-            self.demanded = false;
-            self.cancellation.cancel();
-            self.pending.lock().take();
         }
     }
 }
 
 impl Drop for QueryWorker {
     fn drop(&mut self) {
-        self.cancel();
-        // Replacements cancel the active read but retain its physical wait.
-        // Shutdown closes the socket, dropping Core's reply receiver instead.
+        self.pending.lock().take();
+        // Owner tickets retire logical reads; shutdown closes the retained
+        // physical exchange and drops Core's reply receiver.
         self.shutdown.cancel();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
@@ -771,6 +760,9 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
                     }),
                 Err(error) => Err(error.clone()),
             };
+            if stopping.is_cancelled() {
+                break;
+            }
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
             if instance_changed || job.ticket.is_current() {
                 *results.lock() = Some((job.request, result));
@@ -785,8 +777,6 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
         pending,
         latest,
         liveness,
-        cancellation: rivu_protocol::query_tracking::QueryEpoch::default(),
-        demanded: false,
         shutdown,
         worker: Some(worker),
     }

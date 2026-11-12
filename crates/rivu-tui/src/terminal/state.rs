@@ -1032,17 +1032,23 @@ impl ReadCoordinator {
         self.tracker.cancel();
     }
 
-    fn submit(&mut self, demand: ReadSpec, state: &TuiSnapshot) {
+    fn submit(
+        &mut self,
+        demand: ReadSpec,
+        state: &TuiSnapshot,
+    ) -> (QueryRequest, rivu_protocol::query_tracking::QueryTicket) {
         // A new page demand is a new submission even when protocol identity
         // deliberately excludes its offset and limit (including A-B-A).
         self.tracker.cancel();
         let submission = self
             .tracker
             .submit(demand.protocol_query(), demand.revisions(state));
-        self.requested = Some(QueryRequest {
+        let request = QueryRequest {
             demand: Arc::new(demand),
             submission,
-        });
+        };
+        self.requested = Some(request.clone());
+        (request, self.tracker.ticket())
     }
 }
 
@@ -1144,12 +1150,15 @@ impl UiState {
 
     // A pending demand is borrowed on every input-loop tick. Own its query only
     // when it actually replaces the worker's submission.
-    pub(super) fn prepare_query_request(&mut self, state: &TuiSnapshot) -> bool {
+    pub(super) fn prepare_query_request(
+        &mut self,
+        state: &TuiSnapshot,
+    ) -> Option<(QueryRequest, rivu_protocol::query_tracking::QueryTicket)> {
         let Some(demand) = self.next_demand(state) else {
             if self.reads.requested.is_some() {
                 self.reads.retire();
             }
-            return false;
+            return None;
         };
         if self
             .reads
@@ -1157,14 +1166,14 @@ impl UiState {
             .as_ref()
             .is_some_and(|request| demand.matches(&request.demand, state))
         {
-            return false;
+            return None;
         }
         let demand = demand.own(state);
-        self.reads.submit(demand, state);
+        let request = self.reads.submit(demand, state);
         if self.details_active {
             self.details.state = DetailState::Loading;
         }
-        true
+        Some(request)
     }
 
     #[cfg(test)]

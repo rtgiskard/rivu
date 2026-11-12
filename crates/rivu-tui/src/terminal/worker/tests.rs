@@ -1,8 +1,4 @@
 use super::*;
-use crate::terminal::{
-    paged::PagedList,
-    state::{UiState, View},
-};
 use rivu::test_support::ipc;
 use rivu_protocol::model::Command;
 use rivu_protocol::query_tracking::QueryTracker;
@@ -39,6 +35,7 @@ fn queue_request(
         limit: 20,
     }
     .own(&state);
+    tracker.cancel();
     let submission = tracker.submit(demand.protocol_query(), revisions);
     QueryRequest {
         demand: Arc::new(demand),
@@ -228,19 +225,16 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
                     liveness.recv_timeout(Duration::from_secs(5)),
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected)
                 ));
-                let mut cancellation = rivu_protocol::query_tracking::QueryEpoch::default();
                 let mut tracker = QueryTracker::default();
                 let request = queue_request(&mut tracker, 0, QueryRevisions::default());
                 QueryWorker {
                     sender: Some(sender),
                     pending: Arc::new(Mutex::new(Some(QueryJob {
                         request,
-                        ticket: cancellation.ticket(),
+                        ticket: tracker.ticket(),
                     }))),
                     latest: Arc::new(Mutex::new(None)),
                     liveness,
-                    cancellation,
-                    demanded: true,
                     shutdown: rivu_client::SessionCancellation::default(),
                     worker: Some(worker),
                 }
@@ -446,13 +440,9 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         connected.send(listener.accept().unwrap().0).unwrap();
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
-    let state = TuiSnapshot::default();
-    let mut ui = UiState {
-        view: View::Playlists(PagedList::default()),
-        ..UiState::default()
-    };
-    let request = ui.query_request(&state).unwrap();
-    worker.request(request.clone()).unwrap();
+    let mut tracker = QueryTracker::default();
+    let request = queue_request(&mut tracker, 0, QueryRevisions::default());
+    worker.request(request, tracker.ticket()).unwrap();
     let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(worker.take_result().unwrap().is_none());
     stream
@@ -460,16 +450,10 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
         .unwrap();
     for offset in 1..100 {
         worker
-            .request(QueryRequest {
-                demand: Arc::new(
-                    ReadDemand {
-                        offset,
-                        ..request.demand.borrowed()
-                    }
-                    .own(&state),
-                ),
-                submission: request.submission,
-            })
+            .request(
+                queue_request(&mut tracker, offset, QueryRevisions::default()),
+                tracker.ticket(),
+            )
             .unwrap();
     }
     assert!(worker.sender.as_ref().unwrap().is_full());
@@ -552,15 +536,18 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone()).unwrap();
+    worker.request(request.clone(), tracker.ticket()).unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     for offset in 1..100 {
         worker
-            .request(queue_request(
-                &mut tracker,
-                offset,
-                QueryRevisions::default().with_bitrate_revision(offset as u64),
-            ))
+            .request(
+                queue_request(
+                    &mut tracker,
+                    offset,
+                    QueryRevisions::default().with_bitrate_revision(offset as u64),
+                ),
+                tracker.ticket(),
+            )
             .unwrap();
     }
     cancellation.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -599,10 +586,13 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone()).unwrap();
+    worker.request(request.clone(), tracker.ticket()).unwrap();
     let stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker
-        .request(queue_request(&mut tracker, 99, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 99, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
     let pending = Arc::clone(&worker.pending);
     let results = Arc::clone(&worker.latest);
@@ -778,7 +768,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
     let mut queries = spawn_query_worker(directory.path(), instance_id);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    queries.request(request).unwrap();
+    queries.request(request, tracker.ticket()).unwrap();
     queries.sender.take();
     queries.worker.take().unwrap().join().unwrap();
     let (_, result) = queries.latest.lock().take().unwrap();
@@ -847,14 +837,20 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     worker
-        .request(queue_request(&mut tracker, 0, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 0, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
     connected.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker.cancel();
+    tracker.cancel();
     release.send(()).unwrap();
     worker.worker.take().unwrap().join().unwrap();
     let error = worker
-        .request(queue_request(&mut tracker, 1, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 1, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap_err();
     assert!(error.is::<QueryError>());
     // Even after its publisher has exited and demand was withdrawn, identity
@@ -897,10 +893,13 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
-    worker.request(request.clone()).unwrap();
+    worker.request(request.clone(), tracker.ticket()).unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker
-        .request(queue_request(&mut tracker, 20, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 20, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
     release.send(()).unwrap();
     worker.sender.take();
@@ -1152,22 +1151,31 @@ fn repeated_withdrawal_discards_pending_but_retains_active_until_reply() {
     });
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
-    // Withdrawing an idle worker must leave its next real demand usable.
-    worker.cancel();
-    worker.cancel();
+    // Retiring idle demand must leave its next real submission usable.
+    tracker.cancel();
+    tracker.cancel();
     worker
-        .request(queue_request(&mut tracker, 0, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 0, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
     active.recv_timeout(Duration::from_secs(5)).unwrap();
     worker
-        .request(queue_request(&mut tracker, 1, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 1, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
-    worker.cancel();
-    worker.cancel();
+    tracker.cancel();
+    tracker.cancel();
     cancelled.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(worker.take_result().unwrap().is_none());
     worker
-        .request(queue_request(&mut tracker, 2, QueryRevisions::default()))
+        .request(
+            queue_request(&mut tracker, 2, QueryRevisions::default()),
+            tracker.ticket(),
+        )
         .unwrap();
     release.send(()).unwrap();
     worker.sender.take();
