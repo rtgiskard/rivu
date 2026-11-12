@@ -175,9 +175,11 @@ with the resize; shrinking discards removed bands and their drafts.
 When a track rate is known, adding bands requires room for the 20 Hz lower
 bound; otherwise the editor reports an error. Removing bands remains available.
 
-Reset preserves the enabled state but clears bands and both gains; graph EQ also
-returns to IIR. It discards that target's EQ drafts, including implementation/taps,
-and retires queued local edit intent.
+Reset preserves the enabled state. In Monitor EQ it restores the parameter snapshot
+of the last preset successfully loaded in this desktop session; subsequent parameter
+edits do not change that baseline. Without a loaded preset it clears bands and both
+gains. Graph EQ always clears bands and gains and returns to IIR. Reset discards
+that target's EQ drafts, including implementation/taps, and retires queued local edit intent.
 Band-count changes and Reset are unavailable while a processing acknowledgement is pending.
 
 Hover/focus the curve to see numbered band nodes. Drag horizontally for frequency

@@ -83,7 +83,6 @@ processing-input-gain-short = Input
 processing-output-gain-short = Output
 processing-band-properties = Band { $band } · { $kind }
 processing-band-disabled = Disabled
-processing-band-empty = No bands
 processing-band-count-label = Band count
 processing-band-count-help = Enter 0–32 and press Enter to confirm. Increasing adds neutral bands; decreasing removes bands from the end and preserves earlier settings.
 processing-band-count-invalid = Enter a whole band count from 0 to 32.

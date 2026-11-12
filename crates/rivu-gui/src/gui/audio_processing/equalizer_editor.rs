@@ -94,6 +94,8 @@ pub(super) struct EqualizerEditors {
     reset_band_focus: Option<EqTarget>,
     pending_node_focus_reset: Option<(u64, u64)>,
     reconciled: Option<EqualizerReconcileInputs>,
+    loaded_preset: Option<EqualizerConfig>,
+    loading_preset: Option<EqualizerConfig>,
 }
 
 // Publications also carry transport position. Retain only the last dependency
@@ -2639,7 +2641,11 @@ impl EqualizerEditor {
                             }
                         },
                     )
-                    .when(kind == band.kind, |v| v.bg(rgb(theme.selected))),
+                    .when(kind == band.kind, |v| {
+                        v.bg(rgb(theme.selected))
+                            .border_color(rgb(theme.accent))
+                            .text_color(rgb(theme.accent))
+                    }),
                     self.config_locked(),
                 ));
             }
@@ -2694,9 +2700,6 @@ impl EqualizerEditor {
             .gap_2()
             .child(tools)
             .child(controls)
-            .when(eq.bands.is_empty(), |view| {
-                view.child(caption(theme, self.tr("processing-band-empty")))
-            })
             .child(body)
             .when(self.channel_choices.is_open(), |view| {
                 if let Some(anchor) = self.channel_anchor.get() {
@@ -2811,7 +2814,18 @@ impl AudioProcessing {
                 cx.notify();
             });
         }
-        let next = reset_equalizer_config(&config);
+        let next = if target == EqTarget::Monitor {
+            self.equalizer_editors
+                .loaded_preset
+                .clone()
+                .map(|mut preset| {
+                    preset.enabled = config.enabled;
+                    preset
+                })
+        } else {
+            None
+        }
+        .unwrap_or_else(|| reset_equalizer_config(&config));
         match target {
             EqTarget::Monitor => self.submit_target_equalizer(
                 (target, revision, &config, format),
@@ -3604,6 +3618,21 @@ fn replaces_band_identity(edit: &EqualizerEdit) -> bool {
 
 impl AudioProcessing {
     pub(super) fn begin_equalizer_command(&mut self, command: &Command) {
+        self.equalizer_editors.loading_preset = match command {
+            Command::EqualizerEdit {
+                edit: EqualizerEdit::LoadPreset { name },
+                ..
+            } => self
+                .context
+                .snapshot()
+                .system
+                .config
+                .equalizer_presets
+                .iter()
+                .find(|preset| preset.name == *name)
+                .map(|preset| preset.config.clone()),
+            _ => None,
+        };
         self.equalizer_editors.reset_band_focus = match command {
             Command::EqualizerEdit { edit, .. } if replaces_band_identity(edit) => {
                 Some(EqTarget::Monitor)
@@ -3637,6 +3666,11 @@ impl AudioProcessing {
     }
 
     pub(super) fn finish_equalizer_command(&mut self, success: bool) {
+        if let Some(preset) = self.equalizer_editors.loading_preset.take()
+            && success
+        {
+            self.equalizer_editors.loaded_preset = Some(preset);
+        }
         if !success {
             self.equalizer_editors.removing.clear();
             self.equalizer_editors.reset_band_focus = None;
@@ -5919,6 +5953,49 @@ mod tests {
             assert_ne!(editor.config.bands[0].frequency_hz, 80.);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+    }
+
+    #[gpui::test]
+    fn reset_restores_successfully_loaded_preset_after_parameter_edits(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, _editor, _handle) = fixture_with_owner(cx);
+        let preset = owner.read_with(cx, |owner, _| {
+            owner.context.snapshot().system.config.equalizer_presets[1].clone()
+        });
+        let load = Command::EqualizerEdit {
+            expected_revision: owner.read_with(cx, |owner, _| {
+                owner.context.snapshot().revisions.configuration
+            }),
+            edit: EqualizerEdit::LoadPreset { name: preset.name },
+        };
+        owner.update(cx, |owner, _| owner.begin_equalizer_command(&load));
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(load))
+                .ack
+                .is_success()
+        );
+        owner.update(cx, |owner, _| owner.finish_equalizer_command(true));
+        let edit = Command::EqualizerEdit {
+            expected_revision: owner.read_with(cx, |owner, _| {
+                owner.context.snapshot().revisions.configuration
+            }),
+            edit: EqualizerEdit::PreampDb(3.),
+        };
+        assert!(
+            futures::executor::block_on(runtime.handle.request_ack(edit))
+                .ack
+                .is_success()
+        );
+        owner.update(cx, |owner, cx| {
+            owner.reconcile(owner.context.snapshot(), cx);
+            owner.command_active = true;
+            let state = owner.context.snapshot();
+            assert!(state.system.config.equalizer.enabled);
+            owner.reset_target_equalizer(EqTarget::Monitor, 0, equalizer_format(&state), cx);
+            let command = owner.commands.pop_front().unwrap().command;
+            assert!(matches!(command, Command::EqualizerEdit {
+                edit: EqualizerEdit::Replace { config }, ..
+            } if config == EqualizerConfig { enabled: true, ..preset.config }));
+        });
     }
 
     #[gpui::test]

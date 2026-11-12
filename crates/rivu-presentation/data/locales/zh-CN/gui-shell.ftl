@@ -83,7 +83,6 @@ processing-input-gain-short = 输入
 processing-output-gain-short = 输出
 processing-band-properties = 频段 { $band } · { $kind }
 processing-band-disabled = 已禁用
-processing-band-empty = 暂无频段
 processing-band-count-label = 频段数
 processing-band-count-help = 输入 0–32，按回车确认；增加时添加中性频段，减少时从末尾移除，保留前面频段的参数。
 processing-band-count-invalid = 请输入 0 到 32 之间的整数频段总数。
