@@ -104,9 +104,12 @@ state, visibility, and waveform progress still govern whether retained data is
 usable. Structural ownership belongs to link:24_layout.adoc[GUI layout].
 
 Bitrate changes retire display payloads for demand-driven reload while preserving
-selection, counts, and navigation geometry. They create no history or reverse
-track-to-view index; old responses must pass the same query-stamp admission as
-other data. See link:21_ipc.adoc#query-results-and-pagination[IPC query results].
+selection, counts, and navigation geometry, including known-empty results. Album
+and member unfiltered totals follow the album revision independently of bitrate;
+fresh payload pages reuse those totals rather than querying them again. Page
+responses still require their complete query stamp. These updates create no
+history or reverse track-to-view index. See
+link:21_ipc.adoc#query-results-and-pagination[IPC query results].
 
 ==== Demand, cancellation, and physical retirement
 
@@ -152,8 +155,11 @@ physical retirement still owns the execution slot. Genuine query failures remain
 visible through the feature's normal error handling.
 
 Album Browser publishes rows before querying an uncached unfiltered search total.
-An auxiliary failure leaves rows usable and the counter unavailable; its physical
-slot follows the same retirement rule.
+Missing totals have their own demand: after an obsolete count physically retires,
+a known-empty filtered result can fetch its total without reloading empty payload.
+A page timeout cannot suppress counts after that page's physical worker retires.
+An auxiliary failure leaves rows usable and the counter unavailable, without
+automatic retry; its physical slot follows the same retirement rule.
 
 [cols="1,3",options="header"]
 |===
@@ -220,7 +226,7 @@ when live contents shrink substantially, retaining reuse slack instead of
 reallocating on every deselection. This limits stale capacity, not live selection
 size: selecting all still retains every selected identity.
 
-A data revision forgets counts and drops obsolete pages, failures, and positional
+A content revision forgets counts and drops obsolete pages, failures, and positional
 pins, but retains nonempty scroll geometry until a current result supplies its
 total. Previously empty results gain a loading position so additions remain
 discoverable. Flat-list/album query changes discard old geometry; tree filter

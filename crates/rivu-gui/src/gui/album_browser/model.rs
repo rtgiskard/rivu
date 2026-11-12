@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
-    model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, Query, QueryStamp},
+    model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, Query},
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 
@@ -71,8 +71,9 @@ pub(super) struct AlbumModel {
     page_size: usize,
     worker_pending: bool,
     page_timed_out: bool,
-    albums_total: Option<(QueryStamp, usize)>,
-    tracks_total: Option<(QueryStamp, usize)>,
+    // Counts depend on album membership/search data, never technical bitrate payloads.
+    albums_total: Option<(u64, usize)>,
+    tracks_total: Option<(u64, usize)>,
     albums_count_retired: bool,
     tracks_count_retired: bool,
     selected: Option<AlbumKey>,
@@ -154,7 +155,7 @@ impl AlbumModel {
             self.albums_total
         };
         total
-            .filter(|(stamp, _)| Some(*stamp) == self.active_projection().stamp())
+            .filter(|(revision, _)| *revision == self.revisions.album)
             .map(|(_, total)| total)
     }
 
@@ -375,40 +376,25 @@ impl AlbumModel {
         }
         match response.result {
             Ok(ViewResponse::Albums(page)) if matches!(query, Query::Albums { .. }) => {
-                let stamp = Query::Albums {
-                    query: None,
-                    sort: self.sort,
-                    offset: 0,
-                    limit: 0,
-                }
-                .stamp(response.revisions);
+                let revision = response.revisions.album;
                 if self.query.is_none() {
-                    self.albums_total = Some((stamp, page.total));
+                    self.albums_total = Some((revision, page.total));
                 }
                 completion.counts = self
                     .albums_total
-                    .filter(|(s, _)| *s == stamp)
+                    .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
                 self.albums.accept(page);
                 completion.published = Published::Albums;
             }
             Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
-                let Query::AlbumTracks { key, .. } = query else {
-                    unreachable!()
-                };
-                let stamp = Query::AlbumTracks {
-                    key: key.clone(),
-                    query: None,
-                    offset: 0,
-                    limit: 0,
-                }
-                .stamp(response.revisions);
+                let revision = response.revisions.album;
                 if self.tracks_query.is_none() {
-                    self.tracks_total = Some((stamp, page.total));
+                    self.tracks_total = Some((revision, page.total));
                 }
                 completion.counts = self
                     .tracks_total
-                    .filter(|(s, _)| *s == stamp)
+                    .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
                 self.tracks.accept(page);
                 completion.published = Published::Tracks;
@@ -422,6 +408,7 @@ impl AlbumModel {
     /// Only physical completion releases the shared slot, including obsolete work.
     pub fn retire_worker(&mut self) {
         self.worker_pending = false;
+        self.page_timed_out = false;
     }
 
     pub fn prepare_count(&mut self, page_query: &Query, generation: u64) -> Option<CountRequest> {
@@ -466,7 +453,7 @@ impl AlbumModel {
         } else {
             self.albums_total
         };
-        if total.is_some_and(|(stamp, _)| stamp == query.stamp(self.revisions)) {
+        if total.is_some_and(|(revision, _)| revision == self.revisions.album) {
             return None;
         }
         let ticket = if self.selected.is_some() {
@@ -480,6 +467,38 @@ impl AlbumModel {
             generation,
             ticket,
         })
+    }
+
+    /// A retained empty page has no payload demand to drive a replacement count.
+    pub fn prepare_missing_count(&mut self) -> Option<CountRequest> {
+        let retired = if self.selected.is_some() {
+            self.tracks_count_retired
+        } else {
+            self.albums_count_retired
+        };
+        if self.worker_pending
+            || retired
+            || !self.visible
+            || self.page_timed_out
+            || self.total().is_some()
+        {
+            return None;
+        }
+        let page_query = if let Some(key) = &self.selected {
+            self.tracks.total()?;
+            Query::AlbumTracks {
+                key: key.clone(),
+                query: self.tracks_query.clone(),
+                offset: 0,
+                limit: self.page_size,
+            }
+        } else {
+            self.albums.total()?;
+            self.albums_query()
+        };
+        let count = self.prepare_count(&page_query, self.generation())?;
+        self.worker_pending = true;
+        Some(count)
     }
 
     pub fn complete_count(
@@ -506,8 +525,7 @@ impl AlbumModel {
         if matches!(
             &response.result,
             Err(QueryError::RevisionChanged | QueryError::Cancelled)
-        ) || (response.result.is_ok()
-            && request.query.stamp(response.revisions) != request.query.stamp(current_revisions))
+        ) || (response.result.is_ok() && response.revisions.album != current_revisions.album)
         {
             if self.selected.is_some() {
                 self.tracks_count_retired = true;
@@ -517,23 +535,25 @@ impl AlbumModel {
             self.retire_page();
             return completion;
         }
-        if !self.active_projection().accepts(
-            &request.page_query,
-            request.generation,
-            response.revisions,
-        ) {
-            return completion;
-        }
         let (total, matched, published) = match (&request.query, response.result) {
             (Query::Albums { .. }, Ok(ViewResponse::Albums(page))) => {
-                self.albums_total = Some((request.query.stamp(response.revisions), page.total));
+                self.albums_total = Some((response.revisions.album, page.total));
                 (page.total, self.albums.total(), Published::Albums)
             }
             (Query::AlbumTracks { .. }, Ok(ViewResponse::AlbumTracks(page))) => {
-                self.tracks_total = Some((request.query.stamp(response.revisions), page.total));
+                self.tracks_total = Some((response.revisions.album, page.total));
                 (page.total, self.tracks.total(), Published::Tracks)
             }
-            _ => return completion,
+            _ => {
+                // Preserve the existing terminal-failure policy: a missing count
+                // must not turn worker retirement into an automatic retry loop.
+                if self.selected.is_some() {
+                    self.tracks_count_retired = true;
+                } else {
+                    self.albums_count_retired = true;
+                }
+                return completion;
+            }
         };
         completion.published = published;
         completion.counts = matched.map(|matched| (matched, total));
@@ -614,11 +634,16 @@ fn sync_pages<T>(
     revisions: QueryRevisions,
 ) -> bool {
     let identity_changed = !projection.matches_identity(query);
+    let content_changed = projection
+        .stamp()
+        .is_none_or(|stamp| stamp.revisions().album != revisions.album);
     if !projection.sync(query, revisions) {
         return false;
     }
     if identity_changed {
         pages.clear();
+    } else if !content_changed {
+        pages.invalidate_payload();
     } else if matches!(query, Query::Albums { .. }) {
         pages.refresh();
     } else {
@@ -945,9 +970,13 @@ mod tests {
     fn bitrate_revision_reloads_both_listings_preserving_selection_queries_and_geometry() {
         let mut model = AlbumModel::default();
         model.sync(true, QueryRevisions::default(), 3);
+        let albums = model.prepare().unwrap();
+        finish(&mut model, albums, 200);
         model.set_query(Some("album search".into()));
         model.toggle_sort();
         model.select(Some(key("A")));
+        let tracks = model.prepare().unwrap();
+        finish(&mut model, tracks, 60);
         model.set_tracks_query(Some("track search".into()));
         model.albums.begin(0, ALBUM_PAGE);
         model.albums.accept(Page {
@@ -971,7 +1000,11 @@ mod tests {
         let change = model.sync(true, revisions, 3);
         assert!(change.data.albums && change.data.tracks);
         assert!(model.albums.get(0).is_none());
+        assert!(model.albums.display(0).is_none());
         assert!(model.tracks.get(0).is_none());
+        assert_eq!(model.albums.total(), Some(100));
+        assert_eq!(model.tracks.total(), Some(30));
+        assert_eq!(model.total(), Some(60));
         assert_eq!(model.albums.len(), 100);
         assert_eq!(model.tracks.len(), 30);
         assert_eq!(model.albums.visible(), 72..80);
@@ -981,6 +1014,238 @@ mod tests {
         assert_eq!(model.tracks_query(), Some("track search"));
         assert_eq!(model.sort(), sort);
         assert_ne!(model.generation(), generation);
+        let tracks = model.prepare().unwrap();
+        assert!(
+            model
+                .prepare_count(&tracks.query, tracks.generation)
+                .is_none()
+        );
+        assert_eq!(finish(&mut model, tracks, 30).counts, Some((30, 60)));
+        model.select(None);
+        assert_eq!(model.total(), Some(200));
+        let albums = model.prepare().unwrap();
+        assert!(
+            model
+                .prepare_count(&albums.query, albums.generation)
+                .is_none()
+        );
+        assert_eq!(finish(&mut model, albums, 100).counts, Some((100, 200)));
+    }
+
+    #[test]
+    fn bitrate_revision_preserves_empty_counts_without_bootstrapping_either_listing() {
+        for tracks in [false, true] {
+            for filtered in [false, true] {
+                let mut model = AlbumModel::default();
+                model.sync(true, QueryRevisions::default(), 2);
+                if tracks {
+                    model.select(Some(key("A")));
+                }
+                let unfiltered = model.prepare().unwrap();
+                finish(&mut model, unfiltered, if filtered { 10 } else { 0 });
+                if filtered {
+                    if tracks {
+                        model.set_tracks_query(Some("no matches".into()));
+                    } else {
+                        model.set_query(Some("no matches".into()));
+                    }
+                    let empty = model.prepare().unwrap();
+                    assert_eq!(finish(&mut model, empty, 0).counts, Some((0, 10)));
+                }
+                let total = model.total();
+                let revisions = QueryRevisions {
+                    bitrate: 1,
+                    ..model.revisions
+                };
+                model.sync(true, revisions, 2);
+                let (matched, len) = if tracks {
+                    (model.tracks().total(), model.tracks().len())
+                } else {
+                    (model.albums().total(), model.albums().len())
+                };
+                assert_eq!(matched, Some(0));
+                assert_eq!(len, 0);
+                assert_eq!(model.total(), total);
+                assert!(model.prepare().is_none());
+
+                model.sync(
+                    true,
+                    QueryRevisions {
+                        album: 1,
+                        ..revisions
+                    },
+                    2,
+                );
+                assert_eq!(model.total(), None);
+                let len = if tracks {
+                    model.tracks().len()
+                } else {
+                    model.albums().len()
+                };
+                assert_eq!(len, 1);
+                assert!(model.prepare().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn empty_search_replaces_obsolete_count_without_reloading_payload() {
+        for tracks in [false, true] {
+            let mut model = AlbumModel::default();
+            let old = QueryRevisions::default();
+            model.sync(true, old, 2);
+            if tracks {
+                model.select(Some(key("A")));
+                model.set_tracks_query(Some("no matches".into()));
+            } else {
+                model.set_query(Some("no matches".into()));
+            }
+            let page = model.prepare().unwrap();
+            model.complete_page(
+                &page.query,
+                page.generation,
+                response(&page, 0, old),
+                old,
+                "wrong response",
+            );
+            let count = model.prepare_count(&page.query, page.generation).unwrap();
+            let current = QueryRevisions { bitrate: 1, ..old };
+            model.sync(true, current, 2);
+            let completion = model.complete_count(&count, count_response(&count, 10, old), current);
+            assert_eq!(completion.published, Published::None);
+            assert!(model.prepare_missing_count().is_none());
+            model.retire_worker();
+            assert!(model.prepare().is_none(), "known-empty payload stays empty");
+            let replacement = model.prepare_missing_count().unwrap();
+            assert!(
+                model.prepare_missing_count().is_none(),
+                "one physical worker"
+            );
+            let completion = model.complete_count(
+                &replacement,
+                count_response(&replacement, 10, current),
+                current,
+            );
+            assert_eq!(completion.counts, Some((0, 10)));
+            model.retire_worker();
+            assert!(model.prepare_missing_count().is_none());
+        }
+    }
+
+    #[test]
+    fn retired_grid_timeout_does_not_block_empty_member_count() {
+        let mut model = AlbumModel::default();
+        let old = QueryRevisions::default();
+        model.sync(true, old, 2);
+        model.select(Some(key("A")));
+        model.set_tracks_query(Some("no matches".into()));
+        let tracks = model.prepare().unwrap();
+        model.complete_page(
+            &tracks.query,
+            tracks.generation,
+            response(&tracks, 0, old),
+            old,
+            "wrong response",
+        );
+        let count = model
+            .prepare_count(&tracks.query, tracks.generation)
+            .unwrap();
+        let current = QueryRevisions { bitrate: 1, ..old };
+        model.sync(true, current, 2);
+        model.select(None);
+        model.complete_count(&count, count_response(&count, 10, old), current);
+        model.retire_worker();
+
+        let grid = model.prepare().unwrap();
+        model.complete_page(
+            &grid.query,
+            grid.generation,
+            QueryResponse {
+                revisions: current,
+                result: Ok(ViewResponse::Albums(Page {
+                    total: ALBUM_PAGE + 1,
+                    rows: vec![summary(42)],
+                })),
+            },
+            current,
+            "wrong response",
+        );
+        model.retire_worker();
+        model.demand_albums(ALBUM_PAGE..ALBUM_PAGE + 1);
+        let late = model.prepare().unwrap();
+        model.timeout(
+            &late.query,
+            late.generation,
+            QueryResponse {
+                revisions: current,
+                result: Err(QueryError::Message("timed out".into())),
+            },
+            current,
+        );
+        let completion = model.complete_page(
+            &late.query,
+            late.generation,
+            response(&late, ALBUM_PAGE + 1, current),
+            current,
+            "wrong response",
+        );
+        assert_eq!(completion.published, Published::None);
+        model.select(Some(key("A")));
+        assert!(
+            model.prepare_missing_count().is_none(),
+            "late worker owns slot"
+        );
+        model.retire_worker();
+        assert!(
+            model.prepare().is_none(),
+            "empty member payload stays retained"
+        );
+        let replacement = model.prepare_missing_count().unwrap();
+        let completion = model.complete_count(
+            &replacement,
+            count_response(&replacement, 10, current),
+            current,
+        );
+        assert_eq!(completion.counts, Some((0, 10)));
+        model.retire_worker();
+    }
+
+    #[test]
+    fn auxiliary_count_uses_album_freshness_independently_of_bitrate_payload() {
+        for tracks in [false, true] {
+            let mut model = AlbumModel::default();
+            let revisions = QueryRevisions {
+                bitrate: 1,
+                ..Default::default()
+            };
+            model.sync(true, revisions, 2);
+            if tracks {
+                model.select(Some(key("A")));
+                model.set_tracks_query(Some("needle".into()));
+            } else {
+                model.set_query(Some("needle".into()));
+            }
+            let page = model.prepare().unwrap();
+            model.complete_page(
+                &page.query,
+                page.generation,
+                response(&page, 1, revisions),
+                revisions,
+                "wrong response",
+            );
+            let count = model.prepare_count(&page.query, page.generation).unwrap();
+            let completion = model.complete_count(
+                &count,
+                count_response(&count, 10, QueryRevisions::default()),
+                revisions,
+            );
+            assert_eq!(completion.counts, Some((1, 10)));
+            assert_eq!(model.total(), Some(10));
+            assert!(!model.retired());
+            assert!(model.prepare_count(&page.query, page.generation).is_none());
+            assert!(model.prepare().is_none());
+            model.retire_worker();
+        }
     }
 
     #[test]
@@ -1305,6 +1570,7 @@ mod tests {
             }
             assert!(model.prepare().is_none());
             model.retire_worker();
+            assert!(model.prepare_missing_count().is_none());
             if tracks {
                 assert!(model.prepare().is_some());
             }
@@ -1313,7 +1579,7 @@ mod tests {
 
     #[test]
     fn obsolete_counts_cannot_update_replacement_or_reopened_listing() {
-        for transition in 0..4 {
+        for transition in 0..5 {
             let mut model = AlbumModel::default();
             model.sync(true, QueryRevisions::default(), 2);
             model.select(Some(key("A")));
@@ -1343,6 +1609,9 @@ mod tests {
                 }
                 3 => {
                     model.sync(true, QueryRevisions { album: 1, ..old }, 2);
+                }
+                4 => {
+                    model.sync(true, QueryRevisions { bitrate: 1, ..old }, 2);
                 }
                 _ => unreachable!(),
             }

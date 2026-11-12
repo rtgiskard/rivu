@@ -398,11 +398,11 @@ impl AlbumBrowser {
     }
 
     fn apply_data_change(&mut self, change: DataChange, cx: &mut App) {
-        if change.albums {
+        if change.albums && self.model.albums().total().is_none() {
             self.album_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
-        if change.tracks {
+        if change.tracks && self.model.tracks().total().is_none() {
             self.tracks_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
@@ -428,21 +428,30 @@ impl AlbumBrowser {
     }
 
     fn request_next(&mut self, cx: &mut Context<Self>) {
-        let Some(Request {
-            query,
-            generation,
-            ticket,
-        }) = self.model.prepare()
-        else {
-            return;
+        let page = self.model.prepare();
+        let count = if page.is_none() {
+            self.model.prepare_missing_count()
+        } else {
+            None
         };
-        self.loading_text.begin((), generation, Instant::now());
-        self.loading_text
-            .schedule(cx, |this| &mut this.loading_text);
+        if page.is_none() && count.is_none() {
+            return;
+        }
+        if let Some(page) = &page {
+            self.loading_text.begin((), page.generation, Instant::now());
+            self.loading_text
+                .schedule(cx, |this| &mut this.loading_text);
+        }
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let worker_query = query.clone();
-            let response = super::query::run(
+            let count = if let Some(Request {
+                query,
+                generation,
+                ticket,
+            }) = page
+            {
+                let worker_query = query.clone();
+                let response = super::query::run(
                 handle.clone(),
                 cx,
                 move |handle| async move { handle.query_if_current(worker_query, ticket).await },
@@ -463,8 +472,7 @@ impl AlbumBrowser {
                 },
             )
             .await;
-            let count = this
-                .update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     this.loading_text.finish(&(), generation);
                     this.loading_text
                         .schedule(cx, |this| &mut this.loading_text);
@@ -491,7 +499,10 @@ impl AlbumBrowser {
                     count
                 })
                 .ok()
-                .flatten();
+                .flatten()
+            } else {
+                count
+            };
             if let Some(count) = count {
                 let count_query = count.query.clone();
                 let ticket = count.ticket.clone();
