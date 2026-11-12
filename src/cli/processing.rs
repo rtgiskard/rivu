@@ -177,7 +177,7 @@ fn show_processing(
         let value = if graph_only {
             serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
         } else {
-            serde_json::json!({"processing_bypassed":config.processing_bypassed,"processing_selection":playback.processing_selection,"processing_audition":playback.processing_audition,"equalizer":config.equalizer,"presets":config.equalizer_presets,"equalizer_ab":config.equalizer_ab,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
+            serde_json::json!({"processing_bypassed":config.processing_bypassed,"processing_selection":playback.processing_selection,"processing_audition":playback.processing_audition,"equalizer":config.equalizer,"presets":config.equalizer_presets,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
         };
         writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
     } else {

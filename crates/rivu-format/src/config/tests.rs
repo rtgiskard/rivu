@@ -548,7 +548,6 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
         name: "Voice".into(),
         config: config.equalizer.clone(),
     });
-    config.equalizer_ab = Some(EqualizerConfig::default());
     let text = to_toml(&config).unwrap();
     assert_eq!(from_toml(&text).unwrap(), config);
     let input = "[denoise]\nspectral_gain_floor_db = -31.5\n";

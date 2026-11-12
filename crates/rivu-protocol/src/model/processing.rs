@@ -88,7 +88,6 @@ pub enum EqualizerEdit {
         path: PathBuf,
         name: String,
     },
-    SwapAb,
     ResizeBands {
         count: usize,
     },
@@ -96,7 +95,7 @@ pub enum EqualizerEdit {
 
 impl EqualizerEdit {
     /// Apply monitor/node-independent parameter edits to a caller-owned candidate.
-    /// Returns owner-only preset/A-B operations untouched. The caller validates
+    /// Returns owner-only preset operations untouched. The caller validates
     /// and commits the whole candidate atomically; errors must discard it.
     pub fn apply_config(
         self,

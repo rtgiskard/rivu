@@ -549,7 +549,6 @@ macro_rules! config_fields {
         pub neural: $crate::config::NeuralConfig,
         pub processing_graph: $crate::config::processing_graph::ProcessingGraph,
         pub equalizer_presets: Vec<$crate::config::EqualizerPreset>,
-        pub equalizer_ab: Option<$crate::config::EqualizerConfig>,
             }
     };
 }
@@ -662,7 +661,6 @@ impl Config {
             neural: NeuralConfig::default(),
             processing_graph: ProcessingGraph::default(),
             equalizer_presets,
-            equalizer_ab: None,
         }
     }
 }
@@ -714,9 +712,6 @@ impl Config {
                 "duplicate equalizer preset name"
             );
             preset.config.validate()?;
-        }
-        if let Some(config) = &self.equalizer_ab {
-            config.validate()?;
         }
         let roots = self
             .library_roots

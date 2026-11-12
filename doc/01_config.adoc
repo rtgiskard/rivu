@@ -47,7 +47,7 @@ enabled = true
 == Saving configuration
 
 Rivu saves `config.toml` on Settings Apply, IPC Configure, accepted processing edits
-(graph, Monitor EQ, presets/A/B, restoration or neural settings), live Textures
+(graph, Monitor EQ, presets, restoration or neural settings), live Textures
 edits, and orderly exit. Processing and Textures edits save immediately. Other
 controls, including playback, output, visualization enablement, Waveform seeking,
 Library columns and folder changes, update memory; the next save includes their
@@ -269,9 +269,9 @@ successful configuration save.
 === Audio processing defaults
 
 Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
-`[neural]` tables, `[[equalizer.bands]]`, named `[[equalizer_presets]]`, and an
-optional `[equalizer_ab]`. The processing DAG, including node-local parameters,
-connections and canvas positions, lives in `[processing_graph]` and its nested
+`[neural]` tables, `[[equalizer.bands]]`, and named `[[equalizer_presets]]`. The
+processing DAG, including node-local parameters, connections and canvas positions,
+lives in `[processing_graph]` and its nested
 arrays. These are core settings in `config.toml`, not preferences in `layout.json`.
 The default graph connects Source directly to Output; the top-level Monitor EQ
 and restoration/neural defaults do not implicitly insert graph nodes.

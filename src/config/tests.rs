@@ -714,7 +714,6 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         denoise: Default::default(),
         neural: Default::default(),
         equalizer_presets: Vec::new(),
-        equalizer_ab: None,
         processing_graph: Default::default(),
     };
     config.save(&path).unwrap();

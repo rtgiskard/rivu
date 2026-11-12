@@ -147,7 +147,7 @@ configuration commits. See link:01_config.adoc#saving-configuration[Saving confi
 === Equalizer
 
 Monitor EQ and graph EQ share an editor but have independent settings. Presets
-and playback A/B belong to Monitor EQ. Monitor EQ uses recursive IIR filters;
+belong to Monitor EQ. Monitor EQ uses recursive IIR filters;
 graph EQ can select linear-phase FIR with 3–16,385 odd taps. More taps change
 resolution, preparation cost and latency, not an IIR quality label. The curve
 shows the configured IIR magnitude at the current stream rate; for FIR it is the
@@ -198,7 +198,7 @@ tooltip; clamping the plotted position does not retune the band.
 
 Monitor EQ can be enabled independently of master bypass. While EQ is off,
 configuration, preset and reset controls are locked; curve selection and values
-remain visible. A/B stays available to reverse a swap to a disabled configuration.
+remain visible.
 Disabling preserves drafts and selection without applying them on re-enable.
 Master bypass does not lock an enabled EQ's editor; see <<playback-bypass,Playback bypass>>.
 
@@ -234,9 +234,7 @@ no command. Changing the target or reopening the dialog invalidates old confirma
 CLI SavePreset/ImportPreset omit `overwrite` or set it false to create only;
 `overwrite: true` replaces only an existing preset, never creates a missing one.
 Imports require an ordinary file of at most 64 KiB; devices/FIFOs are rejected
-and reads remain bounded if the file grows. A/B swaps with the alternate; the
-first swap saves the current configuration and selects the disabled, zero-gain,
-empty-band default. Save a preset if both alternatives must be retained.
+and reads remain bounded if the file grows.
 
 When `equalizer_presets` is absent from `config.toml`, the default list contains
 Flat, Vocal Clarity, Acoustic & OST, Punch, Soft Focus, and Quiet Listening.
@@ -273,7 +271,6 @@ rivu processing eq '{"AddBand":{"band":{"kind":"peak","frequency_hz":1200.0,"gai
 rivu processing eq '{"BandField":{"index":0,"field":{"Channels":{"selected":[0]}}}}'
 rivu processing eq '{"SavePreset":{"name":"Voice presence"}}'
 rivu processing eq '{"SavePreset":{"name":"Voice presence","overwrite":true}}'
-rivu processing eq '"SwapAb"'
 rivu processing eq '{"LoadPreset":{"name":"Voice presence"}}'
 rivu processing eq '{"ExportPreset":{"path":"/absolute/presence.json","name":"Voice presence"}}'
 ----

@@ -124,7 +124,6 @@ impl EqualizerReconcileInputs {
             && self.reset_band_focus == previous.reset_band_focus
             && (Arc::ptr_eq(&self.config, &previous.config)
                 || (self.config.equalizer == previous.config.equalizer
-                    && self.config.equalizer_ab == previous.config.equalizer_ab
                     && self.config.processing_graph.revision
                         == previous.config.processing_graph.revision
                     && self.config.ui_scale == previous.config.ui_scale))
@@ -361,10 +360,7 @@ impl EqualizerEditor {
             || self.blocked != blocked
             || self.collecting_revision != collecting_revision
             || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
-                && (self.state.system.config.ui_scale != state.system.config.ui_scale
-                    || self.target == EqTarget::Monitor
-                        && self.state.system.config.equalizer_ab
-                            != state.system.config.equalizer_ab)
+                && self.state.system.config.ui_scale != state.system.config.ui_scale
             || self.pending != pending;
         self.state = state;
         self.format = format;
@@ -596,10 +592,7 @@ impl EqualizerEditor {
         submitted: Option<SubmittedField>,
         cx: &mut Context<Self>,
     ) {
-        if self.blocked
-            || (!self.config.enabled
-                && !matches!(edit, EqualizerEdit::Enabled(_) | EqualizerEdit::SwapAb))
-        {
+        if self.blocked || (!self.config.enabled && !matches!(edit, EqualizerEdit::Enabled(_))) {
             return;
         }
         let target = self.target;
@@ -2232,52 +2225,6 @@ impl EqualizerEditor {
         true
     }
 
-    fn comparison_summary(&self, config: &EqualizerConfig) -> String {
-        self.context
-            .i18n
-            .format(
-                "processing-ab-summary",
-                &[
-                    (
-                        "state",
-                        self.tr(if config.enabled {
-                            "processing-enabled"
-                        } else {
-                            "processing-band-disabled"
-                        })
-                        .to_string()
-                        .into(),
-                    ),
-                    ("count", config.bands.len().into()),
-                    ("input", format!("{:+.2}", config.preamp_db).into()),
-                    ("output", format!("{:+.2}", config.output_gain_db).into()),
-                ],
-            )
-            .to_string()
-    }
-
-    fn comparison_state_key(&self) -> &'static str {
-        match &self.state.system.config.equalizer_ab {
-            None => "processing-ab-no-backup",
-            Some(backup) if backup == &self.state.system.config.equalizer => "processing-ab-same",
-            Some(_) => "processing-ab-different",
-        }
-    }
-
-    fn comparison_swap_hint(&self) -> String {
-        let mut hint = self.tr("processing-ab-help").to_string();
-        if let Some(backup) = &self.state.system.config.equalizer_ab {
-            hint.push('\n');
-            hint.push_str(&self.context.i18n.format(
-                "processing-ab-backup",
-                &[("summary", self.comparison_summary(backup).into())],
-            ));
-        }
-        hint.push('\n');
-        hint.push_str(&self.tr(self.comparison_state_key()));
-        hint
-    }
-
     fn equalizer_view(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let graph = self.graph(panel, window, cx);
@@ -2466,20 +2413,6 @@ impl EqualizerEditor {
                     )
                     .debug_selector(move || format!("eq-reset-{panel}")),
             )
-            .when(self.target == EqTarget::Monitor, |r| {
-                r.child(
-                    rivu_ui::IconButton::new(("eq-ab", panel), "󰓡", self.comparison_swap_hint())
-                        .enabled(!self.blocked && self.pending == 0)
-                        .build(
-                            rivu_ui::IconButtonStyle::Quiet,
-                            rivu_ui::IconButtonDensity::Compact,
-                            cx,
-                            |this, _, cx| this.eq(EqualizerEdit::SwapAb, cx),
-                        )
-                        .aria_label(self.tr("processing-ab-help"))
-                        .debug_selector(move || format!("eq-ab-{panel}")),
-                )
-            })
             .child(
                 rivu_ui::icon("", cx)
                     .text_color(rgb(theme.secondary))
@@ -2860,7 +2793,7 @@ impl AudioProcessing {
 
     pub(super) fn eq(&mut self, edit: EqualizerEdit, cx: &mut Context<Self>) {
         if !self.context.snapshot().system.config.equalizer.enabled
-            && !matches!(edit, EqualizerEdit::Enabled(_) | EqualizerEdit::SwapAb)
+            && !matches!(edit, EqualizerEdit::Enabled(_))
         {
             return;
         }
@@ -3612,7 +3545,6 @@ fn replaces_band_identity(edit: &EqualizerEdit) -> bool {
         EqualizerEdit::Band { .. }
             | EqualizerEdit::Replace { .. }
             | EqualizerEdit::LoadPreset { .. }
-            | EqualizerEdit::SwapAb
     )
 }
 
@@ -3690,42 +3622,6 @@ mod tests {
     const PANEL: u64 = 7;
 
     #[gpui::test]
-    fn comparison_first_swap_and_return_follow_core_snapshots_even_when_bypassed(
-        cx: &mut TestAppContext,
-    ) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        let original = runtime
-            .handle
-            .gui_snapshot()
-            .system
-            .config
-            .equalizer
-            .clone();
-        owner.update(cx, |owner, _| owner.command_active = true);
-        click(cx, handle, "eq-ab-7");
-        acknowledge_front(cx, &runtime, &owner, true);
-        draw(cx, handle);
-        editor.read_with(cx, |editor, _| {
-            assert_eq!(
-                editor.state.system.config.equalizer,
-                EqualizerConfig::default()
-            );
-            assert_eq!(
-                editor.state.system.config.equalizer_ab.as_ref(),
-                Some(&original)
-            );
-        });
-        click(cx, handle, "eq-ab-7");
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
-        acknowledge_front(cx, &runtime, &owner, true);
-        draw(cx, handle);
-        assert_eq!(
-            runtime.handle.gui_snapshot().system.config.equalizer,
-            original
-        );
-    }
-
-    #[gpui::test]
     fn eq_switch_locks_only_eq_edits_while_master_bypass_preserves_editability(
         cx: &mut TestAppContext,
     ) {
@@ -3773,10 +3669,6 @@ mod tests {
         assert_eq!(runtime.handle.config_snapshot().equalizer, expected);
         assert!(runtime.handle.config_snapshot().processing_bypassed);
 
-        click(cx, handle, "eq-ab-7");
-        acknowledge_front(cx, &runtime, &owner, true);
-        assert!(runtime.handle.config_snapshot().processing_bypassed);
-        draw(cx, handle);
         click(cx, handle, "eq-enable-7");
         acknowledge_front(cx, &runtime, &owner, true);
         draw(cx, handle);

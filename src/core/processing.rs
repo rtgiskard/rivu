@@ -380,10 +380,6 @@ impl Core {
             .map(|track| track.sample_rate);
         if let Some(edit) = edit.apply_config(&mut config.equalizer, sample_rate)? {
             match edit {
-                SwapAb => {
-                    let previous = config.equalizer_ab.take().unwrap_or_default();
-                    config.equalizer_ab = Some(std::mem::replace(&mut config.equalizer, previous));
-                }
                 SavePreset { name, overwrite } => {
                     let existing = config.equalizer_presets.iter_mut().find(|p| p.name == name);
                     ensure!(

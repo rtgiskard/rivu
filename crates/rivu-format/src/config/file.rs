@@ -286,7 +286,6 @@ pub(super) struct FileConfig {
     neural: Option<NeuralConfig>,
     processing_graph: Option<StoredGraph>,
     equalizer_presets: Option<Vec<EqualizerPreset>>,
-    equalizer_ab: Option<EqualizerConfig>,
 }
 
 impl FileConfig {
@@ -320,7 +319,6 @@ impl FileConfig {
                 next_id: value.next_id,
             };
         }
-        config.equalizer_ab = self.equalizer_ab;
         self.visualizations.apply(&mut config);
         config
     }
@@ -340,7 +338,6 @@ impl FileConfig {
         patch_field!(table, baseline, config, neural => neural: NeuralConfig);
         patch_field!(table, baseline, config, #[serde(serialize_with = "serialize_graph")] processing_graph => processing_graph: ProcessingGraph);
         patch_field!(table, baseline, config, equalizer_presets => equalizer_presets: Vec<EqualizerPreset>);
-        patch_field!(table, baseline, config, #[serde(skip_serializing_if = "Option::is_none")] equalizer_ab => equalizer_ab: Option<EqualizerConfig>);
         Ok(())
     }
 }
@@ -359,8 +356,6 @@ pub(super) struct FileConfigView<'a> {
     #[serde(serialize_with = "serialize_graph")]
     processing_graph: &'a ProcessingGraph,
     equalizer_presets: &'a Vec<EqualizerPreset>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    equalizer_ab: &'a Option<EqualizerConfig>,
 }
 
 impl<'a> From<&'a Config> for FileConfigView<'a> {
@@ -376,7 +371,6 @@ impl<'a> From<&'a Config> for FileConfigView<'a> {
             neural: &config.neural,
             processing_graph: &config.processing_graph,
             equalizer_presets: &config.equalizer_presets,
-            equalizer_ab: &config.equalizer_ab,
             visualizations: config.into(),
         }
     }

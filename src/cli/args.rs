@@ -115,7 +115,7 @@ pub(super) enum ProcessingAction {
     /// Inspect, edit and execute the persisted audio node graph.
     #[command(subcommand)]
     Graph(ProcessingGraphAction),
-    /// Apply a field-based EqualizerEdit JSON value (including presets and A/B).
+    /// Apply a field-based EqualizerEdit JSON value (including named presets).
     Eq { edit: String },
     /// Merge a DenoisePatch JSON object into current settings.
     Denoise { patch: String },

@@ -146,7 +146,6 @@ macro_rules! config_wire_fields {
             denoise: rivu_dsp::denoise::DenoiseConfig,
             neural: rivu_format::config::NeuralConfig,
             equalizer_presets: Vec<rivu_format::config::EqualizerPreset>,
-            equalizer_ab: Option<rivu_dsp::equalizer::config::EqualizerConfig>,
             processing_graph: crate::model::ProcessingGraph,
         }
     };
