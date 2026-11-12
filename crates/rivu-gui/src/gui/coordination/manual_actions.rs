@@ -41,10 +41,6 @@ impl ManualIntents {
         self.preparing = false;
         true
     }
-
-    pub(in crate::gui) fn allows_follow(&self) -> bool {
-        !self.preparing
-    }
 }
 
 pub(in crate::gui) enum ManualAction {
@@ -76,39 +72,15 @@ impl WindowView {
 
     pub(in crate::gui) fn invalidate_manual_intent(&mut self, cx: &mut Context<Self>) {
         let id = self.begin_manual_intent(cx);
-        self.settle_manual_intent(id, cx);
+        self.settle_manual_intent(id);
     }
 
     pub(in crate::gui) fn manual_intent_current(&self, id: ManualIntentId) -> bool {
         self.manual_intents.current(id)
     }
 
-    pub(in crate::gui) fn fail_manual_intent(
-        &mut self,
-        id: ManualIntentId,
-        cx: &mut Context<Self>,
-    ) {
-        if self.manual_intent_current(id) {
-            self.settle_manual_intent(id, cx);
-        }
-    }
-
-    pub(in crate::gui) fn settle_manual_intent(
-        &mut self,
-        id: ManualIntentId,
-        cx: &mut Context<Self>,
-    ) {
-        if self.manual_intents.settle(id) {
-            self.reconcile_manual_follow(cx);
-        }
-    }
-
-    pub(in crate::gui) fn reconcile_manual_follow(&mut self, cx: &mut Context<Self>) {
-        // Preparing a selection holds playback follow until the intent settles.
-        if self.manual_intents.allows_follow() {
-            self.metadata
-                .update(cx, |metadata, cx| metadata.resume_follow(cx));
-        }
+    pub(in crate::gui) fn settle_manual_intent(&mut self, id: ManualIntentId) {
+        self.manual_intents.settle(id);
     }
 
     fn manual_action_valid(&self, action: &ManualAction, cx: &gpui::App) -> bool {
@@ -138,7 +110,7 @@ impl WindowView {
             return;
         }
         if !self.manual_action_valid(&action, cx) {
-            self.fail_manual_intent(id, cx);
+            self.settle_manual_intent(id);
             self.reject_stale_manual_action(cx);
             return;
         }
@@ -220,7 +192,7 @@ mod tests {
             Some(ManualAction::Quit)
         ));
         assert!(owner.offer(current, ManualAction::Clear).is_none());
-        assert!(owner.allows_follow());
+        assert!(!owner.current(current));
     }
 
     #[test]
@@ -229,10 +201,10 @@ mod tests {
         let old = owner.begin();
         let current = owner.begin();
         assert!(!owner.settle(old));
-        assert!(!owner.allows_follow());
+        assert!(owner.current(current));
         assert!(owner.settle(current));
         assert!(!owner.settle(current));
-        assert!(owner.allows_follow());
+        assert!(!owner.current(current));
         assert!(owner.offer(current, ManualAction::Clear).is_none());
     }
 }

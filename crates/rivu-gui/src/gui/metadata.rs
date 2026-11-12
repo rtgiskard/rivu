@@ -447,7 +447,6 @@ impl Metadata {
                         if accepted && !this.metadata.editable() {
                             this.cancel_edit(cx);
                         }
-                        this.resume_follow(cx);
                         cx.emit(MetadataEvent::TrackChanged);
                     }
                     ReadCompletion::Failed => {}
@@ -476,20 +475,6 @@ impl Metadata {
             self.cancel_edit(cx);
             self.close_hint(cx);
             self.error = None;
-        }
-    }
-
-    pub(in crate::gui) fn resume_follow(&mut self, cx: &mut Context<Self>) {
-        if self.metadata.selected().is_none()
-            && self.metadata.identity() != self.state.current_track().map(|track| track.id)
-            && !matches!(self.metadata.read_state(), MetadataReadState::Pending(_))
-        {
-            let previous = self.metadata.editor_identity();
-            self.sync_metadata_default(cx);
-            if self.metadata.editor_identity() != previous {
-                cx.emit(MetadataEvent::TrackChanged);
-                cx.notify();
-            }
         }
     }
 

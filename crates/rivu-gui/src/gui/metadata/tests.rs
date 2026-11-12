@@ -156,6 +156,44 @@ fn hidden_playback_advance_with_bitrate_change_prepares_current_identity(cx: &mu
     });
 }
 
+#[gpui::test]
+fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let old_follow = this.metadata.begin_load(1);
+        playback(this, track(2, "B"), cx);
+        assert_eq!(this.metadata.identity(), Some(2));
+        assert!(
+            !this
+                .metadata
+                .accept_load(old_follow, Some(track(1, "late A")))
+        );
+        assert_eq!(this.metadata.track().unwrap().title, "B");
+
+        artwork_selection(this, track(3, "selected C"), cx);
+        let old_selection = this.metadata.begin_load(3);
+        playback(this, track(4, "D"), cx);
+        assert_eq!(this.metadata.selected(), Some(3));
+        assert_eq!(this.metadata.track().unwrap().title, "selected C");
+
+        this.clear_selection(cx);
+        assert_eq!(this.metadata.identity(), Some(4));
+        assert_eq!(this.metadata.track().unwrap().title, "D");
+        assert!(
+            !this
+                .metadata
+                .accept_load(old_selection, Some(track(3, "late C")))
+        );
+        assert_eq!(this.metadata.identity(), Some(4));
+
+        let mut state = (*this.state).clone();
+        state.current_track = None;
+        this.reconcile(Rc::new(state), cx);
+        assert_eq!(this.metadata.identity(), None);
+        assert!(this.metadata.track().is_none());
+    });
+}
+
 fn edit_text(
     metadata: &Entity<Metadata>,
     field: Field,

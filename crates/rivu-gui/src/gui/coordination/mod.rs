@@ -141,7 +141,7 @@ impl WindowView {
                             this.ready_manual_action(*intent, ManualAction::Library(commit), cx);
                         }
                     }
-                    LibraryEvent::Failed(intent) => this.fail_manual_intent(*intent, cx),
+                    LibraryEvent::Failed(intent) => this.settle_manual_intent(*intent),
                     LibraryEvent::SelectionChanged(id) => {
                         this.metadata.update(cx, |owner, cx| {
                             if let Some(id) = id {
@@ -187,7 +187,7 @@ impl WindowView {
                             this.ready_manual_action(*intent, ManualAction::Queue(commit), cx);
                         }
                     }
-                    QueueEvent::SelectionFailed(intent) => this.fail_manual_intent(*intent, cx),
+                    QueueEvent::SelectionFailed(intent) => this.settle_manual_intent(*intent),
                     QueueEvent::SelectionCommitted { track_id } => {
                         this.selected_track(*track_id, cx)
                     }
@@ -253,7 +253,7 @@ impl WindowView {
                             this.ready_manual_action(*intent, ManualAction::Playlist(commit), cx);
                         }
                     }
-                    PlaylistEvent::Failed(intent) => this.fail_manual_intent(*intent, cx),
+                    PlaylistEvent::Failed(intent) => this.settle_manual_intent(*intent),
                     PlaylistEvent::InvalidateManualIntent => {
                         this.invalidate_manual_intent(cx);
                     }
@@ -321,7 +321,7 @@ impl WindowView {
                             owner.prepare_selection(*id, *shift, *additive, intent, cx)
                         });
                         if !prepared {
-                            this.fail_manual_intent(intent, cx);
+                            this.settle_manual_intent(intent);
                         }
                     }
                     HistoryEvent::SelectionReady {
@@ -497,7 +497,7 @@ impl WindowView {
         let intent = self.begin_manual_intent(cx);
         self.metadata
             .update(cx, |owner, cx| owner.clear_selection(cx));
-        self.settle_manual_intent(intent, cx);
+        self.settle_manual_intent(intent);
         self.sync_waveform(cx);
     }
 

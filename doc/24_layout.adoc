@@ -395,6 +395,14 @@ link:22_cache.adoc#query-projection-retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
 link:02_library.adoc#paged-views[Paged views].
 
+The window arbitrates explicit actions by newest input identity. Preparing an
+action does not suspend playback-follow Details; only a valid selection commit
+pins its target. Failure or cancellation settles that input, never a newer one,
+and does not choose a Details target. The metadata owner synchronizes follow
+identity directly from playback snapshots and when explicit selection is cleared;
+read completions update availability, not target identity. User-facing behavior is
+described in link:02_library.adoc#_inline_track_details_edits[Inline Track details edits].
+
 Settings root-removal controls retain the configured path and edit session, not
 the rendered vector index. Hidden or reopened Settings cannot accept that old
 input. Content and playlist action menus bind rendered callbacks, including
