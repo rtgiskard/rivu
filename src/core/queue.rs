@@ -2,9 +2,38 @@ use super::*;
 use anyhow::ensure;
 use rand::RngExt;
 
+pub(in crate::core) enum QueueRefresh {
+    Projection,
+    Reload,
+}
+
+/// This context is attached only after a queue transaction has committed.
+#[derive(Debug)]
+pub(in crate::core) struct QueueSyncError;
+
+impl std::fmt::Display for QueueSyncError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")
+    }
+}
+
+impl std::error::Error for QueueSyncError {}
+
 impl Core {
     pub(in crate::core) fn advance_queue_revision(&mut self) {
         self.state.queue.revision = self.state.queue.revision.wrapping_add(1);
+    }
+
+    pub(in crate::core) fn queue_mutation_committed(
+        &mut self,
+        refresh: QueueRefresh,
+    ) -> Result<()> {
+        self.advance_queue_revision();
+        match refresh {
+            QueueRefresh::Projection => self.refresh_queue_projection(),
+            QueueRefresh::Reload => self.reload_queue(),
+        }
+        .context(QueueSyncError)
     }
 
     pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
@@ -55,19 +84,15 @@ impl Core {
     }
 
     pub(in crate::core) fn queue_replaced(&mut self, changed: bool) -> Result<()> {
-        if changed {
-            self.advance_queue_revision();
-        }
         self.transport.replace_occurrences();
         self.state.queue.current_id = None;
         self.state.queue.current_position = None;
         self.state.current_track = None;
         self.state.playback.stopped_source_generation = None;
-        let result = self.reload_queue();
         if changed {
-            result.context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")
+            self.queue_mutation_committed(QueueRefresh::Reload)
         } else {
-            result
+            self.reload_queue()
         }
     }
 
@@ -217,13 +242,9 @@ impl Core {
         }
         let changed = self.store.remove_prepared_queue_entries(selection)?;
         if changed {
-            self.advance_queue_revision();
-        }
-        let result = self.reload_queue();
-        if changed {
-            result.context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")
+            self.queue_mutation_committed(QueueRefresh::Reload)
         } else {
-            result
+            self.reload_queue()
         }
     }
 
@@ -242,8 +263,7 @@ impl Core {
         }
         self.ensure_queue_control_ready()?;
         if self.store.move_queue_entries(queue_ids, index)? {
-            self.advance_queue_revision();
-            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
+            self.queue_mutation_committed(QueueRefresh::Projection)?;
         }
         Ok(())
     }
@@ -254,8 +274,7 @@ impl Core {
         }
         self.ensure_queue_control_ready()?;
         if self.store.enqueue_tracks(ids)? {
-            self.advance_queue_revision();
-            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
+            self.queue_mutation_committed(QueueRefresh::Projection)?;
         }
         Ok(())
     }
@@ -270,8 +289,7 @@ impl Core {
         let mut order = self.store.queue_ids()?;
         order.shuffle(rng);
         if self.store.reorder_queue(&order)? {
-            self.advance_queue_revision();
-            self.refresh_queue_projection().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
+            self.queue_mutation_committed(QueueRefresh::Projection)?;
         }
         Ok(())
     }
@@ -279,8 +297,7 @@ impl Core {
     pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
         self.ensure_queue_control_ready()?;
         if self.store.deduplicate_queue()? {
-            self.advance_queue_revision();
-            self.reload_queue().context("Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification")?;
+            self.queue_mutation_committed(QueueRefresh::Reload)?;
         }
         Ok(())
     }

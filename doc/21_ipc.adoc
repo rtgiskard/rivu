@@ -1233,9 +1233,10 @@ deletes references and compacts positions transactionally. Stop returns final
 position and heard time independently of lifecycle-event backpressure; later
 events cannot count that time twice.
 
-A confirmed deletion advances affected revisions before fallible projection reads.
-Catalog/history and scalar Queue recovery proceed independently; a failed refresh
-reports the committed deletion, not rollback, and leaves that domain pending.
+Confirmed deletions and queue mutations advance affected revisions before fallible
+projection reads. Catalog/history and scalar Queue recovery proceed independently;
+a failed refresh reports saved changes, not rollback, and leaves that domain
+pending. Repairing a projection must never append the same occurrences again.
 
 Queue consumers recover stale control projections before using occurrence order,
 insertion boundaries, or navigation history. Recovery does not materialize the

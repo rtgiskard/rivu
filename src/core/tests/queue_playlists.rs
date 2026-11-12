@@ -2615,3 +2615,89 @@ fn clear_and_dedup_commits_recover_without_replaying_mutation() {
         assert_eq!(core.state.queue.revision, revision + 1);
     }
 }
+
+#[test]
+fn collection_and_album_enqueue_failures_distinguish_commits_without_replaying_writes() {
+    for entry in ["album", "album_transfer", "playlist_transfer"] {
+        for committed in [false, true] {
+            let (directory, mut core) = fixture();
+            core.edit_track(1, None, None, Some("Queued album".into()), None)
+                .unwrap();
+            core.create_playlist_with_tracks("Source".into(), vec![1, 1])
+                .unwrap();
+            core.state.queue.current_id = Some(5);
+            core.save_queue().unwrap();
+            let key = AlbumKey {
+                directory: directory.path().into(),
+                title: "Queued album".into(),
+            };
+            let command = match entry {
+                "album" => Command::EnqueueAlbum { key },
+                "album_transfer" => Command::TransferCollection {
+                    source: CollectionSource::Album {
+                        key,
+                        revision: core.state.library.album_revision,
+                    },
+                    destination: CollectionDestination::Queue { insertion: None },
+                },
+                _ => Command::TransferCollection {
+                    source: CollectionSource::Playlist {
+                        playlist_id: 1,
+                        revision: core.state.library.playlist_entry_revisions[&1],
+                    },
+                    destination: CollectionDestination::Queue { insertion: None },
+                },
+            };
+            let before = core.store.queue_ids().unwrap();
+            let revision = core.state.queue.revision;
+            let connection = if committed {
+                fail_queue_projection_after(directory.path(), "INSERT")
+            } else {
+                let connection =
+                    rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER reject_queue_insert BEFORE INSERT ON playlist_entries
+                         WHEN NEW.playlist_id=0 BEGIN SELECT RAISE(ABORT,'queue insert rejected'); END;",
+                    )
+                    .unwrap();
+                connection
+            };
+            let error = core.command(command).unwrap_err().error;
+            assert_eq!(
+                error
+                    .downcast_ref::<super::super::queue::QueueSyncError>()
+                    .is_some(),
+                committed,
+                "{entry}: {error:#}"
+            );
+            assert_eq!(error.to_string().contains("do not repeat"), committed);
+            assert_eq!(core.state.queue.revision, revision + u64::from(committed));
+            let saved = core.store.queue_ids().unwrap();
+            if committed {
+                let added = if entry == "playlist_transfer" { 2 } else { 1 };
+                assert_eq!(saved.len(), before.len() + added);
+                assert!(core.transport.projection_stale);
+                for _ in 0..2 {
+                    assert!(core.ensure_queue_control_ready().is_err());
+                    assert_eq!(core.store.queue_ids().unwrap(), saved);
+                }
+                repair_queue_projection(&connection);
+            } else {
+                assert_eq!(saved, before);
+                assert!(!core.transport.projection_stale);
+                connection
+                    .execute_batch("DROP TRIGGER reject_queue_insert")
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                core.ensure_queue_control_ready().unwrap();
+                assert_eq!(core.store.queue_ids().unwrap(), saved);
+                assert_eq!(core.state.queue.total, saved.len());
+                assert_eq!(core.state.queue.current_id, Some(5));
+                assert_eq!(core.state.queue.revision, revision + u64::from(committed));
+            }
+            assert_queue_saved(&core);
+        }
+    }
+}

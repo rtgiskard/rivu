@@ -1,3 +1,4 @@
+use super::queue::QueueRefresh;
 use super::*;
 use anyhow::{bail, ensure};
 
@@ -155,21 +156,18 @@ impl Core {
                 }
                 match destination {
                     CollectionDestination::Queue { .. } => {
-                        self.advance_queue_revision();
-                        self.refresh_queue_projection()?;
+                        self.queue_mutation_committed(QueueRefresh::Projection)?;
                     }
-                    CollectionDestination::Playlist { playlist_id, .. } if count != 0 => {
+                    CollectionDestination::Playlist { playlist_id, .. } => {
                         self.invalidate_playlist_members(&[playlist_id])?;
                     }
-                    CollectionDestination::Playlist { .. } => {}
                 }
             }
             Command::PlayAlbum { key } => self.play_album(&key)?,
             Command::EnqueueAlbum { key } => {
                 self.ensure_queue_control_ready()?;
                 self.store.queue_album(&key, false)?;
-                self.advance_queue_revision();
-                self.refresh_queue_projection()?;
+                self.queue_mutation_committed(QueueRefresh::Projection)?;
             }
             Command::Scan { paths, force } => {
                 return self.scan(paths, force).map(CommandOutcome::Scan);
@@ -316,10 +314,7 @@ impl Core {
                     .store
                     .enqueue_sources(&directories, &track_ids, roots)?
                 {
-                    self.advance_queue_revision();
-                    self.refresh_queue_projection().context(
-                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
-                    )?;
+                    self.queue_mutation_committed(QueueRefresh::Projection)?;
                 }
             }
             Command::InsertQueue {
@@ -330,10 +325,7 @@ impl Core {
                 self.ensure_queue_control_ready()?;
                 self.check_queue_insertion(index, expected_revision)?;
                 if self.store.insert_queue_tracks(&track_ids, index)? != 0 {
-                    self.advance_queue_revision();
-                    self.refresh_queue_projection().context(
-                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
-                    )?;
+                    self.queue_mutation_committed(QueueRefresh::Projection)?;
                 }
             }
             Command::InsertQueueSources {
@@ -352,10 +344,7 @@ impl Core {
                     index,
                 )?;
                 if count != 0 {
-                    self.advance_queue_revision();
-                    self.refresh_queue_projection().context(
-                        "Queue modification committed, but refreshing views failed; changes are saved; do not repeat the modification",
-                    )?;
+                    self.queue_mutation_committed(QueueRefresh::Projection)?;
                 }
             }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
