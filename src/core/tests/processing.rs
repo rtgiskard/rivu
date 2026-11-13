@@ -3143,7 +3143,7 @@ fn stopped_graph_preparation_keeps_its_own_source_handoff() {
 }
 
 #[test]
-fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
+fn settings_patch_cannot_overwrite_graph_from_a_stale_snapshot() {
     let (_directory, mut core) = fixture();
     let mut stale = core.preferences.checkpoint();
     core.processing_graph_edit(
@@ -3156,8 +3156,11 @@ fn generic_configure_cannot_overwrite_graph_from_a_stale_settings_snapshot() {
     .unwrap();
     stale.volume = 0.25;
     assert!(
-        core.command(Command::Configure {
-            config: Arc::new(stale)
+        core.command(Command::MutateConfig {
+            change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+                &core.preferences.checkpoint(),
+                &stale,
+            ))),
         })
         .is_err()
     );
@@ -3312,16 +3315,24 @@ fn master_bypass_stop_and_next_source_revoke_retained_selection() {
 }
 
 #[test]
-fn master_bypass_is_core_owned_across_full_configuration_commits() {
+fn master_bypass_is_core_owned_across_settings_patches() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
     let stale = core.preferences.settings().clone();
     core.processing_bypass(true).unwrap();
-    core.configure(stale).unwrap_err();
+    core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+        &core.preferences.checkpoint(),
+        &stale,
+    ))))
+    .unwrap_err();
     assert!(core.preferences.settings().processing_bypassed);
     let mut config = core.preferences.checkpoint();
     config.equalizer.enabled = true;
-    core.configure(Arc::new(config)).unwrap();
+    core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+        &core.preferences.checkpoint(),
+        &config,
+    ))))
+    .unwrap();
     assert!(core.preferences.settings().equalizer.enabled);
     assert!(!core.playback_equalizer().enabled);
     core.processing_bypass(false).unwrap();
@@ -3351,7 +3362,11 @@ fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
     .unwrap();
     let mut config = core.preferences.checkpoint();
     config.equalizer.output_gain_db = -2.0;
-    core.configure(Arc::new(config)).unwrap();
+    core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+        &core.preferences.checkpoint(),
+        &config,
+    ))))
+    .unwrap();
     assert!(core.preferences.settings().equalizer.enabled);
     assert!(core.preferences.settings().processing_bypassed);
     loop {

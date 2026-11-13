@@ -155,7 +155,7 @@ impl Core {
         }
         Ok(())
     }
-    pub(in crate::core) fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
+    fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
         anyhow::ensure!(
             config.processing_bypassed == self.preferences.settings().processing_bypassed,
             "Playback bypass changes require ProcessingBypass commands"

@@ -559,6 +559,17 @@ already a logical intent before it can execute. Keep payload application and
 failure recovery with their business owners rather than introducing a universal
 query scheduler. See link:22_cache.adoc#demand-cancellation-and-physical-retirement[query ownership].
 
+[[DEC-023]]
+=== DEC-023: Configuration writes describe edits, not client snapshots
+
+Status: implemented, 2026-11-13.
+
+Retain one public Settings write contract: baseline-derived field edits merged
+at Core. Full client snapshots can overwrite unrelated concurrent controls;
+revision-gating them would retain a second write convention rather than express
+field-level intent. See link:21_ipc.adoc#configuration-mutations[the contract] and
+link:26_migration.adoc#settings-protocol-cutover[client upgrade requirements].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

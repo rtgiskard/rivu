@@ -577,8 +577,11 @@ fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
     let mut config = core.preferences.checkpoint();
     config.query_batch_size = 42;
     config.output_device = Some("retained-output".into());
-    core.command(Command::Configure {
-        config: Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     let path = core.state.configuration.config_path.clone();
@@ -601,8 +604,11 @@ fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
     let _audio = recording_audio(&mut core);
     let mut config = core.preferences.checkpoint();
     config.output_device = Some("USB DAC".into());
-    core.command(Command::Configure {
-        config: Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     let path = core.state.configuration.config_path.clone();
@@ -634,8 +640,12 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
         std::fs::write(&path, original).unwrap();
         core.command(Command::Volume { value: 0.25 }).unwrap();
         if apply {
-            let config = Arc::new(core.preferences.checkpoint());
-            assert!(core.command(Command::Configure { config }).is_err());
+            assert!(
+                core.command(Command::MutateConfig {
+                    change: ConfigMutation::Settings(Box::default()),
+                })
+                .is_err()
+            );
         } else {
             let (sender, receiver) = async_channel::bounded(1);
             drop(sender);
@@ -671,11 +681,11 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     std::fs::write(&path, &original).unwrap();
     let inode = std::fs::metadata(&path).unwrap().ino();
     let baseline = core.preferences.settings().clone();
-    core.command(Command::Configure {
-        config: baseline.clone(),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::default()),
     })
     .unwrap();
-    // Configure enqueues synchronously, but the recorder forwards on another thread.
+    // Apply enqueues synchronously, but the recorder forwards on another thread.
     audio
         .recv_timeout(Duration::from_secs(2))
         .expect("No-op Apply still validates output settings");
@@ -726,8 +736,11 @@ fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validatio
     config.ui_scale = 1.25;
     config.animation_fps = 30;
     config.analysis_rate_hz = 30;
-    core.command(Command::Configure {
-        config: Arc::new(config.clone()),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     assert_eq!(core.engine.pcm.state(), before);
@@ -749,8 +762,11 @@ fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validatio
     );
 
     // An explicit no-op Apply must still validate the selected output again.
-    core.command(Command::Configure {
-        config: Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     assert_eq!(core.engine.pcm.state(), before);
@@ -826,8 +842,11 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
             if change_volume {
                 config.volume = 0.25;
             }
-            let result = core.command(Command::Configure {
-                config: Arc::new(config.clone()),
+            let result = core.command(Command::MutateConfig {
+                change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+                    &core.preferences.checkpoint(),
+                    &config,
+                ))),
             });
             // Explicit output validation needs one slot; changed volume needs another.
             if available < 1 + usize::from(change_volume) {
@@ -1105,8 +1124,11 @@ fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() 
         let mut config = before.as_ref().clone();
         config.library_roots.push(root);
         assert!(
-            core.command(Command::Configure {
-                config: Arc::new(config)
+            core.command(Command::MutateConfig {
+                change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+                    &core.preferences.checkpoint(),
+                    &config,
+                ))),
             })
             .is_err()
         );
@@ -1337,8 +1359,11 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     let device = core.preferences.live().output_device.clone();
     let ffmpeg_status = core.state.system.ffmpeg_status.clone();
 
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap_err();
 
@@ -1370,8 +1395,11 @@ fn configure_rejected_preparation_keeps_saved_and_desired_settings() {
     config.visualization_enabled = false;
     config.query_batch_size = 0;
 
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap_err();
 
@@ -1472,8 +1500,11 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
     let mut config = core.preferences.settings().as_ref().clone();
     config.ffmpeg_enabled = false;
     config.output_device = Some("PipeWire: unavailable-configured-sink".into());
-    core.command(Command::Configure {
-        config: Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     assert_eq!(
@@ -1519,8 +1550,11 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     core.transport.history_cursor = 2;
     let expected = config.clone();
 
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap_err();
 
@@ -1612,11 +1646,14 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     #[cfg(feature = "ffmpeg")]
     let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
     let configure = |enabled| {
-        let mut config = handle.config_snapshot().as_ref().clone();
+        let baseline = handle.config_snapshot();
+        let mut config = baseline.as_ref().clone();
         config.ffmpeg_enabled = enabled;
         let ack = futures::executor::block_on(handle.operation_ack_async(
-            Operation::Command(Command::Configure {
-                config: Arc::new(config),
+            Operation::Command(Command::MutateConfig {
+                change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+                    &baseline, &config,
+                ))),
             }),
             Duration::from_secs(5),
         ));
@@ -1679,15 +1716,20 @@ fn configure_shuffle_keeps_current_occurrence_as_history_start() {
     core.command(Command::Pause).unwrap();
     let mut config = core.preferences.settings().as_ref().clone();
     config.shuffle = true;
-    let config = Arc::new(config);
-    core.command(Command::Configure {
-        config: Arc::clone(&config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     // Choose a non-adjacent draw deterministically, then reapply the same mode.
     core.start(next, QueueHistory::Record).unwrap();
     core.command(Command::Pause).unwrap();
-    core.command(Command::Configure { config }).unwrap();
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::default()),
+    })
+    .unwrap();
     core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(first));
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);

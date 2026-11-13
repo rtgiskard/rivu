@@ -497,10 +497,17 @@ Full configuration and sparse patch wire adapters share one positional field
 declaration. Their field order and encoding remain explicit protocol contracts;
 sharing that declaration does not negotiate or change the wire schema.
 
-Configuration mutations use the positional `WireConfigMutation` adapter. Settings
-carry only edited fields; Core merges them into its current configuration and
-publishes the authoritative result. GUI commands do not bypass persistence or
-playback validation.
+[[configuration-mutations]]
+Configuration writes use `MutateConfig` through the positional
+`WireConfigMutation` adapter. Settings carries a field patch built with
+`ConfigPatch::between(baseline, draft)` from the client's actual editing baseline.
+Core merges it into current preferences: explicit fields win conflicts, edited
+lists replace whole lists, and optional clears differ from omitted fields.
+Full `WireConfig` values are state observations, not writable command payloads.
+Graph and bypass changes require their dedicated commands. Even an empty Settings
+patch saves accepted live controls and revalidates output settings; see
+link:01_config.adoc#apply-and-validation[Apply and validation]. Client upgrade
+requirements are in link:26_migration.adoc#settings-protocol-cutover[migration].
 
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.
@@ -1359,7 +1366,7 @@ Ordinary audio admission never waits for capacity: a full queue returns an
 unsuccessful acknowledgement explicitly stating that the command was not queued.
 There is no automatic replay. Core can therefore keep draining critical lifecycle
 events, whose worker-thread delivery retains backpressure; progress remains
-best-effort. Configure checks capacity for its complete audio batch, and Still
+best-effort. Settings Apply checks capacity for its complete audio batch, and Still
 Mode for its single command, before persisting or publishing the change. Device
 request identity advances only after admission. A worker disconnect after settings
 are saved retains the committed desired configuration and reports audio-application
@@ -1490,8 +1497,8 @@ rejects the entire edit. Node removal disconnects its edges; it never guesses
 replacement routing. Positions do not affect audio. Graphs allow at most 64 nodes
 and 128 typed, acyclic edges, with
 one connection per input and explicit mix nodes for fan-in.
-Generic `Configure` requests cannot replace this graph, including from a stale
-settings snapshot; graph changes use the revision-checked edit command.
+Settings patches cannot replace this graph, including from a stale settings
+snapshot; graph changes use the revision-checked edit command.
 
 `ProcessingGraphRun {track_id, target: {node,port}, mode}` freezes source and graph
 revision. Default `auto` chooses supported realtime, hybrid, or offline execution;

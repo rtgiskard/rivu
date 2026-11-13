@@ -554,7 +554,6 @@ impl Core {
                 }
                 return Ok(CommandOutcome::Immediate);
             }
-            Command::Configure { config } => self.configure(config)?,
             Command::MutateConfig { change } => self.mutate_config(change)?,
             Command::SeekQueue { queue_id, seconds } => {
                 if self.state.queue.current_id == Some(queue_id) {

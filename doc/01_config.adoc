@@ -47,7 +47,7 @@ enabled = true
 [[saving-configuration]]
 == Saving configuration
 
-Rivu saves `config.toml` on Settings Apply, IPC Configure, accepted processing edits
+Rivu saves `config.toml` on Settings Apply, IPC Settings patches, accepted processing edits
 (graph, Monitor EQ, presets, restoration or neural settings), live Textures
 edits, and orderly exit. Processing and Textures edits save immediately. Other
 controls, including playback, output, visualization enablement, Waveform seeking,

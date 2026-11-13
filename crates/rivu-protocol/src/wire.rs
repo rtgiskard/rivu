@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 25;
+pub const PROTOCOL_VERSION: u8 = 26;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -435,9 +435,6 @@ pub enum WireCommand {
         name: Option<String>,
     },
     DismissError,
-    Configure {
-        config: Box<WireConfig>,
-    },
     Shutdown,
     DismissScanResult,
     CancelScan {
@@ -1316,9 +1313,6 @@ impl From<Command> for WireCommand {
             Command::DismissError => Self::DismissError,
             Command::DismissScanResult => Self::DismissScanResult,
             Command::CancelScan { id } => Self::CancelScan { id },
-            Command::Configure { config } => Self::Configure {
-                config: Box::new(WireConfig::from(config)),
-            },
             Command::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
             },
@@ -1622,9 +1616,6 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::DismissError => Self::DismissError,
             WireCommand::DismissScanResult => Self::DismissScanResult,
             WireCommand::CancelScan { id } => Self::CancelScan { id },
-            WireCommand::Configure { config } => Self::Configure {
-                config: (*config).into(),
-            },
             WireCommand::MutateConfig { change } => Self::MutateConfig {
                 change: change.into(),
             },

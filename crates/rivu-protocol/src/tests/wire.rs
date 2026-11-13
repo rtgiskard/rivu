@@ -1122,7 +1122,7 @@ fn request_round_trip_uses_explicit_message_types() {
 }
 
 #[test]
-fn configure_request_round_trip_preserves_optional_config_field_and_library_columns() {
+fn state_round_trip_preserves_optional_config_field_and_library_columns() {
     for (output_device, library_columns) in [
         (
             None,
@@ -1158,18 +1158,19 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             animation_fps: 30,
             ..Default::default()
         };
-        let request = WireRequest::Command(WireCommand::from(Command::Configure {
-            config: std::sync::Arc::new(config.clone()),
+        let response = WireResponse::State(wire_state(StateResponse {
+            configuration: Some(crate::model::ConfigurationState {
+                config: Arc::new(config.clone()),
+                config_path: "/test/config.toml".into(),
+            }),
+            ..Default::default()
         }));
         let mut encoded = Vec::new();
-        encode_request_frame_into(&request, &mut encoded).unwrap();
-        let decoded = decode_request_frame(&encoded[4..]).unwrap();
-        let WireRequest::Command(command) = decoded else {
-            panic!("expected command request")
+        encode_response_frame_into(&response, &mut encoded).unwrap();
+        let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected state response");
         };
-        let Command::Configure { config: decoded } = command.try_into().unwrap() else {
-            panic!("expected configure command")
-        };
+        let decoded = state_response(decoded).configuration.unwrap().config;
         assert_eq!(decoded.as_ref(), &config);
     }
 }
@@ -1796,12 +1797,6 @@ fn shared_configuration_encoding_rejects_oversize_and_recovers() {
         ..Default::default()
     });
     let mut encoded = Vec::new();
-    let request = WireRequest::Command(WireCommand::from(Command::Configure {
-        config: Arc::clone(&config),
-    }));
-    assert!(encode_request_frame_into(&request, &mut encoded).is_err());
-    assert!(encoded.is_empty());
-    assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
     let response = WireResponse::State(wire_state(StateResponse {
         configuration: Some(crate::model::ConfigurationState {
             config,
@@ -1813,18 +1808,21 @@ fn shared_configuration_encoding_rejects_oversize_and_recovers() {
     assert!(encoded.is_empty());
     assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
 
-    let config = Arc::new(rivu_format::config::Config::default());
-    let request = WireRequest::Command(WireCommand::from(Command::Configure {
-        config: Arc::clone(&config),
+    let config = rivu_format::config::Config::default();
+    let response = WireResponse::State(wire_state(StateResponse {
+        configuration: Some(crate::model::ConfigurationState {
+            config: Arc::new(config.clone()),
+            config_path: "/test/config.toml".into(),
+        }),
+        ..Default::default()
     }));
-    encode_request_frame_into(&request, &mut encoded).unwrap();
-    let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("expected command");
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&response, &mut encoded).unwrap();
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state response");
     };
-    let Command::Configure { config: decoded } = Command::try_from(command).unwrap() else {
-        panic!("expected configuration");
-    };
-    assert_eq!(*decoded, *config);
+    let decoded = state_response(decoded).configuration.unwrap().config;
+    assert_eq!(decoded.as_ref(), &config);
 }
 
 #[test]
@@ -1934,20 +1932,19 @@ fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges
             },
         )
         .unwrap();
-    let mut encoded = Vec::new();
-    encode_request_frame_into(
-        &WireRequest::Command(WireCommand::from(Command::Configure {
+    let response = WireResponse::State(wire_state(StateResponse {
+        configuration: Some(crate::model::ConfigurationState {
             config: Arc::new(config.clone()),
-        })),
-        &mut encoded,
-    )
-    .unwrap();
-    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("expected configure frame");
+            config_path: "/test/config.toml".into(),
+        }),
+        ..Default::default()
+    }));
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&response, &mut encoded).unwrap();
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state response");
     };
-    let Command::Configure { config: decoded } = Command::try_from(decoded).unwrap() else {
-        panic!("expected configure command");
-    };
+    let decoded = state_response(decoded).configuration.unwrap().config;
     assert_eq!(decoded.as_ref(), &config);
 }
 

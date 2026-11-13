@@ -1420,8 +1420,11 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     write_pcm(&hidden);
     let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 2;
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     core.command(Command::Scan {
@@ -1448,8 +1451,11 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     std::fs::remove_file(&hidden).unwrap();
     let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 1;
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     core.command(Command::Scan {
@@ -1479,8 +1485,11 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     assert!(!core.track(visible_id).unwrap().missing);
     let mut config = core.preferences.checkpoint();
     config.scan_max_depth = 2;
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     core.command(Command::Scan {
@@ -1590,8 +1599,11 @@ fn scan_keeps_distinct_configured_aliases_of_the_same_directory() {
     }
     let mut config = core.preferences.checkpoint();
     config.library_roots = vec![first.join("."), second.join("unused/..")];
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     core.command(Command::Scan {
@@ -1742,8 +1754,11 @@ fn playlist_import_and_directory_queries_preserve_configured_aliases() {
     std::os::unix::fs::symlink(outside.path(), &alias).unwrap();
     let mut config = core.preferences.checkpoint();
     config.library_roots = vec![alias.join("unused/.."), outside.path().to_path_buf()];
-    core.command(Command::Configure {
-        config: std::sync::Arc::new(config),
+    core.command(Command::MutateConfig {
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &core.preferences.checkpoint(),
+            &config,
+        ))),
     })
     .unwrap();
     assert_eq!(

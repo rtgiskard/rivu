@@ -29,6 +29,13 @@ migrated. Waveform style, display settings and seek controls retain their keys;
 see link:23_visuals.adoc#waveform[Waveform] and
 link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
 
+[[settings-protocol-cutover]]
+Protocol 26 removes the full-configuration `Configure` command. Upgrade clients
+together and restart Core; mismatched versions are rejected before decoding.
+Clients must use `MutateConfig` Settings patches or dedicated commands instead;
+see link:21_ipc.adoc#configuration-mutations[configuration mutations]. On-disk
+configuration and database formats are unchanged; no disk migration is needed.
+
 To inspect or upgrade a supported database before application startup, stop Rivu
 and run the tool with the intended data directory and configuration:
 

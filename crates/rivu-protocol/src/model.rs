@@ -891,9 +891,6 @@ pub enum Command {
         name: Option<String>,
     },
     DismissError,
-    Configure {
-        config: Arc<rivu_format::config::Config>,
-    },
     DismissScanResult,
     CancelScan {
         id: u64,
