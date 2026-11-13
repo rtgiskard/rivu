@@ -431,7 +431,14 @@ mod tests {
                    ('/cue/source.wav',?1,'/cue/album.cue',2,75)",
             [cue_only_hash.as_bytes().as_slice()],
         )?;
-        store.edit_track(1, Some("Custom"), None, None, Some(DecoderHint::Native))?;
+        store.edit_track(
+            1,
+            Some("Custom"),
+            None,
+            None,
+            Some(DecoderHint::Native),
+            None,
+        )?;
         store.set_favorite(&[1], true)?;
         store.increment_play_count(1)?;
         store.mark_played(1, 123)?;
@@ -517,6 +524,7 @@ mod tests {
             Some(""),
             Some("Owned"),
             Some(DecoderHint::Ffmpeg),
+            None,
         )?;
         store.set_favorite(&[1], true)?;
         store.increment_play_count(1)?;

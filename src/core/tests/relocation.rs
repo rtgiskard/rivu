@@ -174,6 +174,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
         artist: None,
         album: None,
         decoder_hint: Some(DecoderHint::Native),
+        release_date: None,
     })
     .unwrap();
     core.store.mark_played(source, 123).unwrap();

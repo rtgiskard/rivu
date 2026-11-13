@@ -713,7 +713,9 @@ fn single_member_album_keeps_membership_across_artist_transitions_and_rollback()
         )
         .unwrap();
     for artist in ["First", "Second", ""] {
-        store.edit_track(1, None, Some(artist), None, None).unwrap();
+        store
+            .edit_track(1, None, Some(artist), None, None, None)
+            .unwrap();
         let page = store.albums_page(None, AlbumSort::Artist, 0, 24).unwrap();
         assert_eq!(page.total, 1);
         let album = &page.rows[0];
@@ -790,6 +792,7 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
             None,
             Some("User artist"),
             Some("User album"),
+            None,
             None,
         )
         .unwrap();

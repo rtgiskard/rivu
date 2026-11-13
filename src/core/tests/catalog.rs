@@ -116,7 +116,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
     // invalidation must survive the later count projection failure.
     let edit = core
         .store
-        .edit_track(1, Some("Committed queued title"), None, None, None)
+        .edit_track(1, Some("Committed queued title"), None, None, None, None)
         .unwrap();
     impacts.queue |= edit.queue;
     impacts.albums |= edit.albums;
@@ -1445,6 +1445,7 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
             Some("Kept title"),
             Some("Artist"),
             Some("Album"),
+            None,
             None,
         )
         .unwrap();

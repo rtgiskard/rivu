@@ -302,6 +302,7 @@ pub(super) fn run(
                 artist,
                 album,
                 decoder_hint: None,
+                release_date: None,
             };
             let ack = rivu_client::request_ack(data_dir, command)?;
             show_ack(i18n, &ack, json)

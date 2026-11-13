@@ -1304,6 +1304,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
                 artist: None,
                 album: None,
                 decoder_hint: None,
+                release_date: None,
             })
             .unwrap()
             .is_success()

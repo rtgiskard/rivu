@@ -221,7 +221,14 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
     store.set_favorite(&[id], true).unwrap();
     assert!(store.track(id).unwrap().unwrap().favorite);
     store
-        .edit_track(id, Some("Edited"), Some("Artist"), Some("Album"), None)
+        .edit_track(
+            id,
+            Some("Edited"),
+            Some("Artist"),
+            Some("Album"),
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(store.track(id).unwrap().unwrap().title, "Edited");
     store.mark_played(id, 42).unwrap();
@@ -247,7 +254,7 @@ fn track_cache_rescan_invalidation_returns_new_metadata() {
     let id = all_tracks(&store)[0].id;
     store.track(id).unwrap();
     store
-        .edit_track(id, None, None, None, Some(DecoderHint::Native))
+        .edit_track(id, None, None, None, Some(DecoderHint::Native), None)
         .unwrap();
     store
         .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "Rescanned", 20.)]))

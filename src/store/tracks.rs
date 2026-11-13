@@ -941,6 +941,7 @@ impl Store {
         artist: Option<&str>,
         album: Option<&str>,
         decoder_hint: Option<DecoderHint>,
+        release_date: Option<&str>,
     ) -> Result<TrackEditImpact> {
         let tx = self.conn.unchecked_transaction()?;
         let decoder_hint = decoder_hint.map(|hint| match hint {
@@ -953,7 +954,8 @@ impl Store {
                 ((?1 IS NOT NULL AND ?1 IS NOT COALESCE(title_override,raw_title))
                  OR (?2 IS NOT NULL AND ?2 IS NOT COALESCE(artist_override,raw_artist))
                  OR (?3 IS NOT NULL AND ?3 IS NOT COALESCE(album_override,raw_album))),
-                (?4 IS NOT NULL AND ?4 IS NOT decoder_hint),
+                ((?4 IS NOT NULL AND ?4 IS NOT decoder_hint)
+                 OR (?6 IS NOT NULL AND NULLIF(?6,'') IS NOT release_date)),
                 ((title_override IS NOT NULL OR artist_override IS NOT NULL
                   OR album_override IS NOT NULL OR decoder_hint<>0)
                  IS NOT
@@ -962,7 +964,7 @@ impl Store {
                 (last_played IS NOT NULL AND ?1 IS NOT NULL
                  AND ?1 IS NOT COALESCE(title_override,raw_title))
              FROM tracks WHERE id=?5",
-            params![title, artist, album, decoder_hint, id],
+            params![title, artist, album, decoder_hint, id, release_date],
             |row| {
                 let display: bool = row.get(0)?;
                 let decoder: bool = row.get(1)?;
@@ -1008,12 +1010,14 @@ impl Store {
             "UPDATE tracks SET title_override=COALESCE(?1,title_override),
              artist_override=COALESCE(?2,artist_override),
              album_override=COALESCE(?3,album_override),
-             decoder_hint=COALESCE(?4,decoder_hint) WHERE id=?5 AND
+             decoder_hint=COALESCE(?4,decoder_hint),
+             release_date=CASE WHEN ?6 IS NULL THEN release_date ELSE NULLIF(?6,'') END WHERE id=?5 AND
              ((?1 IS NOT NULL AND title_override IS NOT ?1) OR
               (?2 IS NOT NULL AND artist_override IS NOT ?2) OR
               (?3 IS NOT NULL AND album_override IS NOT ?3) OR
-              (?4 IS NOT NULL AND decoder_hint IS NOT ?4))",
-            params![title, artist, album, decoder_hint, id],
+              (?4 IS NOT NULL AND decoder_hint IS NOT ?4) OR
+              (?6 IS NOT NULL AND release_date IS NOT NULLIF(?6,'')))",
+            params![title, artist, album, decoder_hint, id, release_date],
         )?;
         tx.commit()?;
         impact.changed = updated != 0;
@@ -1567,17 +1571,17 @@ mod request_tests {
             [],
         )?;
         let original = store.track(1)?.unwrap();
-        assert!(!store.edit_track(1, None, None, None, None)?.changed);
+        assert!(!store.edit_track(1, None, None, None, None, None)?.changed);
         assert_eq!(store.track(1)?.unwrap(), original);
-        assert!(store.edit_track(999, None, None, None, None).is_err());
+        assert!(store.edit_track(999, None, None, None, None, None).is_err());
         assert!(
             store
-                .edit_track(999, Some("Title"), None, None, None)
+                .edit_track(999, Some("Title"), None, None, None, None)
                 .is_err()
         );
         assert!(
             store
-                .edit_track(1, Some(""), Some("Override"), None, None)?
+                .edit_track(1, Some(""), Some("Override"), None, None, None)?
                 .changed
         );
         let edited = store.track(1)?.unwrap();
@@ -1587,13 +1591,13 @@ mod request_tests {
         );
         assert!(
             !store
-                .edit_track(1, Some(""), Some("Override"), None, None)?
+                .edit_track(1, Some(""), Some("Override"), None, None, None)?
                 .changed
         );
         assert_eq!(store.track(1)?.unwrap(), edited);
         assert!(
             store
-                .edit_track(1, None, None, Some("New album"), None)?
+                .edit_track(1, None, None, Some("New album"), None, None)?
                 .changed
         );
         let edited = store.track(1)?.unwrap();
@@ -1616,12 +1620,13 @@ mod request_tests {
         )?;
         store.enqueue_tracks(&[3])?;
         let playlist = store.create_playlist_with_tracks("Members", &[1, 2, 3])?;
-        let member = store.edit_track(2, None, None, None, Some(DecoderHint::Native))?;
+        let member = store.edit_track(2, None, None, None, Some(DecoderHint::Native), None)?;
         assert!(member.changed && member.library && !member.queue && !member.albums);
         assert_eq!(member.playlists, Some(Vec::new()));
-        let representative = store.edit_track(1, None, None, None, Some(DecoderHint::Native))?;
+        let representative =
+            store.edit_track(1, None, None, None, Some(DecoderHint::Native), None)?;
         assert!(representative.library && representative.albums && !representative.queue);
-        let display = store.edit_track(2, Some("Retitled"), None, None, None)?;
+        let display = store.edit_track(2, Some("Retitled"), None, None, None, None)?;
         assert!(display.library && display.albums && !display.queue);
         assert_eq!(display.playlists, Some(vec![playlist]));
         let plain = store.set_favorite(&[3], true)?;
@@ -1707,7 +1712,7 @@ mod request_tests {
         let track = store.track(1)?.unwrap();
         let queue = store.queue_state()?;
         assert_eq!(
-            store.edit_track(1, Some("Title"), None, None, None)?,
+            store.edit_track(1, Some("Title"), None, None, None, None)?,
             TrackEditImpact {
                 changed: true,
                 member_facts: true,
@@ -1718,11 +1723,11 @@ mod request_tests {
         assert_eq!(store.track(1)?.unwrap(), track);
         assert_eq!(store.queue_state()?, queue);
         assert_eq!(
-            store.edit_track(1, Some("Title"), None, None, None)?,
+            store.edit_track(1, Some("Title"), None, None, None, None)?,
             TrackEditImpact::default()
         );
         assert_eq!(
-            store.edit_track(1, None, None, Some("Album"), None)?,
+            store.edit_track(1, None, None, Some("Album"), None, None)?,
             TrackEditImpact {
                 changed: true,
                 ..Default::default()

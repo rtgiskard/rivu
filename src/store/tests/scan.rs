@@ -143,7 +143,7 @@ fn successful_cue_admits_short_whole_and_segment_with_independent_state() {
     assert_ne!(whole_id, cue_id);
     store.set_favorite(&[whole_id], true).unwrap();
     store
-        .edit_track(cue_id, Some("Owned segment"), None, None, None)
+        .edit_track(cue_id, Some("Owned segment"), None, None, None, None)
         .unwrap();
     let playlist = store
         .create_playlist_with_tracks("Mixed identities", &[cue_id, whole_id, cue_id])
@@ -309,7 +309,7 @@ fn cue_refresh_reports_played_title_changes_without_technical_history_churn() {
     assert!(store.apply_scan(&scan).unwrap().history);
     assert_eq!(store.history(10).unwrap()[0].title, "New segment title");
     store
-        .edit_track(id, Some("Personal segment"), None, None, None)
+        .edit_track(id, Some("Personal segment"), None, None, None, None)
         .unwrap();
     let overridden = history_values();
     metadata.title = "Hidden segment title".into();
@@ -520,7 +520,7 @@ fn identical_rescans_keep_queue_content_stable() {
     store.mark_played(id, 123).unwrap();
     store.increment_play_count(id).unwrap();
     store
-        .edit_track(id, Some("Override"), None, None, None)
+        .edit_track(id, Some("Override"), None, None, None, None)
         .unwrap();
     let page = store.queue_page(None, 0, 10).unwrap();
     store.set_queue_current(Some(page.rows[0].id)).unwrap();
@@ -679,6 +679,7 @@ fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
             Some("Custom artist"),
             Some("Custom album"),
             None,
+            None,
         )
         .unwrap();
     let page = store.queue_page(None, 0, 10).unwrap();
@@ -720,7 +721,9 @@ fn equal_to_raw_and_repeated_overrides_keep_queue_values_stable() {
         (Some("Title"), Some("Artist"), Some("Album")),
     ] {
         for _ in 0..2 {
-            store.edit_track(id, title, artist, album, None).unwrap();
+            store
+                .edit_track(id, title, artist, album, None, None)
+                .unwrap();
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         }
@@ -749,7 +752,7 @@ fn displayed_overrides_invalidate_queue_including_empty_strings() {
         let state = store.queue_state().unwrap();
         assert!(
             store
-                .edit_track(id, title, artist, album, None)
+                .edit_track(id, title, artist, album, None, None)
                 .unwrap()
                 .queue
         );
@@ -763,7 +766,9 @@ fn displayed_overrides_invalidate_queue_including_empty_strings() {
         assert_eq!(after.track.artist, artist.unwrap_or(&before.track.artist));
         assert_eq!(after.track.album, album.unwrap_or(&before.track.album));
         let state = store.queue_state().unwrap();
-        store.edit_track(id, title, artist, album, None).unwrap();
+        store
+            .edit_track(id, title, artist, album, None, None)
+            .unwrap();
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], after);
     }
@@ -1372,7 +1377,7 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
         .unwrap()
         .unwrap();
     store
-        .edit_track(first_id, Some("Owned title"), None, None, None)
+        .edit_track(first_id, Some("Owned title"), None, None, None, None)
         .unwrap();
     store.increment_play_count(second_id).unwrap();
     let mut target = first.clone();
@@ -1985,7 +1990,7 @@ fn completed_no_change_scan_retains_track_cache_and_hidden_raw_edits_do_not_clea
     store.invalidate_catalog_caches(impacts, false);
     assert!(store.track_cache.borrow().entries.contains_key(&id));
     store
-        .edit_track(id, Some("Personal"), None, None, None)
+        .edit_track(id, Some("Personal"), None, None, None, None)
         .unwrap();
     let overridden = store.track(id).unwrap().unwrap();
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Hidden raw title".into();

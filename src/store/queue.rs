@@ -801,15 +801,23 @@ mod tests {
     fn queued_metadata_favorites_and_statistics_return_precise_effects() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 1, 2])?;
-        assert!(store.edit_track(1, Some("Title"), None, None, None)?.queue);
+        assert!(
+            store
+                .edit_track(1, Some("Title"), None, None, None, None)?
+                .queue
+        );
         assert!(store.set_favorite(&[1], true)?.queue);
         assert!(store.increment_play_count(1)?.queue);
         assert!(!store.mark_played(1, 123)?.queue);
-        assert!(!store.edit_track(1, Some("Title"), None, None, None)?.queue);
+        assert!(
+            !store
+                .edit_track(1, Some("Title"), None, None, None, None)?
+                .queue
+        );
         assert!(!store.set_favorite(&[1], true)?.queue);
         assert!(
             !store
-                .edit_track(4, Some("Unqueued"), None, None, None)?
+                .edit_track(4, Some("Unqueued"), None, None, None, None)?
                 .queue
         );
         assert!(!store.set_favorite(&[4], true)?.queue);

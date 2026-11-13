@@ -1189,6 +1189,7 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
             artist: artist.clone(),
             album: album.clone(),
             decoder_hint: None,
+            release_date: None,
         }));
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
@@ -1201,6 +1202,7 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
             artist: decoded_artist,
             album: decoded_album,
             decoder_hint: None,
+            release_date: None,
         } = command.try_into().unwrap()
         else {
             panic!("expected metadata patch");
@@ -1210,6 +1212,37 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
             (decoded_title, decoded_artist, decoded_album),
             (title, artist, album)
         );
+    }
+}
+
+#[test]
+fn edit_track_wire_round_trip_preserves_omitted_set_and_cleared_date() {
+    for release_date in [None, Some("2026-11-13".to_owned()), Some(String::new())] {
+        let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
+            track_id: 12,
+            title: None,
+            artist: None,
+            album: None,
+            decoder_hint: None,
+            release_date: release_date.clone(),
+        }));
+        let mut encoded = Vec::new();
+        encode_request_frame_into(&request, &mut encoded).unwrap();
+        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command request");
+        };
+        let Command::EditTrack {
+            track_id: 12,
+            title: None,
+            artist: None,
+            album: None,
+            decoder_hint: None,
+            release_date: decoded_date,
+        } = command.try_into().unwrap()
+        else {
+            panic!("expected date-only patch");
+        };
+        assert_eq!(decoded_date, release_date);
     }
 }
 
@@ -1284,6 +1317,7 @@ fn request_encoding_rejects_oversized_body_before_completion() {
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     }));
     let mut encoded = Vec::new();
     assert!(encode_request_frame_into(&request, &mut encoded).is_err());

@@ -11,6 +11,7 @@ pub(super) enum Field {
     Title,
     Artist,
     Album,
+    ReleaseDate,
     PlayCount,
     DecoderHint,
 }
@@ -20,6 +21,7 @@ pub(super) enum SavedValue {
     Title(String),
     Artist(String),
     Album(String),
+    ReleaseDate(String),
     PlayCount(u64),
     DecoderHint(DecoderHint),
 }
@@ -30,6 +32,7 @@ impl SavedValue {
             Self::Title(_) => Field::Title,
             Self::Artist(_) => Field::Artist,
             Self::Album(_) => Field::Album,
+            Self::ReleaseDate(_) => Field::ReleaseDate,
             Self::PlayCount(_) => Field::PlayCount,
             Self::DecoderHint(_) => Field::DecoderHint,
         }
@@ -40,6 +43,7 @@ impl SavedValue {
             Self::Title(value) => *value != track.title,
             Self::Artist(value) => *value != track.artist,
             Self::Album(value) => *value != track.album,
+            Self::ReleaseDate(value) => value != track.release_date.as_deref().unwrap_or_default(),
             Self::PlayCount(value) => *value != track.play_count,
             Self::DecoderHint(value) => *value != track.decoder_hint,
         }
@@ -71,6 +75,11 @@ impl SavedValue {
             },
             decoder_hint: if let Self::DecoderHint(value) = self {
                 Some(*value)
+            } else {
+                None
+            },
+            release_date: if let Self::ReleaseDate(value) = self {
+                Some(value.clone())
             } else {
                 None
             },

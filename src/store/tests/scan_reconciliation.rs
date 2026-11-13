@@ -20,6 +20,7 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
         Some("A"),
         Some("B"),
         Some(DecoderHint::Ffmpeg),
+        None,
     )
     .unwrap();
     s.apply_scan(&scan(vec![rec(
@@ -67,7 +68,14 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     let ids: Vec<_> = tracks.iter().map(|t| t.id).collect();
     assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4);
     store
-        .edit_track(ids[1], Some("Custom"), Some("Artist"), Some("Album"), None)
+        .edit_track(
+            ids[1],
+            Some("Custom"),
+            Some("Artist"),
+            Some("Album"),
+            None,
+            None,
+        )
         .unwrap();
     store.mark_played(ids[1], 10).unwrap();
     store.increment_play_count(ids[1]).unwrap();
@@ -76,10 +84,10 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
         .add_playlist(playlist, &[ids[1], ids[2], ids[1], ids[3]])
         .unwrap();
     store
-        .edit_track(ids[1], None, None, None, Some(DecoderHint::Native))
+        .edit_track(ids[1], None, None, None, Some(DecoderHint::Native), None)
         .unwrap();
     store
-        .edit_track(ids[2], None, None, None, Some(DecoderHint::Ffmpeg))
+        .edit_track(ids[2], None, None, None, Some(DecoderHint::Ffmpeg), None)
         .unwrap();
     let mut changed_source = rec("/music/replaced.wav", "shared", "Source", 180.0);
     changed_source.media.title = "Source title, not segment title".into();
@@ -622,7 +630,14 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
         store.apply_scan(&result).unwrap();
         let id = all_tracks(&store)[0].id;
         store
-            .edit_track(id, Some("Override"), Some("Artist"), Some("Album"), None)
+            .edit_track(
+                id,
+                Some("Override"),
+                Some("Artist"),
+                Some("Album"),
+                None,
+                None,
+            )
             .unwrap();
         if !sheet_exists {
             fs::remove_file(&sheet).unwrap();
@@ -672,7 +687,7 @@ fn ambiguous_cue_relocation_preserves_ids_and_user_data_on_both_sides() {
             store.set_favorite(&old_ids, true).unwrap();
             for id in &old_ids {
                 store
-                    .edit_track(*id, Some("Owned title"), None, None, None)
+                    .edit_track(*id, Some("Owned title"), None, None, None, None)
                     .unwrap();
             }
             let playlist = store.create_playlist("Owned references").unwrap();
@@ -734,10 +749,10 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
             .unwrap()
             .unwrap();
         store
-            .edit_track(old_id, Some("Migrated title"), None, None, None)
+            .edit_track(old_id, Some("Migrated title"), None, None, None, None)
             .unwrap();
         store
-            .edit_track(exact_id, Some("Exact title"), None, None, None)
+            .edit_track(exact_id, Some("Exact title"), None, None, None, None)
             .unwrap();
         let destination = make("new.cue");
         result.segments = vec![destination.clone(), exact.clone()];

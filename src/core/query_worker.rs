@@ -941,6 +941,7 @@ mod tests {
                     artist: None,
                     album: None,
                     decoder_hint: None,
+                    release_date: None,
                 },
             ),
             (
@@ -951,6 +952,7 @@ mod tests {
                     artist: None,
                     album: None,
                     decoder_hint: Some(rivu_format::decoder_hint::DecoderHint::Native),
+                    release_date: None,
                 },
             ),
             (
@@ -961,6 +963,7 @@ mod tests {
                     artist: None,
                     album: None,
                     decoder_hint: None,
+                    release_date: None,
                 },
             ),
             (
@@ -1327,6 +1330,7 @@ mod tests {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
         core.publish();
@@ -1360,6 +1364,7 @@ mod tests {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
         core.command(Command::AddPlaylist {
@@ -1412,6 +1417,7 @@ mod tests {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
         assert_eq!(
@@ -1462,7 +1468,7 @@ mod tests {
             matches!(&before.result, Ok(ViewResponse::Track(Some(track))) if track.title == "Track 1")
         );
         core.store
-            .edit_track(1, Some("New committed title"), None, None, None)
+            .edit_track(1, Some("New committed title"), None, None, None, None)
             .unwrap();
         assert_eq!(
             core.store.track(1).unwrap().unwrap().title,

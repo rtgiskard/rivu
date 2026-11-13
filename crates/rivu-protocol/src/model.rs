@@ -880,6 +880,7 @@ pub enum Command {
         artist: Option<String>,
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
+        release_date: Option<String>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,

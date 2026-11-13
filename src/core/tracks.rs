@@ -146,6 +146,7 @@ impl Core {
         artist: Option<String>,
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
+        release_date: Option<String>,
     ) -> Result<()> {
         if let Some(current) = self.state.current_track.as_ref()
             && current.id == track_id
@@ -154,7 +155,11 @@ impl Core {
                 .session
                 .as_ref()
                 .is_some_and(|playback| playback.track_id == track_id)
-            && (title.is_some() || artist.is_some() || album.is_some() || decoder_hint.is_some())
+            && (title.is_some()
+                || artist.is_some()
+                || album.is_some()
+                || decoder_hint.is_some()
+                || release_date.is_some())
         {
             // A failed projection refresh can leave current_track behind the store.
             let stored = self.track(track_id)?;
@@ -164,7 +169,14 @@ impl Core {
             let library_changed = next_title != stored.title
                 || next_artist != stored.artist
                 || next_album != stored.album
-                || decoder_hint.is_some_and(|hint| hint != stored.decoder_hint);
+                || decoder_hint.is_some_and(|hint| hint != stored.decoder_hint)
+                || release_date.as_deref().is_some_and(|date| {
+                    Some(date).filter(|date| !date.is_empty())
+                        != stored
+                            .release_date
+                            .as_deref()
+                            .filter(|date| !date.is_empty())
+                });
             let metadata_changed = next_title != current.title
                 || next_artist != current.artist
                 || next_album != current.album;
@@ -179,6 +191,7 @@ impl Core {
             artist.as_deref(),
             album.as_deref(),
             decoder_hint,
+            release_date.as_deref(),
         )?;
         let impacts = crate::store::CatalogChanges {
             changed: impact.changed,

@@ -32,6 +32,7 @@ fn prepare(core: &mut Core) {
             artist: None,
             album: Some("Album".into()),
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
     }
@@ -67,6 +68,7 @@ fn core_source_changes_reject_collection_transfers_without_destination_changes()
                 artist: None,
                 album: Some("Changed album".into()),
                 decoder_hint: None,
+                release_date: None,
             })
             .unwrap();
             CollectionSource::Album {

@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 26;
+pub const PROTOCOL_VERSION: u8 = 27;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -424,6 +424,7 @@ pub enum WireCommand {
         artist: Option<String>,
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
+        release_date: Option<String>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,
@@ -1300,12 +1301,14 @@ impl From<Command> for WireCommand {
                 artist,
                 album,
                 decoder_hint,
+                release_date,
             } => Self::EditTrack {
                 track_id,
                 title,
                 artist,
                 album,
                 decoder_hint,
+                release_date,
             },
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             Command::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
@@ -1603,12 +1606,14 @@ impl TryFrom<WireCommand> for Command {
                 artist,
                 album,
                 decoder_hint,
+                release_date,
             } => Self::EditTrack {
                 track_id,
                 title,
                 artist,
                 album,
                 decoder_hint,
+                release_date,
             },
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             WireCommand::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },

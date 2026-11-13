@@ -363,6 +363,7 @@ fn synchronous_projection_refreshes_do_not_admit_duplicate_background_reads() {
                 artist: None,
                 album: None,
                 decoder_hint: None,
+                release_date: None,
             },
             "remove" => Command::RemoveTracks { track_ids: vec![2] },
             "history" => Command::RemoveHistory { track_ids: vec![1] },
@@ -536,6 +537,7 @@ fn failed_synchronous_reads_wait_for_new_demand_even_when_the_domain_was_already
                     artist: None,
                     album: None,
                     decoder_hint: None,
+                    release_date: None,
                 }
             } else {
                 Command::RemoveHistory { track_ids: vec![1] }

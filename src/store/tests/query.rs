@@ -413,7 +413,7 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
         assert_eq!(store.queue_page(Some(query), 0, 0).unwrap().total, expected);
     }
     store
-        .edit_track(1, Some("Override"), None, None, None)
+        .edit_track(1, Some("Override"), None, None, None, None)
         .unwrap();
     assert_eq!(
         store.queue_page(Some("needle title"), 0, 0).unwrap().total,
@@ -474,7 +474,7 @@ fn paged_totals_follow_local_writes_and_rollback() {
         .rows[0]
         .id;
     store
-        .edit_track(first, Some("Other"), None, None, None)
+        .edit_track(first, Some("Other"), None, None, None, None)
         .unwrap();
     assert_eq!(count(), 1);
     store

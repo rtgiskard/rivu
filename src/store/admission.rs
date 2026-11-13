@@ -329,7 +329,7 @@ mod tests {
             assert!(apply(source.clone()).history);
             assert_eq!(store.history(10).unwrap()[0].title, "Played title");
             store
-                .edit_track(id, Some("Personal title"), None, None, None)
+                .edit_track(id, Some("Personal title"), None, None, None, None)
                 .unwrap();
             let overridden = history_values();
             source.media.title = "Hidden title".into();

@@ -1159,6 +1159,7 @@ mod tests {
                 artist: None,
                 album: Some(album.title.clone()),
                 decoder_hint: None,
+                release_date: None,
             }))
             .ack;
             assert!(ack.is_success(), "{:?}", ack.error);
@@ -1534,6 +1535,7 @@ mod tests {
                 artist: None,
                 album: None,
                 decoder_hint: None,
+                release_date: None,
             }))
             .ack;
         assert!(ack.is_success(), "{:?}", ack.error);
@@ -1747,6 +1749,7 @@ mod tests {
                 artist: None,
                 album: Some("Changed".into()),
                 decoder_hint: None,
+                release_date: None,
             }))
             .ack;
         assert!(ack.is_success(), "{:?}", ack.error);

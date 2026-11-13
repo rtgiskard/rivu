@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::tracks::TrackEditImpact;
 
 #[test]
 fn track_edit_history_impact_uses_effective_title_and_persisted_membership() {
@@ -18,26 +19,26 @@ fn track_edit_history_impact_uses_effective_title_and_persisted_membership() {
     ] {
         assert!(
             !store
-                .edit_track(1, title, artist, album, hint)
+                .edit_track(1, title, artist, album, hint, None)
                 .unwrap()
                 .history
         );
     }
     assert!(
         store
-            .edit_track(1, Some("Changed"), None, None, None)
+            .edit_track(1, Some("Changed"), None, None, None, None)
             .unwrap()
             .history
     );
     assert!(
         !store
-            .edit_track(1, Some("Changed"), None, None, None)
+            .edit_track(1, Some("Changed"), None, None, None, None)
             .unwrap()
             .history
     );
     assert!(
         !store
-            .edit_track(2, Some("Changed"), None, None, None)
+            .edit_track(2, Some("Changed"), None, None, None, None)
             .unwrap()
             .history
     );
@@ -262,7 +263,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     let ffmpeg = expected[1].id;
     store.set_favorite(&[native], true).unwrap();
     store
-        .edit_track(native, Some("Custom"), None, None, None)
+        .edit_track(native, Some("Custom"), None, None, None, None)
         .unwrap();
     store.mark_played(native, 42).unwrap();
     store.increment_play_count(native).unwrap();
@@ -271,10 +272,10 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     let queue_before_hint = store.queue_state().unwrap();
     let page_before_hint = store.queue_page(None, 0, 10).unwrap();
     store
-        .edit_track(native, None, None, None, Some(DecoderHint::Native))
+        .edit_track(native, None, None, None, Some(DecoderHint::Native), None)
         .unwrap();
     store
-        .edit_track(ffmpeg, None, None, None, Some(DecoderHint::Ffmpeg))
+        .edit_track(ffmpeg, None, None, None, Some(DecoderHint::Ffmpeg), None)
         .unwrap();
     expected[0].decoder_hint = DecoderHint::Native;
     expected[1].decoder_hint = DecoderHint::Ffmpeg;
@@ -282,14 +283,21 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     assert_eq!(store.queue_page(None, 0, 10).unwrap(), page_before_hint);
     assert!(
         !store
-            .edit_track(native, None, None, None, Some(DecoderHint::Native))
+            .edit_track(native, None, None, None, Some(DecoderHint::Native), None)
             .unwrap()
             .changed
     );
     assert_eq!(store.track(native).unwrap().unwrap(), expected[0]);
     assert!(
         store
-            .edit_track(999, Some("Missing"), None, None, Some(DecoderHint::Native))
+            .edit_track(
+                999,
+                Some("Missing"),
+                None,
+                None,
+                Some(DecoderHint::Native),
+                None
+            )
             .is_err()
     );
     assert_eq!(all_tracks(&store), expected);
@@ -309,7 +317,7 @@ fn decoder_hint_persists_without_overwriting_track_state() {
     let reopened = Store::open(&path).unwrap();
     assert_eq!(all_tracks(&reopened), expected);
     reopened
-        .edit_track(native, None, None, None, Some(DecoderHint::Auto))
+        .edit_track(native, None, None, None, Some(DecoderHint::Auto), None)
         .unwrap();
     assert_eq!(
         reopened.track(native).unwrap().unwrap().decoder_hint,
@@ -328,10 +336,17 @@ fn metadata_patch_omitting_hint_preserves_concurrent_preference() {
     let baseline = all_tracks(&store)[0].clone();
     let concurrent = Store::open(&path).unwrap();
     concurrent
-        .edit_track(baseline.id, None, None, None, Some(DecoderHint::Ffmpeg))
+        .edit_track(
+            baseline.id,
+            None,
+            None,
+            None,
+            Some(DecoderHint::Ffmpeg),
+            None,
+        )
         .unwrap();
     store
-        .edit_track(baseline.id, Some("Edited"), None, None, None)
+        .edit_track(baseline.id, Some("Edited"), None, None, None, None)
         .unwrap();
     let saved = store.track(baseline.id).unwrap().unwrap();
     assert_eq!(saved.title, "Edited");
@@ -365,7 +380,8 @@ fn combined_metadata_patch_commits_or_fails_as_one_update() {
                 Some("Edited"),
                 Some("Artist"),
                 Some("Album"),
-                Some(DecoderHint::Ffmpeg)
+                Some(DecoderHint::Ffmpeg),
+                None
             )
             .is_err()
     );
@@ -381,6 +397,7 @@ fn combined_metadata_patch_commits_or_fails_as_one_update() {
             Some("Artist"),
             Some("Album"),
             Some(DecoderHint::Ffmpeg),
+            None,
         )
         .unwrap();
     let mut expected = before;
@@ -396,7 +413,8 @@ fn combined_metadata_patch_commits_or_fails_as_one_update() {
                 Some("Missing"),
                 Some("Artist"),
                 Some("Album"),
-                Some(DecoderHint::Native)
+                Some(DecoderHint::Native),
+                None
             )
             .is_err()
     );
@@ -453,7 +471,7 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
     // Prime the cache before editing and scanning.
     assert_eq!(store.track(id).unwrap().unwrap().artist, "Raw artist");
     store
-        .edit_track(id, Some("Edited title"), None, None, None)
+        .edit_track(id, Some("Edited title"), None, None, None, None)
         .unwrap();
     record.media.title = "Rescanned title".into();
     record.media.artist = "Rescanned artist".into();
@@ -465,7 +483,9 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
     assert_eq!(track.album, "Rescanned album");
 
     // Empty text is an actual override, unlike an omitted field.
-    store.edit_track(id, None, Some(""), None, None).unwrap();
+    store
+        .edit_track(id, None, Some(""), None, None, None)
+        .unwrap();
     record.media.artist = "Another artist".into();
     record.media.album = "Another album".into();
     store.apply_scan(&scan(vec![record])).unwrap();
@@ -512,4 +532,76 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
             .track_number,
         Some(3)
     );
+}
+
+#[test]
+fn release_date_patch_sets_clears_and_omits_without_queue_or_user_state_changes() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let mut record = rec("/music/a.mp3", "same", "Raw title", 100.);
+    record.media.album = "Album".into();
+    record.media.release_date = Some("2000".into());
+    store.apply_scan(&scan(vec![record.clone()])).unwrap();
+    let id = all_tracks(&store)[0].id;
+    store.enqueue_tracks(&[id, id]).unwrap();
+    store
+        .set_queue_current(Some(store.queue_ids().unwrap()[0]))
+        .unwrap();
+    let queue = store.queue_state().unwrap();
+    let page = store.queue_page(None, 0, 10).unwrap();
+    let playlist = store.create_playlist_with_tracks("Dates", &[id]).unwrap();
+    assert_eq!(
+        store.track(id).unwrap().unwrap().release_date.as_deref(),
+        Some("2000")
+    );
+
+    for (date, expected) in [("2024-03", Some("2024-03")), ("", None)] {
+        let impact = store
+            .edit_track(id, None, None, None, None, Some(date))
+            .unwrap();
+        assert!(impact.changed && impact.library && impact.albums);
+        assert!(!impact.queue && !impact.member_facts && !impact.history);
+        assert_eq!(impact.playlists, Some(Vec::new()));
+        assert_eq!(
+            store.track(id).unwrap().unwrap().release_date.as_deref(),
+            expected
+        );
+        assert_eq!(
+            store
+                .albums_page(None, AlbumSort::Title, 0, 10)
+                .unwrap()
+                .rows[0]
+                .representative
+                .release_date
+                .as_deref(),
+            expected
+        );
+        assert_eq!(store.queue_state().unwrap(), queue);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
+        assert_eq!(store.playlist_track_ids(playlist, 10).unwrap(), vec![id]);
+        assert_eq!(
+            store
+                .edit_track(id, None, None, None, None, Some(date))
+                .unwrap(),
+            TrackEditImpact::default()
+        );
+        assert_eq!(
+            store.edit_track(id, None, None, None, None, None).unwrap(),
+            TrackEditImpact::default()
+        );
+    }
+    let persisted: Option<String> = store
+        .conn
+        .query_row("SELECT release_date FROM tracks WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(persisted, None);
+    record.media.release_date = Some("1999".into());
+    let impact = store.apply_scan(&scan(vec![record])).unwrap();
+    assert!(impact.library && impact.albums && !impact.queue);
+    assert_eq!(
+        store.track(id).unwrap().unwrap().release_date.as_deref(),
+        Some("1999")
+    );
+    assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
 }

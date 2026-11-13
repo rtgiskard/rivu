@@ -29,7 +29,7 @@ use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,
     IconButtonStyle, caption, column, disabled_control,
     input::{Input, InputEvent},
-    label_value_row, panel_surface, row, section_group,
+    panel_surface, row, section_group,
 };
 use session::{Field, MetadataAvailability, MetadataReadState, MetadataSession, SavedValue};
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
@@ -243,6 +243,7 @@ impl Metadata {
             Field::Title => track.title.clone(),
             Field::Artist => track.artist.clone(),
             Field::Album => track.album.clone(),
+            Field::ReleaseDate => track.release_date.clone().unwrap_or_default(),
             Field::PlayCount => track.play_count.to_string(),
             Field::DecoderHint => return,
         };
@@ -254,6 +255,7 @@ impl Metadata {
             Field::Title => "gl-title",
             Field::Artist => "gl-artist",
             Field::Album => "gl-album",
+            Field::ReleaseDate => "gl-release",
             Field::PlayCount => "gl-play-count",
             Field::DecoderHint => unreachable!(),
         });
@@ -316,6 +318,7 @@ impl Metadata {
             Field::Title => SavedValue::Title(text.to_owned()),
             Field::Artist => SavedValue::Artist(text.to_owned()),
             Field::Album => SavedValue::Album(text.to_owned()),
+            Field::ReleaseDate => SavedValue::ReleaseDate(text.to_owned()),
             Field::PlayCount => match text.parse::<u64>() {
                 Ok(value) if value <= i64::MAX as u64 => SavedValue::PlayCount(value),
                 _ => {
@@ -640,6 +643,9 @@ impl Metadata {
             .bg(gpui::transparent_black())
             .border_color(gpui::transparent_black())
             .px_0()
+            .h_6()
+            .min_h_0()
+            .py_0()
             .w_auto()
             .min_w(gpui::rems(4.))
             .ml(-px(1.))
@@ -648,6 +654,8 @@ impl Metadata {
             });
         let mut content = column().gap_1().child(
             row()
+                .h_6()
+                .items_center()
                 .gap_4()
                 .child(
                     caption(theme, self.tr("gl-decoder-hint"))
@@ -736,7 +744,6 @@ impl Metadata {
         field: Field,
         label: SharedString,
         width: gpui::Pixels,
-        window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let value: SharedString = self.metadata.track().map_or_else(
@@ -745,17 +752,18 @@ impl Metadata {
                 Field::Title => track.title.clone().into(),
                 Field::Artist => track.artist.clone().into(),
                 Field::Album => track.album.clone().into(),
+                Field::ReleaseDate => track.release_date.clone().unwrap_or_default().into(),
                 Field::PlayCount => track.play_count.to_string().into(),
                 Field::DecoderHint => unreachable!(),
             },
         );
-        let height = rivu_ui::single_line_row_height(window, cx);
         let identity = self.metadata.editor_identity();
         if let Some(edit) = self.edit.as_ref().filter(|edit| edit.field == field) {
             return row()
                 .group("label-value-row")
                 .min_w_0()
-                .h(height)
+                .h_6()
+                .items_center()
                 .gap_4()
                 .child(caption(theme, label).w(width).flex_shrink_0().truncate())
                 .child(
@@ -800,7 +808,7 @@ impl Metadata {
                     }),
                 )
                 .enabled(self.metadata.editable() && !self.metadata.saving(field))
-                .build(
+                .build_with(
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Compact,
                     cx,
@@ -809,6 +817,7 @@ impl Metadata {
                             this.begin_edit(field, window, cx);
                         }
                     },
+                    |control| control.h_6().py_0().min_h_0(),
                 )
                 .text_size(gpui::rems(0.75)),
             ))
@@ -820,8 +829,6 @@ impl Metadata {
             ));
         let value = if value.is_empty() { "-".into() } else { value };
         label_value_row(theme, label, value, width, Some(actions))
-            .h(height)
-            .items_center()
     }
 
     fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
@@ -869,24 +876,37 @@ impl Metadata {
     }
 }
 
+fn label_value_row(
+    theme: &'static rivu_format::palette::Palette,
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    width: gpui::Pixels,
+    action: Option<gpui::Stateful<Div>>,
+) -> Div {
+    rivu_ui::label_value_row(theme, label, value, width, action)
+        .h_6()
+        .items_center()
+}
+
 fn metadata_copy(
     label: SharedString,
     value: SharedString,
     hint: Option<SharedString>,
     cx: &mut Context<Metadata>,
 ) -> Option<gpui::Stateful<Div>> {
-    let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
+    let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "-")?;
     Some(rivu_ui::hover_reveal(
         label.clone(),
         "label-value-row",
         IconButton::new(label, "", hint)
-            .build(
+            .build_with(
                 IconButtonStyle::Quiet,
                 IconButtonDensity::Compact,
                 cx,
                 move |_, _, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
                 },
+                |control| control.h_6().py_0().min_h_0(),
             )
             .text_size(gpui::rems(0.75)),
     ))
@@ -900,7 +920,7 @@ fn metadata_rows(
     cx: &mut Context<Metadata>,
 ) -> Div {
     column()
-        .gap_1()
+        .gap_0()
         .children(rows.into_iter().map(|[first, second]| {
             metadata_row(
                 label_value_row(
@@ -924,10 +944,11 @@ fn metadata_rows(
 fn metadata_row(first: Div, second: Div) -> Div {
     row()
         .flex_wrap()
-        .gap_4()
+        .gap_x_4()
+        .gap_y_0()
         .items_start()
-        .child(first.flex_1().flex_basis(gpui::rems(16.)).min_w_0())
-        .child(second.flex_1().flex_basis(gpui::rems(16.)).min_w_0())
+        .child(first.flex_1().flex_basis(gpui::rems(16.)).min_w_0().h_6())
+        .child(second.flex_1().flex_basis(gpui::rems(16.)).min_w_0().h_6())
 }
 
 fn metadata_group(
@@ -1093,7 +1114,7 @@ impl Metadata {
                         || placeholder.clone(),
                         |track| {
                             if track.codec.is_empty() {
-                                "—".into()
+                                "-".into()
                             } else {
                                 track.codec.to_ascii_lowercase().into()
                             }
@@ -1106,7 +1127,7 @@ impl Metadata {
                         || placeholder.clone(),
                         |track| {
                             if track.sample_rate == 0 {
-                                "—".into()
+                                "-".into()
                             } else {
                                 format!("{} Hz", track.sample_rate).into()
                             }
@@ -1121,7 +1142,7 @@ impl Metadata {
                         || placeholder.clone(),
                         |track| {
                             if track.channels == 0 {
-                                "—".into()
+                                "-".into()
                             } else {
                                 track.channels.to_string().into()
                             }
@@ -1135,7 +1156,7 @@ impl Metadata {
                         |track| {
                             track
                                 .duration
-                                .map_or("—".into(), |value| format_time(value).into())
+                                .map_or("-".into(), |value| format_time(value).into())
                         },
                     ),
                 ),
@@ -1146,7 +1167,7 @@ impl Metadata {
                     track.map_or_else(
                         || placeholder.clone(),
                         |track| {
-                            track.bitrate_bps.map_or("—".into(), |value| {
+                            track.bitrate_bps.map_or("-".into(), |value| {
                                 format!(
                                     "{}{:.0} kbps",
                                     if track.bitrate_exact { "" } else { "≈" },
@@ -1164,26 +1185,12 @@ impl Metadata {
                         |track| {
                             track
                                 .bits_per_sample
-                                .map_or("—".into(), |value| value.to_string().into())
+                                .map_or("-".into(), |value| value.to_string().into())
                         },
                     ),
                 ),
             ],
         ];
-        let release_date = (
-            self.tr("gl-release"),
-            track.map_or_else(
-                || placeholder.clone(),
-                |track| {
-                    track
-                        .release_date
-                        .as_deref()
-                        .unwrap_or("—")
-                        .to_owned()
-                        .into()
-                },
-            ),
-        );
         let last_played = (
             self.tr("gl-last-played"),
             track.map_or_else(
@@ -1199,7 +1206,7 @@ impl Metadata {
                     |track| {
                         track
                             .disc_number
-                            .map_or("—".into(), |value| value.to_string().into())
+                            .map_or("-".into(), |value| value.to_string().into())
                     },
                 ),
             ),
@@ -1210,28 +1217,27 @@ impl Metadata {
                     |track| {
                         track
                             .track_number
-                            .map_or("—".into(), |value| value.to_string().into())
+                            .map_or("-".into(), |value| value.to_string().into())
                     },
                 ),
             ),
         ]];
         let edit_labels = [
             [self.tr("gl-title"), self.tr("gl-artist")],
-            [self.tr("gl-album"), release_date.0.clone()],
+            [self.tr("gl-album"), self.tr("gl-release")],
             [self.tr("gl-play-count"), last_played.0.clone()],
         ];
         // Static labels are measured even before values load, using the caption font.
-        // Every card shares the same two column widths.
-        let label_widths = std::array::from_fn(|index| {
+        // One shared label width keeps values aligned when column pairs wrap.
+        let label_width = {
             let width = file
                 .iter()
                 .chain(&metadata)
                 .chain(&cue_fields)
                 .chain(&tags)
-                .map(|fields| &fields[index].0)
-                .chain(edit_labels.iter().map(|fields| &fields[index]))
-                .chain((index == 1).then(|| self.tr("gl-decoder-hint")).as_ref())
-                .chain((index == 0).then_some(&track_kind.0))
+                .flat_map(|fields| fields.iter().map(|field| &field.0))
+                .chain(edit_labels.iter().flatten())
+                .chain([&self.tr("gl-decoder-hint"), &track_kind.0])
                 .map(|label| {
                     let run = gpui::TextRun {
                         len: label.len(),
@@ -1256,7 +1262,8 @@ impl Metadata {
             // Layout rounds fixed widths to device pixels; never round a measured label down.
             let scale = window.scale_factor();
             px((f32::from(width) * scale).ceil() / scale)
-        });
+        };
+        let label_widths = [label_width; 2];
         let has_cue = cue.is_some();
         let decoder = self.decoder_view(panel_id, label_widths[1], window, cx);
         let scroll = self
@@ -1330,7 +1337,7 @@ impl Metadata {
                         theme,
                         self.tr("gl-file"),
                         column()
-                            .gap_1()
+                            .gap_0()
                             .child(metadata_row(
                                 div().flex_1().min_w_0().child(
                                     label_value_row(
@@ -1414,14 +1421,13 @@ impl Metadata {
                                     )),
                             ),
                         column()
-                            .gap_1()
+                            .gap_0()
                             .child(metadata_row(
                                 self.panel_field(
                                     theme,
                                     Field::Title,
                                     self.tr("gl-title"),
                                     label_widths[0],
-                                    window,
                                     cx,
                                 ),
                                 self.panel_field(
@@ -1429,7 +1435,6 @@ impl Metadata {
                                     Field::Artist,
                                     self.tr("gl-artist"),
                                     label_widths[1],
-                                    window,
                                     cx,
                                 ),
                             ))
@@ -1439,20 +1444,14 @@ impl Metadata {
                                     Field::Album,
                                     self.tr("gl-album"),
                                     label_widths[0],
-                                    window,
                                     cx,
                                 ),
-                                label_value_row(
+                                self.panel_field(
                                     theme,
-                                    release_date.0.clone(),
-                                    release_date.1.clone(),
+                                    Field::ReleaseDate,
+                                    self.tr("gl-release"),
                                     label_widths[1],
-                                    metadata_copy(
-                                        release_date.0,
-                                        release_date.1,
-                                        copy_hint.clone(),
-                                        cx,
-                                    ),
+                                    cx,
                                 ),
                             ))
                             .child(metadata_rows(
@@ -1468,7 +1467,6 @@ impl Metadata {
                                     Field::PlayCount,
                                     self.tr("gl-play-count"),
                                     label_widths[0],
-                                    window,
                                     cx,
                                 ),
                                 label_value_row(

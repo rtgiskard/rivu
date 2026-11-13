@@ -376,8 +376,8 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 [[database-edits]]
 === Database edits
 
-Title, artist, album, favorite, play-count, and decoder-hint edits in the library
-change Rivu's database only; they do not rewrite media files, tags, or CUE sheets.
+Title, artist, album, release-date, favorite, play-count, and decoder-hint edits in
+the library change Rivu's database only; they do not rewrite media files, tags, or CUE sheets.
 Rescans preserve matching IDs, overrides, favorites, decoder hints, counts, and
 last-played timestamps. `library remove` and `library clean-missing` atomically
 remove records and their queue/playlist
@@ -389,13 +389,15 @@ Failed writes leave saved data unchanged. A refresh error after a committed edit
 does not roll it back; older rows may remain visible until refresh succeeds.
 Repeating an already-saved edit is not a refresh retry.
 
-Metadata edits override only fields you change. An omitted CLI option or an
+Title, artist, and album edits override only fields you change. An omitted CLI option or an
 unchanged Track details field keeps its current value and continues to follow
 rescanned metadata if it has no previous override. Concurrent edits to different
 fields preserve both changes; edits to the same field use the last applied value.
 Passing an empty string explicitly clears that field's displayed text.
-An explicitly supplied CLI field records an override even when its value equals
-the current scanned metadata; that field then stays fixed across rescans.
+An explicitly supplied title, artist, or album records an override even when its
+value equals the current scanned metadata; that field then stays fixed across rescans.
+Release-date edits directly update the stored date without normalization;
+later metadata rescans may replace it from the source file.
 
 [source,sh]
 ----
@@ -466,8 +468,8 @@ lost text cannot be reconstructed.
 
 === Inline Track details edits
 
-Hover Title, Artist, Album, or Play count for Edit and Copy. Edit selects the
-current value; Enter saves that field, while Escape or leaving the input cancels
+Hover Title, Artist, Album, Release date, or Play count for Edit and Copy. Edit
+selects the current value; Enter saves that field, while Escape or leaving the input cancels
 unsubmitted text. Unchanged values send no write. Empty text displays as `-` but
 starts empty in the editor; saving it clears the database field, not source tags.
 

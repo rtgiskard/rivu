@@ -1854,7 +1854,7 @@ mod occurrence_tests {
         store.enqueue_tracks(&[1, 1])?;
         let first = store.create_playlist_with_tracks("first", &[1, 1, 2])?;
         let other = store.create_playlist_with_tracks("other", &[1, 3, 1])?;
-        let edit = store.edit_track(1, Some("changed"), None, None, None)?;
+        let edit = store.edit_track(1, Some("changed"), None, None, None, None)?;
         assert!(edit.queue);
         let mut playlists = edit.playlists.unwrap();
         playlists.sort_unstable();

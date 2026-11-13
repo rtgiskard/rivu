@@ -241,7 +241,13 @@ fn selection_and_blur_cancel_without_submitting(cx: &mut TestAppContext) {
     let window = cx
         .add_empty_window()
         .update(|window, _| window.window_handle());
-    for field in [Field::Title, Field::Artist, Field::Album, Field::PlayCount] {
+    for field in [
+        Field::Title,
+        Field::Artist,
+        Field::Album,
+        Field::ReleaseDate,
+        Field::PlayCount,
+    ] {
         cx.update_window(window, |_, window, cx| {
             metadata.update(cx, |this, cx| {
                 playback(this, track(1, "A"), cx);
@@ -281,6 +287,11 @@ fn unchanged_submit_and_invalid_count_do_not_save(cx: &mut TestAppContext) {
             this.submit_field(Field::Title, cx);
             assert!(this.edit.is_none());
             assert!(!this.metadata.saving(Field::Title));
+            this.begin_edit(Field::ReleaseDate, window, cx);
+            assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), "");
+            this.submit_field(Field::ReleaseDate, cx);
+            assert!(this.edit.is_none());
+            assert!(!this.metadata.saving(Field::ReleaseDate));
             this.begin_edit(Field::PlayCount, window, cx);
             this.edit
                 .as_ref()

@@ -13,7 +13,7 @@ fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Resu
     let id = store
         .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
         .context("scanned source identity")?;
-    store.edit_track(id, Some("Personal title"), None, None, None)?;
+    store.edit_track(id, Some("Personal title"), None, None, None, None)?;
     store.set_favorite(&[id], true)?;
     store.enqueue_tracks(&[id])?;
     let queue = store.queue_page(None, 0, 10)?;
@@ -299,7 +299,7 @@ fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
             .unwrap(),
     ];
     store.set_favorite(&ids, true)?;
-    store.edit_track(ids[0], Some("Owned title"), None, None, None)?;
+    store.edit_track(ids[0], Some("Owned title"), None, None, None, None)?;
     // A sparse 32 MiB sheet must be rejected by size, before decoding/parsing.
     File::options()
         .write(true)
@@ -498,7 +498,7 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                         .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
                         .unwrap();
                     store.set_favorite(&[id], true)?;
-                    store.edit_track(id, Some("Kept title"), None, None, None)?;
+                    store.edit_track(id, Some("Kept title"), None, None, None, None)?;
                     fs::remove_file(&deleted)?;
                     wav(&good, 75)?;
                     let replace = move |path: &Path| {
@@ -768,7 +768,7 @@ fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Resu
         .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
         .unwrap();
     store.set_favorite(&[id], true)?;
-    store.edit_track(id, Some("Kept title"), None, None, None)?;
+    store.edit_track(id, Some("Kept title"), None, None, None, None)?;
     fs::write(&audio, b"not audio")?;
     fs::remove_file(&deleted)?;
     let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
@@ -1064,7 +1064,7 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
         .track_id_for_identity(crate::store::TrackIdentity::File(&deep))?
         .unwrap();
     store.set_favorite(&[id], true)?;
-    store.edit_track(id, Some("Kept title"), None, None, None)?;
+    store.edit_track(id, Some("Kept title"), None, None, None, None)?;
     let copy = nested.join("copy.wav");
     fs::rename(&deep, &copy)?;
     let partial = scan_paths_at_depth(&[root, nested], &[], false, 1, |_, _, _, _, _| {})?;
@@ -1214,7 +1214,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
             })
             .collect::<Result<_>>()?;
         store.set_favorite(&[ids[0]], true)?;
-        store.edit_track(ids[0], Some("Personal"), None, None, None)?;
+        store.edit_track(ids[0], Some("Personal"), None, None, None, None)?;
         store.enqueue_tracks(&ids)?;
         let queue = store.queue_page(None, 0, 10)?;
         let saved_playlist = store.create_playlist_with_tracks("Imported", &ids)?;

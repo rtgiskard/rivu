@@ -465,6 +465,7 @@ fn queue_batch_revisions_ignore_current_only_changes_and_reject_metadata_edits()
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert!(matches!(
@@ -486,6 +487,7 @@ fn filtered_queue_continuations_bind_rank_query_and_revision_without_expected() 
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
     }
@@ -562,6 +564,7 @@ fn filtered_queue_continuations_bind_rank_query_and_revision_without_expected() 
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert_eq!(
@@ -585,6 +588,7 @@ fn filtered_playlist_continuations_reject_foreign_query_metadata_and_order() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
     }
@@ -679,6 +683,7 @@ fn filtered_playlist_continuations_reject_foreign_query_metadata_and_order() {
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert_eq!(

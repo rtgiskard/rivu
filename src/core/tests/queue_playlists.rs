@@ -1317,6 +1317,7 @@ fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert_ne!(core.state.library.revision, expected.library);
@@ -2001,6 +2002,7 @@ fn collection_transfers_reject_source_changes_after_the_last_page() {
             artist: None,
             album: Some("Album".into()),
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
     }
@@ -2046,6 +2048,7 @@ fn collection_transfers_reject_source_changes_after_the_last_page() {
         artist: None,
         album: Some("Other".into()),
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     let playlist_source = CollectionSource::Playlist {
@@ -2714,7 +2717,7 @@ fn collection_and_album_enqueue_failures_distinguish_commits_without_replaying_w
     for entry in ["album", "album_transfer", "playlist_transfer"] {
         for committed in [false, true] {
             let (directory, mut core) = fixture();
-            core.edit_track(1, None, None, Some("Queued album".into()), None)
+            core.edit_track(1, None, None, Some("Queued album".into()), None, None)
                 .unwrap();
             core.create_playlist_with_tracks("Source".into(), vec![1, 1])
                 .unwrap();

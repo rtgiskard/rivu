@@ -97,6 +97,7 @@ fn add_test_album(core: &mut Core) {
         artist: None,
         album: Some("Playback album".into()),
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
 }

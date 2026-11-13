@@ -5,7 +5,7 @@ fn metadata_history_refresh_uses_committed_facts_not_cached_entries_or_title_int
     let (directory, mut core) = fixture_with_database(Some(10.0));
     core.store.mark_played(1, 123).unwrap();
     assert!(core.state.library.history.is_empty());
-    core.edit_track(1, Some("Changed".into()), None, None, None)
+    core.edit_track(1, Some("Changed".into()), None, None, None, None)
         .unwrap();
     assert_eq!(core.state.library.history[0].title, "Changed");
     let history = Arc::clone(&core.state.library.history);
@@ -15,9 +15,16 @@ fn metadata_history_refresh_uses_committed_facts_not_cached_entries_or_title_int
         .unwrap();
     // Title intent alone is not an effective history change, even when another
     // display value changes. A never-played title edit is likewise irrelevant.
-    core.edit_track(1, Some("Changed".into()), Some("Artist".into()), None, None)
-        .unwrap();
-    core.edit_track(2, Some("Never played".into()), None, None, None)
+    core.edit_track(
+        1,
+        Some("Changed".into()),
+        Some("Artist".into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    core.edit_track(2, Some("Never played".into()), None, None, None, None)
         .unwrap();
     assert!(!core.transport.history_pending);
     assert!(Arc::ptr_eq(&history, &core.state.library.history));
@@ -317,6 +324,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     };
     let before = core.state.query_revisions();
     core.command(edit()).unwrap_err();
@@ -414,6 +422,7 @@ fn failed_edits_and_empty_deletions_do_not_invalidate() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap_err();
     assert!(format!("{error:#}").contains("edit rejected"));
@@ -602,6 +611,7 @@ fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
             artist: None,
             album: None,
             decoder_hint: Some(rivu_format::decoder_hint::DecoderHint::Ffmpeg),
+            release_date: None,
         };
         let artist = Command::EditTrack {
             track_id: 1,
@@ -609,6 +619,7 @@ fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
             artist: Some("Artist".into()),
             album: None,
             decoder_hint: None,
+            release_date: None,
         };
         let revision = core.state.queue.revision;
         for command in if title_first {
@@ -640,6 +651,7 @@ fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .unwrap();
         core.publish();
@@ -678,6 +690,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     let created = core.state.query_revisions();
@@ -704,6 +717,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         },
         Command::EditTrack {
             track_id: 1,
@@ -711,6 +725,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
             artist: None,
             album: None,
             decoder_hint: Some(DecoderHint::Auto),
+            release_date: None,
         },
         Command::SetFavorite {
             track_ids: vec![1, 1, 2],
@@ -741,6 +756,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         },
         Command::SetFavorite {
             track_ids: vec![1, 999],
@@ -773,6 +789,7 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
             artist: None,
             album: None,
             decoder_hint: Some(hint),
+            release_date: None,
         })
         .unwrap();
         core.publish();
@@ -797,6 +814,7 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
             artist: None,
             album: None,
             decoder_hint: Some(hint),
+            release_date: None,
         })
         .unwrap();
         core.publish();
@@ -805,6 +823,70 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
     assert_ne!(core.state.library.revision, revisions.library);
     assert_ne!(core.state.revisions.playback, sections.playback);
     assert_eq!(core.state.revisions.queue, sections.queue);
+}
+
+#[test]
+fn date_edit_refreshes_current_without_audio_and_preserves_no_op_snapshots() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 1);
+    core.publish();
+    let (commands, receive) = async_channel::bounded(1);
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
+    let _idle_commands = core.engine.replace_commands(commands);
+    let original = Arc::clone(core.state.current_track.as_ref().unwrap());
+    let playback = core.state.playback.clone();
+    let generation = core.transport.generation;
+    let edit = |release_date| Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: None,
+        decoder_hint: None,
+        release_date,
+    };
+
+    for date in [Some("2026-11-13"), None] {
+        let before = core.state.query_revisions();
+        core.command(edit(Some(date.unwrap_or("").to_owned())))
+            .unwrap();
+        core.publish();
+        assert_eq!(core.track(1).unwrap().release_date.as_deref(), date);
+        assert_eq!(
+            core.state.current_track().unwrap().release_date.as_deref(),
+            date
+        );
+        assert_ne!(core.state.query_revisions().library, before.library);
+        assert_eq!(core.state.query_revisions().queue, before.queue);
+        assert_eq!(core.state.playback, playback);
+        assert_eq!(core.transport.generation, generation);
+
+        let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+        let revisions = core.state.query_revisions();
+        let sections = core.state.revisions;
+        for patch in [None, Some(date.unwrap_or("").to_owned())] {
+            core.command(edit(patch)).unwrap();
+            core.publish();
+            assert_eq!(core.state.query_revisions(), revisions);
+            assert_eq!(core.state.revisions, sections);
+            assert!(Arc::ptr_eq(
+                core.state.current_track.as_ref().unwrap(),
+                &current
+            ));
+        }
+    }
+    assert!(original.release_date.is_none());
+    assert!(matches!(
+        receive.try_recv().map(|queued| queued.command),
+        Ok(AudioCommand::Volume(_))
+    ));
+    assert!(
+        receive.is_empty(),
+        "date edits must not send audio commands"
+    );
 }
 
 #[test]
@@ -840,6 +922,7 @@ fn targeted_metadata_preserves_unrelated_track_and_playlist_reads() {
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         },
         Command::SetFavorite {
             track_ids: vec![1, 1],
@@ -872,6 +955,7 @@ fn targeted_metadata_preserves_unrelated_track_and_playlist_reads() {
         artist: None,
         album: None,
         decoder_hint: Some(rivu_format::decoder_hint::DecoderHint::Native),
+        release_date: None,
     })
     .unwrap();
     assert_eq!(
@@ -1535,6 +1619,7 @@ fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     core.publish();
@@ -1579,6 +1664,7 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
         artist: Some("Current artist".into()),
         album: Some("Current album".into()),
         decoder_hint: None,
+        release_date: None,
     };
 
     assert!(core.command(edit()).is_err());
@@ -1602,6 +1688,7 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert_eq!(core.state.current_track().unwrap().title, "Track 1");
@@ -1647,6 +1734,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
             Some("Artist"),
             Some("Album"),
             None,
+            None,
         )
         .unwrap();
 
@@ -1669,6 +1757,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
             artist: None,
             album: None,
             decoder_hint: None,
+            release_date: None,
         })
         .is_err()
     );
@@ -1680,6 +1769,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
         artist: Some("Artist".into()),
         album: Some("Album".into()),
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert!(Arc::ptr_eq(
@@ -1749,6 +1839,7 @@ fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_c
         artist: None,
         album: Some("Scoped album".into()),
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     let query = Query::AlbumTracks {
@@ -1767,6 +1858,7 @@ fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_c
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     assert_eq!(query.stamp(core.query_response(&query).revisions), before);
@@ -1776,6 +1868,7 @@ fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_c
         artist: None,
         album: None,
         decoder_hint: None,
+        release_date: None,
     })
     .unwrap();
     let response = core.query_response(&query);

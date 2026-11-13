@@ -1165,7 +1165,7 @@ mod tests {
             let playlist_total = core.state.library.playlist_total;
             let edit = core
                 .store
-                .edit_track(1, Some("Committed title"), None, None, None)
+                .edit_track(1, Some("Committed title"), None, None, None, None)
                 .unwrap();
             let playlist_id = core
                 .store

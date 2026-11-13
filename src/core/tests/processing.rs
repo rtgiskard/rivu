@@ -1534,7 +1534,7 @@ fn audition_starts_original_queue_identity_without_creating_processed_tracks() {
 fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+    core.edit_track(1, None, None, None, Some(DecoderHint::Auto), None)
         .unwrap();
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
@@ -1545,6 +1545,7 @@ fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
         artist: None,
         album: None,
         decoder_hint: Some(DecoderHint::Native),
+        release_date: None,
     })
     .unwrap();
     let generation = core.transport.generation;
@@ -1566,7 +1567,7 @@ fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
 fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+    core.edit_track(1, None, None, None, Some(DecoderHint::Auto), None)
         .unwrap();
     prepare_mix(&mut core);
     let retained_bytes = core.processing.memory_bytes();
@@ -1584,6 +1585,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
         artist: None,
         album: None,
         decoder_hint: Some(DecoderHint::Native),
+        release_date: None,
     })
     .unwrap();
     let generation = core.transport.generation;
@@ -3662,7 +3664,7 @@ fn selected_bypass_recovers_metadata_before_admitting_or_saving_the_cutover() {
 
     // A committed catalog update can leave its metadata projection pending.
     core.store
-        .edit_track(1, Some("Recovered source title"), None, None, None)
+        .edit_track(1, Some("Recovered source title"), None, None, None, None)
         .unwrap();
     core.transport.projection_stale = true;
     let (commands, receive) = async_channel::bounded(3);
@@ -4117,7 +4119,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
     for change in ["file", "decoder", "database"] {
         let (directory, mut core) = fixture();
         source(directory.path());
-        core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+        core.edit_track(1, None, None, None, Some(DecoderHint::Auto), None)
             .unwrap();
         prepare_mix(&mut core);
         let retained_bytes = core.processing.memory_bytes();
@@ -4133,7 +4135,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
         match change {
             "file" => std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap(),
             "decoder" => core
-                .edit_track(1, None, None, None, Some(DecoderHint::Native))
+                .edit_track(1, None, None, None, Some(DecoderHint::Native), None)
                 .unwrap(),
             "database" => core.database_outcome_uncertain(),
             _ => unreachable!(),
