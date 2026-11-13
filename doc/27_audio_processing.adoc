@@ -181,6 +181,8 @@ edits do not change that baseline. Without a loaded preset it clears bands and b
 gains. Graph EQ always clears bands and gains and returns to IIR. Reset discards
 that target's EQ drafts, including implementation/taps, and retires queued local edit intent.
 Band-count changes and Reset are unavailable while a processing acknowledgement is pending.
+The reset tooltip identifies whether it restores the last loaded preset or clears
+parameters.
 
 Hover/focus the curve to see numbered band nodes. Drag horizontally for frequency
 and vertically for peak/shelf gain; release commits once, while Escape or lost

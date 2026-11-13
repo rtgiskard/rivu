@@ -1573,12 +1573,7 @@ impl EqualizerEditor {
             Arc::get_mut(&mut self.response_buffer)
                 .expect("unique response buffer")
                 .clear();
-            self.response_error = Some(
-                self.context
-                    .i18n
-                    .text("processing-response-unknown")
-                    .to_owned(),
-            );
+            self.response_error = None;
             std::mem::swap(&mut self.response, &mut self.response_buffer);
             return;
         };
@@ -2369,7 +2364,7 @@ impl EqualizerEditor {
             controls = controls.child(trigger);
         }
         curve = curve.child(graph);
-        if self.response_error.is_none() {
+        if !self.response.is_empty() {
             let mut labels = row().justify_between().gap_1();
             for fraction in [0., 0.25, 0.5, 0.75, 1.] {
                 let minimum = graph_minimum_frequency(self.maximum_frequency);
@@ -2387,7 +2382,8 @@ impl EqualizerEditor {
         }
         if let Some(error) = &self.response_error {
             curve = curve.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
-
+        } else if self.format.is_none() {
+            curve = curve.child(caption(theme, self.tr("processing-response-unknown")));
         }
         if self.format.is_some()
             && self
@@ -2435,31 +2431,46 @@ impl EqualizerEditor {
                     .ok();
                 view.child(div().flex_1().max_w_full().min_w_0().children(preset))
             });
+        let restores_preset = self.target == EqTarget::Monitor
+            && self
+                .owner
+                .upgrade()
+                .is_some_and(|owner| owner.read(cx).equalizer_editors.loaded_preset.is_some());
         let reset_controls = row()
             .gap_1()
             .flex_shrink_0()
             .child(
-                rivu_ui::IconButton::new(("eq-reset", panel), "󰑓", self.tr("processing-eq-reset"))
-                    .enabled(!self.reset_locked(cx))
-                    .build(
-                        rivu_ui::IconButtonStyle::Quiet,
-                        rivu_ui::IconButtonDensity::Compact,
-                        cx,
-                        |this, _, cx| {
-                            let owner = this.owner.clone();
-                            let target = this.target;
-                            let revision = this.revision;
-                            let format = this.format;
-                            // Release the initiating editor before retiring all
-                            // unsubmitted parameter drafts across this target's panels.
-                            cx.defer(move |cx| {
-                                let _ = owner.update(cx, |owner, cx| {
-                                    owner.reset_target_equalizer(target, revision, format, cx);
-                                });
+                rivu_ui::IconButton::new(
+                    ("eq-reset", panel),
+                    "󰑓",
+                    self.tr(if matches!(self.target, EqTarget::Node(_)) {
+                        "processing-eq-reset-node"
+                    } else if restores_preset {
+                        "processing-eq-restore-preset"
+                    } else {
+                        "processing-eq-clear-parameters"
+                    }),
+                )
+                .enabled(!self.reset_locked(cx))
+                .build(
+                    rivu_ui::IconButtonStyle::Quiet,
+                    rivu_ui::IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| {
+                        let owner = this.owner.clone();
+                        let target = this.target;
+                        let revision = this.revision;
+                        let format = this.format;
+                        // Release the initiating editor before retiring all
+                        // unsubmitted parameter drafts across this target's panels.
+                        cx.defer(move |cx| {
+                            let _ = owner.update(cx, |owner, cx| {
+                                owner.reset_target_equalizer(target, revision, format, cx);
                             });
-                        },
-                    )
-                    .debug_selector(move || format!("eq-reset-{panel}")),
+                        });
+                    },
+                )
+                .debug_selector(move || format!("eq-reset-{panel}")),
             )
             .child(
                 rivu_ui::icon("", cx)
