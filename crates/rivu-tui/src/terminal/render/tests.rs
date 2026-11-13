@@ -95,9 +95,20 @@ fn current_error_overrides_retained_scan_but_not_active_scan_or_notice() {
 
 #[test]
 fn command_prompt_keeps_unicode_cursor_in_bounds() {
-    for width in [1, 8, 40, 120] {
+    let long_input = "界".repeat(80);
+    for (input, width, expected_column) in [
+        ("", 8, Some(2)),
+        ("a界e\u{301}", 8, Some(6)),
+        (long_input.as_str(), 1, None),
+        (long_input.as_str(), 2, None),
+        (long_input.as_str(), 3, None),
+        (long_input.as_str(), 4, Some(2)),
+        (long_input.as_str(), 8, Some(6)),
+        (long_input.as_str(), 40, Some(38)),
+        (long_input.as_str(), 120, Some(118)),
+    ] {
         let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
-        ui.command_input = Some("界".repeat(80));
+        ui.command_input = Some(input.to_owned());
         let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
         terminal
             .draw(|frame| {
@@ -105,9 +116,19 @@ fn command_prompt_keeps_unicode_cursor_in_bounds() {
                 draw(frame, &TuiSnapshot::default(), &mut ui)
             })
             .unwrap();
-        let cursor = terminal.get_cursor_position().unwrap();
-        assert!(cursor.x < width);
-        assert!(cursor.y < 18);
+        assert_eq!(
+            terminal.backend().cursor_visible(),
+            expected_column.is_some(),
+            "width={width}, input={input:?}"
+        );
+        if let Some(column) = expected_column {
+            let cursor = terminal.backend().cursor_position();
+            assert_eq!(
+                (cursor.x, cursor.y),
+                (column, 17),
+                "width={width}, input={input:?}"
+            );
+        }
     }
 }
 
@@ -349,7 +370,12 @@ fn details_wrap_without_splitting_graphemes() {
                 .iter()
                 .all(|line| Span::raw(line.as_str()).width() <= width)
         );
-        assert!(wrapped.iter().all(|line| !line.starts_with('\u{301}')));
+        assert!(
+            wrapped
+                .iter()
+                .flat_map(|line| line.graphemes(true))
+                .eq(text.graphemes(true))
+        );
     }
 }
 

@@ -99,10 +99,16 @@ class MetricSemanticsTests(unittest.TestCase):
             expected = 10*np.log10(np.dot(target, target)/np.dot(est-target, est-target))
             self.assertAlmostEqual(measured["si_sdr_db"][channel], expected, places=11)
             np.testing.assert_allclose(measured["reference_gain"][channel], gain, rtol=1e-12, atol=1e-14)
-        rms, peak = benchmark.reconstruction_metrics(reference, estimate, reference-estimate)
-        residual = reference-estimate-(reference-estimate)
-        self.assertEqual(rms, np.sqrt(np.mean(residual**2)))
-        self.assertEqual(peak, np.max(np.abs(residual)))
+        complement = reference-estimate
+        self.assertEqual(benchmark.reconstruction_metrics(reference, estimate, complement), (0.0, 0.0))
+        residual = np.zeros_like(reference)
+        residual[:65536, 0] = 0.125
+        residual[65536:2*65536, 1] = -0.25
+        residual[2*65536:, 0] = 0.75
+        rms, peak = benchmark.reconstruction_metrics(reference, estimate, complement-residual)
+        np.testing.assert_allclose((rms, peak),
+                                   (np.sqrt(np.mean(residual**2)), np.max(np.abs(residual))),
+                                   rtol=1e-12, atol=1e-14)
 
     def test_prepared_reference_preserves_weak_frames_and_per_output_boundaries(self):
         rate = 1000

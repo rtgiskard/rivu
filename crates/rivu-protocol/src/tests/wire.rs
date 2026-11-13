@@ -183,105 +183,101 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 fn other_tracks_requests_round_trip_boundaries() {
     use rivu_protocol::model::LibrarySort;
     let mut encoded = Vec::new();
+    let mut assert_query_round_trip = |expected: Query| {
+        encode_request_frame_into(
+            &WireRequest::Query(WireQuery::from(expected.clone())),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query")
+        };
+        assert_eq!(Query::try_from(wire).unwrap(), expected);
+    };
+    assert_query_round_trip(Query::OtherTracksCount);
     for query in [None, Some(String::new()), Some("Été_100%".into())] {
         for favorite in [None, Some(false), Some(true)] {
             for missing in [None, Some(false), Some(true)] {
                 for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+                    assert_query_round_trip(Query::OtherTracksLocate {
+                        track_id: i64::MAX,
+                        query: query.clone(),
+                        favorite,
+                        missing,
+                        sort,
+                    });
                     for offset in [0, usize::MAX] {
-                        for expected in [
-                            Query::OtherTracksPage {
-                                query: query.clone(),
-                                favorite,
-                                missing,
-                                sort,
-                                offset,
-                                limit: usize::MAX,
-                            },
-                            Query::OtherTracksLocate {
-                                track_id: i64::MAX,
-                                query: query.clone(),
-                                favorite,
-                                missing,
-                                sort,
-                            },
-                            Query::OtherTracksCount,
-                        ] {
-                            encode_request_frame_into(
-                                &WireRequest::Query(WireQuery::from(expected.clone())),
-                                &mut encoded,
-                            )
-                            .unwrap();
-                            let WireRequest::Query(wire) =
-                                decode_request_frame(&encoded[4..]).unwrap()
-                            else {
-                                panic!("expected query")
-                            };
-                            assert_eq!(Query::try_from(wire).unwrap(), expected);
-                        }
+                        assert_query_round_trip(Query::OtherTracksPage {
+                            query: query.clone(),
+                            favorite,
+                            missing,
+                            sort,
+                            offset,
+                            limit: usize::MAX,
+                        });
                     }
                 }
             }
         }
     }
+    let mut assert_command_round_trip = |command: Command| {
+        let expected = serde_json::to_value(&command).unwrap();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(command)),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected command")
+        };
+        assert_eq!(
+            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    };
     for other_tracks in [false, true] {
-        for index in [None, Some(0), Some(usize::MAX)] {
-            for expected_revision in [None, Some(0), Some(u64::MAX)] {
-                for command in [
-                    Command::CheckOtherTracks {
-                        force: other_tracks,
-                    },
-                    Command::QueueExternalPaths {
-                        paths: vec!["/音楽/track.wav".into(), "/music".into()],
-                        index,
-                        expected_revision,
-                    },
-                    Command::QueueExternalPaths {
-                        paths: vec![],
-                        index,
-                        expected_revision,
-                    },
-                    Command::EnqueueSources {
-                        directories: vec![],
-                        track_ids: vec![],
-                        other_tracks,
-                    },
-                    Command::InsertQueueSources {
-                        directories: vec!["/music".into()],
-                        track_ids: vec![1, i64::MAX],
-                        other_tracks,
-                        index: index.unwrap_or(0),
-                        expected_revision: expected_revision.unwrap_or(0),
-                    },
-                    Command::AddPlaylistSources {
-                        playlist_id: i64::MAX,
-                        directories: vec![],
-                        track_ids: vec![],
-                        other_tracks,
-                    },
-                    Command::InsertPlaylistSources {
-                        playlist_id: i64::MAX,
-                        directories: vec![],
-                        track_ids: vec![],
-                        other_tracks,
-                        index: index.unwrap_or(0),
-                        expected_revision: expected_revision.unwrap_or(0),
-                    },
-                ] {
-                    let expected = serde_json::to_value(&command).unwrap();
-                    encode_request_frame_into(
-                        &WireRequest::Command(WireCommand::from(command)),
-                        &mut encoded,
-                    )
-                    .unwrap();
-                    let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap()
-                    else {
-                        panic!("expected command")
-                    };
-                    assert_eq!(
-                        serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
-                        expected
-                    );
-                }
+        assert_command_round_trip(Command::CheckOtherTracks {
+            force: other_tracks,
+        });
+        assert_command_round_trip(Command::EnqueueSources {
+            directories: vec![],
+            track_ids: vec![],
+            other_tracks,
+        });
+        assert_command_round_trip(Command::AddPlaylistSources {
+            playlist_id: i64::MAX,
+            directories: vec![],
+            track_ids: vec![],
+            other_tracks,
+        });
+        for index in [0, usize::MAX] {
+            for expected_revision in [0, u64::MAX] {
+                assert_command_round_trip(Command::InsertQueueSources {
+                    directories: vec!["/music".into()],
+                    track_ids: vec![1, i64::MAX],
+                    other_tracks,
+                    index,
+                    expected_revision,
+                });
+                assert_command_round_trip(Command::InsertPlaylistSources {
+                    playlist_id: i64::MAX,
+                    directories: vec![],
+                    track_ids: vec![],
+                    other_tracks,
+                    index,
+                    expected_revision,
+                });
+            }
+        }
+    }
+    for index in [None, Some(0), Some(usize::MAX)] {
+        for expected_revision in [None, Some(0), Some(u64::MAX)] {
+            for paths in [vec!["/音楽/track.wav".into(), "/music".into()], vec![]] {
+                assert_command_round_trip(Command::QueueExternalPaths {
+                    paths,
+                    index,
+                    expected_revision,
+                });
             }
         }
     }

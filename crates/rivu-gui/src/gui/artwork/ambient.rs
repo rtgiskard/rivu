@@ -64,7 +64,11 @@ mod tests {
             }
         }
         let result = filtered(&RenderImage::new([image::Frame::new(pixels)]));
-        for pixel in result.as_bytes(0).unwrap().as_chunks::<4>().0 {
+        let bytes = result.as_bytes(0).unwrap();
+        let pixels = bytes.as_chunks::<4>().0;
+        assert!(pixels.iter().any(|pixel| pixel[3] > 32));
+        assert!(pixels.iter().any(|pixel| pixel[3] < 32));
+        for pixel in pixels {
             assert_eq!(pixel[0], 0);
             assert_eq!(pixel[1], 0);
             if pixel[3] > 32 {
