@@ -228,12 +228,11 @@ pub(super) fn run(
             &mut provenance,
             cancel,
         );
-        if model.is_err() {
-            let _ = tx.send_blocking(Event::Model {
-                id: status.id,
-                provenance,
-            });
-        }
+        // Decoding can fail before inference publishes a model outcome.
+        let _ = tx.send_blocking(Event::Model {
+            id: status.id,
+            provenance,
+        });
         Some(model?)
     } else {
         None

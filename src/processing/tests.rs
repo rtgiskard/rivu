@@ -864,6 +864,239 @@ sys.stdout.buffer.flush()
     assert!(service.status(task).unwrap().model_id.is_none());
 }
 
+fn preparation_fixture() -> (tempfile::TempDir, Track, Arc<Config>) {
+    let (directory, old, track, config) = fixture();
+    drop(old);
+    let mut writer = hound::WavWriter::create(
+        &track.path,
+        hound::WavSpec {
+            channels: 2,
+            sample_rate: 8_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for sample in PCM {
+        writer.write_sample(sample).unwrap();
+    }
+    writer.finalize().unwrap();
+    (directory, track, config)
+}
+
+fn preparation_only_model(
+    directory: &std::path::Path,
+    id: &str,
+    backend: &str,
+) -> rivu_format::config::NeuralConfig {
+    let manifest = directory.join(format!("{id}.json"));
+    fs::write(
+        &manifest,
+        serde_json::json!({"id": id, "operation": "speech", "backend": backend}).to_string(),
+    )
+    .unwrap();
+    rivu_format::config::NeuralConfig {
+        speech_manifest: Some(manifest.clone()),
+        // Preparation only requires a regular worker file. No worker or model
+        // runtime is executed: a later preparation/decode failure must win.
+        worker: manifest,
+        speech_interpreter: directory.join("must-not-run"),
+        ..Default::default()
+    }
+}
+
+fn failed_prepared_model_task(
+    service: &mut Service,
+    task: u64,
+) -> (ProcessingTaskStatus, Vec<GraphNodeStatus>) {
+    let mut nodes = Vec::new();
+    loop {
+        // Consume real worker events through the same Service reducers as Core.
+        // Never copy a worker status or synthesize provenance into the record.
+        match next_event(service) {
+            Event::Model { id, provenance } => {
+                assert_eq!(id, task);
+                service.model_provenance(id, provenance);
+            }
+            Event::GraphNode { id, status } => {
+                assert_eq!(id, task);
+                service.node_status(id, status.clone());
+                nodes.push(status);
+            }
+            Event::GraphPrepared {
+                id,
+                mode,
+                boundary,
+                plan,
+            } => {
+                assert_eq!(id, task);
+                service.graph_prepared(id, mode, boundary, plan);
+            }
+            Event::Progress {
+                id,
+                completed,
+                total,
+                phase,
+            } => {
+                assert_eq!(id, task);
+                service.progress(id, completed, total, phase);
+            }
+            Event::Finished { id, result } => {
+                assert_eq!(id, task);
+                let error = result
+                    .err()
+                    .expect("prepared model task unexpectedly succeeded");
+                assert_eq!(service.finish_task(id), Some(false));
+                service.outcome(id, ProcessingPhase::Failed, Some(format!("{error:#}")));
+                service.retain_terminal(id);
+                let published = service.current_projection().unwrap();
+                assert_eq!(published.id, task);
+                assert_eq!(published.phase, ProcessingPhase::Failed);
+                assert_eq!(service.history().last(), Some(published.as_ref()));
+                return ((*published).clone(), nodes);
+            }
+            _ => panic!("unexpected prepared model event"),
+        }
+    }
+}
+
+#[test]
+fn model_preparation_provenance_survives_later_graph_preparation_failure() {
+    let (directory, track, _) = preparation_fixture();
+    // Preparation must fail before source allocation, and no interpreter exists.
+    let mut service = Service::with_memory_limit(1);
+    let config = graph_config(vec![
+        GraphNodeKind::Speech {
+            config: preparation_only_model(directory.path(), "prepared-first", "python"),
+        },
+        GraphNodeKind::Speech {
+            config: preparation_only_model(directory.path(), "rejected-second", "unsupported"),
+        },
+    ]);
+    let task = service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target: GraphPort { node: 2, port: 0 },
+                mode: GraphExecutionMode::Offline,
+                export_path: None,
+                source_run: None,
+                cached_output: None,
+            },
+        )
+        .unwrap();
+    let (status, nodes) = failed_prepared_model_task(&mut service, task);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Unsupported model backend")
+    );
+    for (node, id) in [(3, "prepared-first"), (4, "rejected-second")] {
+        let prepared = nodes.iter().find(|entry| entry.node == node).unwrap();
+        assert_eq!(prepared.phase, ProcessingPhase::Queued);
+        assert_eq!(prepared.model_id.as_deref(), Some(id));
+        let terminal = status
+            .graph_nodes
+            .iter()
+            .find(|entry| entry.node == node)
+            .unwrap();
+        assert_eq!(terminal.phase, ProcessingPhase::Failed);
+        assert_eq!(terminal.model_id.as_deref(), Some(id));
+        // Python preparation knows the declared identity, not a verified hash.
+        assert!(terminal.model_sha256.is_none());
+    }
+    assert!(
+        status
+            .graph_nodes
+            .iter()
+            .find(|node| node.node == 3)
+            .unwrap()
+            .error
+            .is_none()
+    );
+    assert!(status.model_id.is_none());
+    assert_eq!(service.memory_bytes(), 0);
+}
+
+#[test]
+fn model_preparation_provenance_survives_graph_decode_failure() {
+    let (directory, track, _) = preparation_fixture();
+    let mut service = Service::with_memory_limit(1);
+    let config = graph_config(
+        ["prepared-first", "prepared-second"]
+            .into_iter()
+            .map(|id| GraphNodeKind::Speech {
+                config: preparation_only_model(directory.path(), id, "python"),
+            })
+            .collect(),
+    );
+    let task = service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target: GraphPort { node: 2, port: 0 },
+                mode: GraphExecutionMode::Offline,
+                export_path: None,
+                source_run: None,
+                cached_output: None,
+            },
+        )
+        .unwrap();
+    let (status, nodes) = failed_prepared_model_task(&mut service, task);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("PCM memory budget exceeded")
+    );
+    assert_eq!(nodes.len(), 2);
+    for (node, id) in [(3, "prepared-first"), (4, "prepared-second")] {
+        let prepared = nodes.iter().find(|entry| entry.node == node).unwrap();
+        assert_eq!(prepared.phase, ProcessingPhase::Queued);
+        assert_eq!(prepared.model_id.as_deref(), Some(id));
+        let terminal = status
+            .graph_nodes
+            .iter()
+            .find(|entry| entry.node == node)
+            .unwrap();
+        assert_eq!(terminal.phase, ProcessingPhase::Failed);
+        assert_eq!(terminal.model_id.as_deref(), Some(id));
+        assert!(terminal.model_sha256.is_none());
+        assert!(terminal.error.is_none());
+    }
+    assert!(status.model_id.is_none());
+    assert_eq!(service.memory_bytes(), 0);
+}
+
+#[test]
+fn model_preparation_provenance_survives_standalone_decode_failure() {
+    let (directory, track, mut config) = preparation_fixture();
+    let mut service = Service::with_memory_limit(1);
+    Arc::make_mut(&mut config).neural =
+        preparation_only_model(directory.path(), "prepared-standalone", "python");
+    let task = service
+        .start(track, config, ProcessingOperation::Speech, None)
+        .unwrap();
+    let (status, nodes) = failed_prepared_model_task(&mut service, task);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("PCM memory budget exceeded")
+    );
+    assert_eq!(status.operation, ProcessingOperation::Speech);
+    assert_eq!(status.model_id.as_deref(), Some("prepared-standalone"));
+    assert!(status.model_sha256.is_none());
+    assert!(nodes.is_empty());
+    assert_eq!(service.memory_bytes(), 0);
+}
+
 fn assert_graph_failure(
     service: &mut Service,
     track: &Track,

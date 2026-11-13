@@ -699,6 +699,12 @@ pub(super) fn prepare_models(
             .context("Missing graph node status")?;
         entry.model_id = provenance.id;
         entry.model_sha256 = provenance.sha256;
+        // Preparation learns identity before decoding or inference. Preserve the
+        // current phase while reliably handing that fact to the task owner.
+        let _ = tx.send_blocking(Event::GraphNode {
+            id: status.id,
+            status: entry.clone(),
+        });
         match model {
             Ok(model) => {
                 models.insert(id, model);
