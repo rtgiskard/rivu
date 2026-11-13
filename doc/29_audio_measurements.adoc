@@ -1,0 +1,97 @@
+= Historical audio-processing measurements
+:toc:
+:toclevels: 2
+
+These records were separated from the current design on 2026-11-13. Experiment
+dates and source identities are retained only where recorded; this date does not
+identify a measurement revision or imply renewed verification. Current workflow,
+acceptance requirements and remaining gaps belong in
+link:27_audio_processing.adoc[Audio processing].
+
+== Recorded local evidence and remaining limits
+
+These are earlier local observations, not current-source reruns, universal
+performance guarantees or listening approval. Paths below identify task artifacts
+under `.cache/`, not installed files. Several quality/GUI/graph bundles, including
+`eq-candidate.json`, `audio-quality-corpus/`, `neural/acceptance-evidence/` and
+`audio-graph-evidence/`, are absent from the current local archive. Check artifact
+availability and source identity before reusing any record for acceptance.
+
+Human listening, quiet-content/stereo-artifact approval, broad lossless fullband
+music coverage and device-specific underrun/deadline evidence remain gaps.
+Reference parity, scalar improvement and reconstruction do not close them.
+
+=== Native ONNX speech integration checks
+
+Recorded synthetic comparisons used ONNX Runtime 1.23.2 CPU with the pinned
+GTCRN and UL-UNAS graphs and an independent Torch STFT/ISTFT reference using
+the same complete-hop reflection. Short inputs and partial final hops were
+included. UL-UNAS's log-magnitude features amplify FFT roundoff near zero:
+its constant one-sample extension differed by 6.39e-4, while feeding the exact
+Rust spectrum to the Python runtime reduced the difference to 7.4e-11. This
+distinguishes transform conditioning from model execution; it does not justify
+input special cases or establish speech quality, listening acceptance or
+cross-runtime bit equality. These observations are not acceptance of the current
+standalone or graph dispatch paths.
+
+=== Historical quality and integration observations
+
+These records concern earlier experiments, not acceptance of the current source.
+
+[cols="1,2,3",options="header"]
+|===
+|Area |Recorded evidence under `.cache/` |What it establishes and what it does not
+|Equalizer
+|`eq-candidate.json`
+|Warm process-call timings and allocation counts excluded preparation, copying,
+file I/O and device output; they do not establish callback deadlines or end-to-end cost
+|Classical restoration
+|`audio-quality-corpus/classical-matrix-preservation/report.json`
+|A 64-case-per-mode synthetic matrix included Stationary regressions; it does not
+establish general music transparency
+|Neural reference parity
+|`neural/moss-upstream-comparison.json`, `neural/kim-upstream-comparison.json`
+|Comparisons with the selected upstream algorithms; not whole-file parity at every
+context boundary or listening approval
+|Speech and quiet-content tradeoffs
+|`neural/delivery-evidence.json`, `neural/acceptance-evidence/`
+|Partial VoiceBank and synthetic evaluations. One wet/attenuation blend improved
+clean-reference preservation while reducing noisy-input scores; not a universal default
+|Separation and lossless coverage
+|`neural/acceptance-evidence/summary.json`
+|AAC stem comparisons excluded the Al James reference erratum. One seven-second
+MedleyDB PCM16 remix adds lossless evidence, not broad fullband music coverage
+|Application and graph interaction
+|Earlier Rivu/PipeWire and nested-Wayland observations
+|EQ drafts, graph edits, cancellation/reaping, audition and export were exercised;
+these are historical observations, not complete GUI or current-build acceptance
+|===
+
+Historical separation timings were not realtime. Repeated worker measurements
+covered short excerpts and fresh processes, not guaranteed cold OS caches or
+all-duration memory/deadline bounds.
+
+=== Node graph measurements
+
+`audio-graph-evidence/graph-baseline.json` and `graph-optimized.json` recorded
+nine repetitions for each of 18 native graph workloads, excluding preparation,
+copying, file I/O and device output. Untimed output comparisons were sample-exact
+and processing allocated no additional storage. Timings did not show a uniform
+speedup or establish physical-device deadlines.
+
+`neural/graph-backend-evidence/comparison.json` covered three seconds of a MUSDB
+AAC excerpt with Kim. Its mixture reconstruction checks the accompaniment
+definition; one timing run is not a repeated performance estimate, quality ranking
+or fullband/listening acceptance.
+
+=== Implementation cost audit
+
+Earlier records in `experiments/audio/classical-audit/`,
+`experiments/audio/audio-implementation-audit/`, `audio-review-next/` and
+`speech-optimize-20261023/` isolate native allocation, shared worker storage and
+MossFormer2 numerical-processing costs. They do not measure whole-process RSS,
+model-weight equivalence or device deadlines. Paired numerical checks preserved
+outputs within their stated precision; timing did not establish a stable speedup.
+Torch/Kaldi/DSP checks did not execute model weights or CUDA. Real-model regression
+checks still require prepared manifests and matching interpreters; skipped tests
+and environment-installation failures are not passes.

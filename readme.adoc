@@ -124,6 +124,7 @@ rivu playback volume 50
 Details: link:doc/02_library.adoc#cli-output[CLI output] and
 link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 
+[[files-and-data-directories]]
 == Files and data directories
 
 Library, queue, and playlist edits change Rivu's records, not source files;
@@ -173,6 +174,7 @@ Unsupported formats or migration failure stop startup without resetting data.
 * Agent development skills
 ** https://github.com/rtgiskard/gskd-craft[gskd-craft]: reusable agent development skills
 
+[[build-and-install]]
 == Build and install
 
 === Prebuilt Linux x86_64 binaries
@@ -260,6 +262,7 @@ Add `ffmpeg` or `onnx` as needed. Disabled frontend commands are absent from hel
 also builds independent frontend packages. See
 link:doc/21_ipc.adoc#consumer-and-application-lifetimes[frontend lifetimes].
 
+[[ffmpeg-and-native-only-builds]]
 === FFmpeg and native-only builds
 
 Enabled by default; requires `libclang` and FFmpeg headers (`libavutil` 61.x,
@@ -296,6 +299,7 @@ Setup runs without Core. Add `--activate` to select the prepared model through a
 running Core; it does not start inference. Nothing is downloaded during playback.
 See link:doc/27_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[backend selection, local weights and deployment].
 
+[[font-embedding]]
 === Font embedding
 
 Off by default. Install Symbols Nerd Font Mono on the GUI host

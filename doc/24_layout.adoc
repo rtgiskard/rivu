@@ -198,6 +198,7 @@ blocking state before committing, so cancellation does not depend on a repaint.
 Wayland implicit button grabs may deliver motion outside the window without an
 exit event; viewport bounds provide the same cancellation in that case.
 
+[[dragging-and-snapping]]
 == Dragging and snapping
 
 A separator drag snapshots the relevant geometry and mouse-to-separator offset.
@@ -234,6 +235,7 @@ without modifying the settings draft or saved file. Snapping aligns current
 geometry only: no persistent cross-container constraint or general constraint
 solver is stored.
 
+[[geometry-and-constrained-viewports]]
 == Geometry and constrained viewports
 
 Visualization sizing uses the actual content canvas, after any visible
@@ -592,14 +594,11 @@ revive the old modal focus owner.
 
 The source-image studies from Gradient translucency through Celtic storybook share
 decoded artwork rather than generating per-frame bitmaps. Image masks,
-sampling blur, UV waves, grain and color quantization compose on one sprite. All
-effect taps clamp to the source atlas tile. Nonzero cover blur uses fixed 9-by-9
-Gaussian sampling with alpha-correct texel interpolation; it can perform up to
-324 texel reads per covered fragment. Exact centers and collapsed axes skip
-zero-weight bilinear taps. Active feather, grain and color-level effects also use
-alpha-correct interpolation for fractional source alpha, while ordinary no-effect
-images retain their hardware sampling path. Sharing a texture does not make this
-work free. Native Metal explicitly rejects these new image/filter operations.
+sampling blur, UV waves, grain and color quantization compose on one sprite.
+All effect sampling stays within the source atlas tile and handles fractional
+source alpha correctly; ordinary no-effect images retain their sampling semantics.
+Sharing a texture does not make sampling work free. Native Metal explicitly
+rejects these new image/filter operations.
 
 Source-image effects have a fixed order: wave displacement selects the sampling
 center, source blur samples around it, then color quantization precedes grain.
@@ -607,44 +606,31 @@ Feathering masks the resulting image; this is not an arbitrary reorderable chain
 Backdrop capture and subtree isolation remain separate scene operations because
 their inputs and painter-order boundaries differ from source-image sampling.
 
-Backdrop frost is different from cover blur: it captures already-painted geometry,
-then applies two separable Gaussian passes before the panel foreground.
-Each pass combines adjacent discrete Gaussian taps with one weighted linear
-texture fetch, retaining the three-sigma footprint and clamped edges. For radius
-`r = ceil(3 * sigma)`, the fetch bound drops from `2r + 1` to `r + 1` per fragment
-per pass, without another target or downsampling. Floating-point accumulation
-and hardware interpolation can differ within the renderer's 8-bit tolerance.
-Group edge fade isolates viewport children, including overlaps, and composites their
-premultiplied result once. Headers, tabs and toolbars are outside the list mask.
-Groups containing backdrop blur interpolate the composed parent/group result so
-translucent backdrop alpha is not counted twice. Plain fades retain transparent
-isolation and source-over composition. Frames without backdrop blur draw their
-root directly into the output, retaining only one viewport target per active
-group depth and requiring no final root-copy pass. Frames containing backdrop
-blur additionally retain an offscreen root and shared scratch target; nested
-blur needs no separate backdrop-capture target. The target-byte budget charges
-these renderer-owned targets, not the output. Per-window target storage and
-fade-depth limits are runtime settings; defaults and accepted ranges are in
-link:01_config.adoc#_appearance_and_library_display[Appearance and library display]. Ordered filter markers
-remain capped at 64. Exceeding a configured limit, that marker cap or device texture
-dimensions skips all scene filters for the frame and preserves ordinary content;
-unbalanced filter groups remain rendering errors. Backdrop sigma is capped at
-32 physical pixels after logical-to-physical conversion. The material frame
-resolves its effective logical sigma to `min(requested, 32 / physical_scale)`;
-the session retains the requested value rather than changing its preset when
-output scale changes. Filters introduce painter-order barriers and can reduce
-batching; fade groups use grayscale text coverage.
-They add no production CPU readback or desktop/compositor transparency.
+Backdrop frost captures already-painted geometry and blurs it before the panel
+foreground; it does not blur the source cover. Group edge fade isolates viewport
+children, including overlaps, and composites their premultiplied result once.
+Headers, tabs and toolbars are outside the list mask. Groups containing backdrop
+blur interpolate the composed parent/group result so translucent backdrop alpha
+is not counted twice. Plain fades retain transparent isolation and source-over
+composition.
 
-Filter validation and procedural-water counts share one allocation-free scene
-preflight before filter or water resources are established. Scenes with neither
-operation bypass that traversal by inspecting their existing effect collections.
+Per-window target storage and fade-depth limits are runtime settings; defaults
+and accepted ranges are in
+link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
+The target-byte budget charges renderer-owned filter targets, not the output.
+Ordered filter markers remain capped at 64. Exceeding a configured limit, that
+marker cap or device texture dimensions skips all scene filters for the frame
+and preserves ordinary content; unbalanced filter groups remain rendering errors.
+Backdrop sigma is capped at 32 physical pixels after logical-to-physical conversion.
+The material frame resolves its effective logical sigma to
+`min(requested, 32 / physical_scale)`; the session retains the requested value
+rather than changing its preset when output scale changes.
 More than 256 water panels skips all procedural water for that frame. Water and
 filter admission are independent, and both resume on later in-limit frames.
-Filter pipelines are created only for the first admitted filtered frame. An unfiltered
-frame releases filter targets but retains established pipelines for reuse; water alone does not create
-filter resources. Target sizes still follow the viewport: this does not introduce
-a persistent image cache or change the filter budget.
+Filters introduce painter-order barriers and can reduce batching; fade groups
+use grayscale text coverage. They add no production CPU readback or
+desktop/compositor transparency. Sampling and filter-resource implementation
+boundaries belong to link:25_gpu_rendering.adoc[GPU Rendering Design].
 
 Only an enabled cover transition retains one predecessor. Its clock starts after
 the new source decode is ready; hiding, disabling motion, zero duration or changing
@@ -823,6 +809,7 @@ visible rotating instances. Animated source images still update every visible
 Artwork consumer, including instances whose rotation mode is static.
 
 
+[[reusable-gpui-controls]]
 === Reusable GPUI controls
 
 The workspace package `rivu-ui` provides the shared controls independently of

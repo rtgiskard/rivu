@@ -48,6 +48,7 @@ Downgrade, cross-file transactions, paired restore, layout/cache conversion and
 undocumented historical conversions are outside this contract. For other database
 operations, see link:02_library.adoc#sqlite-maintenance[SQLite maintenance].
 
+[[application-invocation]]
 == Application invocation
 
 On a database version mismatch, GUI and headless startup run
@@ -71,6 +72,7 @@ I/O and Core/UI state; the tool owns offline preflight, backups and historical
 conversions. Historical decoders and migration dependencies must not enter the
 application's normal decoding or SQL paths.
 
+[[version-authority]]
 == Version authority
 
 === Database schema
@@ -98,6 +100,7 @@ format guard. Empty detection ignores only the literal `sqlite_` table prefix.
 Other unversioned tables, unknown or future formats are rejected: changing a marker
 cannot establish compatibility.
 
+[[configuration-schema]]
 === Configuration schema
 
 The current configuration schema permits an omitted `schema_version`, meaning
@@ -168,11 +171,13 @@ alone is not a consistent backup. Publication proceeds from `.bak.partial` to
   bookkeeping did not complete.
 * `complete; no storage sync requested`: database maintenance may start.
 
-Files and directories are not explicitly synced. A completed backup is logically
-consistent, not a power-loss durability guarantee; see
+Backup publication does not explicitly sync files or directories. A completed
+backup is logically consistent, not a power-loss durability guarantee; see
 link:91_design_decisions.adoc#DEC-018[file publication policy]. Failures retain
-partial evidence and never trigger restoration. Backup publication and the
-migration transaction are separate boundaries, not a cross-resource commit.
+partial evidence and never trigger restoration. The SQLite migration connection
+uses `synchronous=FULL` for its transaction, including WAL durability. Backup
+publication and the migration transaction are separate boundaries, not a
+cross-resource commit.
 Backup and transaction/WAL growth need disk space; preflight's capacity estimate
 is advisory and later storage errors still fail. Transformations remain in SQLite,
 without whole-library buffers, scanning, network access or decoder probing.
@@ -203,6 +208,7 @@ trigger behavior. Updating the current format must not silently redefine old inp
 Integration proof must run the tool, then load settings and query/write its database
 with the application. Unit tests or compilation alone are insufficient.
 
+[[configuration-compatibility]]
 == Configuration compatibility
 
 The tool validates current configuration; it does not translate historical keys or

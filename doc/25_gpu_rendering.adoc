@@ -32,6 +32,102 @@ No universal three-slot rule or fixed 128 MiB CPU/GPU budget is adopted. Bounded
 display latency or small visual differences may be accepted for demonstrated gains,
 not invalid memory access, stale source identity, unbounded retention or audio stalls.
 
+== Pinned renderer maintenance
+
+`Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
+`a7fcc341793ee115ea07565c1b6e5e9d5d8ba364` from
+https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
+together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
+https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
+the remaining GPUI platform crates retain that pinned dependency baseline.
+This is a maintained capability patch, not a framework replacement or upgrade.
+The layout engine follows the Taffy 0.15 update in
+https://github.com/zed-industries/zed/commit/b488c4e81451f2042d5f47d93f6158732ac28212[Zed revision b488c4e81451f2042d5f47d93f6158732ac28212],
+without upgrading the remaining platform crates.
+
+Shared images retain their normal image and atlas lifetimes.
+
+Cached views track their own entity dependencies, including dependencies shared
+with enclosing views. Parent redraw and scene replay must not sever a child's
+notifications or force unrelated cached siblings to rerender. Regression commands
+are listed under <<renderer-regression-checks,Renderer regression checks>>.
+
+These external renderer extensions require matched Rust scene and shader layouts;
+Rivu consumes them through the pinned interfaces rather than owning their pipelines.
+
+Color images clamp linear texture sampling to their atlas tile's first and last
+texel centers. This prevents neighboring images from bleeding into magnified
+edges without adding atlas padding or disabling interpolation.
+
+=== Maintenance boundary and removal criteria
+
+The implemented rendering backend is WGPU. Native Metal rejects these new
+painting operations rather than silently substituting a different result;
+Linux/Vulkan runtime evidence does not establish Metal or browser support.
+The extra fields also increase shared vertex/sprite record sizes, so this
+patch is not a universal rendering or memory improvement.
+
+Maintain framework and renderer changes in `gpui-wgpu`, then update both Rivu
+patch revisions together. When updating the upstream baseline, compare these
+extensions against it, keep Rust and shader record layouts synchronized, and
+preserve transformed image clipping, palette Path mapping, atlas lifetime and
+drawing order. Revalidate ordinary untransformed images and plain paths as well
+as all migrated consumers. Drop the overrides only when the selected upstream
+revision supplies the required behavior and all Rivu callers have migrated;
+a newer dependency version alone is not sufficient.
+
+[[renderer-regression-checks]]
+=== Renderer regression checks
+
+Framework, shader and headless GPU regressions live in the independent
+`gpui-wgpu` repository, together with licensed font and image fixtures.
+Check out the exact revision pinned by Rivu before running its commands:
+
+[source,sh]
+----
+git clone https://github.com/rtgiskard/gpui-wgpu
+cd gpui-wgpu
+git checkout a7fcc341793ee115ea07565c1b6e5e9d5d8ba364
+make test
+----
+
+See that repository's README for focused checks and build prerequisites.
+Headless WGPU checks need an available adapter and do not establish native-window
+behavior. They are not substitutes for Rivu application behavior tests.
+
+From Rivu's repository root, run `cargo test --locked -p rivu-gui --test gpui_cached_dependencies`
+for the application-side cached-view notification and replay regressions.
+
+For a native-window smoke check, use a Wayland desktop with a working WGPU
+adapter and PipeWire server. Build the updated consumer first with
+`cargo build --locked --bin rivu`; an existing binary does not test a new pin.
+From Rivu's repository root, create isolated application storage and disable
+desktop integrations so the smoke instance does not claim the normal tray or
+MPRIS identity:
+
+[source,sh]
+----
+mkdir -p .cache
+smoke_dir=$(mktemp -d "$PWD/.cache/gpui-smoke.XXXXXX")
+printf '[interface]\ntray_enabled = false\nmpris_enabled = false\n' > "$smoke_dir/config.toml"
+.cache/target/debug/rivu --data-dir "$smoke_dir" gui
+----
+
+Retain the same `smoke_dir` in another terminal to stop the instance with
+`.cache/target/debug/rivu --data-dir "$smoke_dir" quit`. Closing the last window
+exits the desktop process but leaves Core running. Do not point the smoke instance
+at normal user storage or pass music paths unless importing test media is
+intentional. Keep the real Wayland runtime environment: changing `XDG_RUNTIME_DIR`
+would also disconnect the compositor and audio endpoints. This isolates application
+data and desktop registration, not the shared GPU or audio server.
+
+Check initial text and artwork rendering, cached-view updates, window resizing,
+and the visualization styles being exercised. Empty isolated storage cannot
+establish playback-driven visualization behavior; use disposable test media for
+that check. `make ui-demo` is a separate component showcase, not an application
+or playback smoke test.
+
+[[implemented-fixed-schema-slices]]
 == Implemented fixed-schema slices
 
 [[internal-led-vertical-slice]]
@@ -40,7 +136,7 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 Rivu consumes private fixed schemas through GPUI's existing Scene-to-renderer path.
 The implementations described here live in the external pinned GPUI/WGPU patch;
 FFT, analysis and simulation remain Rivu-owned. The original rectangle-only LED
-experiment is retained under <<initial-comparative-measurements>>.
+experiment is retained in link:28_gpu_measurements.adoc#initial-comparative-measurements[the historical measurement archive].
 
 The pinned renderer exposes the experimental `GpuPalette`, `GpuFrame`,
 schema-stable `GpuState`, `GpuSource` and `Window::paint_gpu` interfaces.
@@ -94,6 +190,7 @@ normalization/rebasing avoids overflow while preserving physical stroke width;
 it does not narrow publication coordinates or require CPU geometry copies.
 
 
+[[spectrogram-column-fields]]
 ==== Spectrogram column fields
 
 Spectrogram tiles contain at most 32 numerical columns with independent time
@@ -150,6 +247,7 @@ alignment, transport limits and scene order.
 GPUI/WGPU owns upload reuse and physical retirement. Artwork and radial styles
 keep independent rendering paths.
 
+[[consumer-cutover-contracts]]
 === Consumer cutover contracts
 
 Current application/GPU responsibilities are:
@@ -197,6 +295,8 @@ straight RGBA interpolation. Moving coloring into the shader does not eliminate
 its cost: enlarged or static draws still evaluate four mappings per output fragment.
 Field upload uses four bytes per source cell. Shader coloring avoids CPU
 recoloring; it does not by itself reduce upload size or fragment work.
+Density/Spatial use a 256-sample straight RGBA palette with 8-bit quantization,
+rebuilt only on color changes.
 
 Paths reuse existing tessellated vertices and coverage coordinates, not a filled
 bounding rectangle. Their original bounds map into the recorded placement bounds;
@@ -206,6 +306,46 @@ placement. Palette ownership is shared; path geometry remains immutable.
 These Paths use the shared local multisample scratch below, not a separate
 offscreen attachment.
 
+=== Source-image sampling and scene-filter resources
+
+Source-image effects and scene-filter semantics are described in
+link:24_layout.adoc[Layout and materials]. Their implementation belongs to the
+paired external renderer patch, not Rivu's material controls.
+
+All effect taps clamp to the source atlas tile. Nonzero cover blur uses fixed 9-by-9
+Gaussian sampling with alpha-correct texel interpolation; it can perform up to
+324 texel reads per covered fragment. Exact centers and collapsed axes skip
+zero-weight bilinear taps. Active feather, grain and color-level effects also use
+alpha-correct interpolation for fractional source alpha, while ordinary no-effect
+images retain their hardware sampling path. Sharing a texture does not make this
+work free. Native Metal explicitly rejects these new image/filter operations.
+
+Backdrop frost uses two separable Gaussian passes over captured scene content.
+Each pass combines adjacent discrete Gaussian taps with one weighted linear
+texture fetch, retaining the three-sigma footprint and clamped edges. For radius
+`r = ceil(3 * sigma)`, the fetch bound drops from `2r + 1` to `r + 1` per fragment
+per pass, without another target or downsampling. Floating-point accumulation
+and hardware interpolation can differ within the renderer's 8-bit tolerance.
+
+Frames without backdrop blur draw their
+root directly into the output, retaining only one viewport target per active
+group depth and requiring no final root-copy pass. Frames containing backdrop
+blur additionally retain an offscreen root and shared scratch target; nested
+blur needs no separate backdrop-capture target. The target-byte budget charges
+these renderer-owned targets, not the output. Per-window storage and fade-depth
+settings are defined in link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
+
+Filter validation and procedural-water counts share one allocation-free scene
+preflight before filter or water resources are established. Scenes with neither
+operation bypass that traversal by inspecting their existing effect collections.
+More than 256 water panels skips all procedural water for that frame. Water and
+filter admission are independent, and both resume on later in-limit frames.
+Filter pipelines are created only for the first admitted filtered frame. An unfiltered
+frame releases filter targets but retains established pipelines for reuse; water alone does not create
+filter resources. Target sizes still follow the viewport: this does not introduce
+a persistent image cache or change the filter budget.
+
+[[shared-local-multisample-scratch]]
 === Shared local multisample scratch
 
 Waveform, rectangles, procedural segments, palette Paths and ordinary GPUI Paths
@@ -267,6 +407,7 @@ clipping, translucent overlap, fractional coverage, native packed batches, nonze
 raster origins, resize and resource recovery.
 
 
+[[admission-and-retirement]]
 === Admission and retirement
 
 Buffers are initialized through write-only mapped storage, never by reinterpreting
@@ -322,6 +463,7 @@ is no cleanup frame or permanent polling loop. Ordinary scenes with no extension
 resources do not perform extension-specific device polling. Native Metal remains
 explicitly unsupported.
 
+[[surface-reattachment]]
 === Surface reattachment
 
 Reattaching a native surface to an existing renderer preserves its device, queue,
@@ -339,6 +481,7 @@ it under the same bounded-capacity policy. In-flight commands retain prior
 resources until completion. Headless alpha/pixel checks do not establish native
 surface reattachment or compositor behavior; those require platform evidence.
 
+[[proposed-general-rendering-model]]
 == Proposed general rendering model
 
 The following API and lifecycle design is not the closed-schema interface above.
@@ -377,6 +520,7 @@ storage. Moving an avoidable mesh/pixel loop into a pool does not eliminate it.
 Immutable CPU definitions may be shared broadly, but attached resources must
 respect window/device lifetime; another window must not keep removed content alive.
 
+[[application-facing-interface]]
 === Application-facing interface
 
 The proposed public model uses:
@@ -578,6 +722,7 @@ Distinguish invalid data/schema, unsupported capability, temporary pressure,
 limits, closure and device failure. Pressure must not create an unlimited retry
 queue, and no graphics failure blocks or commands audio playback.
 
+[[verification-and-decision-gates]]
 == Verification and decision gates
 
 These are requirements for rendering changes, not claims that every historical
@@ -618,340 +763,44 @@ performance gains; reduced draw calls or fewer source lines alone prove neither.
 Run checks in the repository that owns the change: renderer/shader checks belong
 to the pinned external GPUI/WGPU repository; Rivu integration and GUI behavior
 checks belong here. Commands and platform prerequisites are in
-link:23_visuals.adoc#renderer-regression-checks[Renderer regression checks].
+<<renderer-regression-checks,Renderer regression checks>>.
 Documentation maintenance does not imply a fresh GUI run or benchmark. Permanent
 tests should protect observable invariants and errors, not incidental API spelling
 or code layout; profiling/prototype artifacts remain separate from product code.
 
+[[recorded-measurements]]
 == Recorded measurements
 
-Results below summarize historical experiments, not current performance guarantees.
+The linked archive summarizes historical experiments, not current performance guarantees.
 Current resource limits and record sizes are described above; later fixes and
 extensions do not inherit earlier timing, memory or image-comparison results
 automatically. No GUI or benchmark rerun is implied by maintaining this document.
 
 The decision index separates the reason for each experiment from its historical
-tables and methods below. Results from different rows are not a cumulative
+tables and methods in link:28_gpu_measurements.adoc[the dated measurement archive]. Results from different rows are not a cumulative
 speedup or a common benchmark series.
 
 [cols="2,3",options="header"]
 |===
 |Evidence |Decision supported and limits
-|<<capacity-neutral-regrouping-comparison-2026-10-30,Capacity-neutral regrouping>>
+|link:28_gpu_measurements.adoc#capacity-neutral-regrouping-comparison-2026-10-30[Capacity-neutral regrouping]
 |Reject the extra planning/composite bookkeeping: sparse-layout gains came with an ordinary mixed-layout cost.
-|<<shared-local-msaa-comparison-2026-10-23,Shared local MSAA>>
+|link:28_gpu_measurements.adoc#shared-local-msaa-comparison-2026-10-23[Shared local MSAA]
 |Share local attachments to reduce retained capacity and mixed-layout engine occupancy; distant regions need more passes and CPU work. This does not measure the later reclamation policy.
-|<<initial-comparative-measurements,Rectangle-only predecessor>>
+|link:28_gpu_measurements.adoc#initial-comparative-measurements[Rectangle-only predecessor]
 |Replace LED tessellation with instance publication: lower CPU update, payload and render/readback costs in the prototype. Complete first-image latency is measured separately; this is not a consumer cutover.
-|<<unified-field-and-path-measurements,Unified fields and paths>>
+|link:28_gpu_measurements.adoc#unified-field-and-path-measurements[Unified fields and paths]
 |Move field recoloring to numerical drawing and evaluate palette paths: CPU recoloring disappears, but field render/readback gets slower. Vendor image comparisons alone do not accept application palettes.
-|<<demand-specific-preparation-and-path-batching,Demand-local preparation and batching>>
+|link:28_gpu_measurements.adoc#demand-specific-preparation-and-path-batching[Demand-local preparation and batching]
 |Prepare only needed pipelines and batch safe disjoint paths: strong replay benefit in the stated multi-path workload, not a universal startup gain.
-|<<density-spatial-consumer-evidence,Density/Spatial consumers>>; <<spectrum-barsled-consumer-measurements,Spectrum consumers>>
+|link:28_gpu_measurements.adoc#density-spatial-consumer-evidence[Density/Spatial consumers]; link:28_gpu_measurements.adoc#spectrum-barsled-consumer-measurements[Spectrum consumers]
 |Evaluate actual migrations: bounded live-CPU reductions, overlapping memory ranges and no isolated GPU-cost or synchronized pixel-parity claim.
 |===
 
-The following subsections retain historical workloads, tables and acceptance
+The archive retains historical workloads, tables and acceptance
 limits. Where no source commit is stated, the baseline is identified only by its
 described implementation or compiled libraries, not a reproducible source revision.
 
-[[historical-vendor-measurement-method]]
-=== Shared method for the 2026-10-18 vendor comparisons
-
-The rectangle-only and unified field/path comparisons used Radeon 780M / RADV
-Vulkan, Rust 1.99.0 and optimized release builds with thin LTO. Both used five
-runs alternating baseline/candidate order, each retaining 20 frames after four
-warmups. Steady-state times are microseconds: median of run medians, with the
-minimum and maximum run median in brackets. Shared input generation is excluded
-from CPU update; static replay requires no update. Workloads and baseline
-identities remain specific to each experiment.
-
-In those comparisons and the demand-specific preparation/batching probe,
-render/readback includes CPU renderer preparation, submission, GPU completion,
-copy-back and image assembly; it is not isolated GPU execution time. First-use
-boundaries differ: the rectangle supplement includes construction and initial CPU
-preparation, whereas renderer-first-draw observations and the demand-specific
-probe exclude them. Their process/cache conditions are stated locally. These
-conventions do not apply to the shared-MSAA encode/submit or application process
-counter measurements.
-
-=== Capacity-neutral regrouping comparison (2026-10-30)
-
-Capacity-neutral regrouping was rejected. On Radeon 780M it benefited specific
-sparse layouts but added a small measured cost to the ordinary mixed layout;
-the gains did not justify the additional planning and composite bookkeeping.
-
-=== Shared local MSAA comparison (2026-10-23)
-
-Compared separate release binaries against commit `9b49886b60ce8955c243440b5ca0992118556605`
-on Radeon 780M / RADV, Mesa 26.2.5. The baseline already has local Waveform
-attachments; this comparison measures unifying the other multisampled materials
-and ordinary GPUI Paths, not the earlier full-window-to-local Waveform change.
-
-At the measured revision, successful 192x128, 4x-MSAA synthetic frames retained
-the following nominal attachment bytes. These describe renderer-owned capacity
-in those runs, not physical VRAM or in-flight retired allocations. The later
-capacity-slack and sustained-reclamation policy in
-<<shared-local-multisample-scratch>> is not measured by this table or the timing
-and image comparisons below.
-
-[cols="2,1,1,1,1",options="header"]
-|===
-|Scene |Baseline bytes |Unified bytes |Baseline raster passes |Unified raster passes
-|Mixed native/material |675600 |184080 |22 |22
-|Distant small regions |931820 |431880 |9 |17
-|Fullscreen |983040 |491520 |5 |5
-|Native Path only |491520 |208280 |1 |1
-|One Waveform |259260 |259260 |1 |1
-|Four Waveforms |403200 |403200 |2 |2
-|===
-
-The area-sensitive split has a real cost: distant regions use more passes.
-Three independent runs, each with twelve 64-frame samples, measured CPU
-encode/submit wall time below. Values are the median of run medians, with the
-range of run medians in brackets, in microseconds per frame.
-
-[cols="2,1,1",options="header"]
-|===
-|Scene |Baseline |Unified
-|Mixed native/material |492.869 [477.382–529.284] |489.815 [449.018–539.791]
-|Distant small regions |220.946 [220.397–243.319] |340.676 [326.195–353.866]
-|Fullscreen |145.985 [142.147–149.053] |144.342 [143.614–147.226]
-|Native Path only |78.420 [75.887–78.900] |79.083 [76.015–79.481]
-|Solid only |79.873 [74.948–83.041] |76.564 [72.503–82.366]
-|Segments only |84.612 [80.850–86.655] |76.624 [75.480–77.440]
-|Rectangles only |77.045 [76.726–79.632] |84.606 [80.891–85.417]
-|===
-
-Each warm/reference/measured submission completes before the next submission.
-Measured frames match nonzero completed-reference attachment/pass counters for
-their viewport. Completion waits are accumulated separately and are not GPU
-execution timestamps. Earlier queued-submission profile results were invalid
-because admission pressure omitted drawings; they are excluded.
-Resize samples alternate viewport multipliers 1, 1.5, 0.625 and 1 and use the
-same per-frame admission checks. No universal CPU speedup is claimed.
-
-Real Rivu measurements used a 1280x800 nested niri window on Weston headless GL,
-one minute of stereo 48kHz PCM16 media, muted output, and alternating baseline
-and candidate order. Each version has three six-second samples per layout.
-The table reports process-scoped DRM GFX engine busy percentage: median and
-range across the three runs, not per-widget duration or GPU timestamps.
-
-[cols="2,1,1",options="header"]
-|===
-|Layout |Baseline GFX % |Unified GFX %
-|Waveform + Solid + Fractal Beams + Spectrogram/text |3.655 [3.499–3.670] |3.090 [3.085–3.104]
-|Waveform + Bars + Rings + Spectrogram/text |5.007 [4.981–5.059] |4.234 [4.187–4.356]
-|Waveform + Outline + Rings + Spectrogram/text |5.069 [4.974–5.084] |4.213 [4.184–4.277]
-|Four Waveforms |2.164 [2.164–2.193] |2.219 [2.193–2.252]
-|One Waveform |2.103 [1.993–2.144] |2.135 [2.070–2.162]
-|===
-
-Mixed-layout engine occupancy improves in these workloads; Waveform-only
-controls do not show a stable gain. CPU usage remains broadly similar and
-process PSS does not show a consistent reduction. Paused samples record zero
-process CPU and GFX counter deltas. The first run of each version/layout also
-exercises compositor resize, surface close and CLI reopen; actual captures
-were inspected. These checks do not cover host tray/IME integration or establish
-cross-version pixel parity for unsynchronized live scenes.
-
-The deterministic cross-binary capture matrix covers Unorm/sRGB,
-integer/fractional origins, scales 1/1.5/2, opaque/transparent surfaces,
-mixed/interleaved/overlapping content, replay, resize, hide/show, in-flight use
-and alpha-pipeline rebuild. Every pixel passes the unchanged per-channel tolerance
-of three. Exact native packed-alpha baseline probes also establish expected
-sprite multiplicity. These results apply to that revision.
-
-=== Initial comparative measurements
-
-This subsection describes the historical rectangle-only predecessor, not the
-subsequently unified field/path renderer.
-
-Measured on 2026-10-18 with the <<historical-vendor-measurement-method,shared vendor method>>.
-The baseline was the then-current LED drawing kernel: append each cell to a
-NonZero `PathBuilder`, tessellate, then render the textured path. Both paths ran
-in the same executable with identical input and palette samples. This was not
-an end-to-end player benchmark or a consumer cutover.
-
-The workload uses 96 columns, a 1,024-sample Tokyo Night cubic palette and
-3-pixel filled / 2-pixel empty segments. Single panels are 768 by 320 pixels;
-four panels are each 768 by 160. Resize alternates heights 320 and 240.
-
-[cols="2,2,2,2,2",options="header"]
-|===
-|Workload |Path CPU update |Instances CPU update |Path render + readback |Instances render + readback
-|Static replay |No update |No update |640.51 [637.91–650.39] |227.82 [224.93–231.81]
-|Continuous update |3,257.33 [3,245.21–3,266.90] |6.66 [6.65–6.68] |706.18 [699.49–721.07] |235.92 [233.15–241.96]
-|Four panels, shared signal |6,698.95 [6,674.07–6,737.30] |6.70 [6.64–6.94] |1,356.77 [1,330.06–1,432.29] |309.53 [307.39–380.15]
-|Resize |3,158.91 [3,142.97–3,173.37] |0.27 [0.25–0.31] |678.69 [664.00–682.63] |229.54 [229.45–235.06]
-|===
-
-The original renderer-first-draw observations exclude renderer construction and
-initial CPU preparation, so they must not be read as complete first-use latency.
-
-A supplemental run measures the full boundary symmetrically: five fresh processes
-per path, alternating path order, with one renderer and one first image in each
-process. It includes device/renderer construction, initial palette and geometry
-preparation, scene recording, and first render/readback (including the candidate's
-deferred pipeline creation). Common signal input and palette-sample generation are
-excluded from both. Milliseconds below are median [minimum–maximum]:
-
-[cols="2,2,2",options="header"]
-|===
-|First-use phase |Baseline LED Path |Instances
-|Device/renderer construction |38.372 [37.241–39.534] |38.703 [37.206–38.924]
-|Initial CPU preparation |4.002 [3.963–5.410] |0.0092 [0.0088–0.0109]
-|First render and readback |4.473 [4.237–4.634] |2.741 [2.713–2.862]
-|Complete first image |47.285 [45.966–47.987] |41.446 [39.956–41.714]
-|===
-
-Phase medians need not sum to the directly measured total. Fresh processes prevent
-headless-device reuse, but the driver shader cache was not cleared: these are not
-cold-driver-cache timings. The supplement does not replace the original
-steady-state samples.
-
-At the initial single-panel state, the baseline expands 3,308 cells into 19,848
-CPU vertices. Tested record strides imply 2,858,128 bytes of path vertices and
-sprites submitted per redraw, versus 19,536 bytes for a new rectangle publication
-plus its placement, or 80 placement bytes for a static replay. The old palette's
-4,096-byte initial atlas upload and common globals are separate. These are derived
-payload counts, not measured bus traffic or physical allocation sizes.
-
-Three independent processes per path, each running all four workloads, reported
-peak process RSS medians of 86.48 MiB [86.05–87.43] for Path and
-72.20 MiB [72.15–72.44] for instances (`wait4` maximum RSS). This is not isolated
-VRAM accounting. The matched 768-by-320 output had maximum channel difference
-1/255 and mean absolute channel difference 0.046/255. At that rectangle-only
-stage, application animation, other visualizers, isolated GPU execution time and
-GPU memory were not measured. The later consumer measurements below have their
-own workloads and identities; neither set establishes total player CPU usage or
-frame rate for the current revision.
-
-=== Unified field and path measurements
-
-Measured on 2026-10-18 with the <<historical-vendor-measurement-method,shared vendor method>>.
-Fields compare retained BGRA8 coloring/image drawing against fixed color-first
-numerical drawing. The source is 256 by 256 with a 256-sample
-palette and 70 dB logarithmic mapping. Outputs are 256 pixels square for native
-replay, 1,024 for static enlargement, 768 for continuous updates, and four 512-pixel
-panels sharing one publication. Resize alternates 768 and 576 pixels. Paths compare
-the same 1,024-point, 2-pixel stroke at 768 by 320 through the existing textured
-path and the new palette material; geometry generation is excluded from both.
-
-
-[cols="2,2,2,2,2",options="header"]
-|===
-|Workload |Baseline CPU update |Material CPU update |Baseline render + readback |Material render + readback
-|Field, native static |No update |No update |146.89 [142.82–151.21] |157.33 [154.28–190.41]
-|Field, 4x static enlargement |No update |No update |565.78 [558.97–571.86] |670.89 [670.71–681.19]
-|Field, continuous update |528.88 [528.03–532.66] |4.77 [4.67–4.90] |444.81 [438.90–479.38] |505.01 [500.14–549.93]
-|Field, four shared-data panels |528.40 [527.29–538.30] |5.13 [5.11–5.32] |636.29 [601.46–653.52] |738.41 [719.01–772.00]
-|Field, resize |0.29 [0.27–0.29] |0.34 [0.32–0.41] |321.38 [316.67–364.96] |379.46 [369.89–421.48]
-|Path, static replay |No update |No update |378.39 [373.86–389.33] |310.60 [301.90–317.39]
-|Path, changing geometry |3.79 [3.76–4.18] |4.35 [4.34–4.37] |405.66 [400.07–577.22] |355.90 [355.18–356.74]
-|===
-
-CPU field recoloring was removed, but static enlargement and resize render/readback
-were slower. These costs informed the later consumer migrations; the measurements
-do not justify a second sampling mode or an unmeasured color cache.
-Both field representations upload 262,144 bytes per changed source. The new
-256-sample palette adds 4,096 shared bytes, and each placement encodes 112 bytes.
-These are payload counts at that revision, not bus traffic, current record strides
-or physical VRAM measurements. Path intermediate/MSAA textures were outside the
-extension's buffer-only budget, as shared scratch attachments remain today.
-
-Matched field outputs differ by at most 1/255 per channel. The path comparison
-has maximum difference 7/255, mean absolute difference 0.00338/255, with 58 of
-245,760 pixels exceeding 3/255. That continuous palette material was not
-bit-identical to BGRA texture sampling, so the vendor-only comparison did not
-establish acceptance for subsequently migrated application palettes. No
-application visualizer changed in this historical vendor slice.
-
-In-process first-use observations do not reset device or driver caches and are
-not cold-start results.
-
-
-=== Demand-specific preparation and path batching
-
-A separate comparison uses the pre-review compiled libraries as its baseline and
-identical probe source/compiler flags against the corrected libraries. It covers
-rectangle-first, field-first and path-first rendering, plus 32 disjoint 56-pixel
-path placements on a 512-by-256 target. Five fresh processes per workload/revision
-alternate baseline/candidate order. The driver cache is not cleared. Replay records
-20 frames after four warmups. Milliseconds below are median [minimum–maximum] of
-first-render samples or per-process replay medians:
-
-[cols="2,2,2",options="header"]
-|===
-|Workload |Before |Demand-local pipelines / safe path batches
-|Rectangle first render |3.023 [2.938–3.894] |2.852 [2.797–3.425]
-|Field first render |3.191 [3.096–3.615] |2.957 [2.920–3.256]
-|Path first render |3.194 [3.146–3.356] |3.081 [2.918–3.814]
-|32 disjoint paths, replay |2.652 [2.517–2.807] |0.570 [0.563–0.589]
-|===
-
-These render/readback values exclude device/renderer construction and initial CPU
-preparation. Timing ranges overlap for individual first draws; removing an
-unused pipeline does not establish a universal complete-startup speedup. The
-multi-path replay improvement applies to the stated integer-aligned, disjoint
-workload. Conservative union checks may split additional batches; fractional and
-overlapping placements retain the individual route.
-
-All four probe outputs match the pre-review images byte-for-byte. Regression
-comparisons against individually resolved paths also require exact raw-image
-equality, including clipping, fractional placement, MSAA overlap and interleaving.
-A separate allocation smoke rejected a 262,144-byte field update with a largest
-allocation of 72 bytes during rejection, retaining the previous publication;
-validation-error allocation is not field payload copying. Probe-only headless
-entry points and font fixtures do not become production rendering dependencies.
-
-=== Density/Spatial consumer measurements
-
-[[density-spatial-consumer-evidence]]
-The actual application comparison uses two differently sized panels per style on
-an isolated 1280-by-800 Wayland surface, identical PCM input, config and library
-seed. Baseline/candidate process order was B–C–C–B–B–C.
-Each fresh process warmed up for four seconds, then recorded three two-second live
-intervals and three paused intervals. CPU is percent of one CPU from process ticks;
-the table reports mean and range of the three process means, not GPU timestamps.
-
-[cols="2,2,2",options="header"]
-|===
-|Observation |Before migration |GPU fields
-|Live CPU |9.17% [9.00–9.33%] |8.00% [7.83–8.17%]
-|Live RSS range |119.12–120.41 MiB |118.73–120.38 MiB
-|Paused CPU mean |0% |0.17%
-|===
-
-Live CPU was lower in this short isolated workload; RSS overlaps. The paused
-candidate samples total one 10-ms CPU tick per six-second run, insufficient to
-infer recurring redraw. Process measurements neither isolate GPU cost nor prove
-internal resource release. Cross-binary screenshots were not audio-frame
-synchronized, so they do not establish exact pixel equivalence. Broader whole-app
-performance and physical VRAM claims require separate evidence.
-
-[[spectrum-barsled-consumer-measurements]]
-=== Spectrum Bars/LED consumer measurements
-
-The final comparison uses four unequal Spectrum panels, LED with 512 slots,
-labels and Peaks enabled, caching enabled, 30 Hz analysis and an 8192-point
-Blackman-Harris FFT. Three fresh processes per binary alternate baseline/candidate;
-each CPU window lasts five seconds following the same seek
-and playback-position gate. The isolated Weston GL/niri surface uses AMD 780M
-with Mesa 26.2.4. CPU is a percentage of one core.
-
-[cols="2,1,1",options="header"]
-|===
-|Observation |Textured Path baseline |Final MSAA instances
-|CPU median [range] |9.194% [8.995–9.393%] |7.395% [7.394–7.595%]
-|RSS range |118.43–121.21 MiB |119.00–121.06 MiB
-|===
-
-CPU was lower in this bounded workload; RSS/PSS ranges overlap. These observations
-do not isolate GPU time or demonstrate physical VRAM savings. The final candidate
-uses MSAA coverage: rejected direct/alpha-edge variants and their measurements
-are not mixed into these results. Real-app frames were not synchronized, so
-cross-binary screenshots do not establish pixel equality.
 
 == References and rationale
 

@@ -16,6 +16,7 @@ expansion (for example, `"$HOME/Music"`), not a quoted `"~/Music"`. Except for t
 local `library probe`, `library tags`, and independent migration tool, library
 commands address the running host for the selected data directory.
 
+[[other]]
 == Other
 
 `Other` contains registered tracks outside configured music folders, or all tracks
@@ -49,6 +50,7 @@ include both states. Count always returns the unfiltered collection total.
 independently of browsing filters. Terminal browsing and keys are documented in
 link:04_playback.adoc#terminal-client[Terminal client].
 
+[[roots-and-scanning]]
 == Roots and scanning
 
 Scanning requires at least one configured `library.roots`. Add a directory with
@@ -93,6 +95,7 @@ errors stay in Library rather than replacing the window-global notification.
 Cancelling a desktop file chooser changes neither configuration nor existing
 errors; this also applies to playlist import and export.
 
+[[cue-library-tracks]]
 == CUE library tracks
 
 `rivu library scan album.cue --wait` creates one library track per audio entry
@@ -119,6 +122,7 @@ identity does not remove the other or delete the audio file.
 
 Supported formats and playlist exchange: link:03_playlist.adoc#cue-import[CUE import].
 
+[[desktop-selection-and-directory-tree]]
 == Desktop selection and directory tree
 
 Use tree view to browse directories, or the flat list to browse recursive tracks
@@ -168,6 +172,7 @@ dragging; overlapping sources contribute each track once.
 Scans refresh affected views, including empty expanded folders; collapsed folders
 load current contents when reopened. Unchanged scans preserve existing views.
 
+[[desktop-list-search]]
 == Desktop list search
 
 Use a list's Search button or Ctrl+F with that list focused. Each list keeps its
@@ -217,6 +222,7 @@ If filters hide the track, only the explicit `Clear filters and locate` action
 clears them. Tracks outside roots are located in Other. The control is disabled
 without a current track; a removed track is reported, not replaced by another identity.
 
+[[track-information]]
 == Track information
 
 Playlist, Queue, and album track rows show the title above the artist and album,
@@ -234,6 +240,7 @@ including in Other and when information columns are hidden. Directory hover
 shows its complete path.
 
 
+[[albums]]
 == Albums
 
 Add the dockable `Albums` panel to browse the cover grid. Double-click a card to
@@ -292,9 +299,13 @@ uninterrupted; removed tracks return to history when played again.
 The loaded playback track shows only `Playing`, `Paused`, or `Stopped` in the
 Last played column, even before playback has confirmed any audio was heard.
 This follows the playback track, not the Recent tracks selection. Other rows
-show their stored last-played timestamps. Loading a track does not add a history
-entry; only tracks already present in history appear here.
+show their stored last-played timestamps. Merely selecting a track or restoring
+it in a stopped state does not create history; a successful playback start does.
+Only tracks already in history appear here. See
+<<play-counts-and-recent-tracks,Play counts and recent tracks>> for activity and
+counting rules.
 
+[[play-counts-and-recent-tracks]]
 == Play counts and recent tracks
 
 A playback increments its play count once when confirmed heard time *strictly
@@ -326,6 +337,7 @@ statistics. Pending in-memory recovery does not survive process exit.
 `rivu library history --limit N` returns up to N retained rows (default 20) in both
 text and JSON output. See <<cli-output,CLI output>> for result shapes.
 
+[[paged-views]]
 == Paged views
 
 GUI/TUI library and playlist views, and GUI Albums, load while scrolling. Directory
@@ -358,8 +370,10 @@ not traverse the full collection automatically.
 
 Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
+[[metadata-and-favorites]]
 == Metadata and favorites
 
+[[database-edits]]
 === Database edits
 
 Title, artist, album, favorite, play-count, and decoder-hint edits in the library
@@ -522,6 +536,7 @@ invalidate precision. See link:04_playback.adoc#playback-metadata-updates[Playba
 rivu --json library probe album.wav --enhanced
 ----
 
+[[scan-policies-and-recovery]]
 == Scan policies and recovery
 
 === Scan boundaries
@@ -539,6 +554,7 @@ directories beyond the limit are skipped and reported. Direct file and CUE
 requests are unaffected by this directory limit; `0` is invalid. An explicit
 nested scan has its own boundary, even when an enclosing walk skipped it.
 
+[[minimum-duration-for-new-tracks]]
 === Minimum duration for new tracks
 
 `library.scan_min_duration_seconds` is a new-track admission policy, not a constraint
@@ -562,6 +578,7 @@ the entire task; saving a setting during a task affects only later tasks.
 Changing the setting neither starts a scan nor deletes or cleans existing tracks,
 and has no playback effect.
 
+[[errors-and-partial-results]]
 === Errors and partial results
 
 Readable tracks are saved even when other paths fail. Depth exclusions and scan
@@ -601,6 +618,7 @@ limits and may skip oversized fields while retaining usable audio. See
 link:22_cache.adoc#native-metadata-admission[Metadata admission]. Force a
 scan to refresh metadata already stored in the library.
 
+[[cancellation]]
 === Cancellation
 
 Scans, Other checks, playlist imports, and external-file queue additions share
@@ -638,6 +656,7 @@ available. Shutdown waits for the result. A failed task may have committed chang
 inspect its result before retrying. Playlist imports have additional
 link:03_playlist.adoc#commit-and-export-lifecycle[commit boundaries].
 
+[[same-files-and-relocation]]
 == Same files and relocation
 
 Automatic relocation requires a unique missing old identity and a unique new
@@ -692,6 +711,7 @@ rivu task cancel relocation INSTANCE:TASK_ID
 rivu library keep-independent DESTINATION_ID
 ----
 
+[[sqlite-maintenance]]
 == SQLite maintenance
 
 Rivu opens only the current database format. A new database is initialized
@@ -757,6 +777,7 @@ failed. Inspect the result and close blocking readers before explicitly retrying
 Prepared processing snapshots remain available, but cannot start audition until
 optimization finishes.
 
+[[cli-output]]
 == CLI output
 
 `library list --query TEXT` filters by the Library search fields described above.

@@ -29,6 +29,7 @@ writer starts when the GUI session accepts that data, before the first window is
 constructed. Reopening starts a fresh desktop from the persisted layout; late
 loads within a session cannot replace an edited workspace.
 
+[[queue-control-and-mutation-working-memory]]
 == Queue control and mutation working memory
 
 SQLite owns complete queue order. Core retains only the current queue projection
@@ -49,6 +50,7 @@ These bounds exclude SQLite page caches and transaction working memory. Freed
 allocations may remain in the allocator; a lower post-restart RSS alone does not
 establish a live-object leak.
 
+[[query-projection-retention]]
 == Query projection retention
 
 List/tree retention is always enabled. Reuse and publication require both the
@@ -58,6 +60,7 @@ link:21_ipc.adoc#query-results-and-pagination[IPC query results]. Page boundarie
 are demand, not projection identity. Physical-worker occupancy is independent of
 either freshness check.
 
+[[core-owned-lookup-retention]]
 === Core-owned lookup retention
 
 Core's interactive track-ID LRU holds at most twice `interface.query_batch_size`:
@@ -90,6 +93,7 @@ and shares work for identical normalized roots while preserving input order.
 Persistent album summaries are transactional database projections, not evictable
 pages. See link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[IPC storage queries].
 
+[[window-local-query-retention]]
 === Window-local query retention
 
 One window-local snapshot cache serves GUI feature owners. Background workers
@@ -111,6 +115,7 @@ responses still require their complete query stamp. These updates create no
 history or reverse track-to-view index. See
 link:21_ipc.adoc#query-results-and-pagination[IPC query results].
 
+[[demand-cancellation-and-physical-retirement]]
 ==== Demand, cancellation, and physical retirement
 
 Feature owners reconcile freshness while hidden but submit reads only for active
@@ -281,7 +286,13 @@ measurements; live time labels remain dynamic. Source or typography replacement
 releases obsolete measurements, including while hidden. Tree pages similarly
 retain selection indexes rather than traversing all expansions per viewport request.
 
+[[terminal-projections]]
 === Terminal projections
+
+Each TUI page and Details owns its demand and selection recovery. Only visible
+demand is submitted; every logical submission, including A→B→A and offset-only
+changes, gets a new ticket. Hidden pages invalidate without reading. Layout
+establishes the viewport before read planning; drawing schedules no I/O.
 
 Foreground Details freshness is independent of its underlying list and page size.
 Page, Details, and playlist-summary failures remain suppressed until their own
@@ -299,6 +310,7 @@ Recent counts and time labels remain live. The TUI retains one help layout and
 one Details layout, invalidated by width, language, key context, theme, or Details
 source changes. Scrolling and playback reuse those styled lines.
 
+[[processing-output-retention]]
 == Processing output retention
 
 The processing service owns immutable PCM and frozen run snapshots, independently
@@ -376,6 +388,7 @@ graphics still follow renderer retirement.
 
 === Reuse and invalidation
 
+[[waveform]]
 ==== Waveform
 
 Panels with matching source/display identity share immutable waveform columns and
@@ -394,6 +407,7 @@ Preview chunks, backpressure and physical render-worker ownership belong to
 link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering]; GPU uploads retire
 independently.
 
+[[spectrum]]
 ==== Spectrum
 
 Spectrum panels with matching output and display settings share one immutable
@@ -412,6 +426,7 @@ are released. Restoration draws that presentation until a current drawable resul
 replaces it; semantic invalidation discards it. Envelope and palette semantics are in
 link:23_visuals.adoc#spectrum[Spectrum rendering].
 
+[[spectrogram]]
 ==== Spectrogram
 
 Spectrogram retains frequency history and numerical GPU tiles. Appearance,
@@ -604,6 +619,7 @@ These are metadata admission bounds, not total process-memory or I/O-time
 limits. Audio packets, codec state, FFmpeg reads, and decoded image pixels have
 separate costs. The encoded-image admission limit does not bound decoded pixels.
 
+[[artwork-lookup-retention]]
 == Artwork lookup retention
 
 The optional `rivu-metadata` artwork service accepts source identity and path,
@@ -684,6 +700,7 @@ completed result without probing again; a shared cache hit alone is not display
 ownership. MPRIS likewise forgets completed identity on a source change so returning
 to an evicted source can reacquire after the physical slot retires.
 
+[[encoded-files-and-maintenance]]
 === Encoded files and maintenance
 
 Encoded images use immutable content-derived paths under `artwork/cache`.
@@ -747,9 +764,10 @@ link:23_visuals.adoc#artwork-composition-and-animation[Artwork composition and a
 
 Window consumers share pending or completed real-cover decoding by immutable
 content path and encoded policy, while retaining independent lookup identities
-and file protection. Background sharing also keys the decoded budget; neither
-pixels nor remembered failures cross policy identities. Work starts on preview
-demand using a bounded background decoder, never render-time file I/O.
+and process-local logical ownership, not protection against file deletion.
+Background sharing also keys the decoded budget; neither pixels nor remembered
+failures cross policy identities. Work starts on preview demand using a bounded
+background decoder, never render-time file I/O.
 
 Static previews select the smallest sufficient tier from actual physical display
 size. Album-card demand is capped at 560 pixels, accepting display upscaling above
@@ -789,9 +807,10 @@ late completion cannot restore a hidden owner or start hidden acquisition.
 Window hide, close, or reload flushes current and retired owners without another
 frame. Other windows keep independent lifetimes.
 Source release is terminal even for a scene-held image that was never painted:
-an obsolete scene cannot restart its decode or keep its encoded-file protection
-alive. Updating a path without changing track ID/fingerprint updates queued and
-current lookup inputs, but does not reset artwork rotation or invent a transition.
+an obsolete scene cannot restart its decode or retain its logical source lookup
+ownership. That ownership never protects encoded files from cleanup. Updating a
+path without changing track ID/fingerprint updates queued and current lookup
+inputs, but does not reset artwork rotation or invent a transition.
 
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer
@@ -940,6 +959,7 @@ the caller-provided layout style.
 This cache retains no settings bitmap and does not freeze background
 visualizations or eliminate window composition.
 
+[[renderer-buffers-atlases-and-display-lifecycle]]
 === Renderer buffers, atlases, and display lifecycle
 
 Cached Paths and replayed Scenes share immutable vertices while draw order and

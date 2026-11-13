@@ -130,7 +130,7 @@ in link:22_cache.adoc#artwork-uri-leases[Artwork lookup ownership].
 [[socket-eof-fixture-gaps]]
 === Drop-driven socket EOF isolation
 
-Status: resolved and verified, 2026-11-06; see DEC-010 for the feature matrix.
+Status: resolved and verified, 2026-11-06.
 
 Frontend startup cancellation, IPC abandoned-query admission, query/Watch
 disconnect handling, PCM aggregate disconnect, and GUI full waveform cancellation
@@ -148,7 +148,7 @@ See link:91_design_decisions.adoc#DEC-010[DEC-010].
 [[socket-directory-pin-gaps]]
 === Abstract socket directory identity fixtures
 
-Status: resolved and verified, 2026-11-06; see DEC-010 for the feature matrix.
+Status: resolved and verified, 2026-11-06.
 
 App ownership/blocking-pool IPC, desktop activation, GUI waveform retirement and
 visual core-instance rejection fixtures now pin their directory identity.
@@ -446,6 +446,7 @@ occurrence count does not multiply those lookups. Failed preparation and missing
 identities remain excluded. See
 link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].
 
+[[pcm-continuity-and-frontend-readiness-from-branch-review]]
 === PCM continuity and frontend readiness from branch review
 
 Status: resolved in implementation, 2026-11-06.

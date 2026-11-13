@@ -45,6 +45,7 @@ Saving a queue as a playlist is atomic: failure leaves no newly created empty
 playlist. For whole-playlist versus individual-track playback, confirmation, and
 queue replacement failures, see link:04_playback.adoc#transport-and-timing[Playback].
 
+[[desktop-ui]]
 == Desktop UI
 
 === Catalog and naming
@@ -185,6 +186,7 @@ Limits are 16 MiB per M3U, 1 MiB per CUE, 64 MiB aggregate input (distinct sheet
 read once), and 100,000 expanded occurrences. Exceeding input or retained-data
 limits aborts before saving; these are not playlist-size caps.
 
+[[commit-and-export-lifecycle]]
 === Commit and export lifecycle
 
 Scan saving and playlist creation commit separately. A failed scan save creates
@@ -224,6 +226,7 @@ rejected. CR/LF in title or artist metadata is replaced with spaces so it cannot
 introduce additional M3U lines. Relative paths beginning with `#` are prefixed
 with `./` so they are not interpreted as M3U directives.
 
+[[cue-import]]
 === CUE import
 
 Direct CUE import, or a CUE path in M3U, expands every track in sheet order.

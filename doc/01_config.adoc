@@ -44,6 +44,7 @@ enabled = true
 ----
 
 
+[[saving-configuration]]
 == Saving configuration
 
 Rivu saves `config.toml` on Settings Apply, IPC Configure, accepted processing edits
@@ -65,6 +66,7 @@ Unchanged configuration needs no write. Startup leaves an existing file untouche
 a missing file is created on the first save or orderly exit. Database and layout
 persistence are independent of configuration saving.
 
+[[apply-and-validation]]
 === Apply and validation
 
 Apply validates all Settings pages and merges edited fields into the latest
@@ -83,17 +85,15 @@ audio settings are not resent, except output settings: every explicit Apply
 revalidates the selected device, even if unchanged. Display-only changes do not
 reopen audio.
 
-Core rejects processing-graph replacement through Configure and validates the
-editable settings before preparing logging resources. Saving validates the full
-candidate, the existing TOML and the composed document; an unchanged, already
-saved candidate needs no persistence work. Graph edits use their revision-checked
-processing commands rather than the Settings Apply path.
+Settings Apply validates and saves editable configuration; processing-graph changes
+use their separate revision-checked commands and cannot be applied here.
 
 Save failures appear in logs, `rivu status` and the desktop notice. Correct the
 cause and retry; exit makes one final attempt. Atomic replacement prevents partial
 writes, not power loss. An audio-application failure after a successful save does
 not roll back the saved configuration.
 
+[[file-access-and-external-editors]]
 === File access and external editors
 
 The configuration path must be valid UTF-8, including when derived from
@@ -136,6 +136,7 @@ link:02_library.adoc#paged-views[Library].
 Long desktop lists support mouse-wheel scrolling and a draggable right-hand
 scrollbar; click its track to jump. Edge fades indicate more content above or below.
 
+[[desktop-keyboard-navigation]]
 ==== Desktop keyboard navigation
 
 Use `Tab` and `Shift+Tab` to move between enabled controls; a border marks focus.
@@ -200,6 +201,7 @@ native-decoded playback is unaffected.
 Runtime availability updates when the first explicit load completes, including
 loads initiated by GUI waveform work; an unused extension has no periodic status polling.
 
+[[volume-and-playback-controls]]
 === Volume and playback controls
 
 [[volume]]
@@ -235,6 +237,7 @@ restart; MPRIS changes apply while running. Requirements and recovery are in
 link:04_playback.adoc#desktop-tray-and-window-lifecycle[Desktop tray and window lifecycle]
 and link:04_playback.adoc#mpris-and-artwork[MPRIS and artwork].
 
+[[logging-and-diagnostics]]
 === Logging and diagnostics
 
 `logging.level` accepts `debug`, `info`, `warning` (default), or `error` and
@@ -266,6 +269,7 @@ Preparing an appender can prune files even if configuration persistence later
 fails; pruning is not rolled back. Output and level changes still require a
 successful configuration save.
 
+[[audio-processing-defaults]]
 === Audio processing defaults
 
 Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
@@ -316,6 +320,7 @@ are literal; no shell expansion occurs.
 See link:27_audio_processing.adoc[Audio processing] for graph editing, filter
 semantics, shared and isolated Python environments, licensing, CLI examples and bounds.
 
+[[desktop-settings]]
 == Desktop settings
 
 Settings groups Library, Playback & Audio, Interface, and Visualizations.
@@ -361,10 +366,9 @@ remove other image-admission limits. See
 link:22_cache.adoc#artwork-lookup-retention[Artwork resource boundaries].
 
 
-Interface → Artwork sets new-panel style, mode, period and direction;
-animation FPS remains shared. Existing panels use their own right-click Artwork
-settings editor. Static mode retains rotation parameters.
+For Artwork defaults and per-panel controls, see <<artwork,Artwork>>.
 
+[[animation]]
 === Animation
 
 Settings → Interface → Animation exposes `interface.animation_fps`, an integer
@@ -498,6 +502,7 @@ right-click menu → `Track information`. Both Library views share the saved
 selection; full tooltip information is unaffected. See
 link:02_library.adoc#desktop-selection-and-directory-tree[Library display].
 
+[[output-and-applying-changes]]
 === Output and applying changes
 
 `playback.output_device` selects the default PipeWire sink when omitted, or an
@@ -511,9 +516,7 @@ An unavailable output target can be saved; applying it reports an audio error an
 can stop playback while retaining the saved selection. See
 <<apply-and-validation,Apply and validation>> for the shared Apply contract.
 
-Artwork settings applies only the selected panel's style, mode, period and direction;
-it fails if that instance no longer exists. Instance Apply changes session memory;
-persist it with layout sync or orderly desktop exit, as described in
+For Artwork panel options, see <<artwork,Artwork>>; for their persistence, see
 <<layout,Layout>>. Visualization panels expose their local
 style, reference lines and labels in the right-click menu; Oscilloscope also
 offers Overlay channels.
@@ -534,6 +537,7 @@ Settings opens and refresh after catalog changes or draft-root changes. Removing
 a root changes the draft only; Discard restores the saved roots.
 
 
+[[artwork-cache-maintenance]]
 === Artwork cache maintenance
 
 Settings → Library → Covers & cache also provides manual maintenance of encoded
@@ -562,6 +566,7 @@ saved to `config.toml`. Ownership and retention rationale are documented in
 link:22_cache.adoc#artwork-lookup-retention[Artwork lookup retention].
 
 
+[[artwork]]
 === Artwork
 
 The `Artwork` panel (`artwork` in layout files) follows the current playback
@@ -577,24 +582,31 @@ period_seconds = 20.0
 direction = "clockwise"
 ----
 
+Settings → Interface → Artwork and `[interface.artwork]` supply defaults for new
+panels, not live overrides of existing instances. Saved panels missing options
+initialize from the current defaults.
+
 `style` accepts `plain`, `vinyl`, `glass`, `halo` (default), `metal`, `card`, or
-`duotone` and supplies the initial style for new panels. Each panel saves style,
-mode, period, and direction in the layout. Its right-click Style and Rotation
-actions affect only that panel; Artwork settings edits all four instance options.
-Saved panels missing options initialize from the current defaults. All styles
-support static and rotating modes; changing style preserves the rotation angle.
-`mode` accepts `static` or `rotating` (default). `period_seconds` is the time
-for one full circle and must be finite and greater than zero; there is no
-additional upper limit. `direction` accepts `clockwise` (default) or
-`counterclockwise`. Mode, period, and direction in this configuration supply
-defaults for new panels, not live overrides. All Artwork panels use the shared
-`interface.animation_fps` cap described under <<animation,Animation>>.
-Playback-driven rotation and animated source covers have separate clocks but
-share this FPS cap. Their pause, hiding, track-change, and visualization-enable behavior is
-documented in link:04_playback.adoc#artwork-panel[Artwork panel].
-Track details' full, static preview does not use the animation cap.
+`duotone`. All styles support static and rotating modes; changing style preserves
+the rotation angle. `mode` accepts `static` or `rotating` (default).
+`period_seconds` is the time for one full circle and must be finite and greater
+than zero; there is no additional upper limit. `direction` accepts `clockwise`
+(default) or `counterclockwise`. Static mode retains the rotation parameters.
+
+Each panel's right-click Style and Rotation actions apply immediately to that
+instance. Artwork settings edits its style, mode, period and direction with Apply
+and Discard; Apply fails if the instance no longer exists. These choices survive
+docking and layout duplication in session memory; saving them is covered under
+<<layout,Layout>>.
+
+All Artwork panels use the shared `interface.animation_fps` cap described under
+<<animation,Animation>>. Playback-driven rotation and animated source covers have
+separate clocks; their playback, visibility and visualization-enable behavior is
+documented in link:04_playback.adoc#artwork-panel[Artwork panel]. Track details'
+full, static preview does not use the animation cap.
 
 
+[[layout]]
 == Layout
 
 `layout.json` in the data directory stores named panel trees, sizes, tabs and
@@ -665,6 +677,7 @@ Drag empty footer space with the left button to move the window; text and contro
 do not start a move. Open menus or dialogs disable footer dragging.
 
 
+[[layout-file]]
 === Layout file
 
 `active` names an entry in the nonempty `layouts` object. Each entry requires
@@ -739,6 +752,7 @@ The object belongs only to `artwork` panels, just as the visualizer options
 belong only to `audio_visualizer` panels. Animation FPS remains global.
 
 
+[[visualizations]]
 == Visualizations
 
 Live analysis requires playback, enabled visualizations, and either a visible
@@ -754,8 +768,8 @@ or loads an explicitly requested track preview.
 |Maximum FFT transform and publication rate, not PCM ingestion or animation.
 |===
 
-Set Animation FPS under Settings → Visualizations → General → Appearance;
-Analysis rate is in Frequency analysis. Spectrum release, Spectrogram scrolling,
+For Animation FPS, see <<animation,Animation>>. Analysis rate is under Settings →
+Visualizations → Frequency analysis. Spectrum release, Spectrogram scrolling,
 radial motion, and generative light can advance between analysis publications,
 but display time never advances beyond accepted audio. Stereo Density and Spatial
 Spectrum use the latest result rather than replaying skipped publications.
@@ -842,6 +856,7 @@ Style, reference lines, and labels under New panel defaults affect new panels on
 existing panels retain their layout-local choices. See
 <<audio-visualizer,Audio Visualizer>> for panel settings and style-specific effects.
 
+[[visualization-enablement]]
 === Visualization enablement
 
 `visualizations.general.enabled` defaults to `true`. Disabling it
@@ -864,6 +879,7 @@ Full-waveform requests do not restart automatically; request one explicitly if
 needed. Ordinary playback pause freezes the current visualizations without
 discarding their results.
 
+[[visualization-db-ranges]]
 === Visualization dB ranges
 
 `visualizations.general.db_range` defaults to `70` dB. The optional
@@ -1009,6 +1025,7 @@ Both views use a logarithmic frequency axis. Shared analysis controls are descri
 under <<visualizations,Visualizations>>; display-range overrides under
 <<visualization-db-ranges,Visualization dB ranges>>.
 
+[[audio-visualizer]]
 === Audio Visualizer
 
 Every Visualization panel uses the `audio_visualizer` kind. Right-click and open
@@ -1103,6 +1120,7 @@ always preserves the last displayed frame. `visualizations.effects.primary_color
 `visualizations.effects.secondary_color` default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
 selected instance style does not use them.
 
+[[configuration-schema]]
 == Configuration schema
 
 The application reads only the current configuration schema; explicit noncurrent

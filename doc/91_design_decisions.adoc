@@ -234,32 +234,17 @@ retirement requires exclusive process ownership. Keep production ownership,
 protocols and ordinary test concurrency unchanged; these cases share an ownership
 rule, not necessarily one observation primitive.
 
-Retirement observations follow the resource's identity and ownership:
+Keep observation tied to physical identity rather than reusable descriptor numbers,
+paths or numeric PIDs. PCM checks pin the mapped object; socket rebind/EOF checks
+isolate inherited listeners; neural checks own the direct-child set through
+terminal delivery. Directory identity pins do not prevent listener inheritance.
+Child absence must be paired with proof that the intended failure path ran, and
+cleanup lifelines must not hide a missing production kill.
 
-* PCM checks compare the reader-pinned memfd's `(dev, ino)` with the owner's
-  advertised path after Drop, and still verify retained samples. A missing path
-  or different object is valid retirement; path disappearance or reopening a
-  replacement FD is not required.
-* Socket rebind/EOF checks construct fixtures inside bounded single-test
-  subprocesses when unrelated forks could inherit listeners. Directory pins
-  prevent inode recycling, not listener inheritance; neither replaces the other.
-  Keep immediate assertions and operation deadlines, without retries or global
-  test serialization.
-* Neural checks own an exclusive direct-child set with ordinary SIGCHLD semantics.
-  After terminal delivery, before applying Finished or retiring Core, non-reaping
-  `waitid(P_ALL, 0, ..., WEXITED | WNOHANG | WNOWAIT)` must report `ECHILD`.
-  Live and zombie children fail. A pidfd acquired before retirement is an
-  alternative when exclusive child-set ownership cannot be established; stale
-  numeric PIDs are not safe identities. Child absence must also be paired with
-  proof that the intended failure path actually ran.
-
-Inherited lifelines provide failure cleanup, not proof of production retirement.
-Keep their peer exclusively owned through the retirement assertion so cooperative
-EOF cannot hide a missing kill. On failure, close that peer before Core joins;
-the runner guard kills and waits for its owned child. Direct inheritance avoids
-a named FIFO's blocking-open startup race. These fixtures neither supervise a
-general process tree nor change terminal-signal ownership or production reaping.
-No production PCM attach change follows from FD reuse: preserve the existing
+These fixture choices preserve immediate retirement assertions without retries,
+global test serialization or changes to production ownership. Detailed observation
+and cleanup mechanics belong to the investigation records below. Production PCM
+attach retains the existing
 link:21_ipc.adoc#realtime-pcm-transport[subscription admission ordering].
 
 The investigation records own the counterexamples and detailed evidence:
@@ -527,7 +512,7 @@ or added to the IPC configuration contract.
 The controller consumes an intent before attempting registration and accepts its
 result only while that intent remains current. Retirement rechecks current intent
 before starting replacement work. Failure or bus loss alone does not authorize
-automatic retries; see link:04_playback.adoc#_mpris_and_artwork[MPRIS recovery].
+automatic retries; see link:04_playback.adoc#mpris-and-artwork[MPRIS recovery].
 
 [[DEC-020]]
 === DEC-020: One Audio processing panel per named layout
@@ -540,7 +525,7 @@ sessions; duplicate editors would require extra input identities and draft
 reconciliation without providing a separate workflow.
 
 Insertion and migration behavior: link:24_layout.adoc#_panel_insertion[Panel insertion].
-Draft and input lifetime: link:27_audio_processing.adoc#_ownership_and_invariants[Ownership and invariants].
+Draft and input lifetime: link:27_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
 
 [[DEC-021]]
 === DEC-021: Processing task status has one authoritative record
@@ -554,7 +539,7 @@ an operation's outcome or resource availability changes; publishing a snapshot
 does not transfer mutation authority.
 
 Record retention and resource boundaries:
-link:27_audio_processing.adoc#_ownership_and_invariants[Ownership and invariants].
+link:27_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
 
 [[DEC-022]]
 === DEC-022: Query replacement belongs to the demand owner
@@ -572,7 +557,7 @@ pending publication and physical occupancy remain independent. Timeout consumes
 publication rights without releasing the worker, and a queued replacement is
 already a logical intent before it can execute. Keep payload application and
 failure recovery with their business owners rather than introducing a universal
-query scheduler. See link:22_cache.adoc#_demand_cancellation_and_physical_retirement[query ownership].
+query scheduler. See link:22_cache.adoc#demand-cancellation-and-physical-retirement[query ownership].
 
 [[unapproved-candidates]]
 == Unapproved candidates

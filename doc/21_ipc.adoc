@@ -8,6 +8,7 @@ External clients need <<transport-and-frame-format,framing>>,
 State, query results and task identities belong to one running instance;
 client timeout or disconnection does not roll back an accepted mutation.
 
+[[core-and-client-boundary]]
 == Core and client boundary
 
 One Core owns library storage, queue mutations, configuration, and playback
@@ -50,6 +51,7 @@ Run these independently with `cargo test --locked -p rivu-protocol -p rivu-clien
 Socket interactions involving App and Core remain in the root application's IPC
 integration tests rather than making the standalone crates depend on the host.
 
+[[consumer-and-application-lifetimes]]
 === Consumer and application lifetimes
 
 `rivu-gui` owns the graphical event loop, windows, layout persistence, remote
@@ -112,13 +114,10 @@ or killing only a frontend leaves the service alive. Accepted shutdown
 acknowledgements drain before transport retirement. Window/display resource release is described in
 link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
 
-The TUI owns raw mode, the alternate screen and cursor visibility through a
-guard established immediately after enabling raw mode. Partial initialization
-failure and Rust panic unwinding attempt the same cleanup as normal exit, with
-each restoration step attempted even if another fails. Normal exit reports a
-cleanup failure unless an earlier run error takes precedence; unwinding keeps
-the original panic. Process abort and uncatchable termination cannot run this
-cleanup.
+The TUI restores terminal input and display state on normal exit, partial startup
+failure, and Rust panic unwinding. Cleanup failure is reported unless an earlier
+run error takes precedence; unwinding preserves the original panic. Process
+abort and uncatchable termination cannot restore the terminal.
 
 [[realtime-pcm-transport]]
 ==== Realtime PCM transport
@@ -278,17 +277,14 @@ retention are described in link:22_cache.adoc#window-local-query-retention[Resou
 This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
 
-Each TUI page and Details owns its demand, selection recovery and failed-read
-parking. Only visible demand is submitted; every logical submission, including
-A→B→A and offset-only changes, gets a new ticket. Hidden pages invalidate without
-reading. Layout establishes the viewport before read planning; drawing schedules
-no I/O. Cancelled reads retain their physical slot until the exchange retires.
+TUI page demand, selection recovery, and read planning are described in
+link:22_cache.adoc#terminal-projections[Terminal projections]. Cancelled reads
+retain their physical slot until the exchange retires.
 
-Processing task metadata occupies its own response section and client snapshot
-field, independently of System state. Local snapshots share it immutably;
-copy-on-write keeps older publications stable. Socket representation remains a
-task value. System-only updates preserve the last applied task; an explicitly
-empty Processing section clears it. The TUI does not request this section.
+Local Processing snapshots share task metadata immutably; copy-on-write keeps
+older publications stable. Socket responses encode a task value. The TUI does
+not request Processing; its section and update semantics are defined in
+link:21_ipc.adoc#wire-schemas[Wire schemas].
 
 Startup and single-instance operation are documented in
 link:../readme.adoc[README]. Socket clients and Core must use compatible builds.
@@ -296,6 +292,7 @@ link:../readme.adoc[README]. Socket clients and Core must use compatible builds.
 
 == Sessions and protocol
 
+[[transport-and-frame-format]]
 === Transport and frame format
 
 IPC uses a Unix domain socket. Each frame contains:
@@ -396,6 +393,7 @@ Pipelined tails and cancelled partial reads keep their bytes until consumed or
 disconnected. These are framing-storage bounds, not decoded-message or RSS limits;
 bulk transfers can allocate again and allocator pages may remain resident.
 
+[[session-handshake]]
 === Session handshake
 
 A client session starts unbound and must send Hello before State, Query, Command,
@@ -468,6 +466,7 @@ These numbers are the frame's `message_type` byte, represented by `wire::Request
 and `wire::ResponseTag`, not Postcard enum ordinals inside a body. Wire enum variant
 and field order are part of the binary schema.
 
+[[wire-schemas]]
 === Wire schemas
 
 Configuration state carries the low-frequency settings `Config` and `config_path`
@@ -482,10 +481,12 @@ are versioned positional contracts; lengths and optional fields are in the body.
 Full configuration encoding borrows fields from the shared immutable snapshot;
 decoding owns an independent configuration. The positional adapter remains
 separate from the human-readable configuration schema.
-Processing is an independent selected state section and revision domain. Its
-payload is `processing.task`; requested empty processing explicitly clears the
-task, while an omitted section preserves the client's current task. System wire
-state excludes processing, so system-only updates never transport a task payload.
+Processing is an independent selected state section and revision domain, with
+its own client snapshot field. Its payload is `processing.task`; a requested
+empty Processing section explicitly clears the task, while an omitted section
+preserves the client's current task. System wire state excludes processing, so
+system-only updates neither transport a task payload nor change the client's
+task. Subscribe to the Processing revision for latest-task presentation updates.
 Full `status --json` exposes the task under `processing.task`.
 
 Library information-column selection is encoded in WireConfig as five booleans
@@ -557,6 +558,7 @@ Cancellation is cooperative, not a hard filesystem/I/O deadline, and never cance
 an accepted command. Frontend admission, timeout presentation and retained payloads
 are described in link:22_cache.adoc#demand-cancellation-and-physical-retirement[Query resource lifecycles].
 
+[[request-failures-and-completion]]
 === Request failures and completion
 
 Well-formed requests with invalid values, handshake-order errors, and server-side
@@ -644,6 +646,7 @@ commands. Per-read cancellation instead uses
 
 == Consistency
 
+[[revisions-and-watching]]
 === Revisions and watching
 
 State revisions are tracked independently for Playback, Queue, Library, System,
@@ -763,6 +766,7 @@ Watch has no fixed expiry. A complete new request on that connection supersedes
 a pending Watch without a Watch response. The preserved input then becomes the
 next request; disconnect or server shutdown terminates the wait.
 
+[[query-results-and-pagination]]
 === Query results and pagination
 
 Query responses contain the requested projection and its data revisions, not a
@@ -791,9 +795,9 @@ advance member facts, while playlist names and order do not.
 Task-status queries select no query-data revision domains. Their empty stamp does
 not make status immutable: query the exact task again or use `WaitTask` for its
 terminal result. For presentation updates, subscribe to System for scan and
-relocation status, and to the independent Processing section and revision for
-processing status. System wire state does not carry processing. Task IDs and
-retained results belong to the running instance, not a persistent job database.
+relocation status; Processing subscriptions follow
+link:21_ipc.adoc#wire-schemas[Wire schemas]. Task IDs and retained results belong
+to the running instance, not a persistent job database.
 
 Track and playlist metadata scopes share an index of at most 256 entries. Commits
 identify affected display metadata transactionally; decoder hints and playback
@@ -987,6 +991,7 @@ filesystem inventory. It uses the library-content stamp rather than the
 count-only structure stamp. Settings batches requests and rejects obsolete
 results when its session, draft roots, or library revision changes.
 
+[[business-ownership-and-transactions]]
 == Business ownership and transactions
 
 The wire interface does not transfer ownership to the caller. Core validates
@@ -996,6 +1001,7 @@ The following sections explain those boundaries and their costs; user workflows
 remain in link:02_library.adoc[Library], link:03_playlist.adoc[Playlists], and
 link:04_playback.adoc[Playback].
 
+[[ordered-collections-and-transaction-ownership]]
 === Ordered collections and transaction ownership
 
 Queue and ordinary playlists use the same `playlist_entries` occurrence table.
@@ -1141,6 +1147,7 @@ separate operation. Overlapping low-level query ranges do not relax this
 configuration invariant. Root operations and admission settings are described in
 link:01_config.adoc[Configuration] and link:02_library.adoc[Library].
 
+[[scanning-and-metadata-ownership]]
 === Scanning and metadata ownership
 
 Core owns task admission and retirement; library workers prepare filesystem facts,
@@ -1231,6 +1238,7 @@ A failed wait never automatically replays startup.
 Shutdown cancels and joins scan preparation, but drains accepted Saving completion
 so committed facts cannot be reported as cancellation.
 
+[[transactional-inputs-and-bounded-storage-queries]]
 === Transactional inputs and bounded storage queries
 
 Library deletion validates its selected identities before playback effects, then
@@ -1456,10 +1464,10 @@ retained IDs return `None`, unlike unknown scan and relocation task queries.
 `CancelProcessing { id }` requests cooperative cancellation of the matching active
 task; its acknowledgement does not prove worker retirement. `AuditionProcessing
 { id, mode, vocal_gain_db, accompaniment_gain_db }` selects
-original/denoised/vocals/accompaniment/mix. The independent Processing state section
-exposes the latest task under `processing.task`; subscribe to its revision, not
-System. Use the exact task query or `WaitTask` for that task's completion rather
-than an unrelated latest-task field, and bind task IDs to the Hello instance.
+original/denoised/vocals/accompaniment/mix. Latest-task presentation follows the
+Processing section contract in link:21_ipc.adoc#wire-schemas[Wire schemas]. Use
+the exact task query or `WaitTask` for that task's completion rather than an
+unrelated latest-task field, and bind task IDs to the Hello instance.
 Settings and source identity are captured with the job; output status reports
 the models actually used. Retained output availability is session-bounded.
 Known model identity and verified provenance remain visible after inference

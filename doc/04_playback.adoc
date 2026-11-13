@@ -6,6 +6,7 @@ Playback follows queue occurrences, with shared controls in the GUI, TUI, CLI
 and optional MPRIS service. Output uses native PipeWire; decoder selection and
 processing are independent of the output device.
 
+[[transport-and-timing]]
 == Transport and timing
 
 Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
@@ -104,10 +105,9 @@ when rejected after the command was acknowledged; the confirmed position is then
 restored. A real decoder seek or output-restart failure stops playback because the
 decoder may already have moved. Ordinary file seeks are not clamped by estimated
 metadata duration; only an explicit CUE end bounds the target.
-Progress updates are fenced by the loaded source and latest accepted seek intent,
-so queued pre-seek progress cannot overwrite a newer target. Heard time is still
-recorded for that source. Rejecting a seek restores the confirmed position without
-blocking subsequent progress from the attempt.
+Older progress updates cannot overwrite a newer seek target. Rejecting a seek
+restores the confirmed position and normal progress updates continue; listening
+statistics retain audio already heard from that source.
 
 Seeking while paused stays paused. If Pause arrives at actual EOF, the next
 occurrence is selected but kept paused; Repeat One instead reloads the current
@@ -119,6 +119,7 @@ instantaneous hardware mute. Paused wall time does not advance playback or live
 analysis. Late heard-audio confirmations can still update listening statistics;
 see link:02_library.adoc#play-counts-and-recent-tracks[Library].
 
+[[queue]]
 == Queue
 
 Queue entries are independent occurrences, so a track may appear more than once.
@@ -157,6 +158,7 @@ does not unregister their library tracks. JSON listings contain occurrence rows
 with zero-based positions and display metadata. Discard incomplete listings after
 concurrent changes and retry; see link:02_library.adoc#paged-views[Paged views].
 
+[[adding-local-files]]
 === Adding local files
 
 Drag ordinary local audio files from a file manager into Queue. A drop in blank
@@ -281,6 +283,7 @@ A slider key ends an active pointer drag so release cannot commit an old preview
 Escape cancels the innermost interaction or leaves the editor first; see
 link:01_config.adoc#desktop-keyboard-navigation[desktop control navigation].
 
+[[output-devices-and-speaker-layouts]]
 == Output devices and speaker layouts
 
 `playback.output_device` is an exact name from `rivu playback devices`, which lists native
@@ -293,15 +296,14 @@ instead of rerouting; a failed device change stops playback and retains the
 requested setting. Select an available sink and explicitly restart playback to
 recover. Reapplying the same setting validates it again, even while stopped.
 
-Output and Monitor EQ application failures remain reportable while Stop or an
-audition source replacement retires playback. Superseded setting requests and
-inapplicable EQ generations/configurations are ignored; retiring playback events
-do not restart transport or advance the queue.
+Output and Monitor EQ application failures can still be reported after Stop or
+an audition source change, but cannot restart playback or advance the queue.
+Errors from superseded settings do not replace the current request's result.
 
 Changing sink or remixing rebuilds output at the final confirmed audible position,
-preserving pause without reopening the decoder. The retired output's final position
-and heard time remain authoritative even if its replacement fails to open; resetting
-analysis for the replacement cannot discard or count those confirmations twice.
+preserving pause without reopening the decoder. The final position and heard time
+are retained even if the replacement output fails to open; listening statistics
+are not lost or counted twice.
 Rebuilding output does not apply a newly saved Decoder hint or read-buffer size.
 PipeWire handles device-rate conversion.
 
@@ -336,6 +338,7 @@ returns EOF; a source with no decodable audio fails. Native Matroska supports
 backward seeking when seekable; unseekable sources scan forward only.
 
 
+[[optional-ffmpeg-decoder]]
 == Optional FFmpeg decoder
 
 Native decoding is the default. Enable `playback.ffmpeg_enabled` for sources the
@@ -379,6 +382,7 @@ Build prerequisites and ABI compatibility: link:../readme.adoc[README].
 Enablement, disabling an active decoder, and build-feature restrictions:
 link:01_config.adoc[Configuration].
 
+[[playback-metadata-updates]]
 == Playback metadata updates
 
 Successful playback can improve the library's bitrate information without
@@ -397,6 +401,7 @@ Enrichment updates open views without changing membership or counts. It uses the
 already selected decoder and never loads FFmpeg or changes decoder selection.
 
 
+[[terminal-client]]
 == Terminal client
 
 `rivu tui` connects to the Core for its data directory, starting an independent
@@ -529,6 +534,7 @@ independent Core keeps its own lifetime and playback is not stopped.
 
 Core shutdown exits normally; a lost connection without shutdown state reports an error.
 
+[[desktop-tray-and-window-lifecycle]]
 == Desktop tray and window lifecycle
 
 Closing the window, including Close window in the application menu, leaves Core
@@ -546,20 +552,16 @@ offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit application. Play/P
 toggles Core's state at command execution; the asynchronously updated menu label
 does not determine the transport command.
 
+[[artwork-panel]]
 == Artwork panel
 
 The *Artwork* panel follows the current playback track, independently of
 Library selection and Track details. Add it from the panel catalog; it is also
 included in the built-in *Default* layout.
 
-The panel's right-click Style and Rotation actions apply immediately; Artwork
-settings edits its options with Apply and Discard. These instance choices survive
-docking and layout duplication in session memory. Persist them with layout sync
-or orderly exit of the last desktop window, independently of the running Core;
-see link:01_config.adoc#layout[Layout persistence]. Settings → Interface → Artwork
-instead sets defaults for new panels without overwriting existing instances. See
-link:01_config.adoc#artwork[Artwork configuration] for styles,
-animation parameters, defaults, and shared frame rate.
+See link:01_config.adoc#artwork[Artwork configuration] for defaults, per-panel
+controls, animation parameters and the shared frame-rate cap, and
+link:01_config.adoc#layout[Layout persistence] for saving instance choices.
 
 Rotation follows playback while the panel is visible. Pausing or hiding it retains
 the angle without advancing hidden time; stopping, changing tracks, or choosing
@@ -572,6 +574,7 @@ not affect cover loading or animation. Panels share cover loading but retain
 independent rotation and source-animation state. Track details keeps its full,
 static preview.
 
+[[mpris-and-artwork]]
 == MPRIS and artwork
 
 `interface.mpris_enabled` controls desktop media integration in graphical and
@@ -607,7 +610,7 @@ Local images are cached under the data directory's `artwork/` and exposed throug
 `mpris:artUrl` when available. Background loading updates the selected preview
 and desktop metadata when ready. Cache failures do not prevent playback.
 Use link:01_config.adoc#artwork-cache-maintenance[Settings artwork maintenance]
-to inspect disk usage and manually clean expired, unprotected cover files.
+to inspect disk usage and manually clean expired cover files.
 
 MPRIS supports transport, volume, shuffle, and repeat at rate `1.0`. Relative Seek
 accumulates against the current position and stays bound to its queue occurrence;

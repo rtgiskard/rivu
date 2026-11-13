@@ -19,6 +19,7 @@ proposed general rendering API are documented separately in
 link:25_gpu_rendering.adoc[Parameter-Driven GPU Rendering Design]. The current
 consumer behavior is described here; a proposal there does not change it.
 
+[[analysis-boundary]]
 == Analysis boundary
 
 `rivu-visuals` receives immutable analysis frames, typed `VisualParameters`, and
@@ -53,6 +54,7 @@ preparing FFT plans or frequency-domain storage. Frequency demand prepares those
 resources lazily for the same window. RMS squares and accumulation use `f64`,
 including the two-channel energy combination, before publishing `f32` values.
 
+[[pcm-admission]]
 === PCM admission
 
 The shared tap observes only PCM admitted to output. Its native-channel retention
@@ -79,6 +81,7 @@ Invalid seek targets leave decoder, output and analysis unchanged; obsolete
 asynchronous rejections cannot undo newer transport intent. Decoder seek
 execution failure stops playback rather than resuming uncertain decoder state.
 
+[[ingestion-and-publication]]
 === Ingestion and publication
 
 PCM arrival and output-cursor progress wake GUI analysis to ingest a finite retained
@@ -184,8 +187,10 @@ RMS, band power, or other available payloads. The affected renderer keeps its la
 matching readouts until a usable replacement arrives; it never pairs an old
 snapshot with newer metrics.
 
+[[presentation-scheduling-and-visibility]]
 === Presentation scheduling and visibility
 
+[[independent-analysis-and-display-clocks]]
 ==== Independent analysis and display clocks
 
 One window-local `VisualizerRuntime` shares visual models and staging across panels.
@@ -283,6 +288,7 @@ Loss of focus alone never disables analysis. Without reliable visibility
 notifications, compositor throttling limits native animation callbacks but not
 the worker's bounded analysis cadence.
 
+[[visualization-enablement]]
 == Visualization enablement
 
 Visualization enablement gates GUI demand and the audio-worker tap. Disabling
@@ -308,6 +314,7 @@ The disabled-state icon and controls are described in
 link:01_config.adoc#visualization-enablement[Visualization enablement].
 
 
+[[waveform]]
 == Waveform
 
 The GUI session owns the waveform summary, with at most 1024 bins and no disk
@@ -392,6 +399,7 @@ ceil-height geometry preserve one-logical-pixel markers through resize and scali
 Cursor and glow remain dynamic. The closed GPU interface is defined in
 link:25_gpu_rendering.adoc#internal-led-vertical-slice[Publication and drawing API].
 
+[[spectrum]]
 == Spectrum
 
 For non-Solid styles, bar layout is either automatic width or a fixed count;
@@ -525,14 +533,12 @@ There is no application image-retirement queue.
 Color ramps derive from the configured visualizer colors, with increasing
 lightness and pale highlights reserved for the strongest cells. Density has a
 cyanward intermediate hue; Spatial Spectrum retains the primary-to-secondary
-hue progression. The 256-sample straight RGBA palette uses 8-bit quantization
-and rebuilds only on color changes. Opacity lifts faint cells without
-renormalizing their fixed dB references; empty cells remain transparent.
-The GPU maps each neighboring scalar to its quantized color before interpolating,
-as specified in link:25_gpu_rendering.adoc#different-consumers-and-interface-extraction[Field sampling].
-Each changed field still copies/uploads four bytes per cell: CPU coloring is
-removed, not upload bytes.
+hue progression. Opacity lifts faint cells without renormalizing their fixed dB
+references; empty cells remain transparent. Palette quantization, color-first
+interpolation and the sampling/upload cost boundary are defined in
+link:25_gpu_rendering.adoc#different-consumers-and-interface-extraction[Field sampling].
 
+[[spectrogram]]
 == Spectrogram
 
 Spectrogram maps calibrated non-DC FFT bins to colored columns, independently of
@@ -672,33 +678,13 @@ measure the actual renderer as well as CPU and memory use. Renderer-level
 changes should be justified by those workloads rather than historical CPU
 percentages from a different implementation.
 
+[[pinned-gpu-extensions]]
 == Pinned GPU extensions
 
-`Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
-`a7fcc341793ee115ea07565c1b6e5e9d5d8ba364` from
-https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
-together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
-https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
-the remaining GPUI platform crates retain that pinned dependency baseline.
-This is a maintained capability patch, not a framework replacement or upgrade.
-The layout engine follows the Taffy 0.15 update in
-https://github.com/zed-industries/zed/commit/b488c4e81451f2042d5f47d93f6158732ac28212[Zed revision b488c4e81451f2042d5f47d93f6158732ac28212],
-without upgrading the remaining platform crates.
-The extensions add centered image transforms and shared GPU materials on
-Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
-path backgrounds retain their drawing semantics, although ordinary Paths share
-the renderer's local MSAA scratch. See
-link:25_gpu_rendering.adoc#implemented-fixed-schema-slices[Implemented fixed-schema slices]
-for the available schemas, consumer cutover and resource limits. Radial Bars,
-Rings and Bars + Rings retain ordinary GPUI paths. The general `Program` and
-generated-schema interfaces remain proposals.
-
-Shared images retain their normal image and atlas lifetimes.
-
-Cached views track their own entity dependencies, including dependencies shared
-with enclosing views. Parent redraw and scene replay must not sever a child's
-notifications or force unrelated cached siblings to rerender. Regression commands
-are listed under <<renderer-regression-checks,Renderer regression checks>>.
+Rivu needs extensions to GPUI's image transforms and shared GPU materials rather
+than a framework replacement. The pin, platform and maintenance boundaries, and
+regression commands are authoritative in
+link:25_gpu_rendering.adoc[Pinned renderer maintenance and GPU rendering].
 
 === Why the patch is needed
 
@@ -713,77 +699,7 @@ Spectrum fills its geometry with the shared GPU palette material, retaining the
 full standard color maps or authored Deadbeef cubic rather than approximating
 them with two stops; see <<spectrum,Spectrum>>.
 
-These external renderer extensions require matched Rust scene and shader layouts;
-Rivu consumes them through the pinned interfaces rather than owning their pipelines.
-
-Color images clamp linear texture sampling to their atlas tile's first and last
-texel centers. This prevents neighboring images from bleeding into magnified
-edges without adding atlas padding or disabling interpolation.
-
-=== Maintenance boundary and removal criteria
-
-The implemented rendering backend is WGPU. Native Metal rejects these new
-painting operations rather than silently substituting a different result;
-Linux/Vulkan runtime evidence does not establish Metal or browser support.
-The extra fields also increase shared vertex/sprite record sizes, so this
-patch is not a universal rendering or memory improvement.
-
-Maintain framework and renderer changes in `gpui-wgpu`, then update both Rivu
-patch revisions together. When updating the upstream baseline, compare these
-extensions against it, keep Rust and shader record layouts synchronized, and
-preserve transformed image clipping, palette Path mapping, atlas lifetime and
-drawing order. Revalidate ordinary untransformed images and plain paths as well
-as all migrated consumers. Drop the overrides only when the selected upstream
-revision supplies the required behavior and all Rivu callers have migrated;
-a newer dependency version alone is not sufficient.
-
-=== Renderer regression checks
-
-Framework, shader and headless GPU regressions live in the independent
-`gpui-wgpu` repository, together with licensed font and image fixtures.
-Check out the exact revision pinned by Rivu before running its commands:
-
-[source,sh]
-----
-git clone https://github.com/rtgiskard/gpui-wgpu
-cd gpui-wgpu
-git checkout a7fcc341793ee115ea07565c1b6e5e9d5d8ba364
-make test
-----
-
-See that repository's README for focused checks and build prerequisites.
-Headless WGPU checks need an available adapter and do not establish native-window
-behavior. They are not substitutes for Rivu application behavior tests.
-
-From Rivu's repository root, run `cargo test --locked -p rivu-gui --test gpui_cached_dependencies`
-for the application-side cached-view notification and replay regressions.
-
-For a native-window smoke check, use a Wayland desktop with a working WGPU
-adapter and PipeWire server. Build the updated consumer first with
-`cargo build --locked --bin rivu`; an existing binary does not test a new pin.
-From Rivu's repository root, create isolated application storage and disable
-desktop integrations so the smoke instance does not claim the normal tray or
-MPRIS identity:
-
-[source,sh]
-----
-mkdir -p .cache
-smoke_dir=$(mktemp -d "$PWD/.cache/gpui-smoke.XXXXXX")
-printf '[interface]\ntray_enabled = false\nmpris_enabled = false\n' > "$smoke_dir/config.toml"
-.cache/target/debug/rivu --data-dir "$smoke_dir" gui
-----
-
-Retain the same `smoke_dir` in another terminal to stop the instance with
-`.cache/target/debug/rivu --data-dir "$smoke_dir" quit`. Closing the last window
-exits the desktop process but leaves Core running. Do not point the smoke instance
-at normal user storage or pass music paths unless importing test media is
-intentional. Keep the real Wayland runtime environment: changing `XDG_RUNTIME_DIR`
-would also disconnect the compositor and audio endpoints. This isolates application
-data and desktop registration, not the shared GPU or audio server.
-
-Check initial text and artwork rendering, cached-view updates, window resizing,
-and the visualization styles being exercised. Empty isolated storage cannot
-establish playback-driven visualization behavior; use disposable test media for
-that check. `make ui-demo` is a separate component showcase, not an application
-or playback smoke test.
-
+The extensions supply the fixed schemas and consumer/resource contracts described
+in link:25_gpu_rendering.adoc#implemented-fixed-schema-slices[Implemented fixed-schema slices].
+Radial Bars, Rings and Bars + Rings retain ordinary GPUI paths; the general
+`Program` and generated-schema interfaces remain proposals.
