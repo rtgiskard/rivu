@@ -218,12 +218,18 @@ struct EqualizerEditor {
     channel_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
     live_submission_scheduled: bool,
     response: Arc<Vec<f64>>,
+    response_buffer: Arc<Vec<f64>>,
+    preview_config: EqualizerConfig,
     response_error: Option<String>,
     error: Option<String>,
     maximum_frequency: f64,
     frequencies: [f64; 257],
     frequency_limit: f64,
     drag: Option<NodeDrag>,
+    drag_epoch: u64,
+    response_frame_pending: bool,
+    #[cfg(test)]
+    response_computations: usize,
     field_drag: Option<FieldDrag>,
     pointer_count: Rc<Cell<usize>>,
     bounds: MeasuredGraph,
@@ -279,10 +285,16 @@ impl EqualizerEditor {
             channel_anchor: Rc::new(Cell::new(None)),
             live_submission_scheduled: false,
             response: Arc::new(Vec::new()),
+            response_buffer: Arc::new(Vec::new()),
+            preview_config: EqualizerConfig::default(),
             response_error: None,
             error: None,
             maximum_frequency: 20_000.,
             drag: None,
+            drag_epoch: 0,
+            response_frame_pending: false,
+            #[cfg(test)]
+            response_computations: 0,
             field_drag: None,
             bounds: Rc::new(Cell::new(None)),
             frequencies: [0.; 257],
@@ -534,6 +546,8 @@ impl EqualizerEditor {
     fn take_drag(&mut self) -> Option<NodeDrag> {
         let drag = self.drag.take();
         if drag.is_some() {
+            self.drag_epoch = self.drag_epoch.wrapping_add(1);
+            self.response_frame_pending = false;
             self.pointer_count
                 .set(self.pointer_count.get().saturating_sub(1));
         }
@@ -979,35 +993,27 @@ impl EqualizerEditor {
             cx,
         );
         for (i, b) in eq.bands.iter().enumerate() {
-            for (name, label, value) in [
-                (
-                    BandField::FrequencyHz,
-                    "processing-frequency",
-                    equalizer_number_text(
-                        &EqField::Band(i, BandField::FrequencyHz),
-                        b.frequency_hz,
-                    ),
-                ),
-                (
-                    BandField::GainDb,
-                    "processing-gain",
-                    equalizer_number_text(&EqField::Band(i, BandField::GainDb), b.gain_db),
-                ),
-                (
-                    BandField::Q,
-                    "processing-q",
-                    equalizer_number_text(&EqField::Band(i, BandField::Q), b.q),
-                ),
-                (
-                    BandField::ShelfSlope,
-                    "processing-shelf-slope",
-                    equalizer_number_text(&EqField::Band(i, BandField::ShelfSlope), b.shelf_slope),
-                ),
-                (BandField::Stages, "processing-stages", b.stages.to_string()),
-                (
-                    BandField::Channels,
-                    "processing-channels",
-                    match &b.channels {
+            for (name, label) in [
+                (BandField::FrequencyHz, "processing-frequency"),
+                (BandField::GainDb, "processing-gain"),
+                (BandField::Q, "processing-q"),
+                (BandField::ShelfSlope, "processing-shelf-slope"),
+                (BandField::Stages, "processing-stages"),
+                (BandField::Channels, "processing-channels"),
+            ] {
+                let key = EqField::Band(i, name);
+                if !(self.active && i == self.band)
+                    && !self.fields.get(&key).is_some_and(|field| field.dirty)
+                {
+                    continue;
+                }
+                let value = match name {
+                    BandField::FrequencyHz => equalizer_number_text(&key, b.frequency_hz),
+                    BandField::GainDb => equalizer_number_text(&key, b.gain_db),
+                    BandField::Q => equalizer_number_text(&key, b.q),
+                    BandField::ShelfSlope => equalizer_number_text(&key, b.shelf_slope),
+                    BandField::Stages => b.stages.to_string(),
+                    BandField::Channels => match &b.channels {
                         ChannelTarget::All => "all".to_owned(),
                         ChannelTarget::Selected(channels) => channels
                             .iter()
@@ -1015,9 +1021,8 @@ impl EqualizerEditor {
                             .collect::<Vec<_>>()
                             .join(","),
                     },
-                ),
-            ] {
-                self.field(&EqField::Band(i, name), &self.tr(label), value, cx);
+                };
+                self.field(&key, &self.tr(label), value, cx);
             }
         }
         self.prune_inputs();
@@ -1558,15 +1563,23 @@ impl EqualizerEditor {
     // drag previews its position locally; the existing release path commits it.
     fn update_response(&mut self) {
         self.response_dirty = false;
+        // The previous scene can still hold the displayed buffer. Reuse the spare
+        // once released; never copy old samples just to overwrite all of them.
+        if Arc::get_mut(&mut self.response_buffer).is_none() {
+            self.response_buffer = Arc::new(Vec::with_capacity(self.frequencies.len()));
+        }
         let Some((_, sample_rate, channel_count)) = self.format else {
             self.maximum_frequency = 20_000.;
-            self.response = Arc::new(Vec::new());
+            Arc::get_mut(&mut self.response_buffer)
+                .expect("unique response buffer")
+                .clear();
             self.response_error = Some(
                 self.context
                     .i18n
                     .text("processing-response-unknown")
                     .to_owned(),
             );
+            std::mem::swap(&mut self.response, &mut self.response_buffer);
             return;
         };
         if self
@@ -1574,13 +1587,16 @@ impl EqualizerEditor {
             .is_none()
             || channel_count == 0
         {
-            self.response = Arc::new(Vec::new());
+            Arc::get_mut(&mut self.response_buffer)
+                .expect("unique response buffer")
+                .clear();
             self.response_error = Some(
                 self.context
                     .i18n
                     .text("processing-response-unknown")
                     .to_owned(),
             );
+            std::mem::swap(&mut self.response, &mut self.response_buffer);
             return;
         }
         self.maximum_frequency = (sample_rate as f64 * 0.499).min(96_000.);
@@ -1592,32 +1608,58 @@ impl EqualizerEditor {
                 *frequency = minimum * (self.maximum_frequency / minimum).powf(index as f64 / 256.);
             }
         }
-        let mut response = vec![0.; self.frequencies.len()];
-        let preview = self.drag.as_ref().map(|drag| {
-            let mut config = self.config.clone();
-            if let Some(band) = config.bands.get_mut(drag.band) {
+        let config = if let Some(drag) = &self.drag {
+            if let Some(band) = self.preview_config.bands.get_mut(drag.band) {
                 band.frequency_hz = drag.frequency;
                 band.gain_db = drag.gain;
             }
-            config
-        });
-        let config = preview.as_ref().unwrap_or(&self.config);
+            &self.preview_config
+        } else {
+            &self.config
+        };
+        let response = Arc::get_mut(&mut self.response_buffer).expect("unique response buffer");
+        response.resize(self.frequencies.len(), 0.);
+        #[cfg(test)]
+        {
+            self.response_computations += 1;
+        }
         match config.sample_response_db(
             sample_rate,
             channel_count as usize,
             self.response_channel,
             &self.frequencies,
-            &mut response,
+            response,
         ) {
-            Ok(()) => {
-                self.response = Arc::new(response);
-                self.response_error = None;
-            }
+            Ok(()) => self.response_error = None,
             Err(error) => {
-                self.response = Arc::new(Vec::new());
+                response.clear();
                 self.response_error = Some(error.to_string());
             }
         }
+        std::mem::swap(&mut self.response, &mut self.response_buffer);
+    }
+
+    fn schedule_drag_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.response_frame_pending || !self.response_dirty || self.drag.is_none() {
+            return;
+        }
+        self.response_frame_pending = true;
+        let epoch = self.drag_epoch;
+        let entity = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = entity.update(cx, |this, cx| {
+                // Ending, cancelling, hiding or replacing a gesture retires its
+                // callback even if another drag starts before this frame arrives.
+                if this.drag_epoch != epoch || !this.response_frame_pending {
+                    return;
+                }
+                this.response_frame_pending = false;
+                if this.node_geometry_valid(window, cx) && this.response_dirty {
+                    this.update_response();
+                    cx.notify();
+                }
+            });
+        });
     }
 
     fn frequency_x(&self, frequency: f64) -> f32 {
@@ -1655,6 +1697,7 @@ impl EqualizerEditor {
                             this.cancel_pointer(cx);
                         } else if this.node_geometry_valid(window, cx) {
                             this.move_node(event.position, cx);
+                            this.schedule_drag_response(window, cx);
                         }
                         window.prevent_default();
                     }
@@ -1977,6 +2020,10 @@ impl EqualizerEditor {
                             }),
                         ];
                         this.cancel_pointer(cx);
+                        this.preview_config.enabled = this.config.enabled;
+                        this.preview_config.preamp_db = this.config.preamp_db;
+                        this.preview_config.output_gain_db = this.config.output_gain_db;
+                        this.preview_config.bands.clone_from(&this.config.bands);
                         this.pointer_count.set(this.pointer_count.get() + 1);
                         this.drag = Some(NodeDrag {
                             panel,
@@ -2200,7 +2247,7 @@ impl EqualizerEditor {
                     }
                 }
                 cx.notify();
-                self.update_response();
+                self.response_dirty = true;
             }
         }
     }
@@ -2340,6 +2387,7 @@ impl EqualizerEditor {
         }
         if let Some(error) = &self.response_error {
             curve = curve.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
+
         }
         if self.format.is_some()
             && self
@@ -5766,6 +5814,127 @@ mod tests {
     }
 
     #[gpui::test]
+    fn graph_response_frames_coalesce_and_retire_with_their_drag(cx: &mut TestAppContext) {
+        for transition in ["cancel", "hide", "replace", "restart"] {
+            let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+            owner.update(cx, |owner, _| owner.command_active = true);
+            editor.update(cx, |editor, cx| {
+                // Supply the headless fixture's plotting format; pointer fences
+                // still use its real, unchanged no-stream snapshot.
+                editor.format = Some((99, 48_000, 2));
+                editor.update_response();
+                editor.update_response();
+                cx.notify();
+            });
+            draw(cx, handle);
+            let position = VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-node-7-0")
+                .unwrap()
+                .center();
+            dispatch_pointer_event(
+                cx,
+                handle,
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                },
+            );
+            let computations = editor.read_with(cx, |editor, _| editor.response_computations);
+            let spare_samples = editor.read_with(cx, |editor, _| editor.response_buffer.as_ptr());
+            for step in 1..=8 {
+                dispatch_pointer_event(
+                    cx,
+                    handle,
+                    MouseMoveEvent {
+                        position: position + point(px(step as f32 * 5.), px(-18.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                );
+            }
+            editor.read_with(cx, |editor, _| {
+                assert!(editor.response_frame_pending);
+                assert_eq!(editor.response_computations, computations);
+            });
+            cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            editor.read_with(cx, |editor, _| {
+                assert_eq!(editor.response_computations, computations + 1);
+                assert_eq!(editor.response.as_ptr(), spare_samples);
+                assert!(!editor.response_frame_pending);
+                let drag = editor.drag.as_ref().unwrap();
+                let mut preview = editor.config.clone();
+                preview.bands[drag.band].frequency_hz = drag.frequency;
+                preview.bands[drag.band].gain_db = drag.gain;
+                let mut expected = vec![0.; editor.frequencies.len()];
+                preview
+                    .sample_response_db(48_000, 2, 0, &editor.frequencies, &mut expected)
+                    .unwrap();
+                assert_eq!(*editor.response, expected);
+            });
+            draw(cx, handle);
+            dispatch_pointer_event(
+                cx,
+                handle,
+                MouseMoveEvent {
+                    position: position + point(px(55.), px(-25.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                },
+            );
+            assert!(editor.read_with(cx, |editor, _| editor.response_frame_pending));
+            match transition {
+                "hide" => editor.update(cx, |editor, cx| editor.deactivate(cx)),
+                "replace" => {
+                    let mut config = editor.read_with(cx, |editor, _| editor.config.clone());
+                    config.preamp_db = 2.;
+                    reconcile_config(cx, &editor, &config, 0);
+                }
+                _ => editor.update(cx, |editor, cx| editor.cancel_pointer(cx)),
+            }
+            let computations = editor.read_with(cx, |editor, _| editor.response_computations);
+            if transition == "restart" {
+                dispatch_pointer_event(
+                    cx,
+                    handle,
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    },
+                );
+                dispatch_pointer_event(
+                    cx,
+                    handle,
+                    MouseMoveEvent {
+                        position: position + point(px(15.), px(-8.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                );
+                assert!(editor.read_with(cx, |editor, _| editor.response_frame_pending));
+            }
+            let response = editor.read_with(cx, |editor, _| Arc::clone(&editor.response));
+            cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            editor.read_with(cx, |editor, _| {
+                assert!(!editor.response_frame_pending);
+                if transition == "restart" {
+                    assert_eq!(editor.response_computations, computations + 1);
+                    assert!(editor.drag.is_some());
+                } else {
+                    assert_eq!(editor.response_computations, computations);
+                    assert!(Arc::ptr_eq(&response, &editor.response));
+                    assert!(editor.drag.is_none());
+                    assert_eq!(editor.pointer_count.get(), 0);
+                }
+            });
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        }
+    }
+
+    #[gpui::test]
     fn graph_release_commits_once_without_overwriting_dirty_numeric_text(cx: &mut TestAppContext) {
         use gpui::InputEvent as _;
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
@@ -5781,6 +5950,8 @@ mod tests {
             .unwrap()
             .center();
         let end = position + point(px(40.), px(-18.));
+        let release = end + point(px(0.), px(-7.));
+        let mut expected_gain = 0.;
         cx.update_window(handle, |_, window, cx| {
             window.dispatch_event(
                 MouseDownEvent {
@@ -5808,10 +5979,15 @@ mod tests {
                 "-"
             );
             assert!(owner.read(cx).commands.is_empty());
+            expected_gain = editor.read(cx).config.bands[0].gain_db
+                - ((release.y - position.y)
+                    / editor.read(cx).drag.as_ref().unwrap().bounds.size.height)
+                    as f64
+                    * 48.;
             window.dispatch_event(
                 MouseUpEvent {
                     button: MouseButton::Left,
-                    position: end,
+                    position: release,
                     ..Default::default()
                 }
                 .to_platform_input(),
@@ -5820,12 +5996,15 @@ mod tests {
             window.dispatch_event(
                 MouseUpEvent {
                     button: MouseButton::Left,
-                    position: end,
+                    position: release,
                     ..Default::default()
                 }
                 .to_platform_input(),
                 cx,
             );
+            let response = Arc::clone(&editor.read(cx).response);
+            window.simulate_next_frame(cx);
+            assert!(Arc::ptr_eq(&response, &editor.read(cx).response));
         })
         .unwrap();
         draw(cx, handle);
@@ -5843,6 +6022,7 @@ mod tests {
             );
             assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
             assert_ne!(editor.config.bands[0].frequency_hz, 80.);
+            assert_eq!(editor.config.bands[0].gain_db, expected_gain);
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
