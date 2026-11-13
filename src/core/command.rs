@@ -262,7 +262,6 @@ impl Core {
                     .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
             }
             Command::Play { track_id } => {
-                self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;
                 let id = if let Some(id) = existing {
                     id

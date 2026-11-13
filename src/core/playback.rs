@@ -680,7 +680,6 @@ impl Core {
         if let Some(stats) = stats {
             self.transport.history_pending |= stats.changed;
             self.project_playback_stats(track_id, stats);
-            self.refresh_playback_history();
         }
         if let Some((bitrate, exact)) = bitrate {
             self.publish_playback_bitrate(track_id, bitrate, exact);
