@@ -145,14 +145,7 @@ pub(super) fn emit_processing(
             serde_json::to_string_pretty(&task_json(instance_id, task.id, task)?)?
         )?;
     } else {
-        let phase = match task.phase {
-            ProcessingPhase::Queued => "processing-queued",
-            ProcessingPhase::Rendering => "processing-rendering",
-            ProcessingPhase::Processing => "processing-processing",
-            ProcessingPhase::Complete => "processing-complete",
-            ProcessingPhase::Cancelled => "processing-cancelled",
-            ProcessingPhase::Failed => "processing-failed",
-        };
+        let phase = rivu_presentation::processing::phase_key(task.phase);
         writeln!(
             output,
             "{}",

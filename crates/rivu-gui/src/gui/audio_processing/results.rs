@@ -136,14 +136,7 @@ impl AudioProcessing {
                 task.phase,
                 ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
             );
-            let phase = self.tr(match task.phase {
-                ProcessingPhase::Queued => "processing-queued",
-                ProcessingPhase::Rendering => "processing-rendering",
-                ProcessingPhase::Processing => "processing-processing",
-                ProcessingPhase::Complete => "processing-complete",
-                ProcessingPhase::Cancelled => "processing-cancelled",
-                ProcessingPhase::Failed => "processing-failed",
-            });
+            let phase = self.tr(rivu_presentation::processing::phase_key(task.phase));
             let operation = self.tr(match task.operation {
                 ProcessingOperation::Denoise => "processing-restoration",
                 ProcessingOperation::Speech => "processing-speech",
@@ -336,14 +329,7 @@ impl AudioProcessing {
             return column();
         };
         let id = task.id;
-        let phase = self.tr(match task.phase {
-            ProcessingPhase::Queued => "processing-queued",
-            ProcessingPhase::Rendering => "processing-rendering",
-            ProcessingPhase::Processing => "processing-processing",
-            ProcessingPhase::Complete => "processing-complete",
-            ProcessingPhase::Cancelled => "processing-cancelled",
-            ProcessingPhase::Failed => "processing-failed",
-        });
+        let phase = self.tr(rivu_presentation::processing::phase_key(task.phase));
         let source = task
             .source_path
             .file_name()
@@ -913,14 +899,7 @@ impl AudioProcessing {
                 }
             }
             for node in &task.graph_nodes {
-                let phase = self.tr(match node.phase {
-                    ProcessingPhase::Queued => "processing-queued",
-                    ProcessingPhase::Rendering => "processing-rendering",
-                    ProcessingPhase::Processing => "processing-processing",
-                    ProcessingPhase::Complete => "processing-complete",
-                    ProcessingPhase::Cancelled => "processing-cancelled",
-                    ProcessingPhase::Failed => "processing-failed",
-                });
+                let phase = self.tr(rivu_presentation::processing::phase_key(node.phase));
                 content = content.child(caption(theme, format!("#{} · {phase}", node.node)));
                 if let Some(model) = &node.model_id {
                     content = content.child(caption(
