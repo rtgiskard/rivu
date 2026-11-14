@@ -145,15 +145,23 @@ mod tests {
 
     #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [None, Some(0), Some(1), Some(2), Some(3), Some(99)] {
+        for version in [
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(99),
+        ] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let store = Store::open(&path)?;
             store.conn.execute_batch(
-                "INSERT INTO tracks(id,path,raw_title,title_override,raw_album,album_override,
-                    raw_artist,artist_override,favorite,play_count,last_played) VALUES
-                    (1,'/music/one.flac','Raw','User title','Raw album','','Raw artist','User artist',1,7,42),
-                    (2,'/music/two.flac','Two',NULL,'Real album',NULL,'',NULL,0,0,NULL);",
+                "INSERT INTO tracks(id,path,title,album,artist,favorite,play_count,last_played) VALUES
+                    (1,'/music/one.flac','User title','','User artist',1,7,42),
+                    (2,'/music/two.flac','Two','Real album','',0,0,NULL);",
             )?;
             let playlist = store.create_playlist("Preserved playlist")?;
             store.add_playlist(playlist, &[2, 1])?;
@@ -222,9 +230,7 @@ mod tests {
             let path = directory.path().join("library.db");
             let conn = Connection::open(&path)?;
             rivu_format::database::create_current(&conn)?;
-            conn.execute_batch(
-                "INSERT INTO tracks(id,path,title_override) VALUES(1,'one','preserved');",
-            )?;
+            conn.execute_batch("INSERT INTO tracks(id,path,title) VALUES(1,'one','preserved');")?;
             conn.execute_batch(incompatible)?;
             let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
             let journal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -240,7 +246,7 @@ mod tests {
             );
             assert_eq!(conn.total_changes(), changes);
             assert_eq!(
-                conn.query_row("SELECT title_override FROM tracks WHERE id=1", [], |row| {
+                conn.query_row("SELECT title FROM tracks WHERE id=1", [], |row| {
                     row.get::<_, String>(0)
                 })?,
                 "preserved"

@@ -130,7 +130,7 @@ link:doc/01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 Library, queue, and playlist edits change Rivu's records, not source files;
 audio processing writes separate outputs. The explicit offline
 link:doc/02_library.adoc#source-file-tags[`library tags` command] can read source
-tags or write selected fields with an original-file backup.
+tags or normalize and write selected fields without an original-file backup.
 
 [cols="1,2",options="header"]
 |===

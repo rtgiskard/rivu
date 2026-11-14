@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 fn fixture() -> Store {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.conn.execute_batch(
-        "INSERT INTO tracks(id,path,raw_title,raw_artist,raw_album,favorite,missing,play_count,cue_sheet,cue_number,cue_start_frame,cue_end_frame) VALUES
+        "INSERT INTO tracks(id,path,title,artist,album,favorite,missing,play_count,cue_sheet,cue_number,cue_start_frame,cue_end_frame) VALUES
          (1,'/music/a.wav','Needle A','Artist','Z',1,0,2,NULL,NULL,NULL,NULL),
          (2,'/music/deep/image.wav','Needle B','Artist','A',0,1,5,'/music/deep/image.cue',1,0,4500),
          (3,'/musical/out.wav','Needle C','Artist','B',1,1,8,NULL,NULL,NULL,NULL),

@@ -10,6 +10,7 @@ pub(super) enum BusinessEvent {
     Export(Result<()>),
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
+    SourceTags(source_tags::SourceTagFinished),
     FfmpegLoaded,
     DevicesEnumerated(Result<Vec<String>>),
     MprisStatus,
@@ -126,6 +127,7 @@ impl Core {
             active_export,
             active_external_admission,
             active_optimization,
+            active_source_tags,
             processing,
             mpris_status,
             ..
@@ -180,6 +182,14 @@ impl Core {
             }.fuse() => BusinessEvent::Optimization(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
                 "Database optimization ended without a result; the database may already have changed"
             )))),
+            result = async {
+                match active_source_tags.as_mut() {
+                    Some(task) => (&mut task.finished).await,
+                    None => std::future::pending().await,
+                }
+            }.fuse() => BusinessEvent::SourceTags(result.unwrap_or_else(|_| source_tags::SourceTagFinished::failed(anyhow::anyhow!(
+                "Source tag worker ended without a result; inspect the file before retrying"
+            )))),
         })
     }
 }
@@ -217,6 +227,7 @@ impl Core {
                 let (reply, result) = self.finish_optimization(result);
                 self.complete_optimization(reply, result);
             }
+            BusinessEvent::SourceTags(result) => self.finish_source_tags(result),
             BusinessEvent::FfmpegLoaded => {
                 self.state.system.ffmpeg_status = audio::ffmpeg_status()
                     .unwrap_or_else(|error| format!("unavailable: {error:#}"));
@@ -430,6 +441,14 @@ impl Core {
                     Ok(CommandOutcome::Scan(id)) => ack.scan_id = Some(id),
                     Ok(CommandOutcome::Relocation(id)) => ack.relocation_id = Some(id),
                     Ok(CommandOutcome::Processing(id)) => ack.processing_id = Some(id),
+                    Ok(CommandOutcome::SourceTags(tags)) => ack.source_tags = Some(tags),
+                    Ok(CommandOutcome::DeferredSourceTags) => {
+                        self.active_source_tags
+                            .as_mut()
+                            .expect("source tag operation was accepted")
+                            .reply = request.reply;
+                        return;
+                    }
                     Ok(CommandOutcome::DeferredExport) => {
                         self.active_export
                             .as_mut()
@@ -494,6 +513,7 @@ impl Core {
         if let Some((reply, result)) = self.shutdown_optimization() {
             self.complete_optimization(reply, result);
         }
+        self.shutdown_source_tags();
         // Optional startup work is not cancelled or published during shutdown.
         // Completion includes the physical PipeWire connection's retirement.
         drop(self.initial_devices.take());

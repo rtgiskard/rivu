@@ -154,7 +154,7 @@ fn successful_cue_admits_short_whole_and_segment_with_independent_state() {
     let cue = store.track(cue_id).unwrap().unwrap();
     assert!(whole.favorite);
     assert!(!cue.favorite);
-    assert_eq!(cue.title, "Owned segment");
+    assert_eq!(cue.title, scan.segments[0].view().media.title);
     assert_eq!(whole.duration, Some(2.0));
     assert_eq!(cue.duration, Some(1.0));
     assert_eq!(
@@ -312,10 +312,14 @@ fn cue_refresh_reports_played_title_changes_without_technical_history_churn() {
         .edit_track(id, Some("Personal segment"), None, None, None, None)
         .unwrap();
     let overridden = history_values();
-    metadata.title = "Hidden segment title".into();
+    metadata.title = "Refreshed segment title".into();
     scan.segments[0] = CueRecord::registered(source, cue, metadata, Some(60.0));
-    assert!(!store.apply_scan(&scan).unwrap().history);
-    assert_eq!(history_values(), overridden);
+    assert!(store.apply_scan(&scan).unwrap().history);
+    assert_ne!(history_values(), overridden);
+    assert_eq!(
+        store.history(10).unwrap()[0].title,
+        "Refreshed segment title"
+    );
 }
 
 #[test]
@@ -519,9 +523,6 @@ fn identical_rescans_keep_queue_content_stable() {
     store.set_favorite(&[id], true).unwrap();
     store.mark_played(id, 123).unwrap();
     store.increment_play_count(id).unwrap();
-    store
-        .edit_track(id, Some("Override"), None, None, None, None)
-        .unwrap();
     let page = store.queue_page(None, 0, 10).unwrap();
     store.set_queue_current(Some(page.rows[0].id)).unwrap();
     let state = store.queue_state().unwrap();
@@ -670,7 +671,7 @@ fn audio_source_rescans_refresh_ordinary_and_cue_row_projections() {
 }
 
 #[test]
-fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
+fn rescans_replace_edited_tags_and_invalidate_display_without_changing_queue_identity() {
     let (store, mut scan, id) = queued(record());
     store
         .edit_track(
@@ -688,29 +689,45 @@ fn raw_metadata_changes_under_overrides_persist_without_invalidating_queue() {
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "New raw title".into();
     std::sync::Arc::make_mut(&mut scan.records[0]).media.artist = "New raw artist".into();
     std::sync::Arc::make_mut(&mut scan.records[0]).media.album = "New raw album".into();
+    std::sync::Arc::make_mut(&mut scan.records[0])
+        .media
+        .release_date = Some("2026-11-14".into());
+    std::sync::Arc::make_mut(&mut scan.records[0])
+        .media
+        .track_number = Some(17);
+    std::sync::Arc::make_mut(&mut scan.records[0])
+        .media
+        .disc_number = Some(2);
     assert_eq!(
         store.apply_scan(&scan).unwrap(),
         CatalogChanges {
             changed: true,
+            library: true,
+            queue: true,
+            albums: true,
             ..CatalogChanges::default()
         }
     );
-    assert!(store.track_cache.borrow().entries.contains_key(&id));
+    assert!(!store.track_cache.borrow().entries.contains_key(&id));
     assert_eq!(store.queue_state().unwrap(), state);
-    assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
+    let refreshed_page = store.queue_page(None, 0, 10).unwrap();
+    assert_ne!(refreshed_page, page);
+    assert_eq!(refreshed_page.rows[0].id, page.rows[0].id);
     let known = store.stored_scan_files(&scan.roots).unwrap();
     let raw = known[0].media.as_ref().unwrap();
     assert_eq!(raw.title, "New raw title");
     assert_eq!(raw.artist, "New raw artist");
     assert_eq!(raw.album, "New raw album");
     let track = store.track(id).unwrap().unwrap();
-    assert_eq!(track.title, "Custom title");
-    assert_eq!(track.artist, "Custom artist");
-    assert_eq!(track.album, "Custom album");
+    assert_eq!(track.title, "New raw title");
+    assert_eq!(track.artist, "New raw artist");
+    assert_eq!(track.album, "New raw album");
+    assert_eq!(track.release_date.as_deref(), Some("2026-11-14"));
+    assert_eq!((track.track_number, track.disc_number), (Some(17), Some(2)));
 }
 
 #[test]
-fn equal_to_raw_and_repeated_overrides_keep_queue_values_stable() {
+fn equal_and_repeated_tag_edits_keep_queue_values_stable_until_rescan() {
     let (store, mut scan, id) = queued(record());
     let page = store.queue_page(None, 0, 10).unwrap();
     let state = store.queue_state().unwrap();
@@ -728,17 +745,17 @@ fn equal_to_raw_and_repeated_overrides_keep_queue_values_stable() {
             assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         }
     }
-    // A later rescan proves equal overrides were retained, not discarded.
+    // A later rescan replaces the complete tag snapshot, not a hidden raw layer.
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Changed raw title".into();
     std::sync::Arc::make_mut(&mut scan.records[0]).media.artist = "Changed raw artist".into();
     std::sync::Arc::make_mut(&mut scan.records[0]).media.album = "Changed raw album".into();
     store.apply_scan(&scan).unwrap();
     assert_eq!(store.queue_state().unwrap(), state);
-    assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
+    assert_ne!(store.queue_page(None, 0, 10).unwrap(), page);
 }
 
 #[test]
-fn displayed_overrides_invalidate_queue_including_empty_strings() {
+fn displayed_tag_edits_invalidate_queue_including_empty_strings() {
     let (store, _, id) = queued(record());
     for (title, artist, album) in [
         (Some("Custom title"), None, None),
@@ -1271,7 +1288,7 @@ fn uncertain_global_candidate_and_failed_scan_preserve_existing_identity() {
         .conn
         .execute_batch(
             "CREATE TEMP TRIGGER reject_scan_insert BEFORE INSERT ON tracks
-         WHEN NEW.raw_title='Reject insert'
+         WHEN NEW.title='Reject insert'
          BEGIN SELECT RAISE(ABORT,'rejected scan insert'); END",
         )
         .unwrap();
@@ -1379,6 +1396,7 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
     store
         .edit_track(first_id, Some("Owned title"), None, None, None, None)
         .unwrap();
+    store.set_favorite(&[first_id], true).unwrap();
     store.increment_play_count(second_id).unwrap();
     let mut target = first.clone();
     target.path = directory.path().join("new/target.wav");
@@ -1405,7 +1423,12 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
     let prepared = store.prepare_relocation(first_id, target_id).unwrap();
     store.commit_relocation(&prepared).unwrap();
     assert_eq!(store.track(first_id).unwrap().unwrap().path, target.path);
-    assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
+    assert_eq!(
+        store.track(first_id).unwrap().unwrap().title,
+        target.media.title
+    );
+    assert!(store.track(first_id).unwrap().unwrap().favorite);
+    assert!(!store.track(first_id).unwrap().unwrap().missing);
     assert_eq!(store.track(second_id).unwrap().unwrap().path, second.path);
     assert_eq!(store.track(second_id).unwrap().unwrap().play_count, 1);
 }
@@ -1656,7 +1679,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
     store
         .conn
         .execute(
-            "UPDATE tracks SET title_override='Personal',play_count=9 WHERE id=?1",
+            "UPDATE tracks SET title='Personal',play_count=9 WHERE id=?1",
             [cue_id],
         )
         .unwrap();
@@ -1752,7 +1775,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
     assert_eq!(stored.modified_ns, source.modified_ns);
     assert_eq!(stored.fingerprint, source.fingerprint);
     let raw = stored.media.as_ref().unwrap();
-    assert_eq!(raw.title, "Registered segment");
+    assert_eq!(raw.title, "Personal");
     assert_eq!(raw.artist, "Registered artist");
     assert_eq!(raw.album, "Registered album");
     assert_eq!(raw.track_number, None);
@@ -1981,7 +2004,7 @@ fn import_scope_json_escaping_is_budgeted_and_failure_releases_workspace() {
 }
 
 #[test]
-fn completed_no_change_scan_retains_track_cache_and_hidden_raw_edits_do_not_clear_it() {
+fn completed_no_change_scan_retains_track_cache_and_rescanned_edits_clear_it() {
     let (store, mut scan, id) = queued(record());
     let original = store.track(id).unwrap().unwrap();
     assert!(store.track_cache.borrow().entries.contains_key(&id));
@@ -1993,13 +2016,14 @@ fn completed_no_change_scan_retains_track_cache_and_hidden_raw_edits_do_not_clea
         .edit_track(id, Some("Personal"), None, None, None, None)
         .unwrap();
     let overridden = store.track(id).unwrap().unwrap();
-    std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Hidden raw title".into();
+    std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Rescanned title".into();
     let impacts = store.apply_scan(&scan).unwrap();
     assert!(impacts.changed);
-    assert!(!impacts.library);
+    assert!(impacts.library);
     store.invalidate_catalog_caches(impacts, false);
-    assert!(store.track_cache.borrow().entries.contains_key(&id));
-    assert_eq!(store.track(id).unwrap().unwrap(), overridden);
+    assert!(!store.track_cache.borrow().entries.contains_key(&id));
+    assert_ne!(store.track(id).unwrap().unwrap(), overridden);
+    assert_eq!(store.track(id).unwrap().unwrap().title, "Rescanned title");
     std::sync::Arc::make_mut(&mut scan.records[0]).media.artist = "Visible artist".into();
     let impacts = store.apply_scan(&scan).unwrap();
     store.invalidate_catalog_caches(impacts, false);

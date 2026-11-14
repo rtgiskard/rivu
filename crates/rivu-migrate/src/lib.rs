@@ -14,6 +14,7 @@ use std::{
 
 mod catalog_order;
 mod target_schema;
+mod track_tags;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -131,11 +132,10 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("Opening database read-only {}", path.display()))?;
     let schema_version = match database::inspect(&connection)? {
-        database::DatabaseState::Versioned { schema_version: 2 } => {
-            target_schema::validate_catalog_source(&connection)
-                .context("Validating database schema structure")?;
-            2
-        }
+        database::DatabaseState::Versioned {
+            schema_version: 2 | 4,
+        } => target_schema::validate_tag_source(&connection)
+            .context("Validating database schema structure")?,
         _ => {
             target_schema::validate(&connection).context("Validating database schema structure")?;
             database::SCHEMA_VERSION
@@ -215,11 +215,14 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
         if needs_migration {
             let plan = database.as_ref().expect("migration requires a database");
             apply_plan(plan, report, |transaction| {
-                catalog_order::apply(transaction)
+                if plan.schema_version == 2 {
+                    catalog_order::apply(transaction)?;
+                }
+                track_tags::apply(transaction)
             })?;
             report.needs_changes = false;
             report.resources.push(format!(
-                "Database {}: migrated to schema {}; catalog order preserved",
+                "Database {}: migrated to schema {}; effective tags and catalog order preserved",
                 plan.path.display(),
                 database::SCHEMA_VERSION
             ));

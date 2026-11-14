@@ -10,6 +10,8 @@ pub(super) enum CommandOutcome {
     Processing(u64),
     DeferredExport,
     DeferredOptimization,
+    DeferredSourceTags,
+    SourceTags(rivu_format::tags::TagValues),
 }
 
 #[derive(Debug)]
@@ -122,7 +124,34 @@ impl Core {
     }
 
     fn apply_command(&mut self, command: Command) -> Result<CommandOutcome> {
+        self.source_tag_control(&command)?;
         match command {
+            Command::LoadSourceTags { track_id, encoding } => {
+                self.start_source_tags(track_id, encoding, None)?;
+                return Ok(CommandOutcome::DeferredSourceTags);
+            }
+            Command::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
+            } => {
+                self.start_source_tags(
+                    track_id,
+                    rivu_format::tags::TagEncoding::Declared,
+                    Some((tags, *expected)),
+                )?;
+                return Ok(CommandOutcome::DeferredSourceTags);
+            }
+            Command::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            } => {
+                self.sync_track_tags(track_id, &tags, &expected)?;
+                return Ok(CommandOutcome::SourceTags(source_tags::track_tags(
+                    &self.track(track_id)?,
+                )));
+            }
             Command::TransferCollection {
                 source,
                 destination,

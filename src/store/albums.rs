@@ -16,15 +16,13 @@ pub(super) fn album_filter() -> String {
 }
 
 pub(super) fn eligible_member(alias: &str) -> String {
-    eligible_title(&format!(
-        "COALESCE({alias}.album_override,{alias}.raw_album)"
-    ))
+    eligible_title(&format!("{alias}.album"))
 }
 
 pub(super) fn representative(alias: &str) -> String {
     let directory = DIRECTORY.replace("path", &format!("{alias}.path"));
     format!(
-        "({eligible} AND {alias}.id=(SELECT id FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}={directory} AND {TITLE}=COALESCE({alias}.album_override,{alias}.raw_album) ORDER BY {ORDER} LIMIT 1))",
+        "({eligible} AND {alias}.id=(SELECT id FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}={directory} AND {TITLE}={alias}.album ORDER BY {ORDER} LIMIT 1))",
         eligible = eligible_member(alias)
     )
 }

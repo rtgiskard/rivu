@@ -798,6 +798,8 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         relocation_id: Some(42),
         processing_id: Some(7),
         database_optimization: None,
+        source_tags: None,
+        source_file_saved: false,
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();

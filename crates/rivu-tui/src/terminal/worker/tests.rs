@@ -634,6 +634,8 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
                 relocation_id: None,
                 processing_id: None,
                 database_optimization: None,
+                source_tags: None,
+                source_file_saved: false,
             },
         );
     });
@@ -995,6 +997,8 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
                         relocation_id: None,
                         processing_id: None,
                         database_optimization: None,
+                        source_tags: None,
+                        source_file_saved: false,
                     },
                 );
             }

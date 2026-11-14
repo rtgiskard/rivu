@@ -44,19 +44,21 @@ pub(super) fn validate(conn: &Connection) -> Result<()> {
     validate_objects(conn, &fresh)
 }
 
-pub(super) fn validate_catalog_source(conn: &Connection) -> Result<()> {
-    ensure!(
-        database::inspect(conn)? == database::DatabaseState::Versioned { schema_version: 2 },
-        "Expected database schema 2"
-    );
+pub(super) fn validate_tag_source(conn: &Connection) -> Result<i64> {
+    let version = match database::inspect(conn)? {
+        database::DatabaseState::Versioned {
+            schema_version: version @ (2 | 4),
+        } => version,
+        state => bail!("Unsupported tag migration source: {state:?}"),
+    };
     database::validate_common_structure(conn)?;
     let fresh = Connection::open_in_memory()?;
-    database::create_current(&fresh)?;
-    // Catalog positions are the only schema change this migration supports.
-    // Compare the source against that same authoritative object set before any
-    // backup or write, rather than discovering unsupported objects after ALTER.
-    fresh.execute_batch("ALTER TABLE playlists DROP COLUMN position")?;
-    validate_objects(conn, &fresh)
+    fresh.execute_batch(include_str!("../tests/fixtures/schema2.sql"))?;
+    if version == 4 {
+        fresh.execute_batch("ALTER TABLE playlists ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK(position>=0)")?;
+    }
+    validate_objects(conn, &fresh)?;
+    Ok(version)
 }
 
 fn validate_objects(conn: &Connection, fresh: &Connection) -> Result<()> {

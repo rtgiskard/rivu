@@ -193,7 +193,7 @@ mod tests {
             let current_track = store.queue_track_id(current_entry).unwrap();
             assert_ne!(current_track, current_entry as i64);
             store.conn.execute(
-                "UPDATE tracks SET play_count='malformed',duration='malformed',title_override='User title' WHERE id=?1",
+                "UPDATE tracks SET play_count='malformed',duration='malformed',title='User title' WHERE id=?1",
                 [current_track],
             ).unwrap();
             let apply = |source: ScanRecord| {
@@ -232,20 +232,27 @@ mod tests {
                 )
                 .unwrap();
             let mut source = record("/current.wav");
-            source.media.title = "New hidden raw title".into();
+            source.media.title = "New tag title".into();
             let hidden = apply(source.clone());
             assert!(hidden.changed);
-            assert_eq!(hidden.current_track, Some(false));
+            assert_eq!(hidden.current_track, Some(true));
             source.media.codec = "flac".into();
             let visible = apply(source);
             assert_eq!(visible.current_track, Some(true));
             assert_eq!(
-                store.conn.query_row(
-                    "SELECT COALESCE(title_override,raw_title),codec,play_count FROM tracks WHERE id=?1",
-                    [current_track],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-                ).unwrap(),
-                ("User title".into(), "flac".into(), "malformed".into()),
+                store
+                    .conn
+                    .query_row(
+                        "SELECT title,codec,play_count FROM tracks WHERE id=?1",
+                        [current_track],
+                        |row| Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?
+                        )),
+                    )
+                    .unwrap(),
+                ("New tag title".into(), "flac".into(), "malformed".into()),
             );
         }
     }
@@ -332,9 +339,10 @@ mod tests {
                 .edit_track(id, Some("Personal title"), None, None, None, None)
                 .unwrap();
             let overridden = history_values();
-            source.media.title = "Hidden title".into();
-            assert!(!apply(source).history);
-            assert_eq!(history_values(), overridden);
+            source.media.title = "Refreshed title".into();
+            assert!(apply(source).history);
+            assert_ne!(history_values(), overridden);
+            assert_eq!(store.history(10).unwrap()[0].title, "Refreshed title");
         }
     }
 
@@ -518,7 +526,7 @@ mod tests {
             )))
             .unwrap()
             .unwrap();
-        store.conn.execute("UPDATE tracks SET title_override='Keep title',favorite=1,play_count=7,missing=1 WHERE id=?1", [ordinary_id]).unwrap();
+        store.conn.execute("UPDATE tracks SET title='Keep title',favorite=1,play_count=7,missing=1 WHERE id=?1", [ordinary_id]).unwrap();
         let mut copied = record("/outside/copied.wav");
         copied.fingerprint = record("/outside/absent.wav").fingerprint;
         let prepared = ExternalAdmission::from_test_records(
@@ -532,7 +540,7 @@ mod tests {
         let (_, _, added) = store.admit_external_queue(&prepared, None, None).unwrap();
         assert_eq!(added, 2);
         let track = store.track(ordinary_id).unwrap().unwrap();
-        assert_eq!(track.title, "Keep title");
+        assert_eq!(track.title, record("/outside/existing.wav").media.title);
         assert!(track.favorite);
         assert_eq!(track.play_count, 7);
         assert!(!track.missing);
@@ -574,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_raw_and_technical_facts_refresh_without_losing_user_state_or_references() {
+    fn existing_tags_and_technical_facts_refresh_without_losing_user_state_or_references() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let mut prepared = admission(&["/outside/existing.wav"], vec![0]);
         store.admit_external_queue(&prepared, None, None).unwrap();
@@ -583,7 +591,7 @@ mod tests {
         let playlist = store
             .create_playlist_with_tracks("Retained", &[id])
             .unwrap();
-        store.conn.execute("UPDATE tracks SET title_override='User title',artist_override='User artist',album_override='User album',favorite=1,play_count=7,last_played=42,missing=1 WHERE id=?1", [id]).unwrap();
+        store.conn.execute("UPDATE tracks SET title='User title',artist='User artist',album='User album',favorite=1,play_count=7,last_played=42,missing=1 WHERE id=?1", [id]).unwrap();
         let before = store.track(id).unwrap().unwrap();
         let mut updated = record("/outside/existing.wav");
         updated.size = 1234;
@@ -618,9 +626,9 @@ mod tests {
         assert!(!impacts.structure);
         let refreshed = store.track(id).unwrap().unwrap();
         assert_eq!(refreshed.id, id);
-        assert_eq!(refreshed.title, before.title);
-        assert_eq!(refreshed.artist, before.artist);
-        assert_eq!(refreshed.album, before.album);
+        assert_eq!(refreshed.title, "Fresh raw title");
+        assert_eq!(refreshed.artist, "Fresh raw artist");
+        assert_eq!(refreshed.album, "Fresh raw album");
         assert_eq!(refreshed.favorite, before.favorite);
         assert_eq!(refreshed.play_count, before.play_count);
         assert_eq!(refreshed.last_played, before.last_played);

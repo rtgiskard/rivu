@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
+const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(tracks.title || ' ' || tracks.artist || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
 pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_path WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
@@ -37,7 +37,7 @@ pub(super) fn search_query(query: Option<&str>) -> Option<String> {
 
 pub(super) fn search_filter(table: &str, parameter: &str) -> String {
     format!(
-        "({parameter} IS NULL OR instr(lower(COALESCE({table}.title_override,{table}.raw_title) || ' ' || COALESCE({table}.artist_override,{table}.raw_artist) || ' ' || COALESCE({table}.album_override,{table}.raw_album) || ' ' || substr({table}.path,length(rtrim({table}.path,replace({table}.path,'/','')))+1)),{parameter})>0)"
+        "({parameter} IS NULL OR instr(lower({table}.title || ' ' || {table}.artist || ' ' || {table}.album || ' ' || substr({table}.path,length(rtrim({table}.path,replace({table}.path,'/','')))+1)),{parameter})>0)"
     )
 }
 
@@ -66,7 +66,7 @@ fn library_order(sort: rivu_protocol::model::LibrarySort) -> &'static str {
     match sort {
         rivu_protocol::model::LibrarySort::Id => "id",
         rivu_protocol::model::LibrarySort::Album => {
-            "COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title),id"
+            "album, CASE WHEN album<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN album<>'' THEN COALESCE(track_number,4294967295) END, title,id"
         }
         rivu_protocol::model::LibrarySort::MostPlayed => "play_count DESC,id",
     }
@@ -100,6 +100,16 @@ pub struct TrackEditImpact {
     pub member_facts: bool,
     /// None means the changed playlist scopes exceeded the publication bound.
     pub playlists: Option<Vec<i64>>,
+}
+
+struct TrackTagPatch<'a> {
+    title: Option<&'a str>,
+    artist: Option<&'a str>,
+    album: Option<&'a str>,
+    decoder_hint: Option<DecoderHint>,
+    release_date: Option<&'a str>,
+    track_number: Option<Option<u32>>,
+    disc_number: Option<Option<u32>>,
 }
 
 #[derive(Debug, Default)]
@@ -920,8 +930,10 @@ impl Store {
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let mut q = self.conn.prepare_cached("SELECT id,COALESCE(title_override,raw_title),play_count,last_played,favorite FROM tracks
-         WHERE last_played IS NOT NULL ORDER BY last_played DESC,id DESC LIMIT ?")?;
+        let mut q = self.conn.prepare_cached(
+            "SELECT id,title,play_count,last_played,favorite FROM tracks
+         WHERE last_played IS NOT NULL ORDER BY last_played DESC,id DESC LIMIT ?",
+        )?;
         Ok(q.query_map([limit.min(i64::MAX as usize) as i64], |r| {
             Ok(HistoryEntry {
                 track_id: r.get(0)?,
@@ -943,53 +955,168 @@ impl Store {
         decoder_hint: Option<DecoderHint>,
         release_date: Option<&str>,
     ) -> Result<TrackEditImpact> {
+        self.update_track_tags(
+            id,
+            TrackTagPatch {
+                title,
+                artist,
+                album,
+                decoder_hint,
+                release_date,
+                track_number: None,
+                disc_number: None,
+            },
+        )
+    }
+
+    /// Persist verified facts from a successful physical tag rewrite.
+    pub fn update_written_source(
+        &self,
+        id: i64,
+        source: &rivu_metadata::WrittenSource,
+    ) -> Result<super::CatalogChanges> {
+        let tx = self.conn.unchecked_transaction()?;
+        let values = params![
+            id,
+            source.fingerprint.as_slice(),
+            source.file_size as i64,
+            source.modified_ns,
+        ];
+        let changes = tx
+            .query_row(
+                &format!(
+                    "SELECT fingerprint IS NOT ?2 OR file_size IS NOT ?3 OR modified_ns IS NOT ?4,
+                    cue_sheet IS NULL AND fingerprint IS NOT ?2,
+                    cue_sheet IS NULL AND (file_size IS NOT ?3 OR modified_ns IS NOT ?4),
+                    fingerprint IS NOT ?2 OR file_size IS NOT ?3,
+                    fingerprint IS NOT ?2 AND {}
+             FROM tracks AS t WHERE t.id=?1",
+                    super::albums::representative("t")
+                ),
+                values,
+                |row| {
+                    Ok(super::CatalogChanges {
+                        changed: row.get(0)?,
+                        library: row.get(3)?,
+                        albums: row.get(4)?,
+                        duplicate_groups: row.get(1)?,
+                        duplicate_members: row.get(2)?,
+                        ..Default::default()
+                    })
+                },
+            )
+            .optional()?
+            .with_context(|| format!("track {id} does not exist"))?;
+        if changes.changed {
+            tx.execute(
+                "UPDATE tracks SET fingerprint=?2,file_size=?3,modified_ns=?4,probe_version=0 WHERE id=?1",
+                values,
+            )?;
+        }
+        tx.commit()?;
+        if changes.changed {
+            self.track_cache.borrow_mut().entries.remove(&id);
+        }
+        Ok(changes)
+    }
+
+    /// Persist the complete tag snapshot accepted by the metadata backend.
+    /// Playback preferences, statistics, references and CUE identity are untouched.
+    pub fn sync_track_tags(
+        &self,
+        id: i64,
+        tags: &rivu_format::tags::TagValues,
+    ) -> Result<TrackEditImpact> {
+        self.update_track_tags(
+            id,
+            TrackTagPatch {
+                title: Some(&tags.title),
+                artist: Some(&tags.artist),
+                album: Some(&tags.album),
+                decoder_hint: None,
+                release_date: Some(tags.release_date.as_deref().unwrap_or("")),
+                track_number: Some(tags.track_number),
+                disc_number: Some(tags.disc_number),
+            },
+        )
+    }
+
+    fn update_track_tags(&self, id: i64, patch: TrackTagPatch<'_>) -> Result<TrackEditImpact> {
+        let TrackTagPatch {
+            title,
+            artist,
+            album,
+            decoder_hint,
+            release_date,
+            track_number,
+            disc_number,
+        } = patch;
         let tx = self.conn.unchecked_transaction()?;
         let decoder_hint = decoder_hint.map(|hint| match hint {
             DecoderHint::Auto => 0,
             DecoderHint::Native => 1,
             DecoderHint::Ffmpeg => 2,
         });
-        let (mut impact, playlist_values_changed) = tx.query_row(
-            "SELECT
-                ((?1 IS NOT NULL AND ?1 IS NOT COALESCE(title_override,raw_title))
-                 OR (?2 IS NOT NULL AND ?2 IS NOT COALESCE(artist_override,raw_artist))
-                 OR (?3 IS NOT NULL AND ?3 IS NOT COALESCE(album_override,raw_album))),
+        let values = params![
+            title,
+            artist,
+            album,
+            decoder_hint,
+            id,
+            release_date,
+            track_number.is_some(),
+            track_number.flatten(),
+            disc_number.is_some(),
+            disc_number.flatten()
+        ];
+        let (mut impact, playlist_values_changed, numbers_changed) = tx
+            .query_row(
+                "SELECT
+                ((?1 IS NOT NULL AND ?1 IS NOT title)
+                 OR (?2 IS NOT NULL AND ?2 IS NOT artist)
+                 OR (?3 IS NOT NULL AND ?3 IS NOT album)),
                 ((?4 IS NOT NULL AND ?4 IS NOT decoder_hint)
                  OR (?6 IS NOT NULL AND NULLIF(?6,'') IS NOT release_date)),
-                ((title_override IS NOT NULL OR artist_override IS NOT NULL
-                  OR album_override IS NOT NULL OR decoder_hint<>0)
-                 IS NOT
-                 (COALESCE(?1,title_override) IS NOT NULL OR COALESCE(?2,artist_override) IS NOT NULL
-                  OR COALESCE(?3,album_override) IS NOT NULL OR COALESCE(?4,decoder_hint)<>0)),
-                (last_played IS NOT NULL AND ?1 IS NOT NULL
-                 AND ?1 IS NOT COALESCE(title_override,raw_title))
+                ((decoder_hint<>0) IS NOT (COALESCE(?4,decoder_hint)<>0)),
+                (last_played IS NOT NULL AND ?1 IS NOT NULL AND ?1 IS NOT title),
+                ((?7 AND ?8 IS NOT track_number) OR (?9 AND ?10 IS NOT disc_number))
              FROM tracks WHERE id=?5",
-            params![title, artist, album, decoder_hint, id, release_date],
-            |row| {
-                let display: bool = row.get(0)?;
-                let decoder: bool = row.get(1)?;
-                Ok((TrackEditImpact { library: display || decoder, member_facts: row.get(2)?, history: row.get(3)?, ..Default::default() }, display))
-            },
-        ).optional()?.with_context(|| format!("track {id} does not exist"))?;
+                values,
+                |row| {
+                    let display: bool = row.get(0)?;
+                    let details: bool = row.get(1)?;
+                    let numbers: bool = row.get(4)?;
+                    Ok((
+                        TrackEditImpact {
+                            library: display || details || numbers,
+                            member_facts: row.get(2)?,
+                            history: row.get(3)?,
+                            ..Default::default()
+                        },
+                        display,
+                        numbers,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("track {id} does not exist"))?;
         impact.queue = playlist_values_changed
             && tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
                 [id],
                 |row| row.get::<_, bool>(0),
             )?;
+        let album_values_changed = playlist_values_changed || numbers_changed;
         impact.albums = tx.query_row(
             &format!(
                 "SELECT ((?1 AND ({} OR {})) OR (?2 AND {})) FROM tracks AS t WHERE id=?3",
                 super::albums::eligible_member("t"),
-                super::albums::eligible_member("t").replace(
-                    "COALESCE(t.album_override,t.raw_album)",
-                    "COALESCE(?4,t.album_override,t.raw_album)"
-                ),
+                rivu_format::database::eligible_title("COALESCE(?4,t.album)"),
                 super::albums::representative("t")
             ),
             params![
-                playlist_values_changed,
-                impact.library && !playlist_values_changed,
+                album_values_changed,
+                impact.library && !album_values_changed,
                 id,
                 album
             ],
@@ -1007,17 +1134,19 @@ impl Store {
             };
         }
         let updated = tx.execute(
-            "UPDATE tracks SET title_override=COALESCE(?1,title_override),
-             artist_override=COALESCE(?2,artist_override),
-             album_override=COALESCE(?3,album_override),
-             decoder_hint=COALESCE(?4,decoder_hint),
-             release_date=CASE WHEN ?6 IS NULL THEN release_date ELSE NULLIF(?6,'') END WHERE id=?5 AND
-             ((?1 IS NOT NULL AND title_override IS NOT ?1) OR
-              (?2 IS NOT NULL AND artist_override IS NOT ?2) OR
-              (?3 IS NOT NULL AND album_override IS NOT ?3) OR
+            "UPDATE tracks SET title=COALESCE(?1,title),artist=COALESCE(?2,artist),
+             album=COALESCE(?3,album),decoder_hint=COALESCE(?4,decoder_hint),
+             release_date=CASE WHEN ?6 IS NULL THEN release_date ELSE NULLIF(?6,'') END,
+             track_number=CASE WHEN ?7 THEN ?8 ELSE track_number END,
+             disc_number=CASE WHEN ?9 THEN ?10 ELSE disc_number END
+             WHERE id=?5 AND
+             ((?1 IS NOT NULL AND title IS NOT ?1) OR
+              (?2 IS NOT NULL AND artist IS NOT ?2) OR
+              (?3 IS NOT NULL AND album IS NOT ?3) OR
               (?4 IS NOT NULL AND decoder_hint IS NOT ?4) OR
-              (?6 IS NOT NULL AND release_date IS NOT NULLIF(?6,'')))",
-            params![title, artist, album, decoder_hint, id, release_date],
+              (?6 IS NOT NULL AND release_date IS NOT NULLIF(?6,'')) OR
+              (?7 AND track_number IS NOT ?8) OR (?9 AND disc_number IS NOT ?10))",
+            values,
         )?;
         tx.commit()?;
         impact.changed = updated != 0;
@@ -1511,7 +1640,7 @@ mod deletion_tests {
         for missing in [false, true] {
             let store = fixture()?;
             store.conn.execute_batch(
-                "UPDATE tracks SET raw_album='Album' WHERE id=2;
+                "UPDATE tracks SET album='Album' WHERE id=2;
                  UPDATE tracks SET fingerprint=zeroblob(32) WHERE id IN (2,3);
                  UPDATE tracks SET missing=1 WHERE id IN (2,8);",
             )?;
@@ -1564,10 +1693,243 @@ mod request_tests {
     use super::*;
 
     #[test]
+    fn sync_tags_updates_six_fields_and_preserves_track_owned_state() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,title,artist,album,release_date,
+            track_number,disc_number,favorite,play_count,last_played,decoder_hint,
+            cue_sheet,cue_number,cue_start_frame,cue_end_frame)
+            VALUES(1,'/music/image.flac','Old title','Old artist','Old album','1999',1,1,1,7,42,2,
+                '/music/album.cue',3,75,4500);",
+        )?;
+        store.enqueue_tracks(&[1, 1])?;
+        let queue = store.queue_ids()?;
+        store.set_queue_current(Some(queue[1]))?;
+        let state = store.queue_state()?;
+        let playlist = store.create_playlist_with_tracks("Retained", &[1, 1])?;
+        let before = store.track(1)?.unwrap();
+        let tags = rivu_format::tags::TagValues {
+            title: String::new(),
+            artist: "New artist".into(),
+            album: "New album".into(),
+            release_date: Some("2026-11-14".into()),
+            track_number: Some(17),
+            disc_number: Some(2),
+        };
+        let impact = store.sync_track_tags(1, &tags)?;
+        assert!(
+            impact.changed && impact.library && impact.queue && impact.albums && impact.history
+        );
+        assert!(!impact.member_facts);
+        assert_eq!(impact.playlists, Some(vec![playlist]));
+        let after = store.track(1)?.unwrap();
+        assert_eq!(
+            (&*after.title, &*after.artist, &*after.album),
+            ("", "New artist", "New album")
+        );
+        assert_eq!(after.release_date.as_deref(), Some("2026-11-14"));
+        assert_eq!((after.track_number, after.disc_number), (Some(17), Some(2)));
+        assert_eq!(
+            (
+                after.id,
+                after.favorite,
+                after.play_count,
+                after.last_played,
+                after.decoder_hint
+            ),
+            (
+                before.id,
+                before.favorite,
+                before.play_count,
+                before.last_played,
+                before.decoder_hint
+            )
+        );
+        assert_eq!(after.cue, before.cue);
+        assert_eq!(after.path, before.path);
+        assert_eq!(store.queue_ids()?, queue);
+        assert_eq!(store.queue_state()?, state);
+        assert_eq!(store.playlist_track_ids(playlist, 10)?, [1, 1]);
+        assert_eq!(store.sync_track_tags(1, &tags)?, TrackEditImpact::default());
+        assert!(store.sync_track_tags(999, &tags).is_err());
+        let cleared = rivu_format::tags::TagValues {
+            release_date: None,
+            track_number: None,
+            disc_number: None,
+            ..tags.clone()
+        };
+        store.sync_track_tags(1, &cleared)?;
+        let cleared_track = store.track(1)?.unwrap();
+        assert_eq!(
+            (
+                cleared_track.release_date.as_deref(),
+                cleared_track.track_number,
+                cleared_track.disc_number
+            ),
+            (None, None, None)
+        );
+        store.conn.execute_batch(
+            "CREATE TEMP TRIGGER reject_tag_sync BEFORE UPDATE ON tracks
+            BEGIN SELECT RAISE(ABORT,'reject tags'); END;",
+        )?;
+        assert!(store.sync_track_tags(1, &tags).is_err());
+        assert_eq!(store.track(1)?.unwrap(), cleared_track);
+        assert_eq!(store.queue_state()?, state);
+        Ok(())
+    }
+
+    #[test]
+    fn synchronized_numbers_reorder_library_and_album_representatives() -> Result<()> {
+        use rivu_protocol::model::{AlbumSort, LibrarySort};
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch("INSERT INTO tracks(id,path,title,album,track_number,disc_number)
+            VALUES(1,'/music/one.flac','One','Shared',1,1),(2,'/music/two.flac','Two','Shared',2,1);")?;
+        store.enqueue_tracks(&[2])?;
+        let order = || -> Result<Vec<i64>> {
+            Ok(store
+                .library_view_page(None, None, None, LibrarySort::Album, 0, 10)?
+                .rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect())
+        };
+        let representative = || -> Result<i64> {
+            Ok(store.albums_page(None, AlbumSort::Title, 0, 1)?.rows[0]
+                .representative
+                .id)
+        };
+        assert_eq!(order()?, [1, 2]);
+        assert_eq!(representative()?, 1);
+        let mut tags = rivu_format::tags::TagValues {
+            title: "Two".into(),
+            album: "Shared".into(),
+            track_number: Some(1),
+            disc_number: Some(0),
+            ..Default::default()
+        };
+        let impact = store.sync_track_tags(2, &tags)?;
+        assert!(impact.changed && impact.library && impact.albums);
+        assert!(!impact.queue && !impact.history && !impact.member_facts);
+        assert_eq!(impact.playlists, Some(Vec::new()));
+        assert_eq!(order()?, [2, 1]);
+        assert_eq!(representative()?, 2);
+        tags.track_number = None;
+        tags.disc_number = None;
+        assert!(store.sync_track_tags(2, &tags)?.albums);
+        assert_eq!(order()?, [1, 2]);
+        assert_eq!(representative()?, 1);
+        tags.track_number = Some(u32::MAX);
+        tags.disc_number = Some(u32::MAX);
+        store.sync_track_tags(2, &tags)?;
+        let track = store.track(2)?.unwrap();
+        assert_eq!(
+            (track.track_number, track.disc_number),
+            (Some(u32::MAX), Some(u32::MAX))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rewritten_source_updates_fingerprints_and_duplicate_groups() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,fingerprint,probe_version,album)
+             VALUES(1,'/one.wav',zeroblob(32),2,'Album'),(2,'/two.wav',zeroblob(32),2,'Album');",
+        )?;
+        assert_eq!(store.duplicate_groups_page(0, 10)?.total, 1);
+        assert!(store.track(1)?.unwrap().fingerprint.is_some());
+        let source = rivu_metadata::WrittenSource {
+            fingerprint: [1; 32],
+            file_size: 123,
+            modified_ns: 456,
+        };
+        assert_eq!(
+            store.update_written_source(1, &source)?,
+            super::super::CatalogChanges {
+                changed: true,
+                library: true,
+                albums: true,
+                duplicate_groups: true,
+                duplicate_members: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            store.track(1)?.unwrap().fingerprint,
+            Some(blake3::Hash::from([1; 32]).to_hex().to_string())
+        );
+        let known = store.known_source(Path::new("/one.wav"))?.unwrap();
+        assert!(known.fingerprint.is_some() && known.media.is_none());
+        assert_eq!(store.duplicate_groups_page(0, 10)?.total, 0);
+        assert!(!store.update_written_source(2, &source)?.albums);
+        assert_eq!(store.duplicate_groups_page(0, 10)?.total, 1);
+        assert!(store.update_written_source(999, &source).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn written_source_no_op_preserves_probe_and_cache() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,fingerprint,file_size,modified_ns,probe_version)
+             VALUES(1,'/one.wav',zeroblob(32),123,456,2);",
+        )?;
+        store.track(1)?;
+        let mut source = rivu_metadata::WrittenSource {
+            fingerprint: [0; 32],
+            file_size: 123,
+            modified_ns: 456,
+        };
+        assert_eq!(store.update_written_source(1, &source)?, Default::default());
+        assert!(store.track_cache.borrow().entries.contains_key(&1));
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT probe_version FROM tracks WHERE id=1", [], |row| row
+                    .get::<_, i64>(0))?,
+            2
+        );
+        for size_changed in [false, true] {
+            if size_changed {
+                source.file_size += 1;
+            } else {
+                source.modified_ns += 1;
+            }
+            assert_eq!(
+                store.update_written_source(1, &source)?,
+                super::super::CatalogChanges {
+                    changed: true,
+                    library: size_changed,
+                    duplicate_members: true,
+                    ..Default::default()
+                }
+            );
+            assert!(!store.track_cache.borrow().entries.contains_key(&1));
+            assert_eq!(
+                store.conn.query_row(
+                    "SELECT file_size,modified_ns FROM tracks WHERE id=1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )?,
+                (source.file_size as i64, source.modified_ns),
+            );
+            assert_eq!(store.update_written_source(1, &source)?, Default::default());
+        }
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT probe_version FROM tracks WHERE id=1", [], |row| row
+                    .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
     fn no_op_edits_preserve_existing_tracks_but_reject_unknown_ids() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute(
-            "INSERT INTO tracks(id,path,raw_title,raw_artist,raw_album) VALUES(1,'one','Title','Artist','Album')",
+            "INSERT INTO tracks(id,path,title,artist,album) VALUES(1,'one','Title','Artist','Album')",
             [],
         )?;
         let original = store.track(1)?.unwrap();
@@ -1613,7 +1975,7 @@ mod request_tests {
     {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
-            "INSERT INTO tracks(id,path,raw_title,raw_album,track_number) VALUES
+            "INSERT INTO tracks(id,path,title,album,track_number) VALUES
              (1,'/album/one.wav','One','Album',1),
              (2,'/album/two.wav','Two','Album',2),
              (3,'/other/three.wav','Three','',NULL);",
@@ -1647,7 +2009,7 @@ mod request_tests {
     fn manual_play_count_preserves_activity_and_checks_sqlite_bounds() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
-            "INSERT INTO tracks(id,path,raw_album,last_played) VALUES (1,'/one.wav','Album',42)",
+            "INSERT INTO tracks(id,path,album,last_played) VALUES (1,'/one.wav','Album',42)",
         )?;
         store.enqueue_tracks(&[1])?;
         let _ = store.track(1)?;
@@ -1672,7 +2034,7 @@ mod request_tests {
     fn statistics_return_committed_changes_and_representative_last_played_effects() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
-            "INSERT INTO tracks(id,path,raw_album,track_number) VALUES
+            "INSERT INTO tracks(id,path,album,track_number) VALUES
              (1,'/album/one.wav','Album',1),(2,'/album/two.wav','Album',2),
              (3,'/plain/three.wav','',NULL);",
         )?;
@@ -1702,10 +2064,10 @@ mod request_tests {
     }
 
     #[test]
-    fn effective_noop_override_changes_member_facts_without_display_invalidation() -> Result<()> {
+    fn equal_tag_edits_have_no_persisted_or_projection_effects() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute(
-            "INSERT INTO tracks(id,path,raw_title,raw_album) VALUES(1,'one','Title','Album')",
+            "INSERT INTO tracks(id,path,title,album) VALUES(1,'one','Title','Album')",
             [],
         )?;
         store.enqueue_tracks(&[1])?;
@@ -1713,12 +2075,7 @@ mod request_tests {
         let queue = store.queue_state()?;
         assert_eq!(
             store.edit_track(1, Some("Title"), None, None, None, None)?,
-            TrackEditImpact {
-                changed: true,
-                member_facts: true,
-                library: false,
-                ..Default::default()
-            }
+            TrackEditImpact::default()
         );
         assert_eq!(store.track(1)?.unwrap(), track);
         assert_eq!(store.queue_state()?, queue);
@@ -1728,10 +2085,7 @@ mod request_tests {
         );
         assert_eq!(
             store.edit_track(1, None, None, Some("Album"), None, None)?,
-            TrackEditImpact {
-                changed: true,
-                ..Default::default()
-            }
+            TrackEditImpact::default()
         );
         assert_eq!(store.queue_state()?, queue);
         Ok(())

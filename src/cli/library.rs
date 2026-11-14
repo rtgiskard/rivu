@@ -29,35 +29,38 @@ pub(super) fn run(
             title,
             artist,
             album,
+            release_date,
+            track_number,
+            disc_number,
         } => {
             let patch = rivu_metadata::TagPatch {
                 title,
                 artist,
                 album,
+                release_date,
+                track_number: track_number.map(|value| (value > 0).then_some(value)),
+                disc_number: disc_number.map(|value| (value > 0).then_some(value)),
             };
-            if patch.title.is_some() || patch.artist.is_some() || patch.album.is_some() {
+            if patch.title.is_some()
+                || patch.artist.is_some()
+                || patch.album.is_some()
+                || patch.release_date.is_some()
+                || patch.track_number.is_some()
+                || patch.disc_number.is_some()
+            {
                 let report = rivu_metadata::edit_file(&path, &patch)?;
                 if json {
                     writeln!(output, "{}", serde_json::to_string_pretty(&report)?)?;
                 } else if report.changed() {
-                    let backup = report
-                        .backup_path()
-                        .context("Source tag edit omitted its backup path")?;
                     writeln!(
                         output,
                         "{}",
                         i18n.format(
                             "core-tags-written",
-                            &[
-                                (
-                                    "path",
-                                    TerminalEscaped(report.path.display()).to_string().into()
-                                ),
-                                (
-                                    "backup",
-                                    TerminalEscaped(backup.display()).to_string().into()
-                                ),
-                            ]
+                            &[(
+                                "path",
+                                TerminalEscaped(report.path.display()).to_string().into()
+                            )]
                         )
                     )?;
                 } else {
@@ -394,8 +397,8 @@ pub(super) fn run(
                                             .into()
                                         ),
                                         (
-                                            "overrides",
-                                            i18n.text(if member.has_overrides {
+                                            "decoder_hint",
+                                            i18n.text(if member.has_decoder_hint {
                                                 "core-yes"
                                             } else {
                                                 "core-no"
@@ -577,6 +580,53 @@ mod tests {
     }
 
     #[test]
+    fn title_only_source_edit_preserves_primary_id3v2_track() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("mixed.mp3");
+        let frames = b"TIT2\0\0\0\x04\0\0\x03OldTRCK\0\0\0\x02\0\0\x031";
+        let mut bytes = b"ID3\x04\0\0\0\0\0\x1a".to_vec();
+        bytes.extend_from_slice(frames);
+        let mut audio = vec![0; 417];
+        audio[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
+        for _ in 0..4 {
+            bytes.extend_from_slice(&audio);
+        }
+        let mut id3v1 = [0; 128];
+        id3v1[..3].copy_from_slice(b"TAG");
+        id3v1[93..97].copy_from_slice(b"2024");
+        id3v1[126] = 2;
+        id3v1[127] = 255;
+        bytes.extend_from_slice(&id3v1);
+        let data_dir = directory.path().join("no-server");
+        for json in [false, true] {
+            fs::write(&path, &bytes)?;
+            let before = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
+            assert_eq!(before.track_number, Some(1));
+            run(
+                &Localizer::for_cli("en-US"),
+                &data_dir,
+                &directory.path().join("absent.toml"),
+                LibraryAction::Tags {
+                    path: path.clone(),
+                    title: Some("Changed".into()),
+                    artist: None,
+                    album: None,
+                    release_date: None,
+                    track_number: None,
+                    disc_number: None,
+                },
+                json,
+            )?;
+            let after = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
+            assert_eq!(after.title.as_deref(), Some("Changed"));
+            assert_eq!(after.track_number, before.track_number);
+            assert!(!data_dir.exists());
+            assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn probe_json_accepts_non_utf8_source_names_without_mutating_the_file() -> Result<()> {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
@@ -608,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn source_tag_commands_are_offline_and_keep_original_backup() -> Result<()> {
+    fn source_tag_commands_are_offline_and_leave_no_backup() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("source.wav");
         let original = wav();
@@ -628,6 +678,9 @@ mod tests {
                     title: None,
                     artist: None,
                     album: None,
+                    release_date: None,
+                    track_number: None,
+                    disc_number: None,
                 },
                 json,
             )?;
@@ -645,6 +698,9 @@ mod tests {
                     title: Some("Source title".into()),
                     artist: Some("Source artist".into()),
                     album: None,
+                    release_date: Some("2024-03-09".into()),
+                    track_number: Some(3),
+                    disc_number: Some(2),
                 },
                 json,
             )?;
@@ -652,15 +708,11 @@ mod tests {
                 .context("supported WAV tags")?;
             assert_eq!(tags.title.as_deref(), Some("Source title"));
             assert_eq!(tags.artist.as_deref(), Some("Source artist"));
-            assert_eq!(fs::read_dir(directory.path())?.count(), 3);
+            assert_eq!(tags.release_date.as_deref(), Some("2024-03-09"));
+            assert_eq!(tags.track_number, Some(3));
+            assert_eq!(tags.disc_number, Some(2));
+            assert_eq!(fs::read_dir(directory.path())?.count(), 2);
         }
-        let backup = fs::read_dir(directory.path())?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<std::io::Result<Vec<_>>>()?
-            .into_iter()
-            .find(|candidate| candidate != &path && candidate != &config)
-            .context("missing original-file backup")?;
-        assert_eq!(fs::read(backup)?, original);
         assert!(
             !data_dir.exists(),
             "offline tag commands must not create a server data directory"

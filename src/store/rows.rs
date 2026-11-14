@@ -52,7 +52,7 @@ pub(super) fn cue_from_row(
         .transpose()
 }
 
-pub(super) const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint,bitrate_exact";
+pub(super) const TRACK_COLUMNS: &str = "id,path,title,artist,album,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint,bitrate_exact";
 /// Number of columns decoded by `track_from_row`; appended row payloads start here.
 pub(super) const TRACK_COLUMN_COUNT: usize = 25;
 
@@ -98,8 +98,8 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     })
 }
 
-pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact,path,channels,sample_rate,bits_per_sample,cue_number";
-pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact,t.path,t.channels,t.sample_rate,t.bits_per_sample,t.cue_number";
+pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,title,artist,album,duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact,path,channels,sample_rate,bits_per_sample,cue_number";
+pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,t.title,t.artist,t.album,t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact,t.path,t.channels,t.sample_rate,t.bits_per_sample,t.cue_number";
 
 pub(super) fn library_row_at(
     row: &rusqlite::Row<'_>,

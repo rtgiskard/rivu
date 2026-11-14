@@ -15,7 +15,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 27;
+pub const PROTOCOL_VERSION: u8 = 28;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -425,6 +425,20 @@ pub enum WireCommand {
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
         release_date: Option<String>,
+    },
+    LoadSourceTags {
+        track_id: i64,
+        encoding: rivu_format::tags::TagEncoding,
+    },
+    SyncTrackTags {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
+        expected: Box<rivu_format::tags::TagValues>,
+    },
+    SaveSourceTags {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
+        expected: Box<rivu_format::tags::TagValues>,
     },
     RemoveTracks {
         track_ids: Vec<i64>,
@@ -1310,6 +1324,27 @@ impl From<Command> for WireCommand {
                 decoder_hint,
                 release_date,
             },
+            Command::LoadSourceTags { track_id, encoding } => {
+                Self::LoadSourceTags { track_id, encoding }
+            }
+            Command::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            } => Self::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            },
+            Command::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
+            } => Self::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
+            },
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             Command::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             Command::Device { name } => Self::Device { name },
@@ -1614,6 +1649,27 @@ impl TryFrom<WireCommand> for Command {
                 album,
                 decoder_hint,
                 release_date,
+            },
+            WireCommand::LoadSourceTags { track_id, encoding } => {
+                Self::LoadSourceTags { track_id, encoding }
+            }
+            WireCommand::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            } => Self::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            },
+            WireCommand::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
+            } => Self::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
             },
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             WireCommand::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },

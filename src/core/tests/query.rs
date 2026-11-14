@@ -212,11 +212,11 @@ fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "UPDATE tracks SET path='/music/a/deep/missing.wav', raw_title='Needle Nested', favorite=1, missing=1 WHERE id=1;
-             UPDATE tracks SET path='/music/a/deep/present.wav', raw_title='Needle Present', favorite=1, missing=0 WHERE id=2;
-             UPDATE tracks SET path='/music/b/deep/missing.wav', raw_title='Needle Other', favorite=0, missing=1 WHERE id=3;
-             UPDATE tracks SET path='/music/direct.wav', raw_title='Needle Direct', favorite=1, missing=1 WHERE id=4;
-             INSERT INTO tracks(id,path,raw_title,favorite,missing) VALUES
+            "UPDATE tracks SET path='/music/a/deep/missing.wav', title='Needle Nested', favorite=1, missing=1 WHERE id=1;
+             UPDATE tracks SET path='/music/a/deep/present.wav', title='Needle Present', favorite=1, missing=0 WHERE id=2;
+             UPDATE tracks SET path='/music/b/deep/missing.wav', title='Needle Other', favorite=0, missing=1 WHERE id=3;
+             UPDATE tracks SET path='/music/direct.wav', title='Needle Direct', favorite=1, missing=1 WHERE id=4;
+             INSERT INTO tracks(id,path,title,favorite,missing) VALUES
              (5,'/music/present/only.wav','Other',0,0),
              (6,'/music/hidden/deep/missing.wav','Other',1,1);",
         )

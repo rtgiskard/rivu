@@ -52,6 +52,8 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 relocation_id: None,
                 processing_id: None,
                 database_optimization: None,
+                source_tags: None,
+                source_file_saved: false,
             },
         );
         assert!(matches!(
@@ -120,6 +122,8 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 relocation_id: None,
                 processing_id: None,
                 database_optimization: None,
+                source_tags: None,
+                source_file_saved: false,
             }),
             &mut frame,
         )
@@ -143,6 +147,8 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 relocation_id: None,
                 processing_id: None,
                 database_optimization: None,
+                source_tags: None,
+                source_file_saved: false,
             },
         );
     });
@@ -315,6 +321,8 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 relocation_id: None,
                 processing_id: None,
                 database_optimization: None,
+                source_tags: None,
+                source_file_saved: false,
             },
         );
     });

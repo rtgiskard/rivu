@@ -186,6 +186,7 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
         "UPDATE rivu_meta SET format_version=99 WHERE singleton=1",
         "UPDATE rivu_meta SET format_version=1 WHERE singleton=1",
         "UPDATE rivu_meta SET format_version=3 WHERE singleton=1",
+        "UPDATE rivu_meta SET format_version=5 WHERE singleton=1",
         "DELETE FROM rivu_meta",
         "DROP TABLE playlist_entries",
     ] {
@@ -265,7 +266,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     assert!(!checked.needs_changes);
     let mut report = Report::default();
     apply_database_change(&options, &mut report, |transaction| {
-        transaction.execute("UPDATE tracks SET raw_title='Changed' WHERE id=1", [])?;
+        transaction.execute("UPDATE tracks SET title='Changed' WHERE id=1", [])?;
         Ok(())
     })
     .unwrap();
@@ -435,10 +436,12 @@ fn version_two_fixture() -> (tempfile::TempDir, Options) {
              codec='flac',channels=2,sample_rate=44100,probe_version=3,bitrate_bps=1000000,
              track_number=2,disc_number=1,bitrate_exact=1,bits_per_sample=16,
              release_date='2001-02-03',relocation_independent=1,decoder_hint=2 WHERE id=1;
+         UPDATE tracks SET raw_title='Hidden title',title_override='',raw_artist='Hidden artist',
+             artist_override='',raw_album='Hidden album',album_override='' WHERE id=2;
          UPDATE rivu_meta SET current_queue_entry_id=42;",
     )
     .unwrap();
-    target_schema::validate_catalog_source(&conn).unwrap();
+    target_schema::validate_tag_source(&conn).unwrap();
     (directory, options)
 }
 
@@ -455,6 +458,27 @@ fn occurrence_snapshot(conn: &Connection) -> Vec<(i64, i64, i64, i64)> {
 
 fn track_snapshot(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
     let mut statement = conn.prepare("SELECT * FROM tracks ORDER BY id").unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| {
+            (0..columns).map(|column| row.get(column)).collect()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn effective_track_snapshot(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id,path,fingerprint,file_size,modified_ns,
+        COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),
+        COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,
+        play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,
+        probe_version,bitrate_bps,track_number,disc_number,bitrate_exact,bits_per_sample,
+        release_date,favorite,relocation_independent,decoder_hint FROM tracks ORDER BY id",
+        )
+        .unwrap();
     let columns = statement.column_count();
     statement
         .query_map([], |row| {
@@ -489,6 +513,7 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     let source_version = format_version(&conn);
     assert_eq!(source_version, 2);
     let tracks = track_snapshot(&conn);
+    let effective_tracks = effective_track_snapshot(&conn);
     let albums = album_snapshot(&conn);
     let occurrences = occurrence_snapshot(&conn);
     let schema: i64 = conn
@@ -520,7 +545,7 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     assert_eq!(applied.backups[0].status, BackupStatus::Complete);
     let backup = Connection::open(&applied.backups[0].path).unwrap();
     assert_eq!(format_version(&backup), source_version);
-    target_schema::validate_catalog_source(&backup).unwrap();
+    target_schema::validate_tag_source(&backup).unwrap();
     assert_eq!(occurrence_snapshot(&backup), occurrences);
     assert_eq!(track_snapshot(&backup), tracks);
     assert_eq!(album_snapshot(&backup), albums);
@@ -550,7 +575,7 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
             .collect::<Vec<_>>()
     );
     assert_eq!(occurrence_snapshot(&conn), occurrences);
-    assert_eq!(track_snapshot(&conn), tracks);
+    assert_eq!(track_snapshot(&conn), effective_tracks);
     assert_eq!(album_snapshot(&conn), albums);
     assert_eq!(
         conn.query_row("SELECT current_queue_entry_id FROM rivu_meta", [], |row| {
@@ -561,7 +586,7 @@ fn catalog_migration_preserves_previous_order_contents_and_queue_after_reopen() 
     );
     let statistics = conn
         .query_row(
-            "SELECT title_override,favorite,play_count,last_played FROM tracks WHERE id=1",
+            "SELECT title,favorite,play_count,last_played FROM tracks WHERE id=1",
             [],
             |row| {
                 Ok((
@@ -718,7 +743,7 @@ fn upgraded_history_keeps_album_summary_triggers_writable() {
     let conn = Connection::open(options.data_dir.join("library.db")).unwrap();
     let original = album_snapshot(&conn);
     conn.execute_batch(
-        "INSERT INTO tracks(id,path,raw_album,raw_artist)
+        "INSERT INTO tracks(id,path,album,artist)
              VALUES(5,'/fresh/one.flac','Fresh album','First artist'),
                    (6,'/fresh/two.flac','Fresh album','Second artist');",
     )
@@ -732,17 +757,11 @@ fn upgraded_history_keeps_album_summary_triggers_writable() {
         .unwrap()
     };
     assert_eq!(summary("Fresh album"), (2, "Various artists".to_owned()));
-    conn.execute(
-        "UPDATE tracks SET artist_override='First artist' WHERE id=6",
-        [],
-    )
-    .unwrap();
+    conn.execute("UPDATE tracks SET artist='First artist' WHERE id=6", [])
+        .unwrap();
     assert_eq!(summary("Fresh album"), (2, "First artist".to_owned()));
-    conn.execute(
-        "UPDATE tracks SET album_override='Moved album' WHERE id=6",
-        [],
-    )
-    .unwrap();
+    conn.execute("UPDATE tracks SET album='Moved album' WHERE id=6", [])
+        .unwrap();
     assert_eq!(summary("Fresh album"), (1, "First artist".to_owned()));
     assert_eq!(summary("Moved album"), (1, "First artist".to_owned()));
     conn.execute_batch("DELETE FROM tracks WHERE id IN (5,6);")
@@ -880,9 +899,10 @@ fn failed_catalog_migration_rolls_back_schema_version_and_data() {
     let mut report = Report::default();
     let error = apply_database_change(&options, &mut report, |transaction| {
         catalog_order::apply(transaction)?;
+        track_tags::apply(transaction)?;
         transaction.execute_batch(
             "CREATE TABLE unexpected(value TEXT);
-             UPDATE tracks SET raw_title='must roll back' WHERE id=1;",
+             UPDATE tracks SET title='must roll back' WHERE id=1;",
         )?;
         target_schema::validate(transaction)
     })
@@ -891,11 +911,11 @@ fn failed_catalog_migration_rolls_back_schema_version_and_data() {
     assert_eq!(report.backups.len(), 1);
     assert_eq!(report.backups[0].status, BackupStatus::Complete);
     let backup = Connection::open(&report.backups[0].path).unwrap();
-    target_schema::validate_catalog_source(&backup).unwrap();
+    target_schema::validate_tag_source(&backup).unwrap();
     assert_eq!(occurrence_snapshot(&backup), occurrences);
     assert_eq!(track_snapshot(&backup), tracks);
     assert_eq!(album_snapshot(&backup), albums);
-    target_schema::validate_catalog_source(&conn).unwrap();
+    target_schema::validate_tag_source(&conn).unwrap();
     assert_eq!(occurrence_snapshot(&conn), occurrences);
     assert_eq!(track_snapshot(&conn), tracks);
     assert_eq!(album_snapshot(&conn), albums);
@@ -934,4 +954,80 @@ fn incompatible_old_formats_are_rejected_before_backup_or_schema_changes() {
             );
         }
     }
+}
+
+#[test]
+fn schema_four_tag_cutover_preserves_effective_empty_values_sequences_and_audio() {
+    let (directory, options) = version_two_fixture();
+    let path = options.data_dir.join("library.db");
+    let conn = Connection::open(&path).unwrap();
+    let audio = directory.path().join("preserved.flac");
+    fs::write(&audio, b"audio bytes must remain untouched").unwrap();
+    catalog_order::apply(&conn).unwrap();
+    conn.execute(
+        "UPDATE tracks SET path=?1 WHERE id=1",
+        [audio.to_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "UPDATE playlists SET position=CASE id WHEN 30 THEN 0 WHEN 10 THEN 1 ELSE 2 END WHERE id>0;
+        INSERT INTO tracks(id,path) VALUES(10000,'/deleted-sequence.wav');
+        DELETE FROM tracks WHERE id=10000;",
+    )
+    .unwrap();
+    let tracks = effective_track_snapshot(&conn);
+    let occurrences = occurrence_snapshot(&conn);
+    let albums = album_snapshot(&conn);
+    let applied = execute(&options, Mode::Apply).unwrap();
+    assert_eq!(applied.backups.len(), 1);
+    assert_eq!(
+        format_version(&Connection::open(&applied.backups[0].path).unwrap()),
+        4
+    );
+    assert_eq!(format_version(&conn), 6);
+    assert_eq!(track_snapshot(&conn), tracks);
+    assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(album_snapshot(&conn), albums);
+    assert_eq!(
+        fs::read(&audio).unwrap(),
+        b"audio bytes must remain untouched"
+    );
+    let empty: (String, String, String) = conn
+        .query_row(
+            "SELECT title,artist,album FROM tracks WHERE id=2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(empty, (String::new(), String::new(), String::new()));
+    let order = conn
+        .prepare("SELECT id FROM playlists WHERE id>0 ORDER BY position,id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(order, [30, 10, 20]);
+    let obsolete: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN (
+            'raw_title','raw_artist','raw_album','title_override','artist_override','album_override')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(obsolete, 0);
+    target_schema::validate(&conn).unwrap();
+    conn.execute("INSERT INTO tracks(path) VALUES('/next-track.wav')", [])
+        .unwrap();
+    assert_eq!(conn.last_insert_rowid(), 10001);
+    assert!(execute(&options, Mode::Apply).unwrap().backups.is_empty());
+}
+
+#[test]
+fn target_schema_keeps_quoted_identifier_spelling_significant() {
+    let conn = Connection::open_in_memory().unwrap();
+    database::create_current(&conn).unwrap();
+    conn.execute_batch("ALTER TABLE tracks RENAME COLUMN title TO \"Title\";")
+        .unwrap();
+    database::validate_structure(&conn).unwrap();
+    let error = target_schema::validate(&conn).unwrap_err();
+    assert!(format!("{error:#}").contains("Schema definition differs"));
 }

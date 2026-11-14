@@ -73,6 +73,10 @@ fn offline_tag_json_preserves_paths_and_replacement_facts() {
         wav.write_sample(0_i16).unwrap();
         wav.finalize().unwrap();
         let original = fs::read(&path).unwrap();
+        let files_before_save = fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<std::collections::BTreeSet<_>>();
 
         let read = success_json(tags(&path, directory.path(), false));
         assert_json_path(&read["path"], &path);
@@ -81,20 +85,14 @@ fn offline_tag_json_preserves_paths_and_replacement_facts() {
         let replaced = success_json(tags(&path, directory.path(), true));
         assert_eq!(replaced["outcome"], "replaced");
         assert_json_path(&replaced["path"], &path);
-        let backups: Vec<_> = fs::read_dir(&parent)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .unwrap()
-                    .as_bytes()
-                    .starts_with(b".rivu-backup-")
-            })
-            .collect();
-        assert_eq!(backups.len(), 1);
-        let backup = backups[0].canonicalize().unwrap();
-        assert_json_path(&replaced["backup_path"], &backup);
-        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(&parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<std::collections::BTreeSet<_>>(),
+            files_before_save
+        );
+        assert!(replaced.get("backup_path").is_none());
         let edited = fs::read(&path).unwrap();
         let read = success_json(tags(&path, directory.path(), false));
         assert_json_path(&read["path"], &path);
@@ -123,7 +121,7 @@ fn offline_tag_json_preserves_paths_and_replacement_facts() {
         let value: serde_json::Value = serde_json::from_slice(&failure.stderr).unwrap();
         assert_eq!(value["outcome"], "before_replace");
         assert_json_path(&value["path"], &path);
-        assert!(value["backup_path"].is_null());
+        assert!(value.get("backup_path").is_none());
         assert!(!directory.path().join("no-server").exists());
     }
 }

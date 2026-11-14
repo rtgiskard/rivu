@@ -21,7 +21,7 @@ core-playlist-entry = { $index }	条目 { $entry }	曲目 { $track }
 core-duplicate-groups = 历史同内容分组：{ $count }（使用缓存哈希，未经重新验证）
 core-duplicate-members = 历史同内容成员：{ $count }
 core-duplicate-group = { $fingerprint }	{ $total } 个成员	{ $missing } 个缺失	{ $present } 个可用
-core-duplicate-member = { $id }	{ $path }	{ $status }	收藏={ $favorite } 修改={ $overrides } 播放={ $plays } 播放列表引用={ $playlists } 队列引用={ $queue } 独立={ $independent }
+core-duplicate-member = { $id }	{ $path }	{ $status }	收藏={ $favorite } 解码偏好={ $decoder_hint } 播放={ $plays } 播放列表引用={ $playlists } 队列引用={ $queue } 独立={ $independent }
 core-optimization = 数据库优化完成
     数据库：{ $before } -> { $after } 字节
     WAL：{ $wal-before } -> { $wal-after } 字节
@@ -57,10 +57,9 @@ core-tags = 源文件标签：{ $path }
       曲目编号：{ $track }
       碟片编号：{ $disc }
       发行日期：{ $date }
-core-tags-written = 已更新源文件标签：{ $path }
-    原文件备份：{ $backup }
-    未更改音乐库数据库中的覆盖值。
-core-tags-unchanged = 源文件标签未变：{ $path }（未创建备份）
+core-tags-written = 已规范化并更新源文件标签：{ $path }
+    不保留原文件备份。未更改音乐库数据库。
+core-tags-unchanged = 源文件标签已符合请求值及目标格式：{ $path }
 core-help-about = 轻量、本地优先的音乐播放器
 core-help-long = 不带命令仅打印帮助。使用 gui 打开桌面界面，连接已有核心；若不存在则自动启动独立核心服务。每个数据目录共享一个核心，控制命令连接该实例。关闭窗口不会停止核心。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
 core-help-long-tui = 不带命令仅打印帮助。使用 tui 打开终端界面，连接已有核心；若不存在则自动启动独立核心服务。Ctrl+C 或 :q 仅关闭当前 TUI，核心和播放继续运行；:qa 退出应用并停止核心和播放。列出输出设备、探测文件和读写源文件标签均可离线运行，无需实例。
@@ -111,10 +110,13 @@ core-help-library-clean-missing = 清理缺失记录及引用
 core-help-library-stats = 显示音乐库规模和累计播放次数
 core-help-library-history = 显示最近播放的曲目，每首仅列一次
 core-help-library-probe = 读取元数据并检查解码支持，不启动实例
-core-help-library-tags = 离线读取源文件标签。提供 --title、--artist 或 --album 时，将指定字段写入源文件并备份原文件；无需服务器，不更新音乐库数据库。值未改变时不创建备份。
+core-help-library-tags = 离线读取源文件标签。提供标签字段时，规范化并写入源文件，不保留备份；无需服务器，不更新音乐库数据库。ID3 统一使用 v2.4 和 UTF-8，并删除次要标签。
 core-help-library-tags-title = 写入源文件标题；空字符串表示明确清空
 core-help-library-tags-artist = 写入源文件艺人；空字符串表示明确清空
 core-help-library-tags-album = 写入源文件专辑；空字符串表示明确清空
+core-help-library-tags-release-date = 写入发行日期，保留年、年月或完整日期精度；空字符串表示清空
+core-help-library-tags-track-number = 写入曲号；零表示清空
+core-help-library-tags-disc-number = 写入碟号；零表示清空
 core-help-library-optimize = 回收数据库空间并更新查询统计；请先停止播放和扫描
 core-help-library-duplicates = 只读查看历史内容相同的分组；缓存哈希不代表重新验证
 core-help-library-relocate = 在重新验证的目标路径保留缺失曲目的身份

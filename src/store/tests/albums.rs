@@ -117,7 +117,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
     store
         .conn
         .execute(
-            "UPDATE tracks SET album_override='',artist_override='' WHERE path='/music/b/a.flac'",
+            "UPDATE tracks SET album='',artist='' WHERE path='/music/b/a.flac'",
             [],
         )
         .unwrap();
@@ -146,16 +146,18 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
         assert!(title.trim().is_empty());
         external
             .execute(
-                "INSERT INTO tracks(path,raw_album,raw_artist) VALUES(?1,?2,'Excluded artist')",
+                "INSERT INTO tracks(path,album,artist) VALUES(?1,?2,'Excluded artist')",
                 params![format!("/music/{index}.flac"), title],
             )
             .unwrap();
     }
     for (index, title) in ["", whitespace].iter().enumerate() {
-        external.execute(
-            "INSERT INTO tracks(path,raw_album,album_override,raw_artist) VALUES(?1,'Tagged',?2,'Excluded artist')",
-            params![format!("/override/{index}.flac"), title],
-        ).unwrap();
+        external
+            .execute(
+                "INSERT INTO tracks(path,album,artist) VALUES(?1,?2,'Excluded artist')",
+                params![format!("/override/{index}.flac"), title],
+            )
+            .unwrap();
     }
     // These nonblank titles stay distinct, including surrounding whitespace
     // and Unicode characters that are not in Unicode White_Space.
@@ -172,7 +174,7 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
         assert!(!title.trim().is_empty());
         external
             .execute(
-                "INSERT INTO tracks(path,raw_album) VALUES(?1,?2)",
+                "INSERT INTO tracks(path,album) VALUES(?1,?2)",
                 params![format!("/valid/{index}.flac"), title],
             )
             .unwrap();
@@ -250,14 +252,16 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
 }
 
 #[test]
-fn album_eligibility_transitions_follow_overrides_external_commits_and_rollback() {
+fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("album-transitions.db");
     let store = Store::open(&path).unwrap();
     let external = Connection::open(&path).unwrap();
-    external.execute_batch(
-        "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES(1,'/music/one.flac','','Artist');",
-    ).unwrap();
+    external
+        .execute_batch(
+            "INSERT INTO tracks(id,path,album,artist) VALUES(1,'/music/one.flac','','Artist');",
+        )
+        .unwrap();
     let check = |title: Option<&str>, artist: &str| {
         for sort in [AlbumSort::Title, AlbumSort::Artist] {
             let page = store.albums_page(None, sort, 0, 24).unwrap();
@@ -280,7 +284,7 @@ fn album_eligibility_transitions_follow_overrides_external_commits_and_rollback(
     };
     check(None, "");
     external
-        .execute("UPDATE tracks SET raw_album=' Tagged ' WHERE id=1", [])
+        .execute("UPDATE tracks SET album=' Tagged ' WHERE id=1", [])
         .unwrap();
     check(Some(" Tagged "), "Artist");
     let stale = store
@@ -290,7 +294,7 @@ fn album_eligibility_transitions_follow_overrides_external_commits_and_rollback(
         .remove(0)
         .key;
     external
-        .execute("UPDATE tracks SET album_override='' WHERE id=1", [])
+        .execute("UPDATE tracks SET album='' WHERE id=1", [])
         .unwrap();
     check(None, "");
     assert_eq!(
@@ -299,37 +303,34 @@ fn album_eligibility_transitions_follow_overrides_external_commits_and_rollback(
     );
     assert!(store.queue_album(&stale, true).is_err());
     external
-        .execute("UPDATE tracks SET raw_album='Raw changed' WHERE id=1", [])
+        .execute("UPDATE tracks SET album='Changed' WHERE id=1", [])
         .unwrap();
-    check(None, "");
-    external
-        .execute("UPDATE tracks SET album_override=NULL WHERE id=1", [])
-        .unwrap();
-    check(Some("Raw changed"), "Artist");
+    check(Some("Changed"), "Artist");
     external
         .execute(
-            "UPDATE tracks SET album_override=?1 WHERE id=1",
+            "UPDATE tracks SET album=?1 WHERE id=1",
             ["\u{a0}\u{2003}\u{202f}\u{3000}"],
         )
         .unwrap();
     check(None, "");
-    external.execute_batch("BEGIN; UPDATE tracks SET album_override='Rollback',artist_override='Rolled back' WHERE id=1;").unwrap();
+    external
+        .execute_batch("BEGIN; UPDATE tracks SET album='Rollback',artist='Rolled back' WHERE id=1;")
+        .unwrap();
     check(None, "");
     external.execute_batch("ROLLBACK;").unwrap();
     check(None, "");
-    external.execute_batch("BEGIN; UPDATE tracks SET album_override=' Override ',artist_override='' WHERE id=1; COMMIT;").unwrap();
+    external
+        .execute_batch("BEGIN; UPDATE tracks SET album=' Override ',artist='' WHERE id=1; COMMIT;")
+        .unwrap();
     check(Some(" Override "), "");
     let tx = store.conn.unchecked_transaction().unwrap();
-    tx.execute("UPDATE tracks SET album_override='' WHERE id=1", [])
+    tx.execute("UPDATE tracks SET album='' WHERE id=1", [])
         .unwrap();
     check(None, "");
     tx.rollback().unwrap();
     check(Some(" Override "), "");
     external
-        .execute(
-            "UPDATE tracks SET raw_album='',album_override=NULL WHERE id=1",
-            [],
-        )
+        .execute("UPDATE tracks SET album='' WHERE id=1", [])
         .unwrap();
     check(None, "");
     external
@@ -444,7 +445,13 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
         );
         assert!(store.albums_page(None, sort, 0, 0).unwrap().rows.is_empty());
     }
-    store.conn.execute("UPDATE tracks SET album_override='Effective',artist_override='Replacement' WHERE path='/music/b/1.flac'", []).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE tracks SET album='Effective',artist='Replacement' WHERE path='/music/b/1.flac'",
+            [],
+        )
+        .unwrap();
     for query in ["effective", "replacement"] {
         let page = store
             .albums_page(Some(query), AlbumSort::Title, 0, 24)
@@ -541,7 +548,7 @@ fn album_representatives_keep_disc_track_title_and_id_priority_after_updates() {
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_title,raw_album,disc_number,track_number) VALUES
+            "INSERT INTO tracks(id,path,title,album,disc_number,track_number) VALUES
             (1,'/music/a/1.flac','A','Shared',NULL,1),
             (2,'/music/a/2.flac','A','Shared',2,1),
             (3,'/music/a/3.flac','A','Shared',1,NULL),
@@ -562,7 +569,7 @@ fn album_representatives_keep_disc_track_title_and_id_priority_after_updates() {
     };
     assert_eq!(representative(), 5);
     for (sql, expected) in [
-        ("UPDATE tracks SET title_override='' WHERE id=6", 6),
+        ("UPDATE tracks SET title='' WHERE id=6", 6),
         ("UPDATE tracks SET disc_number=NULL WHERE id=6", 5),
         ("DELETE FROM tracks WHERE id=5", 4),
         ("UPDATE tracks SET track_number=NULL WHERE id=4", 3),
@@ -582,7 +589,7 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_title,raw_album,raw_artist) VALUES
+            "INSERT INTO tracks(id,path,title,album,artist) VALUES
             (1,'/music/a/1.flac','A One','Shared','ÉTÉ_100%'),
             (2,'/music/a/2.flac','Two','Shared','ÉTÉ_100%'),
             (3,'/music/a/3.flac','Three','Shared','Other'),
@@ -632,9 +639,9 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
     );
     let tx = store.conn.unchecked_transaction().unwrap();
     tx.execute_batch(
-        "UPDATE tracks SET path='/moved.flac',album_override='' WHERE id=1;
+        "UPDATE tracks SET path='/moved.flac',album='' WHERE id=1;
          DELETE FROM tracks WHERE id=3;
-         INSERT INTO tracks(path,raw_album,raw_artist) VALUES('/new/5.flac','New','New');",
+         INSERT INTO tracks(path,album,artist) VALUES('/new/5.flac','New','New');",
     )
     .unwrap();
     assert_eq!(
@@ -652,8 +659,8 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
     external
         .execute_batch(
             "BEGIN;
-         UPDATE tracks SET artist_override='ÉTÉ_100%' WHERE id=3;
-         UPDATE tracks SET raw_artist='Hidden',artist_override='ÉTÉ_100%' WHERE id=1;
+         UPDATE tracks SET artist='ÉTÉ_100%' WHERE id=3;
+         UPDATE tracks SET artist='Hidden',artist='ÉTÉ_100%' WHERE id=1;
          COMMIT;",
         )
         .unwrap();
@@ -668,7 +675,7 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
         .unwrap();
     assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
     external
-        .execute("UPDATE tracks SET artist_override='' WHERE id=1", [])
+        .execute("UPDATE tracks SET artist='' WHERE id=1", [])
         .unwrap();
     assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
     external
@@ -684,9 +691,12 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
             .total,
         0
     );
-    external.execute(
-        "UPDATE tracks SET path='/moved.flac',album_override='',title_override='Moved' WHERE id=1", []
-    ).unwrap();
+    external
+        .execute(
+            "UPDATE tracks SET path='/moved.flac',album='',title='Moved' WHERE id=1",
+            [],
+        )
+        .unwrap();
     let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].key.directory, Path::new("/music/a"));
@@ -708,7 +718,7 @@ fn single_member_album_keeps_membership_across_artist_transitions_and_rollback()
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES
+            "INSERT INTO tracks(id,path,album,artist) VALUES
          (1,'/music/one.flac','Solo','');",
         )
         .unwrap();
@@ -732,11 +742,8 @@ fn single_member_album_keeps_membership_across_artist_transitions_and_rollback()
         );
     }
     let tx = store.conn.unchecked_transaction().unwrap();
-    tx.execute(
-        "UPDATE tracks SET artist_override='Transient' WHERE id=1",
-        [],
-    )
-    .unwrap();
+    tx.execute("UPDATE tracks SET artist='Transient' WHERE id=1", [])
+        .unwrap();
     assert_eq!(
         store
             .albums_page(Some("Transient"), AlbumSort::Title, 0, 24)
@@ -796,6 +803,7 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
             None,
         )
         .unwrap();
+    store.set_favorite(&[source_id], true).unwrap();
     store
         .conn
         .execute("UPDATE tracks SET missing=1 WHERE id=?1", [source_id])
@@ -833,23 +841,24 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
         .unwrap();
     store.commit_relocation(&prepared).unwrap();
     let albums = snapshot(&store);
-    assert_eq!(albums.len(), 2);
+    assert_eq!(albums.len(), 1);
     assert!(
         albums
             .iter()
             .all(|album| album.0.directory == Path::new("/music/new"))
     );
-    assert!(albums.iter().all(|album| album.1 == 1));
-    let moved = albums
-        .iter()
-        .find(|album| album.0.title == "User album")
-        .unwrap();
-    assert_eq!(moved.2, "User artist");
-    assert_eq!(moved.3.id, source_id);
-    assert_eq!(moved.3.path, target.path);
-    // Scanned metadata moves an unoverridden member while preserving user edits.
-    target.media.album = "Ignored raw album".into();
-    target.media.artist = "Ignored raw artist".into();
+    let moved = &albums[0];
+    assert_eq!(moved.0.title, "Destination");
+    assert_eq!(moved.1, 2);
+    assert_eq!(moved.2, "New artist");
+    assert_eq!(moved.3.id, peer_id);
+    assert!(store.track(source_id).unwrap().unwrap().favorite);
+    assert!(store.track(target_id).unwrap().is_none());
+    assert_eq!(moved.3.path, peer.path);
+    assert_eq!(store.track(source_id).unwrap().unwrap().path, target.path);
+    // Rescans refresh both the relocated member and its peer, splitting the album.
+    target.media.album = "Refreshed target album".into();
+    target.media.artist = "Refreshed target artist".into();
     peer.media.album = "Rescanned album".into();
     peer.media.artist = "Rescanned artist".into();
     store.apply_scan(&scan(vec![target, peer])).unwrap();
@@ -869,15 +878,26 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
     );
     assert_eq!(
         store
-            .albums_page(Some("User artist"), AlbumSort::Title, 0, 24)
+            .albums_page(Some("Refreshed target artist"), AlbumSort::Title, 0, 24)
             .unwrap()
             .total,
         1
     );
+    assert_eq!(
+        store
+            .albums_page(Some("User artist"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
     store.remove_tracks(&[peer_id]).unwrap();
     let albums = snapshot(&store);
     assert_eq!(albums.len(), 1);
-    assert_eq!(albums[0].0.title, "User album");
+    assert_eq!(albums[0].0.title, "Refreshed target album");
+    assert_eq!(albums[0].1, 1);
+    assert_eq!(albums[0].2, "Refreshed target artist");
+    assert_eq!(albums[0].3.id, source_id);
+    assert!(store.track(source_id).unwrap().unwrap().favorite);
     store.remove_tracks(&[source_id]).unwrap();
     assert!(snapshot(&store).is_empty());
 }
@@ -890,7 +910,7 @@ fn album_paging_work_is_independent_of_member_count_and_inserts_are_linear() {
             let counter = SqlVmSteps::new(&store.conn);
             store.conn.execute(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
-             INSERT INTO tracks(path,raw_title,raw_album,raw_artist)
+             INSERT INTO tracks(path,title,album,artist)
              SELECT '/music/large/'||id||'.flac','Track '||id,'Large','ÉTÉ_100%' FROM ids",
             [total as i64]
         ).unwrap();

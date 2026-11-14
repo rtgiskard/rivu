@@ -162,7 +162,8 @@ fn relocation_preserves_unrelated_current_projection_after_selection_changes() {
 #[test]
 fn manual_relocation_preserves_source_identity_state_and_references() {
     let (_directory, mut core, source, target) = relocation_fixture();
-    let target_path = core.track(target).unwrap().path;
+    let target_track = core.track(target).unwrap();
+    let target_path = target_track.path;
     core.command(Command::SetFavorite {
         track_ids: vec![source],
         favorite: true,
@@ -209,7 +210,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     assert_eq!(status.phase, RelocationPhase::Completed);
     let retained = core.track(source).unwrap();
     assert_eq!(retained.path, target_path);
-    assert_eq!(retained.title, "User title");
+    assert_eq!(retained.title, target_track.title);
     assert_eq!(retained.decoder_hint, DecoderHint::Native);
     assert!(retained.favorite && !retained.missing);
     assert_eq!(retained.play_count, 1);

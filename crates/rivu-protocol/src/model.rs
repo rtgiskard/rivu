@@ -882,6 +882,23 @@ pub enum Command {
         decoder_hint: Option<DecoderHint>,
         release_date: Option<String>,
     },
+    /// Explicit file read; never updates database metadata.
+    LoadSourceTags {
+        track_id: i64,
+        encoding: rivu_format::tags::TagEncoding,
+    },
+    /// Commit the displayed tag values if the database baseline is still current.
+    SyncTrackTags {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
+        expected: Box<rivu_format::tags::TagValues>,
+    },
+    /// Normalize the source tags, then commit the verified values to the database.
+    SaveSourceTags {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
+        expected: Box<rivu_format::tags::TagValues>,
+    },
     RemoveTracks {
         track_ids: Vec<i64>,
     },

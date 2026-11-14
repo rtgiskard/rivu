@@ -14,14 +14,14 @@ use std::sync::Arc;
 // Bump when probing semantics change; fingerprints remain reusable.
 pub(super) const PROBE_VERSION: i64 = 2;
 
-pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
+pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
 
 // Keep both identity selectors on the same projection without allocating SQL.
 macro_rules! effective_source_select {
     ($identity:literal) => {
         concat!(
-            "SELECT path,fingerprint,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=",
+            "SELECT path,fingerprint,title,artist,album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=",
             $identity
         )
     };
@@ -45,8 +45,8 @@ fn staged_fields(cue: bool) -> impl Iterator<Item = &'static str> {
         .chain(CUE_FIELDS.split(',').filter(move |_| cue))
 }
 
-// Source facts replace source facts; overrides, history and references stay owned
-// by the retained track. The source relation is always aliased as `s`.
+// Source facts, including all six tags, replace the previous scan snapshot.
+// Preferences, history and references stay owned by the retained track.
 pub(super) fn write_source_assignments(sql: &mut String, cue: bool) {
     use std::fmt::Write;
     sql.push_str("missing=0");
@@ -62,7 +62,7 @@ pub(super) fn staged_table_schema(prefix: &str, cue: bool) -> String {
         ""
     };
     format!(
-        "{prefix},path TEXT NOT NULL,fingerprint BLOB,file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,raw_title TEXT NOT NULL,raw_artist TEXT NOT NULL,raw_album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,bits_per_sample INTEGER,release_date TEXT{cue}"
+        "{prefix},path TEXT NOT NULL,fingerprint BLOB,file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,bits_per_sample INTEGER,release_date TEXT{cue}"
     )
 }
 
@@ -124,9 +124,9 @@ pub(super) fn staged_library_column(cue: bool) -> String {
     };
     format!("COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
         OR t.fingerprint IS NOT s.fingerprint OR t.file_size IS NOT s.file_size
-        OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
-        OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
-        OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
+        OR t.title IS NOT s.title
+        OR t.artist IS NOT s.artist
+        OR t.album IS NOT s.album
         OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.channels IS NOT s.channels
         OR t.sample_rate IS NOT s.sample_rate OR t.missing IS NOT 0
         OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
@@ -134,12 +134,12 @@ pub(super) fn staged_library_column(cue: bool) -> String {
         OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date {cue}),0)")
 }
 
-/// Compare staged values before updating tracks; hidden raw changes are excluded.
+/// Compare staged source values before updating tracks.
 pub(super) fn staged_projection_columns(cue: bool) -> String {
     let visible = "t.path IS NOT s.path
-        OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
-        OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
-        OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
+        OR t.title IS NOT s.title
+        OR t.artist IS NOT s.artist
+        OR t.album IS NOT s.album
         OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.missing IS NOT 0
         OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
         OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
@@ -160,7 +160,7 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
         OR t.release_date IS NOT s.release_date {cue_values}"
     );
     let old_album = super::albums::eligible_member("t");
-    let new_album = rivu_format::database::eligible_title("COALESCE(t.album_override,s.raw_album)");
+    let new_album = rivu_format::database::eligible_title("s.album");
     let representative = super::albums::representative("t");
     format!(
         "COALESCE(MAX(({visible} {cue_number}) AND EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id)),0),
@@ -168,7 +168,7 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
             OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number)
             AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0),
         COALESCE(MAX(t.last_played IS NOT NULL
-            AND COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)),0)"
+            AND t.title IS NOT s.title),0)"
     )
 }
 
@@ -338,7 +338,7 @@ fn relocation_key<'a>(
 }
 
 #[cfg(test)]
-const KNOWN_COLUMNS: &str = "file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+const KNOWN_COLUMNS: &str = "file_size,modified_ns,fingerprint,title,artist,album,
     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
     bits_per_sample,release_date,bitrate_exact,id,path";
@@ -490,7 +490,7 @@ impl Store {
     pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
         let path = path.to_str().context("Scan source path is not UTF-8")?;
         let mut q = self.conn.prepare_cached(
-        "SELECT file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+        "SELECT file_size,modified_ns,fingerprint,title,artist,album,
                 duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
                 cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
                 bits_per_sample,release_date,bitrate_exact
@@ -520,7 +520,7 @@ impl Store {
                  SELECT CAST(key AS INTEGER) AS ordinal, value AS path
                  FROM json_each(?1)
              )
-             SELECT t.file_size,t.modified_ns,t.fingerprint,t.raw_title,t.raw_artist,t.raw_album,
+             SELECT t.file_size,t.modified_ns,t.fingerprint,t.title,t.artist,t.album,
                     t.duration,t.codec,t.channels,t.sample_rate,t.cue_sheet,t.cue_number,
                     t.cue_start_frame,t.cue_end_frame,t.probe_version,t.bitrate_bps,t.track_number,
                     t.disc_number,t.bits_per_sample,t.release_date,t.bitrate_exact,r.ordinal
@@ -607,7 +607,7 @@ impl Store {
                      SELECT value AS path FROM json_each(?1)
                  )
                  SELECT t.path,t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
-                        t.raw_title,t.raw_artist,t.raw_album,t.track_number,t.disc_number,
+                        t.title,t.artist,t.album,t.track_number,t.disc_number,
                         t.release_date
                  FROM requested AS r
                  CROSS JOIN tracks AS t INDEXED BY tracks_path
@@ -968,7 +968,7 @@ impl Store {
         ))?;
         let mut stage = tx.prepare(
             "INSERT INTO temp.scan_stage(
-                resolved_id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,
+                resolved_id,path,fingerprint,file_size,modified_ns,title,artist,album,
                 duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,
                 track_number,disc_number,bits_per_sample,release_date,cue_sheet,cue_number,
                 cue_start_frame,cue_end_frame
@@ -1063,7 +1063,7 @@ impl Store {
             [i64::MIN],
         )?;
         // Compare against the final staged values, including playback enrichment,
-        // while the old rows and their overrides are still available. These flags
+        // while the old rows are still available. These flags
         // describe changed dependencies, not hashes of materialized query results.
         let mut impacts = tx.query_row(
             &format!(

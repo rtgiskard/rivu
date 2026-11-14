@@ -7,8 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 
 const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
-    (title_override IS NOT NULL OR artist_override IS NOT NULL
-     OR album_override IS NOT NULL OR decoder_hint<>0),
+    (decoder_hint<>0),
     (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id>0 AND track_id=tracks.id),
     (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),
     relocation_independent";
@@ -23,7 +22,7 @@ fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Duplic
         track: track_from_row(row)?,
         file_size: row.get::<_, i64>(TRACK_COLUMN_COUNT)? as u64,
         modified_ns: row.get(TRACK_COLUMN_COUNT + 1)?,
-        has_overrides: row.get(TRACK_COLUMN_COUNT + 2)?,
+        has_decoder_hint: row.get(TRACK_COLUMN_COUNT + 2)?,
         playlist_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 3)? as usize,
         queue_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 4)? as usize,
         independent: row.get(TRACK_COLUMN_COUNT + 5)?,
@@ -59,8 +58,7 @@ fn relocation_row(conn: &Connection, id: i64) -> Result<RelocationRow> {
     let row = conn
         .query_row(
             "SELECT path,fingerprint,file_size,modified_ns,missing,relocation_independent,
-                    cue_sheet,(title_override IS NOT NULL OR artist_override IS NOT NULL
-                    OR album_override IS NOT NULL OR decoder_hint<>0 OR favorite<>0
+                    cue_sheet,(decoder_hint<>0 OR favorite<>0
                     OR play_count<>0 OR last_played IS NOT NULL
                     OR EXISTS(SELECT 1 FROM playlist_entries WHERE track_id=tracks.id))
              FROM tracks WHERE id=?1",
@@ -286,7 +284,7 @@ impl Store {
         if source.identity != prepared.source || target.identity != prepared.target {
             bail!("Relocation identity changed while the target was being verified");
         }
-        // Snapshot the target's scanned raw metadata before releasing its unique
+        // Snapshot the target's scanned metadata before releasing its unique
         // path. No target user state is transferred or discarded.
         tx.execute(
             &format!(
@@ -306,10 +304,10 @@ impl Store {
                      OR EXISTS(SELECT 1 FROM tracks AS s CROSS JOIN temp.relocation_target AS t
                          WHERE s.id=?1 AND {}),
                      (SELECT s.last_played IS NOT NULL
-                         AND COALESCE(s.title_override,s.raw_title) IS NOT COALESCE(s.title_override,t.raw_title)
+                         AND s.title IS NOT t.title
                       FROM tracks AS s CROSS JOIN temp.relocation_target AS t WHERE s.id=?1)",
                 super::albums::eligible_member("t"),
-                rivu_format::database::eligible_title("COALESCE(s.album_override,t.raw_album)")
+                rivu_format::database::eligible_title("t.album")
             ),
             params![source.identity.id, target.identity.id],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -350,7 +348,7 @@ mod tests {
         let hash = blake3::hash(b"same audio");
         store.conn.execute(
             "INSERT INTO tracks(id,path,fingerprint,file_size,modified_ns,missing,
-                raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,
+                title,artist,album,duration,codec,channels,sample_rate,
                 bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,probe_version)
              VALUES(1,'/old/source.wav',?1,10,20,1,'Old','Artist','Album',1,'pcm',2,48000,
                     1536000,0,1,1,16,'2024',?2),
@@ -458,7 +456,7 @@ mod tests {
         assert_eq!(members.total, 2);
         assert_eq!(members.rows[0].track.id, 1);
         assert_eq!(members.rows[0].track.title, "Custom");
-        assert!(members.rows[0].has_overrides);
+        assert!(members.rows[0].has_decoder_hint);
         assert!(members.rows[0].track.favorite);
         assert_eq!(members.rows[0].track.play_count, 1);
         assert_eq!(members.rows[0].track.last_played, Some(123));
@@ -517,7 +515,7 @@ mod tests {
              INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(1,1,0);",
         )?;
         let prepared = store.prepare_relocation(1, 2)?;
-        // Source edits while hashing are kept; only identity changes invalidate.
+        // Preferences edited while hashing survive; source tags refresh from target.
         store.edit_track(
             1,
             Some("Custom"),
@@ -533,13 +531,13 @@ mod tests {
         let before = store.track(1)?.unwrap();
         let target = store.track(2)?.unwrap();
         let impacts = store.commit_relocation(&prepared)?;
-        assert!(!impacts.history);
+        assert!(impacts.history);
         let retained = store.track(1)?.unwrap();
         assert_eq!(retained.id, before.id);
         assert_eq!(retained.path, target.path);
-        assert_eq!(retained.title, before.title);
-        assert_eq!(retained.artist, before.artist);
-        assert_eq!(retained.album, before.album);
+        assert_eq!(retained.title, target.title);
+        assert_eq!(retained.artist, target.artist);
+        assert_eq!(retained.album, target.album);
         assert_eq!(retained.favorite, before.favorite);
         assert_eq!(retained.play_count, before.play_count);
         assert_eq!(retained.last_played, before.last_played);
@@ -573,9 +571,6 @@ mod tests {
     #[test]
     fn relocation_rejects_every_target_state_even_when_added_after_preparation() -> Result<()> {
         for state in [
-            "UPDATE tracks SET title_override='' WHERE id=2",
-            "UPDATE tracks SET artist_override='' WHERE id=2",
-            "UPDATE tracks SET album_override='' WHERE id=2",
             "UPDATE tracks SET decoder_hint=1 WHERE id=2",
             "UPDATE tracks SET favorite=1 WHERE id=2",
             "UPDATE tracks SET play_count=1 WHERE id=2",

@@ -334,7 +334,7 @@ pub(super) enum LibraryAction {
         #[arg(long)]
         enhanced: bool,
     },
-    /// Read source-file tags offline, or write supplied fields with a backup.
+    /// Read source-file tags offline, or normalize and write supplied fields.
     Tags {
         path: PathBuf,
         /// Replace the source-file title; an empty string explicitly clears it.
@@ -346,6 +346,15 @@ pub(super) enum LibraryAction {
         /// Replace the source-file album; an empty string explicitly clears it.
         #[arg(long)]
         album: Option<String>,
+        /// Replace the release date, preserving year, month or full-date precision; empty clears it.
+        #[arg(long)]
+        release_date: Option<String>,
+        /// Replace the track number; zero explicitly clears it.
+        #[arg(long)]
+        track_number: Option<u32>,
+        /// Replace the disc number; zero explicitly clears it.
+        #[arg(long)]
+        disc_number: Option<u32>,
     },
     /// Reclaim database space and refresh query statistics; stop playback and scans first.
     Optimize,

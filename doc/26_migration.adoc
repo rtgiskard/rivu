@@ -9,10 +9,11 @@ without rewriting either. `apply` upgrades supported databases only after a
 completed SQLite backup; current resources are no-ops and need no backup.
 
 [[supported-source-formats]]
-The supported database upgrade is format `2` to `4`: it adds `playlists.position`
-in playlist-ID order, preserving contents, playback statistics, indexes and queue
-state. It retires no source schema objects. Other noncurrent formats and unknown
-schema objects are rejected, not guessed or removed.
+Supported database upgrades are `2 → 4 → 6` and `4 → 6`. Format 4 adds playlist
+ordering; format 6 replaces raw/override tag columns with their resolved values.
+Track IDs, playback statistics, list references and queue state are preserved.
+Subsequent rescans may replace stored tags. Format 5 and unknown schema objects
+are rejected.
 
 Missing default resources are reported without creation. With explicit
 `--data-dir`, a missing `library.db` is an error; `--config` alone does not select

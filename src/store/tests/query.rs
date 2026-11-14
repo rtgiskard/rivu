@@ -8,7 +8,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
         .conn
         .execute_batch(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<1024)
-         INSERT INTO tracks(id,path,raw_title,raw_album) SELECT id,'/outside/'||id||'.wav',
+         INSERT INTO tracks(id,path,title,album) SELECT id,'/outside/'||id||'.wav',
              CASE WHEN id%7=0 THEN 'needle' ELSE 'other' END,'Collection' FROM ids;
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,id,id-1 FROM tracks;
          INSERT INTO playlists(id,name) VALUES(1,'Count fixture');
@@ -95,7 +95,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
     );
     store
         .conn
-        .execute("UPDATE tracks SET raw_title='needle' WHERE id=1", [])
+        .execute("UPDATE tracks SET title='needle' WHERE id=1", [])
         .unwrap();
     for index in [0, 1, 3, 4, 5] {
         assert_eq!(counts[index](), 147);
@@ -104,7 +104,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
     // A count read inside an aborted writer transaction must not escape rollback.
     store
         .conn
-        .execute_batch("BEGIN; UPDATE tracks SET raw_title='needle' WHERE id=2;")
+        .execute_batch("BEGIN; UPDATE tracks SET title='needle' WHERE id=2;")
         .unwrap();
     assert_eq!(counts[4](), 148);
     store.conn.execute_batch("ROLLBACK").unwrap();
@@ -117,7 +117,7 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
         .conn
         .execute(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
-         INSERT INTO tracks(id,path,raw_title) SELECT id,'track-'||id,
+         INSERT INTO tracks(id,path,title) SELECT id,'track-'||id,
              CASE WHEN id%7=0 THEN 'needle' ELSE 'other' END FROM ids",
             [total as i64],
         )
@@ -480,15 +480,14 @@ fn paged_totals_follow_local_writes_and_rollback() {
     store
         .conn
         .execute(
-            "UPDATE tracks SET raw_title='Needle Three' WHERE path='/music/b/three.wav'",
+            "UPDATE tracks SET title='Needle Three' WHERE path='/music/b/three.wav'",
             [],
         )
         .unwrap();
     assert_eq!(count(), 2);
     // A count read before rollback must not leak the transaction's uncommitted total.
     let tx = store.conn.unchecked_transaction().unwrap();
-    tx.execute("UPDATE tracks SET title_override='Other'", [])
-        .unwrap();
+    tx.execute("UPDATE tracks SET title='Other'", []).unwrap();
     assert_eq!(count(), 0);
     tx.rollback().unwrap();
     assert_eq!(count(), 2);
@@ -782,14 +781,17 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
             rec("/music/search/two.wav", "two", "Other", 60.0),
         ]))
         .unwrap();
-    store.conn.execute(
-        "UPDATE tracks SET title_override='ÉTÉ_100%', artist_override='World' WHERE path='/music/search/one.wav'",
-        [],
-    ).unwrap();
     store
         .conn
         .execute(
-            "UPDATE tracks SET raw_artist='Été_100%' WHERE path='/music/search/two.wav'",
+            "UPDATE tracks SET title='ÉTÉ_100%', artist='World' WHERE path='/music/search/one.wav'",
+            [],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE tracks SET artist='Été_100%' WHERE path='/music/search/two.wav'",
             [],
         )
         .unwrap();
@@ -894,7 +896,7 @@ fn library_root_queries_preserve_path_boundaries_overlap_and_unicode() {
         store
             .conn
             .execute(
-                "INSERT INTO tracks(path,raw_title,missing) VALUES(?1,?2,?3)",
+                "INSERT INTO tracks(path,title,missing) VALUES(?1,?2,?3)",
                 params![path, format!("Track {index}"), index == 1],
             )
             .unwrap();
@@ -936,7 +938,7 @@ fn library_root_queries_preserve_path_boundaries_overlap_and_unicode() {
     store
         .conn
         .execute(
-            "INSERT INTO tracks(path,raw_title) VALUES(?1,'Relative')",
+            "INSERT INTO tracks(path,title) VALUES(?1,'Relative')",
             [cwd.join("root-query-relative/song.wav").to_str().unwrap()],
         )
         .unwrap();
@@ -1011,14 +1013,14 @@ fn library_root_pages_reuse_search_filters_sort_and_total() {
     .enumerate()
     {
         store.conn.execute(
-            "INSERT INTO tracks(path,raw_title,raw_artist,raw_album,disc_number,track_number,play_count,favorite,missing) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO tracks(path,title,artist,album,disc_number,track_number,play_count,favorite,missing) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![path, title, artist, album, disc, number, plays, favorite, missing],
         ).unwrap();
         if index == 0 {
             store
                 .conn
                 .execute(
-                    "UPDATE tracks SET title_override='Needle Override' WHERE path=?1",
+                    "UPDATE tracks SET title='Needle Override' WHERE path=?1",
                     [path],
                 )
                 .unwrap();
@@ -1151,7 +1153,7 @@ fn library_root_queries_bound_root_batches_and_page_rows() {
         store
             .conn
             .execute(
-                "INSERT INTO tracks(path,raw_title) VALUES(?1,?2)",
+                "INSERT INTO tracks(path,title) VALUES(?1,?2)",
                 params![format!("/music/{id}.wav"), format!("Track {id}")],
             )
             .unwrap();
@@ -1379,7 +1381,7 @@ fn library_pages_use_literal_unicode_search_and_database_sorting() {
     store
         .conn
         .execute(
-            "UPDATE tracks SET raw_artist='World' WHERE path='/music/b.wav'",
+            "UPDATE tracks SET artist='World' WHERE path='/music/b.wav'",
             [],
         )
         .unwrap();
@@ -1420,7 +1422,7 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         store
             .conn
             .execute(
-                "INSERT INTO tracks(path,raw_title) VALUES(?1,?2)",
+                "INSERT INTO tracks(path,title) VALUES(?1,?2)",
                 params![format!("/music/{id}.wav"), format!("Track {id}")],
             )
             .unwrap();
@@ -1441,7 +1443,7 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         store
             .conn
             .execute(
-                "INSERT INTO tracks(path,raw_title) VALUES(?1,?2)",
+                "INSERT INTO tracks(path,title) VALUES(?1,?2)",
                 params![format!("/music/{id}.wav"), format!("Track {id}")],
             )
             .unwrap();
@@ -1548,7 +1550,7 @@ fn library_locate_matches_tree_and_flat_projection_without_identity_fallback() {
     use rivu_protocol::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.conn.execute_batch(
-        "INSERT INTO tracks(id,path,raw_title,raw_album,play_count,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
+        "INSERT INTO tracks(id,path,title,album,play_count,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
          (1,'/音楽/Album/shared.wav','Z','Album',2,1,0,'/音楽/Album/album.cue',1,0),
          (2,'/音楽/Album/shared.wav','A','Album',5,0,0,'/音楽/Album/album.cue',2,75),
          (3,'/音楽/top.wav','Top','',1,0,1,NULL,NULL,NULL),
@@ -1659,7 +1661,7 @@ fn all_catalog_locate_matches_empty_root_pages_for_absolute_and_relative_paths()
     use rivu_protocol::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.conn.execute_batch(
-        "INSERT INTO tracks(id,path,raw_title,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
+        "INSERT INTO tracks(id,path,title,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
          (1,'/music/shared.wav','Needle B',1,0,'/music/album.cue',1,0),
          (2,'/music/shared.wav','Needle A',0,1,'/music/album.cue',2,75),
          (3,'relative/one.wav','Relative',1,0,NULL,NULL,NULL),
@@ -1720,7 +1722,7 @@ fn reader_snapshots_preserve_unicode_search() {
     writer
         .conn
         .execute(
-            "INSERT INTO tracks(path,raw_title) VALUES('/unicode.wav','ÄNEEDLE')",
+            "INSERT INTO tracks(path,title) VALUES('/unicode.wav','ÄNEEDLE')",
             [],
         )
         .unwrap();

@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn export_projection_writes_overrides_and_complete_cue_runs() -> Result<()> {
+    fn export_projection_writes_current_tags_and_complete_cue_runs() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("library.db");
         let store = Store::open(&database)?;
@@ -259,8 +259,8 @@ mod tests {
         )?;
         let writer = rusqlite::Connection::open(&database)?;
         writer.execute(
-            "INSERT INTO tracks(id,path,raw_title,title_override,raw_artist,artist_override,duration)
-             VALUES(1,?1,'Raw title','Chosen'||char(13)||char(10)||'Title','Raw artist','',1.6)",
+            "INSERT INTO tracks(id,path,title,artist,duration)
+             VALUES(1,?1,'Chosen'||char(13)||char(10)||'Title','',1.6)",
             [song.to_str().unwrap()],
         )?;
         writer.execute(
@@ -297,7 +297,7 @@ mod tests {
             let writer = rusqlite::Connection::open(&database)?;
             writer.execute(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<?1)
-             INSERT INTO tracks(id,path,raw_title) SELECT id,'/music/'||id||'.wav','Track '||id FROM ids",
+             INSERT INTO tracks(id,path,title) SELECT id,'/music/'||id||'.wav','Track '||id FROM ids",
             [total as i64],
         )?;
             writer.execute(
@@ -319,7 +319,7 @@ mod tests {
             };
             assert_eq!(source.next().await.unwrap()?.title, "Track 1");
             writer.execute(
-                "UPDATE tracks SET raw_title='Edited' WHERE id=?1",
+                "UPDATE tracks SET title='Edited' WHERE id=?1",
                 [total as i64],
             )?;
             writer.execute(

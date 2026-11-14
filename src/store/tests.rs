@@ -184,7 +184,7 @@ fn search_store() -> (tempfile::TempDir, Store) {
         store
             .conn
             .execute(
-                "INSERT INTO tracks(id,path,raw_title,raw_artist,raw_album) VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO tracks(id,path,title,artist,album) VALUES(?1,?2,?3,?4,?5)",
                 params![id, path, title, artist, album],
             )
             .unwrap();

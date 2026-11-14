@@ -18,6 +18,8 @@ mod query;
 mod queue_playlists;
 mod relocation;
 mod settings;
+#[path = "tests/source_tags.rs"]
+mod source_tag_operations;
 mod task_wait;
 mod tracks;
 
@@ -123,6 +125,8 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         active_export: None,
         active_external_admission: None,
         active_optimization: None,
+        active_source_tags: None,
+        pending_written_source: None,
         processing: crate::processing::Service::new(),
         pending_processing_audition: None,
         scan_tx,

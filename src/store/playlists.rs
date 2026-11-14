@@ -12,8 +12,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
 const ENTRY_COLUMNS: &str = "e.position,e.id,e.track_id,
-    COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),
-    COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,t.duration,
+    t.title,t.artist,
+    t.album,COALESCE(t.missing,1),t.favorite,t.duration,
     COALESCE(t.codec,''),COALESCE(t.path,''),COALESCE(t.channels,0),COALESCE(t.sample_rate,0),
     t.bits_per_sample,t.bitrate_bps,COALESCE(t.bitrate_exact,0),t.cue_number";
 
@@ -323,8 +323,8 @@ impl Store {
             " ORDER BY e.position,e.id LIMIT ?2"
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT t.id,t.path,COALESCE(t.title_override,t.raw_title),
-                    COALESCE(t.artist_override,t.raw_artist),t.duration,
+            "SELECT t.id,t.path,t.title,
+                    t.artist,t.duration,
                     t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
                     e.position AS entry_position,e.id AS entry_id
              FROM playlist_entries e LEFT JOIN tracks t
@@ -734,10 +734,10 @@ mod deletion_tests {
     fn page_and_batch_decode_identical_track_fields_and_matching_offsets() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
-            "INSERT INTO tracks(id,path,raw_title,title_override,raw_artist,raw_album,duration,
+            "INSERT INTO tracks(id,path,title,artist,album,duration,
                 codec,channels,sample_rate,bits_per_sample,bitrate_bps,bitrate_exact,favorite,missing)
-             VALUES (1,'/audio.flac','raw','Needle','artist','album',12.5,'flac',2,96000,24,123456,1,1,1),
-                    (2,'/other.wav','other',NULL,'','',1.0,'pcm',1,8000,16,NULL,0,0,0);
+             VALUES (1,'/audio.flac','Needle','artist','album',12.5,'flac',2,96000,24,123456,1,1,1),
+                    (2,'/other.wav','other','','',1.0,'pcm',1,8000,16,NULL,0,0,0);
              INSERT INTO playlists(id,name) VALUES(1,'decoder');
              INSERT INTO playlist_entries(id,playlist_id,track_id,position)
                 VALUES (10,1,2,0),(11,1,1,1),(12,1,1,2);",

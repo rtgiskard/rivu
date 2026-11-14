@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn moved_id_preserves_override_and_delete_does_not_reuse() {
+fn moved_id_refreshes_tags_and_delete_does_not_reuse() {
     let (directory, s) = db();
     let original = directory.path().join("a.mp3");
     let moved = directory.path().join("b.mp3");
@@ -34,7 +34,7 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0].path, moved);
     assert_eq!(tracks[0].id, id);
-    assert_eq!(tracks[0].title, "Override");
+    assert_eq!(tracks[0].title, "Changed");
     assert_eq!(tracks[0].decoder_hint, DecoderHint::Ffmpeg);
     s.remove_tracks(&[id]).unwrap();
     assert!(all_tracks(&s).is_empty());
@@ -52,7 +52,7 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
 }
 
 #[test]
-fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state() {
+fn shared_source_segments_keep_independent_ids_stats_and_missing_state() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let whole = rec("/music/shared.wav", "shared", "Whole", 180.0);
     let first = segment("/music/a.cue", 1, 0, Some(4500));
@@ -118,7 +118,7 @@ fn shared_source_segments_keep_independent_ids_overrides_stats_and_missing_state
     store.apply_scan(&rescan).unwrap();
     let after = all_tracks(&store);
     assert_eq!(after.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
-    assert_eq!(after[1].title, "Custom");
+    assert_eq!(after[1].title, "New raw title");
     assert_eq!(after[1].cue, Some(changed_cue.clone()));
     assert_eq!(after[1].path, changed.source.path);
     assert_eq!(after[1].duration, Some(59.0));
@@ -654,7 +654,7 @@ fn cue_relocation_requires_absent_sheet_not_absent_shared_source() {
         let new = tracks.iter().find(|t| t.cue == expected_cue).unwrap();
         assert_eq!(new.id == id, !sheet_exists);
         if !sheet_exists {
-            assert_eq!(new.title, "Override");
+            assert_eq!(new.title, "Track 1");
         }
     }
 }
@@ -754,6 +754,8 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
         store
             .edit_track(exact_id, Some("Exact title"), None, None, None, None)
             .unwrap();
+        store.set_favorite(&[old_id], true).unwrap();
+        store.increment_play_count(exact_id).unwrap();
         let destination = make("new.cue");
         result.segments = vec![destination.clone(), exact.clone()];
         if reverse {
@@ -771,7 +773,8 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
                 end_frame: Some(4500),
             })
         );
-        assert_eq!(migrated.title, "Migrated title");
+        assert_eq!(migrated.title, destination.view().media.title);
+        assert!(migrated.favorite);
         assert!(!migrated.missing);
         let preserved = store.track(exact_id).unwrap().unwrap();
         assert_eq!(
@@ -783,7 +786,9 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
                 end_frame: Some(4500),
             })
         );
-        assert_eq!(preserved.title, "Exact title");
+        assert_eq!(preserved.title, exact.view().media.title);
+        assert!(!preserved.favorite);
+        assert_eq!(preserved.play_count, 1);
         assert!(!preserved.missing);
     }
 }

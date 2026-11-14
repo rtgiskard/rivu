@@ -6,7 +6,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let directory = tempfile::tempdir_in(".cache").unwrap();
     let path = directory.path().join("library.db");
     let store = Store::open(&path).unwrap();
-    store.conn.execute_batch("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<200000) INSERT INTO tracks(path,raw_title) SELECT '/music/'||n||'.wav','Track '||n FROM ids;").unwrap();
+    store.conn.execute_batch("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<200000) INSERT INTO tracks(path,title) SELECT '/music/'||n||'.wav','Track '||n FROM ids;").unwrap();
     store
         .enqueue_sources(&[PathBuf::from("/music")], &[], None)
         .unwrap();

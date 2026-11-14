@@ -305,6 +305,8 @@ impl CoreRuntime {
             active_export: None,
             active_external_admission: None,
             active_optimization: None,
+            active_source_tags: None,
+            pending_written_source: None,
             processing: crate::processing::Service::new(),
             pending_processing_audition: None,
             scan_tx,

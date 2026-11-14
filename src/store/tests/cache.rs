@@ -7,7 +7,7 @@ fn filtered_library_count_scopes_keep_optional_filters_distinct() {
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(path,raw_title,favorite,missing) VALUES
+            "INSERT INTO tracks(path,title,favorite,missing) VALUES
              ('/music/a','needle',1,0),
              ('/music/b','needle',0,1),
              ('relative','other',0,0);",
@@ -21,7 +21,7 @@ fn filtered_library_count_scopes_keep_optional_filters_distinct() {
             .cached_filtered_library_count(query, favorite, missing, prefix, || {
                 Ok(store.conn.query_row(
                     "SELECT COUNT(*) FROM tracks
-                     WHERE (?1 IS NULL OR instr(lower(raw_title),?1)>0)
+                     WHERE (?1 IS NULL OR instr(lower(title),?1)>0)
                        AND (?2 IS NULL OR favorite=?2)
                        AND (?3 IS NULL OR missing=?3)
                        AND (?4 IS NULL OR (path>=?4 AND path<(rtrim(?4,'/')||'0')))",
@@ -52,7 +52,7 @@ fn writable_filtered_counts_refresh_external_commits_and_rollback() {
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(path,raw_title) VALUES
+            "INSERT INTO tracks(path,title) VALUES
              ('/music/a','needle'),('/music/b','needle'),('/music/c','other');",
         )
         .unwrap();
@@ -66,15 +66,12 @@ fn writable_filtered_counts_refresh_external_commits_and_rollback() {
     let external = Store::open(&path).unwrap();
     external
         .conn
-        .execute(
-            "UPDATE tracks SET raw_title='other' WHERE path='/music/a'",
-            [],
-        )
+        .execute("UPDATE tracks SET title='other' WHERE path='/music/a'", [])
         .unwrap();
     assert_eq!(count(), 1);
     let transaction = store.conn.unchecked_transaction().unwrap();
     transaction
-        .execute("UPDATE tracks SET raw_title='needle'", [])
+        .execute("UPDATE tracks SET title='needle'", [])
         .unwrap();
     assert_eq!(count(), 3);
     transaction.rollback().unwrap();
@@ -158,11 +155,11 @@ fn track_cache_refreshes_hits_before_lru_eviction() {
     store.track(ids[0]).unwrap(); // refresh A's LRU age
     store
         .conn
-        .execute("UPDATE tracks SET title_override='A2' WHERE id=?", [ids[0]])
+        .execute("UPDATE tracks SET title='A2' WHERE id=?", [ids[0]])
         .unwrap();
     store
         .conn
-        .execute("UPDATE tracks SET title_override='B2' WHERE id=?", [ids[1]])
+        .execute("UPDATE tracks SET title='B2' WHERE id=?", [ids[1]])
         .unwrap();
     store.track(ids[2]).unwrap(); // B is oldest and must be evicted
 
@@ -294,7 +291,7 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
         .conn
         .execute_batch(
             "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<4)
-         INSERT INTO tracks(id,path,raw_title,fingerprint)
+         INSERT INTO tracks(id,path,title,fingerprint)
          SELECT id,'/track-'||id,CASE WHEN id%2=0 THEN 'needle' ELSE 'other' END,
              CAST(printf('%032d',(id-1)/2) AS BLOB) FROM ids;",
         )
@@ -314,7 +311,7 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
     assert_eq!(counts(), (2, 2));
     writer
         .conn
-        .execute("UPDATE tracks SET raw_title='changed' WHERE id=2", [])
+        .execute("UPDATE tracks SET title='changed' WHERE id=2", [])
         .unwrap();
     reader.invalidate_scalar_count_domains(&[CountDomain::FilteredLibrary]);
     assert_eq!(counts(), (1, 2));
@@ -326,7 +323,7 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
     assert_eq!(counts(), (1, 1));
     let transaction = writer.conn.unchecked_transaction().unwrap();
     transaction
-        .execute("UPDATE tracks SET raw_title='transient'", [])
+        .execute("UPDATE tracks SET title='transient'", [])
         .unwrap();
     assert_eq!(
         writer
@@ -554,7 +551,7 @@ fn reader_playlist_search_counts_follow_metadata_and_fallback_revisions() {
         writer
             .conn
             .execute(
-                "UPDATE tracks SET raw_title=?1 WHERE id=?2",
+                "UPDATE tracks SET title=?1 WHERE id=?2",
                 params![if expected == 1 { "needle" } else { "changed" }, track],
             )
             .unwrap();

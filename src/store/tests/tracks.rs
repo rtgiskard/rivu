@@ -7,7 +7,7 @@ fn track_edit_history_impact_uses_effective_title_and_persisted_membership() {
     store
         .conn
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one','Title'),(2,'two','Title');
+            "INSERT INTO tracks(id,path,title) VALUES (1,'one','Title'),(2,'two','Title');
          UPDATE tracks SET last_played=123 WHERE id=1;",
         )
         .unwrap();
@@ -461,7 +461,7 @@ fn recent_tracks_merge_replays_without_losing_counts() {
 }
 
 #[test]
-fn title_patch_keeps_unedited_metadata_live_across_rescans() {
+fn rescans_replace_edited_and_unedited_metadata() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut record = rec("/music/a.mp3", "same", "Raw title", 100.);
     record.media.artist = "Raw artist".into();
@@ -473,25 +473,33 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
     store
         .edit_track(id, Some("Edited title"), None, None, None, None)
         .unwrap();
+    let edited = store.track(id).unwrap().unwrap();
+    assert_eq!(edited.title, "Edited title");
+    assert_eq!(edited.artist, "Raw artist");
+    assert_eq!(edited.album, "Raw album");
     record.media.title = "Rescanned title".into();
     record.media.artist = "Rescanned artist".into();
     record.media.album = "Rescanned album".into();
     store.apply_scan(&scan(vec![record.clone()])).unwrap();
     let track = store.track(id).unwrap().unwrap();
-    assert_eq!(track.title, "Edited title");
+    assert_eq!(track.title, "Rescanned title");
     assert_eq!(track.artist, "Rescanned artist");
     assert_eq!(track.album, "Rescanned album");
 
-    // Empty text is an actual override, unlike an omitted field.
+    // Empty text updates the current value, but does not pin it across scans.
     store
         .edit_track(id, None, Some(""), None, None, None)
         .unwrap();
+    let edited = store.track(id).unwrap().unwrap();
+    assert_eq!(edited.title, "Rescanned title");
+    assert_eq!(edited.artist, "");
+    assert_eq!(edited.album, "Rescanned album");
     record.media.artist = "Another artist".into();
     record.media.album = "Another album".into();
     store.apply_scan(&scan(vec![record])).unwrap();
     let track = store.track(id).unwrap().unwrap();
-    assert_eq!(track.title, "Edited title");
-    assert_eq!(track.artist, "");
+    assert_eq!(track.title, "Rescanned title");
+    assert_eq!(track.artist, "Another artist");
     assert_eq!(track.album, "Another album");
 }
 

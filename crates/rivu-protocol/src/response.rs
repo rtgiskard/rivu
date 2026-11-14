@@ -439,6 +439,10 @@ pub struct Ack {
     pub processing_id: Option<u64>,
     /// Present only after successful database optimization and physical worker retirement.
     pub database_optimization: Option<DatabaseOptimization>,
+    /// Verified source values, also returned when the file saved but database sync failed.
+    pub source_tags: Option<rivu_format::tags::TagValues>,
+    /// A successful physical file save is not rolled back by a database error.
+    pub source_file_saved: bool,
 }
 
 impl Ack {
@@ -458,6 +462,8 @@ impl Ack {
             relocation_id: None,
             processing_id: None,
             database_optimization: None,
+            source_tags: None,
+            source_file_saved: false,
         }
     }
 

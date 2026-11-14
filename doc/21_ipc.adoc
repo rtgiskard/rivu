@@ -536,8 +536,14 @@ clients must not infer this capability from successful task completion.
 `EditTrack` carries optional title, artist, album, release-date, and decoder-hint
 fields. For text, `None` leaves a field untouched; `Some("")` explicitly clears it.
 The core merges field intents into the current track rather than replacing it
-with a client snapshot. Override and rescan behavior:
+with a client snapshot. Stored-tag and rescan behavior:
 link:02_library.adoc#database-edits[Database edits].
+
+`LoadSourceTags` reads explicitly using the requested encoding without database
+mutation. `SyncTrackTags` commits six values against an expected database baseline.
+`SaveSourceTags` writes the file on a worker, then synchronizes verified values.
+ACK fields `source_tags` and `source_file_saved` distinguish physical success from
+database failure; retry only synchronization after partial success.
 
 Exact positional schemas and adapters are defined in
 link:../crates/rivu-protocol/src/wire.rs[wire.rs];
@@ -700,13 +706,9 @@ content pages. Unrelated track edits advance Library only. Last-played activity
 does not invalidate Queue unless a displayed field, such as play count, changes.
 Reapplying identical metadata or favorites, including a forced scan that keeps
 the same displayed values, does not advance the queue content revision.
-Raw title, artist, or album changes hidden by overrides also leave queue content
-valid when their effective display values are unchanged.
-Scan publication distinguishes effective display changes, structure, duplicate
-groups, and duplicate-member verification facts. Size/mtime-only changes and raw
-metadata hidden by overrides need not invalidate display pages. Recording an
-override equal to the displayed raw value changes override ownership and member
-facts, not display content; reapplying that override is a no-op. Playlist reference
+Scan publication distinguishes display changes, structure, duplicate groups and
+duplicate-member verification facts. Size/mtime-only changes need not invalidate
+display pages. No-op metadata edits do not advance display revisions. Playlist reference
 changes affect duplicate-member facts only when membership changes, not on empty
 collection lifecycles, rename, or reorder.
 
@@ -945,8 +947,7 @@ or entry identities, not filtered offsets.
 interactive page limit and the Core-owned `album` token, with the bitrate token
 for their track payloads. An album key is the exact effective title plus its
 immediate parent directory (no trailing slash, except `/`).
-Blank/Unicode-whitespace-only titles are ineligible; explicit empty
-overrides remain authoritative, and nonblank keys are not normalized. Artist
+Blank/Unicode-whitespace-only titles are ineligible; nonblank keys are not normalized. Artist
 differences do not split an album and child directories never merge. Blank/stale
 keys return empty member pages with total zero.
 
@@ -964,7 +965,7 @@ browsing behavior is in link:02_library.adoc[Library].
 
 `DuplicateGroups` pages ordinary-file groups by cached fingerprint and reports
 present/missing counts. `DuplicateMembers {fingerprint, offset, limit}` returns
-full track, size/mtime verification, override/independent, and playlist/queue
+full track, size/mtime verification, decoder preference/independent, and playlist/queue
 reference facts. `DuplicateMemberSelection {fingerprint, track_ids}` resolves at
 most 256 selected member IDs to the same facts, omitting deleted, foreign-group,
 and CUE identities and deduplicating repeats. This bounded lookup validates
@@ -1163,9 +1164,8 @@ and Store commits database facts. Scans and external queue admission share sourc
 identity checks, metadata reuse, probing, and hashing. Directory traversal, CUE
 expansion, and coverage detection apply only to scans.
 
-Scan-backed metadata and user overrides skip unchanged stored values. An override
-equal to the raw value still records editing intent; an omitted field continues
-to follow rescans. No-op edits succeed for existing tracks and reject unknown IDs.
+Scans and database edits skip unchanged stored values. No-op edits succeed for
+existing tracks and reject unknown IDs; rescans may replace stored tag values.
 The new-track minimum-duration policy is captured when a scan/import starts and
 applied after exact-identity and relocation matching, never to previously stored
 identities. Successfully validated CUE sheets exempt their subtracks and referenced

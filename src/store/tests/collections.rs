@@ -123,7 +123,7 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
         AlbumKey, CollectionDestination, CollectionInsertion, CollectionSource,
     };
     let store = Store::open(Path::new(":memory:")).unwrap();
-    store.conn.execute_batch("INSERT INTO tracks(id,path,raw_album) VALUES(1,'/album/one.wav','Album'),(2,'/album/two.wav','Album'),(3,'/other/three.wav','Other');").unwrap();
+    store.conn.execute_batch("INSERT INTO tracks(id,path,album) VALUES(1,'/album/one.wav','Album'),(2,'/album/two.wav','Album'),(3,'/other/three.wav','Other');").unwrap();
     store.enqueue_tracks(&[3, 3]).unwrap();
     store
         .set_queue_current(Some(store.queue_ids().unwrap()[1]))

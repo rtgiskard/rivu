@@ -28,6 +28,7 @@ pub fn query_wait_timeout() -> Duration {
 pub fn command_reply_timeout(command: &Command) -> Duration {
     match command {
         Command::OptimizeDatabase => OPTIMIZE_REPLY_TIMEOUT,
+        Command::LoadSourceTags { .. } | Command::SaveSourceTags { .. } => OPTIMIZE_REPLY_TIMEOUT,
         _ => REPLY_TIMEOUT,
     }
 }

@@ -834,6 +834,107 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_tags_publish_written_source_fingerprint_and_size_to_readers() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        core.edit_track(1, None, None, Some("First album".into()), None, None)
+            .unwrap();
+        core.edit_track(2, None, None, Some("Second album".into()), None, None)
+            .unwrap();
+        core.publish();
+        let path = directory.path().join("library.db");
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = None;
+        let query = Query::Track { track_id: 2 };
+        let before = core.shared.read().clone();
+        let old = execute_read(&core, &path, &mut reader, &fence, query.clone());
+        let albums_query = Query::Albums {
+            query: None,
+            sort: rivu_protocol::model::AlbumSort::Title,
+            offset: 0,
+            limit: 10,
+        };
+        let old_albums = execute_read(&core, &path, &mut reader, &fence, albums_query.clone());
+        let Ok(ViewResponse::Albums(page)) = &old_albums.result else {
+            panic!("expected album summaries");
+        };
+        assert_eq!(page.rows[1].representative.id, 2);
+        assert_eq!(page.rows[1].representative.fingerprint, None);
+        let Ok(ViewResponse::Track(Some(old_track))) = &old.result else {
+            panic!("expected original track");
+        };
+        let roots = Query::LibraryRootStats {
+            roots: vec![directory.path().to_path_buf()],
+        };
+        let original_stats = execute_read(&core, &path, &mut reader, &fence, roots.clone());
+        assert!(
+            matches!(original_stats.result, Ok(ViewResponse::LibraryRootStats(stats))
+            if stats[0].file_size == 4)
+        );
+        let tags = rivu_format::tags::TagValues {
+            title: old_track.title.clone(),
+            artist: old_track.artist.clone(),
+            album: old_track.album.clone(),
+            track_number: old_track.track_number,
+            disc_number: old_track.disc_number,
+            release_date: old_track.release_date.clone(),
+        };
+        let source = rivu_metadata::WrittenSource {
+            fingerprint: *blake3::hash(b"saved source with identical tags").as_bytes(),
+            file_size: 17,
+            modified_ns: 2,
+        };
+        let changes = core.store.update_written_source(2, &source).unwrap();
+        assert!(changes.library);
+        assert!(!core.store.sync_track_tags(2, &tags).unwrap().changed);
+        core.accept_catalog_facts(changes, Some(&[2]), None);
+        core.publish();
+        let (reply, _receiver) = oneshot::channel();
+        let stale = ReadRequest {
+            state: ReadState::capture(&before, &query),
+            query: query.clone(),
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
+            Err(QueryError::RevisionChanged)
+        ));
+        let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
+        assert_ne!(query.stamp(old.revisions), query.stamp(current.revisions));
+        assert!(
+            matches!(current.result, Ok(ViewResponse::Track(Some(track)))
+            if track.fingerprint.as_deref() == Some(blake3::Hash::from(source.fingerprint).to_hex().as_str())
+                && track.title == tags.title && track.artist == tags.artist && track.album == tags.album
+                && track.track_number == tags.track_number && track.disc_number == tags.disc_number
+                && track.release_date == tags.release_date)
+        );
+        let (reply, _receiver) = oneshot::channel();
+        let stale_albums = ReadRequest {
+            state: ReadState::capture(&before, &albums_query),
+            query: albums_query.clone(),
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale_albums).result,
+            Err(QueryError::RevisionChanged)
+        ));
+        let current_albums = execute_read(&core, &path, &mut reader, &fence, albums_query);
+        assert!(
+            matches!(current_albums.result, Ok(ViewResponse::Albums(page))
+            if page.rows[0].representative.fingerprint.is_none()
+                && page.rows[1].representative.id == 2
+                && page.rows[1].representative.fingerprint.as_deref()
+                    == Some(blake3::Hash::from(source.fingerprint).to_hex().as_str()))
+        );
+        let current_stats = execute_read(&core, &path, &mut reader, &fence, roots);
+        assert!(
+            matches!(current_stats.result, Ok(ViewResponse::LibraryRootStats(stats))
+            if stats[0].file_size == 20)
+        );
+    }
+
+    #[test]
     fn bitrate_commits_refresh_payload_stamps_without_changing_query_shape() {
         let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
         core.publish();

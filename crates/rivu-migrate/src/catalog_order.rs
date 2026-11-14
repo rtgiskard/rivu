@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use rivu_format::database;
 use rusqlite::Connection;
 
 pub(super) fn apply(conn: &Connection) -> Result<()> {
-    super::target_schema::validate_catalog_source(conn)?;
+    anyhow::ensure!(
+        super::target_schema::validate_tag_source(conn)? == 2,
+        "Catalog order migration requires schema 2"
+    );
     tracing::info!("Adding playlist catalog positions in playlist-ID order");
     conn.execute_batch(
         "ALTER TABLE playlists ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK(position>=0);
@@ -13,13 +15,13 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
     )
     .context("Persisting playlist catalog order")?;
     tracing::info!(
-        schema_version = database::SCHEMA_VERSION,
+        schema_version = 4,
         "Advancing format marker and validating target structure"
     );
     conn.execute(
         "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
-        [database::SCHEMA_VERSION],
+        [4],
     )?;
-    tracing::info!("Verifying all schema objects against a fresh database");
-    super::target_schema::validate(conn)
+    tracing::info!("Verifying catalog-order migration source for tag cutover");
+    super::target_schema::validate_tag_source(conn).map(|_| ())
 }

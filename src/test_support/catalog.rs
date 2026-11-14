@@ -87,7 +87,7 @@ pub fn seed_playlist_targets(data_dir: &Path, count: i64) -> Result<()> {
     let database = data_dir.join("library.db");
     let store = Store::open(&database)?;
     rusqlite::Connection::open(&database)?.execute(
-        "INSERT INTO tracks(id,path,raw_title) VALUES(1,?1,'Source')",
+        "INSERT INTO tracks(id,path,title) VALUES(1,?1,'Source')",
         [data_dir
             .join("source.wav")
             .to_str()

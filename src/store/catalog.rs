@@ -1,8 +1,8 @@
-/// Semantic changes from one committed catalog transaction. Raw writes hidden by
-/// overrides do not imply effective Track, ordering, or duplicate changes.
+/// Semantic changes from one committed catalog transaction. Probe-only writes
+/// do not imply visible Track, ordering, or duplicate changes.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct CatalogChanges {
-    /// Any persisted track write, including hidden raw metadata and probe state.
+    /// Any persisted track write, including probe state.
     pub changed: bool,
     /// Effective full Track values, including library ordering fields.
     pub library: bool,

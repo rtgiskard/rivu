@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Result<()> {
+fn source_tag_edit_refreshes_tags_without_losing_library_state() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();
     let audio = root.join("audio.wav");
@@ -25,6 +25,7 @@ fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Resu
             title: Some("Source title".into()),
             artist: Some("Source artist".into()),
             album: Some("Source album".into()),
+            ..Default::default()
         },
     )?;
     assert!(report.changed());
@@ -34,7 +35,7 @@ fn source_tag_edit_refreshes_raw_metadata_without_losing_library_state() -> Resu
     assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
     store.apply_scan(&rescanned)?;
     let after = store.track(id)?.context("rescanned source")?;
-    assert_eq!(after.title, "Personal title");
+    assert_eq!(after.title, "Source title");
     assert_eq!(after.artist, "Source artist");
     assert_eq!(after.album, "Source album");
     assert!(after.favorite);
@@ -1229,7 +1230,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
         )
         .await?;
         store.apply_scan(&rescanned)?;
-        assert_eq!(store.track(ids[0])?.unwrap().title, "Personal");
+        assert_eq!(store.track(ids[0])?.unwrap().title, "New raw title");
         assert_eq!(store.track(ids[1])?.unwrap().artist, "New artist");
         let moved = root.join("moved");
         fs::rename(&old, &moved)?;
@@ -1251,7 +1252,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
         }
         let kept = store.track(ids[0])?.unwrap();
         assert!(kept.favorite);
-        assert_eq!(kept.title, "Personal");
+        assert_eq!(kept.title, "New raw title");
         assert_eq!(kept.path, moved.join("audio.wav"));
         let moved_queue = store.queue_page(None, 0, 10)?;
         assert_eq!(
@@ -1284,7 +1285,9 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
             .unwrap();
         assert_ne!(copy_id, ids[0]);
         assert!(!store.track(copy_id)?.unwrap().favorite);
-        assert_eq!(store.track(ids[0])?.unwrap().title, "Personal");
+        assert_eq!(store.track(copy_id)?.unwrap().title, "New raw title");
+        assert!(store.track(ids[0])?.unwrap().favorite);
+        assert_eq!(store.track(ids[0])?.unwrap().title, "New raw title");
         Ok(())
     })
 }

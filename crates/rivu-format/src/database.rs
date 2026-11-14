@@ -62,6 +62,8 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
     validate_common_structure(conn)?;
     conn.prepare("SELECT position FROM playlists LIMIT 0")
         .context("Unsupported library database: missing catalog order")?;
+    conn.prepare("SELECT title,artist,album FROM tracks LIMIT 0")
+        .context("Unsupported library database: missing tag values")?;
     Ok(())
 }
 
@@ -75,7 +77,7 @@ pub fn validate_common_structure(conn: &Connection) -> Result<()> {
         ),
         (
             "tracks",
-            "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bitrate_exact,bits_per_sample,release_date,favorite,relocation_independent,decoder_hint",
+            "id,path,fingerprint,file_size,modified_ns,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bitrate_exact,bits_per_sample,release_date,favorite,relocation_independent,decoder_hint",
         ),
         ("playlists", "id,name"),
         ("playlist_entries", "id,playlist_id,track_id,position"),
@@ -273,7 +275,7 @@ pub fn validate_common_structure(conn: &Connection) -> Result<()> {
         ),
         (
             "tracks_recent",
-            "SELECT id,COALESCE(title_override,raw_title),play_count,last_played,favorite
+            "SELECT id,play_count,last_played,favorite
              FROM tracks INDEXED BY tracks_recent WHERE last_played IS NOT NULL
              ORDER BY last_played DESC,id DESC LIMIT ?1",
         ),
@@ -309,15 +311,14 @@ pub fn ensure_current(conn: &Connection) -> Result<()> {
         validate_structure(conn)
     }
 }
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
     fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
     file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
-    raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',
-    raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,
-    album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',
+    \"title\" TEXT NOT NULL DEFAULT '',\"artist\" TEXT NOT NULL DEFAULT '',
+    \"album\" TEXT NOT NULL DEFAULT '',duration REAL,codec TEXT NOT NULL DEFAULT '',
     channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
     missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
     last_played INTEGER,cue_sheet TEXT,cue_number INTEGER,
@@ -336,7 +337,7 @@ const TRACK_INDEXES: &str = "
     CREATE UNIQUE INDEX tracks_path ON tracks(path, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END);
     CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
     CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
-    CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
+    CREATE INDEX tracks_album ON tracks(album, CASE WHEN album<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN album<>'' THEN COALESCE(track_number,4294967295) END, title);
     CREATE INDEX tracks_most_played ON tracks(play_count DESC);";
 
 /// Create the current format transactionally. The connection must have no user tables.
@@ -372,8 +373,9 @@ pub fn create_current(conn: &Connection) -> Result<()> {
 // Paths are logical absolute paths. Keep root '/' while stripping other trailing
 // separators so keys agree with Path::parent(), without recursively merging discs.
 pub const DIRECTORY: &str = "CASE WHEN rtrim(path,replace(path,'/',''))='/' THEN '/' ELSE rtrim(rtrim(path,replace(path,'/','')),'/') END";
-pub const TITLE: &str = "COALESCE(album_override,raw_album)";
-pub const ORDER: &str = "disc_number IS NULL,disc_number,track_number IS NULL,track_number,COALESCE(title_override,raw_title),id";
+pub const TITLE: &str = "album";
+pub const ORDER: &str =
+    "disc_number IS NULL,disc_number,track_number IS NULL,track_number,title,id";
 
 // Rust str::trim uses Unicode White_Space, not SQLite's default ASCII space.
 // Keep this predicate built-in-only so persistent triggers work on any connection;
@@ -409,8 +411,8 @@ fn create_summary_schema(conn: &Connection) -> Result<()> {
 
 fn install_summary_triggers(conn: &Connection) -> Result<()> {
     let directory = |row: &str| DIRECTORY.replace("path", &format!("{row}.path"));
-    let title = |row: &str| format!("COALESCE({row}.album_override,{row}.raw_album)");
-    let artist = |row: &str| format!("COALESCE({row}.artist_override,{row}.raw_artist)");
+    let title = |row: &str| format!("{row}.album");
+    let artist = |row: &str| format!("{row}.artist");
     let refresh_artist = |row: &str| {
         let d = directory(row);
         let t = title(row);
@@ -466,12 +468,10 @@ fn install_summary_triggers(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE TRIGGER albums_insert AFTER INSERT ON tracks BEGIN {add} END;
          CREATE TRIGGER albums_delete AFTER DELETE ON tracks BEGIN {remove} END;
-         CREATE TRIGGER albums_update AFTER UPDATE OF path,raw_album,album_override,
-            raw_artist,artist_override ON tracks
+         CREATE TRIGGER albums_update AFTER UPDATE OF path,album,artist ON tracks
          WHEN {old_d} IS NOT {new_d} OR {old_t} IS NOT {new_t}
          BEGIN {remove} {add} END;
-         CREATE TRIGGER albums_artist_update AFTER UPDATE OF path,raw_album,album_override,
-            raw_artist,artist_override ON tracks
+         CREATE TRIGGER albums_artist_update AFTER UPDATE OF path,album,artist ON tracks
          WHEN {old_d} IS {new_d} AND {old_t} IS {new_t}
             AND {old_a} IS NOT {new_a} AND {eligible}
          BEGIN {remove_artist} {add_artist} {refresh} END;",
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn unsupported_versions_are_rejected_before_any_schema_or_data_write() -> Result<()> {
-        for version in [0, 1, 2, 3, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 99] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute(
@@ -777,7 +777,7 @@ mod tests {
         for (name, definition) in [
             (
                 "tracks_path",
-                "ON tracks(raw_title, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)",
+                "ON tracks(title, CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END)",
             ),
             ("tracks_path", "ON tracks(path)"),
             ("tracks_path", "ON tracks(path,cue_sheet)"),

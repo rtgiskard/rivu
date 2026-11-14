@@ -314,7 +314,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
     // SQLite accepts text in this INTEGER-affinity column; Track decoding does not.
     connection
         .execute_batch(
-            "CREATE TRIGGER fail_edit_refresh AFTER UPDATE OF title_override ON tracks
+            "CREATE TRIGGER fail_edit_refresh AFTER UPDATE OF title ON tracks
          WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=NEW.id; END;",
         )
         .unwrap();
@@ -329,9 +329,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
     let before = core.state.query_revisions();
     core.command(edit()).unwrap_err();
     let title: String = connection
-        .query_row("SELECT title_override FROM tracks WHERE id=1", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT title FROM tracks WHERE id=1", [], |row| row.get(0))
         .unwrap();
     assert_eq!(title, "Committed title");
     let committed = core.state.query_revisions();
@@ -410,7 +408,7 @@ fn failed_edits_and_empty_deletions_do_not_invalidate() {
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER reject_edit BEFORE UPDATE OF title_override ON tracks
+            "CREATE TRIGGER reject_edit BEFORE UPDATE OF title ON tracks
          BEGIN SELECT RAISE(ABORT,'edit rejected'); END;",
         )
         .unwrap();
@@ -681,7 +679,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
     core.refresh_queue_tracks().unwrap();
     core.command(Command::CreatePlaylist { name: "Mix".into() })
         .unwrap();
-    // Creating an equal-value override changes member facts, not display payload.
+    // Equal-value tag edits are true no-ops, including duplicate-member facts.
     let before = core.state.query_revisions();
     let before_current = Arc::clone(core.state.current_track.as_ref().unwrap());
     core.command(Command::EditTrack {
@@ -694,14 +692,7 @@ fn unchanged_metadata_favorite_and_playlist_intents_preserve_revisions() {
     })
     .unwrap();
     let created = core.state.query_revisions();
-    assert_ne!(created.duplicate_members, before.duplicate_members);
-    assert_eq!(
-        QueryRevisions {
-            duplicate_members: before.duplicate_members,
-            ..created
-        },
-        before
-    );
+    assert_eq!(created, before);
     assert!(Arc::ptr_eq(
         core.state.current_track.as_ref().unwrap(),
         &before_current

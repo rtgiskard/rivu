@@ -450,7 +450,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     ] {
         connection
             .execute(
-                "INSERT INTO tracks(path,raw_title,missing) VALUES(?1,?2,?3)",
+                "INSERT INTO tracks(path,title,missing) VALUES(?1,?2,?3)",
                 rusqlite::params![path.to_str().unwrap(), title, missing],
             )
             .unwrap();
@@ -548,7 +548,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection
         .execute_batch(
-            "INSERT INTO tracks(id,path,raw_title) VALUES (1,'one.wav','One'),(2,'two.wav','Two'),(3,'three.wav','Three');
+            "INSERT INTO tracks(id,path,title) VALUES (1,'one.wav','One'),(2,'two.wav','Two'),(3,'three.wav','Three');
          INSERT INTO playlists(id,name) VALUES (10,'one'),(20,'two');
          INSERT INTO playlist_entries(id,playlist_id,track_id,position)
          VALUES (101,10,1,0),(102,10,2,1),(201,20,1,0),(202,20,2,1);",
@@ -1182,7 +1182,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
     drop(crate::store::Store::open(&database).unwrap());
     let connection = rusqlite::Connection::open(database).unwrap();
     connection.execute_batch(
-        "INSERT INTO tracks(id,path,raw_title) VALUES
+        "INSERT INTO tracks(id,path,title) VALUES
              (1,'one.wav','other'),(2,'two.wav','needle'),(3,'three.wav','other'),
              (4,'four.wav','other'),(5,'five.wav','needle'),(6,'six.wav','other'),(7,'seven.wav','needle');
          INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES (0,1,0),(0,2,1),(0,2,2),(0,3,3),(0,4,4),(0,5,5),(0,6,6),(0,7,7);

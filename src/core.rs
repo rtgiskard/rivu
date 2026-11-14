@@ -427,6 +427,8 @@ struct Core {
     active_export: Option<export::ExportTask>,
     active_external_admission: Option<admission::ExternalAdmissionTask>,
     active_optimization: Option<maintenance::OptimizationTask>,
+    active_source_tags: Option<source_tags::SourceTagTask>,
+    pending_written_source: Option<source_tags::PendingWrittenSource>,
     processing: crate::processing::Service,
     pending_processing_audition: Option<(u64, u64)>,
     scan_tx: mpsc::Sender<ScanEvent>,
@@ -453,6 +455,7 @@ impl Drop for Core {
             reads.fence.transition().finish(true);
         }
         drop(self.read_queries.take());
+        self.shutdown_source_tags();
         drop(self.active_export.take());
         drop(self.active_external_admission.take());
         if let Some(task) = self.active_scan.take() {
@@ -511,6 +514,7 @@ mod projections;
 mod queue;
 mod relocation;
 mod settings;
+mod source_tags;
 mod tracks;
 mod write_gate;
 

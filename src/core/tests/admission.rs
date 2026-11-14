@@ -401,7 +401,7 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
     core.refresh_queue_tracks().unwrap();
     let before = core.state.queue.total;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch("CREATE TRIGGER corrupt_admission_projection AFTER UPDATE OF raw_title ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;").unwrap();
+    connection.execute_batch("CREATE TRIGGER corrupt_admission_projection AFTER UPDATE OF title ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;").unwrap();
     core.start_external_admission(vec![path], None, None)
         .unwrap();
     let id = core.active_external_admission.as_ref().unwrap().status.id;

@@ -76,7 +76,7 @@ pub(in crate::gui) enum PlaylistEvent {
         RefCell<Option<crate::gui::list_interaction::TrackSource>>,
         crate::gui::DragDestination,
     ),
-    ContentMenu(RefCell<Option<PlaylistContentMenu>>),
+    ContentMenu(RefCell<Option<Box<PlaylistContentMenu>>>),
     Error(String),
 }
 
@@ -545,13 +545,13 @@ impl Playlists {
         remove: Option<Command>,
         cx: &mut Context<Self>,
     ) {
-        cx.emit(PlaylistEvent::ContentMenu(RefCell::new(Some(
+        cx.emit(PlaylistEvent::ContentMenu(RefCell::new(Some(Box::new(
             PlaylistContentMenu {
                 request,
                 guard,
                 remove,
             },
-        ))));
+        )))));
     }
     fn resolve_library_drag(
         &mut self,

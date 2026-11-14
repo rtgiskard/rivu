@@ -763,7 +763,7 @@ mod tests {
         let playlist = store.create_playlist("Replacement")?;
         store.add_playlist(playlist, &[2, 3])?;
         store.conn.execute(
-            "UPDATE tracks SET raw_album='Replacement' WHERE id IN (2,3)",
+            "UPDATE tracks SET album='Replacement' WHERE id IN (2,3)",
             [],
         )?;
         let album = rivu_protocol::model::AlbumKey {

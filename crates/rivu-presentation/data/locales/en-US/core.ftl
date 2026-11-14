@@ -21,7 +21,7 @@ core-playlist-entry = { $index }	entry { $entry }	track { $track }
 core-duplicate-groups = Historical same-content groups: { $count } (cached hashes, not fresh verification)
 core-duplicate-members = Historical same-content members: { $count }
 core-duplicate-group = { $fingerprint }	{ $total } members	{ $missing } missing	{ $present } present
-core-duplicate-member = { $id }	{ $path }	{ $status }	favorite={ $favorite } overrides={ $overrides } plays={ $plays } playlist_refs={ $playlists } queue_refs={ $queue } independent={ $independent }
+core-duplicate-member = { $id }	{ $path }	{ $status }	favorite={ $favorite } decoder_hint={ $decoder_hint } plays={ $plays } playlist_refs={ $playlists } queue_refs={ $queue } independent={ $independent }
 core-optimization = Database optimization completed
     Database: { $before } -> { $after } bytes
     WAL: { $wal-before } -> { $wal-after } bytes
@@ -57,10 +57,9 @@ core-tags = Source tags: { $path }
       track number: { $track }
       disc number: { $disc }
       release date: { $date }
-core-tags-written = Source-file tags updated: { $path }
-    Original file backup: { $backup }
-    Library database overrides were not changed.
-core-tags-unchanged = Source-file tags unchanged: { $path } (no backup created)
+core-tags-written = Source-file tags normalized and updated: { $path }
+    No original-file backup is kept. The library database was not changed.
+core-tags-unchanged = Source-file tags already match the requested values and format: { $path }
 core-help-about = A lightweight, local-first music player
 core-help-long = Run without a command to print help. Use gui to open the desktop UI, connecting to the existing core or starting an independent core service if absent. Each data directory shares one core; control commands connect to it. Closing the window keeps the core running. Output devices, file probing, and source-file tags work offline without an instance.
 core-help-long-tui = Run without a command to print help. Use tui to open the terminal UI, connecting to the existing core or starting an independent core service if absent. Ctrl+C or :q closes only this TUI, keeping Core and playback running; :qa quits the application and stops Core and playback. Output devices, file probing, and source-file tags work offline without an instance.
@@ -111,10 +110,13 @@ core-help-library-clean-missing = Remove missing library records and references
 core-help-library-stats = Show library size and aggregate play counts
 core-help-library-history = Show recent tracks, once per track
 core-help-library-probe = Read metadata and decoder support without starting an instance
-core-help-library-tags = Read source-file tags offline. With --title, --artist, or --album, write those fields to the source file with an original-file backup; no server or library database update. Unchanged values create no backup.
+core-help-library-tags = Read source-file tags offline. Supplied tag fields normalize and write the source file without a backup; no server or library database update. ID3 is written as v2.4 with UTF-8; secondary tags are removed.
 core-help-library-tags-title = Write the source-file title; an empty string explicitly clears it
 core-help-library-tags-artist = Write the source-file artist; an empty string explicitly clears it
 core-help-library-tags-album = Write the source-file album; an empty string explicitly clears it
+core-help-library-tags-release-date = Write the release date, retaining year, month or full-date precision; an empty string clears it
+core-help-library-tags-track-number = Write the track number; zero clears it
+core-help-library-tags-disc-number = Write the disc number; zero clears it
 core-help-library-optimize = Reclaim database space and refresh query statistics; stop playback and scans first
 core-help-library-duplicates = Read historical same-content groups; cached hashes are not fresh verification
 core-help-library-relocate = Preserve a missing track identity at a freshly verified target
