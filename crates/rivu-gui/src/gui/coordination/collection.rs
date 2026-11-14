@@ -89,7 +89,7 @@ pub(super) async fn resolve_album<F: Future<Output = rivu_protocol::response::Qu
         let response = query_collection_page(&mut query_page, query, ticket).await?;
         let result = response.result?;
         anyhow::ensure!(
-            scope.stamp(response.revisions) == expected,
+            response.revisions.album == expected.revisions().album,
             rivu_protocol::response::QueryError::RevisionChanged
         );
         let ViewResponse::AlbumTracks(page) = result else {
@@ -311,7 +311,15 @@ mod tests {
                 futures::future::ready(if offset == 0 {
                     album_page(&[9, 2], 4, revisions)
                 } else {
-                    album_page(&[8, 3], 4, revisions)
+                    album_page(
+                        &[8, 3],
+                        4,
+                        rivu_protocol::response::QueryRevisions {
+                            library: revisions.library + 1,
+                            bitrate: revisions.bitrate + 1,
+                            ..revisions
+                        },
+                    )
                 })
             },
             key,

@@ -920,7 +920,7 @@ mod tests {
             core.update_track_stats(1, stats).unwrap();
             core.publish();
             assert_ne!(core.state.library.revision, before.revision);
-            assert_ne!(core.state.library.album_revision, before.album_revision);
+            assert_eq!(core.state.library.album_revision, before.album_revision);
             assert_eq!(core.state.library.count_revision, before.count_revision);
             for query in &queries {
                 assert_eq!(
@@ -944,21 +944,23 @@ mod tests {
             );
             assert!(matches!(detail.result, Ok(ViewResponse::Track(Some(track)))
                 if track.last_played == Some(42) && track.play_count == u64::from(play_count)));
-            let albums = execute_read(
+            let members = execute_read(
                 &core,
                 &path,
                 &mut reader,
                 &fence,
-                Query::Albums {
+                Query::AlbumTracks {
+                    key: AlbumKey {
+                        directory: directory.path().to_path_buf(),
+                        title: "Album".into(),
+                    },
                     query: Some("Needle".into()),
-                    sort: AlbumSort::Title,
                     offset: 0,
                     limit: 1,
                 },
             );
-            assert!(matches!(albums.result, Ok(ViewResponse::Albums(page))
-                if page.rows[0].representative.last_played == Some(42)
-                    && page.rows[0].representative.play_count == u64::from(play_count)));
+            assert!(matches!(members.result, Ok(ViewResponse::AlbumTracks(page))
+                if page.rows[0].play_count == u64::from(play_count)));
         }
         core.edit_track(1, None, Some("Changed".into()), None, None, None)
             .unwrap();

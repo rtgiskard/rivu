@@ -1822,7 +1822,7 @@ fn committed_deletion_invalidates_all_affected_playlists_before_projection_failu
 }
 
 #[test]
-fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_changes() {
+fn album_member_queries_follow_library_content_changes() {
     let (_directory, mut core) = fixture();
     core.command(Command::EditTrack {
         track_id: 1,
@@ -1852,7 +1852,7 @@ fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_c
         release_date: None,
     })
     .unwrap();
-    assert_eq!(query.stamp(core.query_response(&query).revisions), before);
+    assert_ne!(query.stamp(core.query_response(&query).revisions), before);
     core.command(Command::EditTrack {
         track_id: 1,
         title: Some("Changed member".into()),

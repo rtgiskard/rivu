@@ -12,11 +12,12 @@ use rivu_format::config::ArtworkOptions;
 use rivu_format::config::ArtworkStyle;
 use rivu_format::config::Config;
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::model::{PlaybackStatus, Track};
+use rivu_protocol::model::{ArtworkSource, PlaybackStatus, Track};
 
 use super::animation_frames::AnimationFrames;
 use super::artwork::{
     ArtworkDecoration, ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork,
+    owned_artwork_source,
 };
 
 pub(super) const ARTWORK_STYLES: [ArtworkStyle; 7] = [
@@ -327,8 +328,12 @@ impl ArtworkRuntime {
     }
 
     fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
-        self.loader
-            .retain_negative(self.track.as_ref().filter(|_| self.visible));
+        self.loader.retain_negative(
+            self.track
+                .as_ref()
+                .filter(|_| self.visible)
+                .map(crate::artwork_source),
+        );
         if !self.visible {
             // The physical load retires normally; hidden panels own no demand.
             return;
@@ -348,21 +353,21 @@ impl ArtworkRuntime {
         let cold = cached.is_none();
         self.replace_artwork(cached.flatten(), cx);
         if let Some(track) = self.track.as_ref().filter(|_| cold)
-            && let Some(track) = self.loader.prepare(track)
+            && let Some(source) = self.loader.prepare(crate::artwork_source(track))
         {
-            self.start_artwork(track, cx);
+            self.start_artwork(source, cx);
         }
     }
 
-    fn start_artwork(&mut self, track: Track, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::new(crate::artwork_source(&track));
+    fn start_artwork(&mut self, source: ArtworkSource, cx: &mut Context<Self>) {
+        let identity = ArtworkIdentity::new(owned_artwork_source(&source));
         let manager = Arc::clone(&self.manager);
         cx.spawn(async move |this, cx| {
             let (path, loaded) = cx
                 .background_executor()
                 .spawn(async move {
-                    let loaded = manager.load(crate::artwork_source(&track));
-                    (track.path, loaded)
+                    let loaded = manager.load(owned_artwork_source(&source));
+                    (source.path, loaded)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -878,7 +883,12 @@ mod tests {
                 cx,
             );
             assert!(owner.view.image(cx).is_none());
-            assert!(owner.loader.prepare(&relocated).is_none());
+            assert!(
+                owner
+                    .loader
+                    .prepare(crate::artwork_source(&relocated))
+                    .is_none()
+            );
             // Hide while the physical worker remains active, then change demand.
             owner.sync(
                 Some(&relocated),
@@ -948,7 +958,12 @@ mod tests {
                 cx,
             );
             assert!(owner.view.image(cx).is_none());
-            assert!(owner.loader.prepare(&missing).is_none());
+            assert!(
+                owner
+                    .loader
+                    .prepare(crate::artwork_source(&missing))
+                    .is_none()
+            );
             for id in 200..270 {
                 let mut pressure = missing.clone();
                 pressure.id = id;

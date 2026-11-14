@@ -1,6 +1,8 @@
 //! One atmosphere consumer, independent of whether an artwork panel is present.
 use super::material::MaterialAppearance;
-use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkSource, ArtworkView};
+use crate::gui::artwork::{
+    ArtworkImageRegistry, ArtworkLoader, ArtworkSource, ArtworkView, owned_artwork_source,
+};
 use gpui::{App, Context, RenderImage, Window};
 use rivu_format::config::MaterialPreset;
 use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
@@ -90,8 +92,12 @@ impl Atmosphere {
     }
 
     fn prepare(&mut self, cx: &mut Context<Self>) {
-        self.loader
-            .retain_negative(self.track.as_ref().filter(|_| self.enabled));
+        self.loader.retain_negative(
+            self.track
+                .as_ref()
+                .filter(|_| self.enabled)
+                .map(crate::artwork_source),
+        );
         if !self.enabled {
             return;
         }
@@ -110,9 +116,9 @@ impl Atmosphere {
         let resolved = self.track.is_none() || cached.is_some();
         self.apply_target(cached.flatten(), resolved, cx);
         if let Some(track) = self.track.as_ref().filter(|_| !resolved)
-            && let Some(track) = self.loader.prepare(track)
+            && let Some(source) = self.loader.prepare(crate::artwork_source(track))
         {
-            self.start(track, cx);
+            self.start(source, cx);
         }
     }
 
@@ -135,14 +141,14 @@ impl Atmosphere {
         }
     }
 
-    fn start(&mut self, track: Track, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::new(crate::artwork_source(&track));
+    fn start(&mut self, source: rivu_protocol::model::ArtworkSource, cx: &mut Context<Self>) {
+        let identity = ArtworkIdentity::new(owned_artwork_source(&source));
         let manager = Arc::clone(&self.manager);
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let artwork = cx
                 .background_executor()
-                .spawn(async move { manager.load(crate::artwork_source(&track)) })
+                .spawn(async move { manager.load(owned_artwork_source(&source)) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.loader.finish(&identity) {

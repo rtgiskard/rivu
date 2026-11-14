@@ -923,7 +923,11 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         this.visible = true;
         this.prepare_artwork(cx);
         assert!(this.artwork_view.image(cx).is_none());
-        assert!(this.artwork_loader.prepare(&selected).is_none());
+        assert!(
+            this.artwork_loader
+                .prepare(crate::artwork_source(&selected))
+                .is_none()
+        );
         this.set_visible(false, cx);
     });
     // A completed miss is not a new acquisition demand on every render/reopen.
@@ -942,7 +946,11 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         );
         assert!(this.artwork_view.image(cx).is_none());
         this.prepare_artwork(cx);
-        assert!(this.artwork_loader.prepare(&selected).is_none());
+        assert!(
+            this.artwork_loader
+                .prepare(crate::artwork_source(&selected))
+                .is_none()
+        );
         assert!(this.artwork_view.image(cx).is_none());
     });
 }
@@ -1009,7 +1017,11 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         artwork_selection(this, first.clone(), cx);
         this.visible = true;
         this.prepare_artwork(cx);
-        assert!(this.artwork_loader.prepare(&latest).is_none());
+        assert!(
+            this.artwork_loader
+                .prepare(crate::artwork_source(&latest))
+                .is_none()
+        );
         let expected = this
             .artwork_manager
             .load(crate::artwork_source(&latest))
@@ -1022,7 +1034,11 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
         assert!(!this.artwork_view.replace(Some(expected), cx));
-        assert!(this.artwork_loader.prepare(&latest).is_some());
+        assert!(
+            this.artwork_loader
+                .prepare(crate::artwork_source(&latest))
+                .is_some()
+        );
         assert!(
             this.artwork_loader
                 .finish(&rivu_metadata::artwork::ArtworkIdentity::new(

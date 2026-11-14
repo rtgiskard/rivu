@@ -72,7 +72,7 @@ pub(super) struct AlbumModel {
     page_size: usize,
     worker_pending: bool,
     page_timed_out: bool,
-    // Counts depend on album membership/search data, never technical bitrate payloads.
+    // Counts depend on album membership/search data, never member payload revisions.
     albums_total: Option<(u64, usize)>,
     tracks_total: Option<(u64, usize)>,
     albums_count_retired: bool,
@@ -676,7 +676,7 @@ fn sync_pages<T>(
     revisions: QueryRevisions,
 ) -> bool {
     let identity_changed = !projection.matches_identity(query);
-    let content_changed = projection
+    let membership_changed = projection
         .stamp()
         .is_none_or(|stamp| stamp.revisions().album != revisions.album);
     if !projection.sync(query, revisions) {
@@ -684,7 +684,7 @@ fn sync_pages<T>(
     }
     if identity_changed {
         pages.clear();
-    } else if content_changed {
+    } else if membership_changed {
         // Same-query rows remain display-only until replacement or the owner wake.
         pages.invalidate();
     } else {
@@ -1196,35 +1196,108 @@ mod tests {
             key: key("A"),
             artist: "artist".into(),
             track_count: 3,
-            representative: rivu_protocol::model::Track {
+            representative: rivu_protocol::model::ArtworkSource {
                 id,
                 path: "/music/a.flac".into(),
                 fingerprint: None,
-                cue: None,
-                title: "title".into(),
-                artist: "artist".into(),
-                album: "A".into(),
-                duration: Some(10.),
-                codec: "flac".into(),
-                channels: 2,
-                sample_rate: 44100,
-                bitrate_bps: None,
-                bitrate_exact: false,
-                track_number: None,
-                disc_number: None,
-                bits_per_sample: None,
-                release_date: None,
-                favorite: false,
-                decoder_hint: Default::default(),
-                missing: false,
-                play_count: 0,
-                last_played: None,
             },
         }
     }
 
     #[test]
-    fn bitrate_revision_reloads_both_listings_preserving_selection_queries_and_geometry() {
+    fn stats_revision_refreshes_member_payload_without_recounting_or_invalidating_cards() {
+        let mut model = AlbumModel::default();
+        let previous = QueryRevisions::default();
+        model.sync(true, previous, 3);
+        let cards = model.prepare().unwrap();
+        let card = summary(7);
+        model.complete_page(
+            &cards.query,
+            cards.generation,
+            QueryResponse {
+                revisions: previous,
+                result: Ok(ViewResponse::Albums(Page {
+                    total: 1,
+                    rows: vec![card.clone()],
+                })),
+            },
+            previous,
+            "wrong response",
+        );
+        model.retire_worker();
+        model.select(Some(key("A")));
+        let tracks = model.prepare().unwrap();
+        finish(&mut model, tracks, 60);
+        model.set_tracks_query(Some("needle".into()));
+        let filtered = model.prepare().unwrap();
+        finish(&mut model, filtered, 30);
+        assert!(model.demand_tracks(24..27, model.generation()));
+        let visible = model.prepare().unwrap();
+        finish(&mut model, visible, 30);
+        model.tracks.pin(Some(24));
+        let previous_row = model.tracks.get(24).unwrap().clone();
+        let cards_generation = model.albums_projection.generation();
+        let generation = model.generation();
+        let current = QueryRevisions {
+            library: 1,
+            ..previous
+        };
+        assert!(!model.albums_need_refresh(current));
+        let change = model.sync(true, current, 3);
+        assert!(!change.data.albums && change.data.tracks);
+        assert_eq!(model.albums_projection.generation(), cards_generation);
+        assert_eq!(model.albums.get(0), Some(&card));
+        assert_eq!(model.albums.refresh_deadline(), None);
+        assert_ne!(model.generation(), generation);
+        assert_eq!(model.selected(), Some(&key("A")));
+        assert_eq!(model.tracks_query(), Some("needle"));
+        assert_eq!(model.tracks.len(), 30);
+        assert_eq!(model.tracks.total(), Some(30));
+        assert_eq!(model.tracks.visible(), 24..27);
+        assert_eq!(model.total(), Some(60));
+        assert!(model.tracks.get(24).is_none());
+        assert_eq!(model.tracks.display(24), Some(&previous_row));
+        assert!(model.prepare_missing_count().is_none());
+        let refresh = model.prepare().unwrap();
+        assert!(matches!(
+            &refresh.query,
+            Query::AlbumTracks {
+                offset: 24,
+                limit: 3,
+                ..
+            }
+        ));
+        assert!(
+            model
+                .prepare_count(&refresh.query, refresh.generation)
+                .is_none()
+        );
+        let mut response = response(&refresh, 30, current);
+        let Ok(ViewResponse::AlbumTracks(page)) = &mut response.result else {
+            unreachable!()
+        };
+        for track in &mut page.rows {
+            track.play_count = 5;
+        }
+        let completion = model.complete_page(
+            &refresh.query,
+            refresh.generation,
+            response,
+            current,
+            "wrong response",
+        );
+        model.retire_worker();
+        assert_eq!(completion.published, Published::Tracks);
+        assert_eq!(completion.counts, Some((30, 60)));
+        assert_eq!(model.tracks.get(24).unwrap().play_count, 5);
+        assert_eq!(model.albums.get(0), Some(&card));
+        model.select(None);
+        assert!(model.prepare().is_none());
+        assert!(model.prepare_missing_count().is_none());
+    }
+
+    #[test]
+    fn bitrate_revision_refreshes_only_members_preserving_counts_selection_and_geometry() {
         let mut model = AlbumModel::default();
         model.sync(true, QueryRevisions::default(), 3);
         let albums = model.prepare().unwrap();
@@ -1250,14 +1323,16 @@ mod tests {
         let selected = model.selected.clone();
         let sort = model.sort();
         let generation = model.generation();
+        let cards_generation = model.albums_projection.generation();
         let revisions = QueryRevisions {
             bitrate: 1,
             ..model.revisions
         };
         let change = model.sync(true, revisions, 3);
-        assert!(change.data.albums && change.data.tracks);
-        assert!(model.albums.get(0).is_none());
-        assert!(model.albums.display(0).is_none());
+        assert!(!change.data.albums && change.data.tracks);
+        assert_eq!(model.albums.get(0), Some(&summary(1)));
+        assert_eq!(model.albums.display(0), Some(&summary(1)));
+        assert_eq!(model.albums_projection.generation(), cards_generation);
         assert!(model.tracks.get(0).is_none());
         assert_eq!(model.albums.total(), Some(100));
         assert_eq!(model.tracks.total(), Some(30));
@@ -1280,7 +1355,9 @@ mod tests {
         assert_eq!(finish(&mut model, tracks, 30).counts, Some((30, 60)));
         model.select(None);
         assert_eq!(model.total(), Some(200));
+        // The old viewport is still cold; this is its existing demand, not a card refresh.
         let albums = model.prepare().unwrap();
+        assert!(matches!(&albums.query, Query::Albums { offset: 72, .. }));
         assert!(
             model
                 .prepare_count(&albums.query, albums.generation)
@@ -1369,6 +1446,15 @@ mod tests {
             let current = QueryRevisions { bitrate: 1, ..old };
             model.sync(true, current, 2);
             let completion = model.complete_count(&count, count_response(&count, 10, old), current);
+            if !tracks {
+                // A member-only revision cannot obsolete a pending card count.
+                assert_eq!(completion.published, Published::Albums);
+                assert_eq!(completion.counts, Some((0, 10)));
+                model.retire_worker();
+                assert!(model.prepare().is_none());
+                assert!(model.prepare_missing_count().is_none());
+                continue;
+            }
             assert_eq!(completion.published, Published::None);
             assert!(model.prepare_missing_count().is_none());
             model.retire_worker();
@@ -1506,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_bitrate_delivery_rejects_rows_and_counts_then_requests_current_payload() {
+    fn stale_bitrate_delivery_rejects_member_rows_but_accepts_unchanged_cards() {
         for tracks in [false, true] {
             let mut model = AlbumModel::default();
             model.sync(true, QueryRevisions::default(), 2);
@@ -1529,6 +1615,13 @@ mod tests {
                 revisions,
                 "wrong response",
             );
+            if !tracks {
+                assert_eq!(completion.published, Published::Albums);
+                assert!(model.prepare_count(&old.query, old.generation).is_some());
+                model.retire_worker();
+                assert!(model.prepare().is_none(), "card payload remains current");
+                continue;
+            }
             assert!(model.prepare_count(&old.query, old.generation).is_none());
             model.retire_worker();
             assert_eq!(completion.published, Published::None);

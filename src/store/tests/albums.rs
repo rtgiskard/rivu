@@ -46,7 +46,6 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
         .unwrap();
     assert_eq!(compilation.artist, "Various artists");
     assert_eq!(compilation.track_count, 3);
-    assert_eq!(compilation.representative.title, "A");
     assert_eq!(
         store
             .album_tracks_page(&compilation.key, None, 0, 24)
@@ -515,7 +514,6 @@ fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
             .unwrap();
         assert_eq!(album.key.title, "共享·曲集");
         assert_eq!(album.track_count, expected.len());
-        assert_eq!(album.representative.title, expected[0]);
         let page = store.album_tracks_page(&album.key, None, 0, 24).unwrap();
         assert_eq!(page.total, expected.len());
         assert_eq!(
@@ -669,7 +667,6 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
         .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].artist, "ÉTÉ_100%");
-    assert_eq!(page.rows[0].representative.artist, "ÉTÉ_100%");
     external
         .execute("DELETE FROM tracks WHERE id=2", [])
         .unwrap();
@@ -922,7 +919,6 @@ fn album_paging_work_is_independent_of_member_count_and_inserts_are_linear() {
                         assert_eq!(page.total, usize::from(query != Some("absent")));
                         if let Some(album) = page.rows.first() {
                             assert_eq!(album.track_count, total);
-                            assert_eq!(album.representative.title, "Track 1");
                         }
                     }
                 }

@@ -277,7 +277,6 @@ pub(crate) struct TrackStats {
     pub last_played: Option<i64>,
     pub changed: bool,
     pub queue: bool,
-    pub albums: bool,
 }
 
 impl TrackStats {
@@ -287,7 +286,6 @@ impl TrackStats {
             last_played: row.get(1)?,
             changed: false,
             queue: false,
-            albums: false,
         })
     }
 }

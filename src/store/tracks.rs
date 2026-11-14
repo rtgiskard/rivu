@@ -1256,18 +1256,13 @@ impl Store {
             duplicate_groups,
         })
     }
-    pub(crate) fn remove_history(&self, ids: &[i64]) -> Result<(bool, bool)> {
+    pub(crate) fn remove_history(&self, ids: &[i64]) -> Result<bool> {
         if ids.is_empty() {
-            return Ok((false, false));
+            return Ok(false);
         }
         let encoded = serde_json::to_string(ids)?;
         let tx = self.conn.unchecked_transaction()?;
         validate_encoded_track_ids(&tx, &encoded)?;
-        let albums = tx.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND t.last_played IS NOT NULL AND {})", super::albums::representative("t")),
-            [&encoded],
-            |row| row.get(0),
-        )?;
         let changed = tx.execute(
             "UPDATE tracks SET last_played=NULL WHERE id IN (SELECT value FROM json_each(?1)) AND last_played IS NOT NULL",
             [&encoded],
@@ -1281,7 +1276,7 @@ impl Store {
                 }
             }
         }
-        Ok((changed, albums))
+        Ok(changed)
     }
 
     pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
@@ -1295,15 +1290,6 @@ impl Store {
                 .optional()?.with_context(|| format!("track {track} does not exist"))?, false),
         };
         stats.changed = changed;
-        stats.albums = changed
-            && tx.query_row(
-                &format!(
-                    "SELECT {} FROM tracks AS t WHERE id=?1",
-                    super::albums::representative("t")
-                ),
-                [track],
-                |row| row.get::<_, bool>(0),
-            )?;
         tx.commit()?;
         self.cache_track_stats(track, stats);
         Ok(stats)
@@ -1322,7 +1308,11 @@ impl Store {
         };
         stats.changed = changed;
         if changed {
-            (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            stats.queue = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
+                [track],
+                |row| row.get(0),
+            )?;
         }
         tx.commit()?;
         self.cache_track_stats(track, stats);
@@ -1336,7 +1326,11 @@ impl Store {
             [track], super::TrackStats::from_row,
         ).optional()?.with_context(|| format!("track {track} does not exist"))?;
         stats.changed = true;
-        (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        stats.queue = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
+            [track],
+            |row| row.get(0),
+        )?;
         tx.commit()?;
         self.cache_track_stats(track, stats);
         Ok(stats)
@@ -2017,12 +2011,12 @@ mod request_tests {
         let _ = store.track(1)?;
         for count in [7, 0, i64::MAX as u64] {
             let stats = store.set_play_count(1, count)?;
-            assert!(stats.changed && stats.queue && stats.albums);
+            assert!(stats.changed && stats.queue);
             assert_eq!((stats.play_count, stats.last_played), (count, Some(42)));
             let cached = store.track(1)?.unwrap();
             assert_eq!((cached.play_count, cached.last_played), (count, Some(42)));
             let noop = store.set_play_count(1, count)?;
-            assert!(!noop.changed && !noop.queue && !noop.albums);
+            assert!(!noop.changed && !noop.queue);
         }
         assert!(store.set_play_count(1, i64::MAX as u64 + 1).is_err());
         assert!(store.set_play_count(999, 0).is_err());
@@ -2033,7 +2027,7 @@ mod request_tests {
     }
 
     #[test]
-    fn statistics_return_committed_changes_and_representative_last_played_effects() -> Result<()> {
+    fn statistics_return_committed_changes_and_queue_effects() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
             "INSERT INTO tracks(id,path,album,track_number) VALUES
@@ -2042,15 +2036,15 @@ mod request_tests {
         )?;
         store.enqueue_tracks(&[3])?;
         let first = store.mark_played(1, 42)?;
-        assert!(first.changed && first.albums && !first.queue);
+        assert!(first.changed && !first.queue);
         let noop = store.mark_played(1, 42)?;
-        assert!(!noop.changed && !noop.albums && !noop.queue);
+        assert!(!noop.changed && !noop.queue);
         let member = store.mark_played(2, 42)?;
-        assert!(member.changed && !member.albums && !member.queue);
+        assert!(member.changed && !member.queue);
         let album_count = store.increment_play_count(2)?;
-        assert!(album_count.changed && album_count.albums && !album_count.queue);
+        assert!(album_count.changed && !album_count.queue);
         let queue_count = store.increment_play_count(3)?;
-        assert!(queue_count.changed && queue_count.queue && !queue_count.albums);
+        assert!(queue_count.changed && queue_count.queue);
         let before = store.track(3)?.unwrap();
         store.conn.execute_batch("CREATE TEMP TRIGGER reject_statistics AFTER UPDATE OF play_count,last_played ON tracks BEGIN SELECT RAISE(ABORT,'reject statistics'); END;")?;
         assert!(store.increment_play_count(3).is_err());

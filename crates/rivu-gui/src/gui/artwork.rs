@@ -8,8 +8,8 @@ use std::{
     time::Duration,
 };
 
-use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity};
-use rivu_protocol::model::Track;
+use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, Source};
+use rivu_protocol::model::ArtworkSource as OwnedArtworkSource;
 
 use gpui::{
     App, Asset, Context, Entity, EntityId, ImageCache, ImageCacheError, ImageCacheItem, Img,
@@ -1155,6 +1155,14 @@ impl ImageCache for ArtworkImage {
     }
 }
 
+pub(super) fn owned_artwork_source(source: &OwnedArtworkSource) -> Source<'_> {
+    Source {
+        id: source.id,
+        fingerprint: source.fingerprint.as_deref(),
+        path: &source.path,
+    }
+}
+
 /// One physical executor load; the consumer owns the latest demand.
 #[derive(Default)]
 pub(super) struct ArtworkLoader {
@@ -1165,11 +1173,11 @@ pub(super) struct ArtworkLoader {
 impl ArtworkLoader {
     /// A visible consumer owns its completed miss independently of cache eviction.
     /// This is demand state, not a lease on a shared cache entry.
-    pub(super) fn retain_negative(&mut self, track: Option<&Track>) {
-        if !track.is_some_and(|track| {
+    pub(super) fn retain_negative(&mut self, source: Option<Source<'_>>) {
+        if !source.is_some_and(|source| {
             self.negative
                 .as_ref()
-                .is_some_and(|identity| identity.matches(crate::artwork_source(track)))
+                .is_some_and(|identity| identity.matches(source))
         }) {
             self.negative = None;
         }
@@ -1179,17 +1187,21 @@ impl ArtworkLoader {
         self.negative = (!positive).then_some(identity);
     }
 
-    pub(super) fn prepare(&mut self, track: &Track) -> Option<Track> {
+    pub(super) fn prepare(&mut self, source: Source<'_>) -> Option<OwnedArtworkSource> {
         if self.active.is_some()
             || self
                 .negative
                 .as_ref()
-                .is_some_and(|identity| identity.matches(crate::artwork_source(track)))
+                .is_some_and(|identity| identity.matches(source))
         {
             return None;
         }
-        self.active = Some(ArtworkIdentity::new(crate::artwork_source(track)));
-        Some(track.clone())
+        self.active = Some(ArtworkIdentity::new(source));
+        Some(OwnedArtworkSource {
+            id: source.id,
+            fingerprint: source.fingerprint.map(str::to_owned),
+            path: source.path.to_owned(),
+        })
     }
 
     pub(super) fn finish(&mut self, identity: &ArtworkIdentity) -> bool {
@@ -4374,6 +4386,8 @@ mod tests {
         assert!(sizes.bytes <= DEFAULT_ARTWORK_MAX_BYTES);
     }
 
+    use rivu_protocol::model::Track;
+
     fn track(id: i64, fingerprint: &str) -> Track {
         Track {
             id,
@@ -4410,15 +4424,18 @@ mod tests {
         latest.path = "/moved/latest.wav".into();
         let active = ArtworkIdentity::new(crate::artwork_source(&first));
         let replacement = ArtworkIdentity::new(crate::artwork_source(&latest));
-        assert!(loader.prepare(&first).is_some());
-        assert!(loader.prepare(&skipped).is_none());
-        assert!(loader.prepare(&latest).is_none());
+        assert!(loader.prepare(crate::artwork_source(&first)).is_some());
+        assert!(loader.prepare(crate::artwork_source(&skipped)).is_none());
+        assert!(loader.prepare(crate::artwork_source(&latest)).is_none());
         assert!(!loader.finish(&replacement));
-        assert!(loader.prepare(&latest).is_none());
+        assert!(loader.prepare(crate::artwork_source(&latest)).is_none());
         assert!(loader.finish(&active));
-        assert_eq!(loader.prepare(&latest).unwrap().path, latest.path);
+        assert_eq!(
+            loader.prepare(crate::artwork_source(&latest)).unwrap().path,
+            latest.path
+        );
         assert!(!loader.finish(&active));
-        assert!(loader.prepare(&first).is_none());
+        assert!(loader.prepare(crate::artwork_source(&first)).is_none());
         assert!(loader.finish(&replacement));
         assert!(loader.active.is_none());
     }
@@ -4434,23 +4451,23 @@ mod tests {
         for next in [relocated, changed, other] {
             let mut loader = ArtworkLoader::default();
             loader.remember_result(identity.clone(), false);
-            loader.retain_negative(Some(&original));
-            assert!(loader.prepare(&original).is_none());
-            loader.retain_negative(Some(&next));
-            assert!(loader.prepare(&next).is_some());
+            loader.retain_negative(Some(crate::artwork_source(&original)));
+            assert!(loader.prepare(crate::artwork_source(&original)).is_none());
+            loader.retain_negative(Some(crate::artwork_source(&next)));
+            assert!(loader.prepare(crate::artwork_source(&next)).is_some());
             // Hiding clears demand, never the still-running physical slot.
             loader.retain_negative(None);
-            assert!(loader.prepare(&original).is_none());
+            assert!(loader.prepare(crate::artwork_source(&original)).is_none());
             assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
-            assert!(loader.prepare(&original).is_some());
+            assert!(loader.prepare(crate::artwork_source(&original)).is_some());
         }
         let mut loader = ArtworkLoader::default();
         loader.remember_result(identity.clone(), false);
         loader.retain_negative(None);
-        assert!(loader.prepare(&original).is_some());
+        assert!(loader.prepare(crate::artwork_source(&original)).is_some());
         assert!(loader.finish(&identity));
         loader.remember_result(identity.clone(), false);
         loader.remember_result(identity, true);
-        assert!(loader.prepare(&original).is_some());
+        assert!(loader.prepare(crate::artwork_source(&original)).is_some());
     }
 }

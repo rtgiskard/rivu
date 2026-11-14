@@ -103,7 +103,90 @@ fn add_test_album(core: &mut Core) {
 }
 
 #[test]
-fn audio_progress_publishes_album_token_only_when_statistics_change() {
+fn playback_statistics_keep_album_cards_stable_and_member_rows_fresh() {
+    use rivu_protocol::model::{AlbumKey, AlbumSort, CollectionDestination, CollectionSource};
+
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
+    add_test_album(&mut core);
+    let albums = Query::Albums {
+        query: None,
+        sort: AlbumSort::Title,
+        offset: 0,
+        limit: 24,
+    };
+    let members = Query::AlbumTracks {
+        key: AlbumKey {
+            directory: core.track(1).unwrap().path.parent().unwrap().into(),
+            title: "Playback album".into(),
+        },
+        query: None,
+        offset: 0,
+        limit: 24,
+    };
+    let baseline = core.query_response(&albums);
+    let card_stamp = albums.stamp(baseline.revisions);
+    let ViewResponse::Albums(cards) = baseline.result.unwrap() else {
+        panic!("expected album cards")
+    };
+    let album_revision = core.state.library.album_revision;
+    let count_revision = core.state.library.count_revision;
+    let mut member_stamp = members.stamp(core.query_response(&members).revisions);
+
+    for step in 0..4 {
+        match step {
+            0 => playing(&mut core, 1),
+            1 => progress(&mut core, 3.0, 3.0),
+            2 => {
+                core.command(Command::SetPlayCount {
+                    track_id: 1,
+                    play_count: 7,
+                })
+                .unwrap();
+            }
+            3 => {
+                core.command(Command::RemoveHistory { track_ids: vec![1] })
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let response = core.query_response(&albums);
+        assert_eq!(albums.stamp(response.revisions), card_stamp);
+        let ViewResponse::Albums(page) = response.result.unwrap() else {
+            panic!("expected album cards")
+        };
+        assert_eq!(page.rows, cards.rows);
+        assert_eq!(page.total, cards.total);
+        assert_eq!(core.state.library.album_revision, album_revision);
+        assert_eq!(core.state.library.count_revision, count_revision);
+        let response = core.query_response(&members);
+        let stamp = members.stamp(response.revisions);
+        assert_ne!(stamp, member_stamp);
+        member_stamp = stamp;
+        let ViewResponse::AlbumTracks(page) = response.result.unwrap() else {
+            panic!("expected album members")
+        };
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].id, 1);
+        assert_eq!(page.rows[0].play_count, [0, 1, 7, 7][step]);
+        assert_eq!(core.track(1).unwrap().last_played.is_some(), step != 3);
+    }
+    let Query::AlbumTracks { key, .. } = members else {
+        unreachable!()
+    };
+    let queue_total = core.state.queue.total;
+    core.command(Command::TransferCollection {
+        source: CollectionSource::Album {
+            key,
+            revision: album_revision,
+        },
+        destination: CollectionDestination::Queue { insertion: None },
+    })
+    .unwrap();
+    assert_eq!(core.state.queue.total, queue_total + 1);
+}
+
+#[test]
+fn audio_progress_preserves_album_token_when_statistics_change() {
     let (_directory, mut core) = fixture();
     add_test_album(&mut core);
     playing(&mut core, 1);
@@ -128,14 +211,7 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
             state.system.revision,
             previous.system.revision.wrapping_add(1)
         );
-        if heard == 3.0 {
-            assert_ne!(state.library.album_revision, before.library.album_revision);
-        } else {
-            assert_eq!(
-                state.library.album_revision,
-                previous.library.album_revision
-            );
-        }
+        assert_eq!(state.library.album_revision, before.library.album_revision);
     }
     assert!(
         core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
@@ -176,7 +252,7 @@ fn audio_progress_publishes_committed_statistics_without_rereading_queue_project
             state.library.revision,
             before.library.revision.wrapping_add(1)
         );
-        assert_ne!(state.library.album_revision, before.library.album_revision);
+        assert_eq!(state.library.album_revision, before.library.album_revision);
         assert!(state.queue.revision > before.queue.revision);
         assert!(state.system.last_error.is_none());
         assert_eq!(play_count(&core, 1), 1);
@@ -215,7 +291,7 @@ fn audio_start_publishes_bitrate_revision_without_extra_shape_invalidation() {
         state.library.revision,
         before.library.revision.wrapping_add(1)
     );
-    assert_ne!(state.library.album_revision, before.library.album_revision);
+    assert_eq!(state.library.album_revision, before.library.album_revision);
     assert_eq!(state.queue.revision, before.queue.revision);
     assert_eq!(
         state.library.bitrate_revision,
@@ -259,7 +335,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
         assert_ne!(core.transport.generation, generation);
         assert_eq!(state.playback.status, PlaybackStatus::Stopped);
         assert!(state.current_track().unwrap().bitrate_exact);
-        assert_ne!(state.library.album_revision, before);
+        assert_eq!(state.library.album_revision, before);
         if failed {
             assert_eq!(state.system.last_error.as_deref(), Some("Decoder failed"));
         }
@@ -417,7 +493,7 @@ fn bitrate_commit_rejects_payload_batch_baselines_and_occurrence_continuations()
 }
 
 #[test]
-fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
+fn audio_eof_resolved_duration_publishes_final_count_without_album_invalidation() {
     let (_directory, mut core) = fixture_with_duration(None);
     add_test_album(&mut core);
     pending(&mut core, 1);
@@ -437,7 +513,7 @@ fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
     assert_eq!(state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(state.current_track().unwrap().play_count, 1);
     assert_eq!(play_count(&core, 1), 1);
-    assert_ne!(state.library.album_revision, before);
+    assert_eq!(state.library.album_revision, before);
 }
 
 #[test]

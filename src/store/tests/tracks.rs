@@ -573,16 +573,6 @@ fn release_date_patch_sets_clears_and_omits_without_queue_or_user_state_changes(
             store.track(id).unwrap().unwrap().release_date.as_deref(),
             expected
         );
-        assert_eq!(
-            store
-                .albums_page(None, AlbumSort::Title, 0, 10)
-                .unwrap()
-                .rows[0]
-                .representative
-                .release_date
-                .as_deref(),
-            expected
-        );
         assert_eq!(store.queue_state().unwrap(), queue);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         assert_eq!(store.playlist_track_ids(playlist, 10).unwrap(), vec![id]);

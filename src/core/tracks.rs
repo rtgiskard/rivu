@@ -252,7 +252,7 @@ impl Core {
         if track_ids.is_empty() {
             return Ok(());
         }
-        let (changed, albums) = self.store.remove_history(&track_ids)?;
+        let changed = self.store.remove_history(&track_ids)?;
         // Commit before suppressing producer writes: failed removals preserve history.
         // The flag belongs to the session, including delayed Started/stop snapshots.
         for playback in self.transport.session.iter_mut().chain(
@@ -266,7 +266,6 @@ impl Core {
             }
         }
         if changed {
-            self.invalidate_collection_impacts(false, albums);
             self.state
                 .library
                 .change_metadata(Some(&track_ids), Some(&[]));
@@ -429,7 +428,7 @@ impl Core {
         track_id: i64,
         stats: crate::store::TrackStats,
     ) -> Result<()> {
-        self.invalidate_collection_impacts(stats.queue, stats.albums);
+        self.invalidate_collection_impacts(stats.queue, false);
         if stats.changed {
             self.state
                 .library

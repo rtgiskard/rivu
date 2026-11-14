@@ -567,11 +567,18 @@ pub struct AlbumKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtworkSource {
+    pub id: i64,
+    pub path: PathBuf,
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     pub key: AlbumKey,
     pub artist: String,
     pub track_count: usize,
-    pub representative: Track,
+    pub representative: ArtworkSource,
 }
 
 /// One exact sibling position; no library payload or unbounded ID list is returned.
@@ -1256,12 +1263,6 @@ mod tests {
                 expected: None,
             },
             Query::Track { track_id: 1 },
-            Query::Albums {
-                query: None,
-                sort: AlbumSort::default(),
-                offset: 0,
-                limit: 1,
-            },
             Query::AlbumTracks {
                 key,
                 query: None,
@@ -1335,6 +1336,12 @@ mod tests {
             assert_ne!(query.stamp(before), query.stamp(after), "{query:?}");
         }
         let identities_and_scalars = [
+            Query::Albums {
+                query: None,
+                sort: AlbumSort::default(),
+                offset: 0,
+                limit: 1,
+            },
             Query::LibraryStats,
             Query::OtherTracksCount,
             Query::LibraryRootCounts {

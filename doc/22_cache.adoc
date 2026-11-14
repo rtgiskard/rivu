@@ -109,11 +109,18 @@ usable. Structural ownership belongs to link:24_layout.adoc[GUI layout].
 
 Bitrate changes retire display payloads for demand-driven reload while preserving
 selection, counts, and navigation geometry, including known-empty results. Album
-and member unfiltered totals follow the album revision independently of bitrate;
-fresh payload pages reuse those totals rather than querying them again. Page
-responses still require their complete query stamp. These updates create no
-history or reverse track-to-view index. See
+and member unfiltered totals follow the album revision independently of bitrate
+and playback statistics; fresh payload pages reuse those totals rather than
+querying them again. Page responses still require their complete query stamp.
+These updates create no history or reverse track-to-view index. See
 link:21_ipc.adoc#query-results-and-pagination[IPC query results].
+
+Album cards retain summary fields and artwork source identity, not full tracks.
+Playback statistics invalidate member payloads through track metadata freshness,
+not the album token; counts, selection and geometry remain. The global metadata
+revision can also invalidate unrelated member pages, avoiding per-album epochs.
+Whole-album ID pagination checks only the album token so statistics do not cancel
+collection operations, while membership/order changes still reject the result.
 
 [[demand-cancellation-and-physical-retirement]]
 ==== Demand, cancellation, and physical retirement

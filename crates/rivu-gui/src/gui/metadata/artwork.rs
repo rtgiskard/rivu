@@ -1,15 +1,20 @@
 //! Metadata artwork uses the existing per-window image registry and one physical loader.
 
 use super::Metadata;
+use crate::gui::artwork::owned_artwork_source;
 use gpui::Context;
 use rivu_metadata::artwork::ArtworkIdentity;
-use rivu_protocol::model::Track;
+use rivu_protocol::model::ArtworkSource;
 use std::sync::Arc;
 
 impl Metadata {
     pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
-        self.artwork_loader
-            .retain_negative(self.metadata.track().filter(|_| self.visible));
+        self.artwork_loader.retain_negative(
+            self.metadata
+                .track()
+                .filter(|_| self.visible)
+                .map(crate::artwork_source),
+        );
         if !self.visible {
             // Shared acquisition may finish, but hidden consumers own no demand.
             return;
@@ -29,19 +34,19 @@ impl Metadata {
         let cold = cached.is_none();
         self.artwork_view.replace(cached.flatten(), cx);
         if let Some(track) = self.metadata.track().filter(|_| cold)
-            && let Some(track) = self.artwork_loader.prepare(track)
+            && let Some(source) = self.artwork_loader.prepare(crate::artwork_source(track))
         {
-            self.start_artwork(track, cx);
+            self.start_artwork(source, cx);
         }
     }
 
-    fn start_artwork(&mut self, track: Track, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::new(crate::artwork_source(&track));
+    fn start_artwork(&mut self, source: ArtworkSource, cx: &mut Context<Self>) {
+        let identity = ArtworkIdentity::new(owned_artwork_source(&source));
         let manager = Arc::clone(&self.artwork_manager);
         cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_executor()
-                .spawn(async move { manager.load(crate::artwork_source(&track)) })
+                .spawn(async move { manager.load(owned_artwork_source(&source)) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.artwork_loader.finish(&identity) {

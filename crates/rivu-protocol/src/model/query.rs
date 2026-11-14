@@ -276,7 +276,11 @@ impl Query {
                     stamp.library = revisions.library;
                 }
             }
-            Self::Albums { .. } | Self::AlbumTracks { .. } => {
+            Self::Albums { .. } => {
+                stamp.album = revisions.album;
+            }
+            Self::AlbumTracks { .. } => {
+                stamp.library = revisions.library;
                 stamp.album = revisions.album;
             }
             Self::DirectoryPage { .. }
@@ -340,7 +344,6 @@ impl Query {
                 | Self::TrackPage { .. }
                 | Self::TrackBatch { .. }
                 | Self::Track { .. }
-                | Self::Albums { .. }
                 | Self::AlbumTracks { .. }
                 | Self::DirectoryPage { .. }
                 | Self::OtherTracksPage { .. }

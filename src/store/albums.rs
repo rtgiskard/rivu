@@ -1,9 +1,11 @@
 use super::Store;
-use super::rows::{LIBRARY_ROW_COLUMNS, TRACK_COLUMNS, library_row_from_row, track_from_row};
+use super::rows::{LIBRARY_ROW_COLUMNS, fingerprint_from_row, library_row_from_row};
 use super::tracks::{search_filter, search_query};
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::{DIRECTORY, ORDER, TITLE, eligible_title};
-use rivu_protocol::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
+use rivu_protocol::model::{
+    AlbumKey, AlbumSort, AlbumSummary, ArtworkSource, LibraryRow, MAX_QUERY_ROWS, Page,
+};
 use rusqlite::params;
 
 // Exact parent and effective title match the leading member-index expressions;
@@ -49,7 +51,7 @@ impl Store {
         };
         let mut statement = self.conn.prepare_cached(&format!("SELECT directory,title,track_count,artist FROM albums WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
         let mut representative = self.conn.prepare_cached(&format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"
+            "SELECT id,path,fingerprint FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"
         ))?;
         let mut rows = statement.query(params![
             query,
@@ -67,7 +69,13 @@ impl Store {
                 .to_str()
                 .context("Album directory is not UTF-8")?;
             let representative =
-                representative.query_row(params![directory, key.title], track_from_row)?;
+                representative.query_row(params![directory, key.title], |row| {
+                    Ok(ArtworkSource {
+                        id: row.get(0)?,
+                        path: row.get::<_, String>(1)?.into(),
+                        fingerprint: fingerprint_from_row(row, 2)?,
+                    })
+                })?;
             summaries.push(AlbumSummary {
                 representative,
                 key,

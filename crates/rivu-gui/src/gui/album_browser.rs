@@ -13,12 +13,14 @@ use gpui::{prelude::*, *};
 use crate::frontend::FrontendHandle;
 use rivu_presentation::track::track_title;
 use rivu_protocol::{
-    model::{AlbumKey, AlbumSort, Command, PlaybackStatus, Track},
+    model::{AlbumKey, AlbumSort, ArtworkSource, Command, PlaybackStatus},
     response::QueryRevisions,
 };
 
 use super::{
-    artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
+    artwork::{
+        ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork, owned_artwork_source,
+    },
     components::{
         search::{SearchScope, new_search, set_search_counts},
         track::{TrackText, track_list_row},
@@ -84,27 +86,32 @@ impl AlbumCover {
 
     /// Reconcile a cached completion before deciding whether to schedule a load.
     /// Returns whether the view changed and whether the source is still cold.
-    fn sync(&mut self, track: &Track, manager: &ArtworkManager, cx: &mut App) -> (bool, bool) {
+    fn sync(
+        &mut self,
+        track: &ArtworkSource,
+        manager: &ArtworkManager,
+        cx: &mut App,
+    ) -> (bool, bool) {
         if self
             .negative
             .as_ref()
-            .is_some_and(|negative| negative.matches(crate::artwork_source(track)))
+            .is_some_and(|negative| negative.matches(owned_artwork_source(track)))
         {
             return (false, false);
         }
-        let cached = manager.cached_result(crate::artwork_source(track));
+        let cached = manager.cached_result(owned_artwork_source(track));
         let cold = cached.is_none();
         self.negative = cached
             .as_ref()
             .is_some_and(Option::is_none)
-            .then(|| ArtworkIdentity::new(crate::artwork_source(track)));
+            .then(|| ArtworkIdentity::new(owned_artwork_source(track)));
         (self.view.replace(cached.flatten(), cx), cold)
     }
 
     fn complete(
         &mut self,
-        source: &Track,
-        current: Option<&Track>,
+        source: &ArtworkSource,
+        current: Option<&ArtworkSource>,
         loaded: Option<&LoadedArtwork>,
         cx: &mut App,
     ) -> bool {
@@ -117,7 +124,7 @@ impl AlbumCover {
         }
         self.negative = loaded
             .is_none()
-            .then(|| ArtworkIdentity::new(crate::artwork_source(source)));
+            .then(|| ArtworkIdentity::new(owned_artwork_source(source)));
         self.view.replace(loaded.cloned(), cx)
     }
 }
@@ -143,7 +150,7 @@ impl AlbumCovers {
     fn sync<'a>(
         &mut self,
         demand: Range<usize>,
-        source: impl Fn(usize) -> Option<&'a Track>,
+        source: impl Fn(usize) -> Option<&'a ArtworkSource>,
         manager: &ArtworkManager,
         images: &ArtworkImageRegistry,
         cx: &mut App,
@@ -176,11 +183,11 @@ impl AlbumCovers {
 
     fn prepare<'a>(
         &mut self,
-        source: impl Fn(usize) -> Option<&'a Track>,
+        source: impl Fn(usize) -> Option<&'a ArtworkSource>,
         manager: &ArtworkManager,
         loader: &mut ArtworkLoader,
         cx: &mut App,
-    ) -> (Option<Track>, bool) {
+    ) -> (Option<ArtworkSource>, bool) {
         let mut changed = false;
         while let Some(&index) = self.pending.front() {
             if let Some(track) = source(index)
@@ -190,7 +197,7 @@ impl AlbumCovers {
                 changed |= updated;
                 if cold {
                     // Keep this candidate while an obsolete physical worker retires.
-                    let next = loader.prepare(track);
+                    let next = loader.prepare(owned_artwork_source(track));
                     if next.is_some() {
                         self.pending.pop_front();
                     }
@@ -204,9 +211,9 @@ impl AlbumCovers {
 
     fn complete<'a>(
         &mut self,
-        track: &Track,
+        track: &ArtworkSource,
         loaded: Option<&LoadedArtwork>,
-        source: impl Fn(usize) -> Option<&'a Track>,
+        source: impl Fn(usize) -> Option<&'a ArtworkSource>,
         cx: &mut App,
     ) -> bool {
         let Some(indices) = self.sources.get(&track.id) else {
@@ -777,13 +784,13 @@ impl AlbumBrowser {
             cx.notify();
         }
         if let Some(track) = next {
-            let identity = ArtworkIdentity::new(crate::artwork_source(&track));
+            let identity = ArtworkIdentity::new(owned_artwork_source(&track));
             let manager = Arc::clone(&self.manager);
             cx.spawn(async move |this, cx| {
                 let (track, loaded) = cx
                     .background_executor()
                     .spawn(async move {
-                        let loaded = manager.load(crate::artwork_source(&track));
+                        let loaded = manager.load(owned_artwork_source(&track));
                         (track, loaded)
                     })
                     .await;
@@ -1461,18 +1468,115 @@ impl Render for AlbumBrowser {
 #[cfg(test)]
 mod tests {
     use super::{AlbumCover, AlbumCovers, anchored_index};
-    use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader};
-    use crate::test_support::artwork_track as track;
+    use crate::gui::artwork::{ArtworkImageRegistry, ArtworkLoader, owned_artwork_source};
     use rivu_metadata::artwork::{ArtworkIdentity, ArtworkManager, test_support::tagged_wav};
+    use rivu_protocol::model::ArtworkSource;
+
+    fn cover_source(path: std::path::PathBuf) -> ArtworkSource {
+        ArtworkSource {
+            id: 1,
+            path,
+            fingerprint: None,
+        }
+    }
+
+    #[gpui::test]
+    fn stats_refresh_retains_cover_demand_and_in_flight_completion(cx: &mut gpui::TestAppContext) {
+        use rivu_protocol::{
+            model::{AlbumKey, AlbumSummary, Page},
+            response::{QueryResponse, QueryRevisions, ViewResponse},
+        };
+
+        for positive in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cover.wav");
+            if positive {
+                tagged_wav(&path);
+            }
+            let manager = ArtworkManager::new(directory.path());
+            let images = ArtworkImageRegistry::default();
+            let mut model = super::AlbumModel::default();
+            let revisions = QueryRevisions::default();
+            model.sync(true, revisions, 2);
+            let cards = model.prepare().unwrap();
+            let card = AlbumSummary {
+                key: AlbumKey {
+                    directory: directory.path().to_owned(),
+                    title: "Album".into(),
+                },
+                artist: "Artist".into(),
+                track_count: 1,
+                representative: cover_source(path),
+            };
+            model.complete_page(
+                &cards.query,
+                cards.generation,
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::Albums(Page {
+                        total: 1,
+                        rows: vec![card.clone()],
+                    })),
+                },
+                revisions,
+                "wrong response",
+            );
+            model.retire_worker();
+            let mut covers = AlbumCovers::default();
+            let mut loader = ArtworkLoader::default();
+            let active = cx.update(|cx| {
+                let source = |index| model.albums().get(index).map(|album| &album.representative);
+                covers.sync(0..1, source, &manager, &images, cx);
+                covers.prepare(source, &manager, &mut loader, cx).0.unwrap()
+            });
+            let sources = covers.sources.clone();
+            let current = QueryRevisions {
+                library: 1,
+                ..revisions
+            };
+            assert!(!model.albums_need_refresh(current));
+            let change = model.sync(true, current, 2);
+            assert!(!change.data.any());
+            assert!(!change.visibility && !change.demand);
+            assert_eq!(model.albums().get(0), Some(&card));
+            assert!(model.prepare().is_none());
+            assert_eq!(covers.sources, sources);
+            assert!(covers.pending.is_empty());
+            assert!(loader.prepare(owned_artwork_source(&active)).is_none());
+            let loaded = manager.load(owned_artwork_source(&active));
+            assert_eq!(loaded.is_some(), positive);
+            assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
+            cx.update(|cx| {
+                let source = |index| model.albums().get(index).map(|album| &album.representative);
+                assert_eq!(
+                    covers.complete(&active, loaded.as_ref(), source, cx),
+                    positive
+                );
+                assert!(!covers.sync(0..1, source, &manager, &images, cx));
+                assert!(
+                    covers
+                        .prepare(source, &manager, &mut loader, cx)
+                        .0
+                        .is_none()
+                );
+                assert_eq!(covers.views[&0].view.image(cx).is_some(), positive);
+                assert_eq!(covers.views[&0].negative.is_some(), !positive);
+                covers.clear(cx);
+                assert!(covers.views.is_empty());
+                assert!(covers.sources.is_empty());
+                assert!(covers.pending.is_empty());
+            });
+        }
+    }
 
     #[gpui::test]
     fn removed_presentation_releases_cover_demand(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cover.wav");
         tagged_wav(&path);
-        let source = track(path);
+        let source = cover_source(path);
         let manager = ArtworkManager::new(directory.path());
-        let loaded = manager.load(crate::artwork_source(&source)).unwrap();
+        let loaded = manager.load(owned_artwork_source(&source)).unwrap();
         let mut covers = AlbumCovers::default();
         cx.update(|cx| {
             let images = ArtworkImageRegistry::default();
@@ -1618,18 +1722,18 @@ mod tests {
         let path = directory.path().join("cover.wav");
         tagged_wav(&path);
         let manager = ArtworkManager::new(directory.path());
-        let mut source = track(path);
+        let mut source = cover_source(path);
         let mut held = Vec::new();
         for id in 1..=64 {
             source.id = id;
-            held.push(manager.load(crate::artwork_source(&source)).unwrap());
+            held.push(manager.load(owned_artwork_source(&source)).unwrap());
         }
         source.id = 65;
         // The worker's result must stay leased while the GUI callback is queued.
-        let completed = manager.load(crate::artwork_source(&source)).unwrap();
+        let completed = manager.load(owned_artwork_source(&source)).unwrap();
         let mut pressure = source.clone();
         pressure.id = 66;
-        drop(manager.load(crate::artwork_source(&pressure)));
+        drop(manager.load(owned_artwork_source(&pressure)));
 
         let mut cover = AlbumCover::new(ArtworkImageRegistry::default());
         cx.update(|cx| {
@@ -1641,11 +1745,11 @@ mod tests {
         drop(held);
         for id in 67..140 {
             pressure.id = id;
-            drop(manager.load(crate::artwork_source(&pressure)));
+            drop(manager.load(owned_artwork_source(&pressure)));
         }
         assert!(
             manager
-                .cached_result(crate::artwork_source(&source))
+                .cached_result(owned_artwork_source(&source))
                 .is_some()
         );
         cx.update(|cx| {
@@ -1659,10 +1763,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cover.wav");
         tagged_wav(&path);
-        let first = track(path.clone());
-        let mut second = track(path);
+        let first = cover_source(path.clone());
+        let mut second = cover_source(path);
         second.id += 1;
-        let mut negative = track(directory.path().join("missing.wav"));
+        let mut negative = cover_source(directory.path().join("missing.wav"));
         negative.id += 2;
         let sources = [first, second, negative];
         let manager = ArtworkManager::new(directory.path());
@@ -1685,10 +1789,10 @@ mod tests {
             })
             .unwrap();
         // Another consumer finishes both waiting sources while this panel loads A.
-        let external = manager.load(crate::artwork_source(&sources[1])).unwrap();
-        assert!(manager.load(crate::artwork_source(&sources[2])).is_none());
-        let completed = manager.load(crate::artwork_source(&active)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&active))));
+        let external = manager.load(owned_artwork_source(&sources[1])).unwrap();
+        assert!(manager.load(owned_artwork_source(&sources[2])).is_none());
+        let completed = manager.load(owned_artwork_source(&active)).unwrap();
+        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
         cx.update(|cx| {
             covers.complete(&active, Some(&completed), |index| sources.get(index), cx);
             let (next, changed) =
@@ -1703,18 +1807,18 @@ mod tests {
                     .negative
                     .as_ref()
                     .unwrap()
-                    .matches(crate::artwork_source(&sources[2]))
+                    .matches(owned_artwork_source(&sources[2]))
             );
         });
         drop(external);
         let mut pressure = sources[2].clone();
         for id in 10..106 {
             pressure.id = id;
-            drop(manager.load(crate::artwork_source(&pressure)));
+            drop(manager.load(owned_artwork_source(&pressure)));
         }
         assert!(
             manager
-                .cached_result(crate::artwork_source(&sources[2]))
+                .cached_result(owned_artwork_source(&sources[2]))
                 .is_none()
         );
         cx.update(|cx| {
@@ -1737,7 +1841,7 @@ mod tests {
                     .negative
                     .as_ref()
                     .unwrap()
-                    .matches(crate::artwork_source(&sources[2]))
+                    .matches(owned_artwork_source(&sources[2]))
             );
         });
     }
@@ -1748,7 +1852,7 @@ mod tests {
         let manager = ArtworkManager::new(directory.path());
         let sources: Vec<_> = (1..=96)
             .map(|id| {
-                let mut source = track(directory.path().join(format!("missing-{id}.wav")));
+                let mut source = cover_source(directory.path().join(format!("missing-{id}.wav")));
                 source.id = id;
                 source
             })
@@ -1773,8 +1877,8 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                ArtworkIdentity::new(crate::artwork_source(source))
-                    .matches(crate::artwork_source(&next))
+                ArtworkIdentity::new(owned_artwork_source(source))
+                    .matches(owned_artwork_source(&next))
             );
             assert!(
                 cx.update(|cx| covers
@@ -1782,20 +1886,20 @@ mod tests {
                     .0)
                     .is_none()
             );
-            let completed = manager.load(crate::artwork_source(&next));
+            let completed = manager.load(owned_artwork_source(&next));
             assert!(completed.is_none());
             assert_eq!(
-                manager.cached_result(crate::artwork_source(source)),
+                manager.cached_result(owned_artwork_source(source)),
                 Some(None)
             );
-            assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+            assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
             cx.update(|cx| {
                 covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
             });
         }
         assert!(
             manager
-                .cached_result(crate::artwork_source(&sources[0]))
+                .cached_result(owned_artwork_source(&sources[0]))
                 .is_none()
         );
         assert!(
@@ -1819,11 +1923,11 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         let manager = ArtworkManager::new(directory.path());
-        let source = track(directory.path().join("missing.wav"));
-        let negative = manager.load(crate::artwork_source(&source));
+        let source = cover_source(directory.path().join("missing.wav"));
+        let negative = manager.load(owned_artwork_source(&source));
         assert!(negative.is_none());
         assert_eq!(
-            manager.cached_result(crate::artwork_source(&source)),
+            manager.cached_result(owned_artwork_source(&source)),
             Some(None)
         );
         let mut current = source.clone();
@@ -1842,7 +1946,7 @@ mod tests {
             cover.complete(&source, Some(&source), negative.as_ref(), cx);
         });
         cx.update(|cx| assert!(cover.sync(&current, &manager, cx).1));
-        let recovered = manager.load(crate::artwork_source(&current)).unwrap();
+        let recovered = manager.load(owned_artwork_source(&current)).unwrap();
         cx.update(|cx| {
             assert!(cover.complete(&current, Some(&current), Some(&recovered), cx));
             assert!(cover.view.image(cx).is_some());
@@ -1855,8 +1959,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cover.wav");
         tagged_wav(&path);
-        let first = track(path);
-        let mut second = track(directory.path().join("missing.wav"));
+        let first = cover_source(path);
+        let mut second = cover_source(directory.path().join("missing.wav"));
         second.id = first.id + 1;
         let sources = [first.clone(), second.clone(), first.clone()];
         let manager = ArtworkManager::new(directory.path());
@@ -1879,11 +1983,10 @@ mod tests {
             })
             .unwrap();
         assert!(
-            ArtworkIdentity::new(crate::artwork_source(&first))
-                .matches(crate::artwork_source(&next))
+            ArtworkIdentity::new(owned_artwork_source(&first)).matches(owned_artwork_source(&next))
         );
-        let completed = manager.load(crate::artwork_source(&next)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+        let completed = manager.load(owned_artwork_source(&next)).unwrap();
+        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), |index| sources.get(index), cx));
             assert!(covers.views[&0].view.image(cx).is_some());
@@ -1898,11 +2001,11 @@ mod tests {
             })
             .unwrap();
         assert!(
-            ArtworkIdentity::new(crate::artwork_source(&second))
-                .matches(crate::artwork_source(&next))
+            ArtworkIdentity::new(owned_artwork_source(&second))
+                .matches(owned_artwork_source(&next))
         );
-        let completed = manager.load(crate::artwork_source(&next));
-        assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+        let completed = manager.load(owned_artwork_source(&next));
+        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
         cx.update(|cx| {
             covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
         });
@@ -1917,7 +2020,7 @@ mod tests {
     #[gpui::test]
     fn changed_viewport_waits_for_retirement_and_rejects_old_source(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
-        let old = track(directory.path().join("missing.wav"));
+        let old = cover_source(directory.path().join("missing.wav"));
         let mut discarded = old.clone();
         discarded.id += 1;
         let previous = [old.clone(), discarded];
@@ -1944,8 +2047,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            ArtworkIdentity::new(crate::artwork_source(&old))
-                .matches(crate::artwork_source(&active))
+            ArtworkIdentity::new(owned_artwork_source(&old)).matches(owned_artwork_source(&active))
         );
         // A page can arrive for the latest viewport while the old load is physical.
         cx.update(|cx| {
@@ -1969,9 +2071,9 @@ mod tests {
             cx.update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
                 .is_none()
         );
-        let negative = manager.load(crate::artwork_source(&active));
+        let negative = manager.load(owned_artwork_source(&active));
         assert!(negative.is_none());
-        assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&active))));
+        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
         cx.update(|cx| {
             assert!(!covers.complete(&active, negative.as_ref(), latest, cx));
             assert!(covers.views[&2].negative.is_none());
@@ -1981,11 +2083,11 @@ mod tests {
             .update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
             .unwrap();
         assert!(
-            ArtworkIdentity::new(crate::artwork_source(&current))
-                .matches(crate::artwork_source(&next))
+            ArtworkIdentity::new(owned_artwork_source(&current))
+                .matches(owned_artwork_source(&next))
         );
-        let completed = manager.load(crate::artwork_source(&next)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+        let completed = manager.load(owned_artwork_source(&next)).unwrap();
+        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), latest, cx));
             assert!(covers.views[&2].view.image(cx).is_some());
