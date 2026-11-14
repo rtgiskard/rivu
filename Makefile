@@ -36,6 +36,8 @@ test-rust:
 	cargo test --locked -p rivu-utils --no-default-features --features logging
 	cargo test --locked -p rivu-utils --no-default-features --features terminal
 	cargo test --locked -p rivu-utils --all-features
+	cargo test --locked -p rivu-ui --features showcase --example showcase
+	cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac
 
 test-python:
 	$(PYTHON) -c 'import numpy, scipy, soundfile, jsonschema'
