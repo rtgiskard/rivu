@@ -1537,6 +1537,22 @@ mod tests {
         (directory, loaded)
     }
 
+    fn install_cover(
+        view: &ArtworkView,
+        loaded: LoadedArtwork,
+        cx: &mut App,
+    ) -> Entity<ArtworkImage> {
+        view.replace(Some(loaded), cx);
+        view.state
+            .borrow()
+            .current
+            .as_ref()
+            .unwrap()
+            .owner
+            .image
+            .clone()
+    }
+
     // Each test selects distinct pixels so global same-source decode sharing
     // cannot make another concurrently running test own its release probe.
     fn static_cover(side: u32, red: u8) -> Vec<u8> {
@@ -2491,17 +2507,7 @@ mod tests {
         let images = ArtworkImageRegistry::default();
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
-        let cache = window.update(|_, cx| {
-            view.replace(Some(loaded), cx);
-            view.state
-                .borrow()
-                .current
-                .as_ref()
-                .unwrap()
-                .owner
-                .image
-                .clone()
-        });
+        let cache = window.update(|_, cx| install_cover(&view, loaded, cx));
         request_cover_size(window, &view, 1, 800.);
         draw_cover(window, &view);
         window.run_until_parked();
@@ -2587,17 +2593,9 @@ mod tests {
         let second = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let cache = window.update(|_, cx| {
-            first.replace(Some(loaded.clone()), cx);
+            let cache = install_cover(&first, loaded.clone(), cx);
             second.replace(Some(loaded), cx);
-            first
-                .state
-                .borrow()
-                .current
-                .as_ref()
-                .unwrap()
-                .owner
-                .image
-                .clone()
+            cache
         });
         request_cover_size(window, &first, 1, 256.);
         request_cover_size(window, &second, 2, 201.);
@@ -2718,17 +2716,7 @@ mod tests {
             let images = ArtworkImageRegistry::default();
             let view = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
-            let cache = window.update(|_, cx| {
-                view.replace(Some(loaded), cx);
-                view.state
-                    .borrow()
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .owner
-                    .image
-                    .clone()
-            });
+            let cache = window.update(|_, cx| install_cover(&view, loaded, cx));
             request_cover_size(window, &view, 1, 200.);
             draw_cover(window, &view);
             window.run_until_parked();
@@ -3033,16 +3021,7 @@ mod tests {
     fn artwork_budget_changes_retry_shared_covers_and_retire_previous_pixels(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
-        let path = directory.path().join("budget.wav");
-        cover_wave(&path, &decode::tests::gif());
-        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager
-            .load(crate::artwork_source(&crate::test_support::artwork_track(
-                path,
-            )))
-            .unwrap();
+        let (_directory, loaded) = loaded_cover(&decode::tests::gif());
         let images = ArtworkImageRegistry::default();
         let first = ArtworkView::new(images.clone());
         let second = ArtworkView::new(images.clone());
@@ -3151,31 +3130,14 @@ mod tests {
     fn artwork_budget_change_cancels_pending_completion_before_it_can_publish(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
-        let path = directory.path().join("pending-budget.wav");
-        cover_wave(&path, &decode::tests::gif());
-        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager
-            .load(crate::artwork_source(&crate::test_support::artwork_track(
-                path,
-            )))
-            .unwrap();
+        let (_directory, loaded) = loaded_cover(&decode::tests::gif());
         for worker_finished in [false, true] {
             let images = ArtworkImageRegistry::default();
             let view = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
             let cache = window.update(|_, cx| {
                 assert!(images.set_decode_budget(decode::tests::budget(2), cx));
-                view.replace(Some(loaded.clone()), cx);
-                view.state
-                    .borrow()
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .owner
-                    .image
-                    .clone()
+                install_cover(&view, loaded.clone(), cx)
             });
             let old_scene = window.update(|_, cx| view.image(cx).unwrap());
             let (sender, receiver) = futures::channel::oneshot::channel();
@@ -3260,30 +3222,12 @@ mod tests {
     fn unrequested_artwork_scenes_cannot_load_after_their_lease_is_retired(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
-        let path = directory.path().join("unrequested.wav");
-        cover_wave(&path, &decode::tests::gif());
-        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager
-            .load(crate::artwork_source(&crate::test_support::artwork_track(
-                path,
-            )))
-            .unwrap();
+        let (_directory, loaded) = loaded_cover(&decode::tests::gif());
         let images = ArtworkImageRegistry::default();
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let (cache, old_cover, old_ambient) = window.update(|_, cx| {
-            view.replace(Some(loaded), cx);
-            let cache = view
-                .state
-                .borrow()
-                .current
-                .as_ref()
-                .unwrap()
-                .owner
-                .image
-                .clone();
+            let cache = install_cover(&view, loaded, cx);
             (
                 cache,
                 view.image(cx).unwrap(),
@@ -3320,32 +3264,13 @@ mod tests {
     fn artwork_flush_cancels_source_and_ambient_before_or_after_worker_completion(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
-        let path = directory.path().join("pending-release.wav");
-        cover_wave(&path, &decode::tests::gif());
-        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
-        let loaded = manager
-            .load(crate::artwork_source(&crate::test_support::artwork_track(
-                path,
-            )))
-            .unwrap();
+        let (_directory, loaded) = loaded_cover(&decode::tests::gif());
         for ambient in [false, true] {
             for worker_finished in [false, true] {
                 let images = ArtworkImageRegistry::default();
                 let view = ArtworkView::new(images.clone());
                 let window = cx.add_empty_window();
-                let cache = window.update(|_, cx| {
-                    view.replace(Some(loaded.clone()), cx);
-                    view.state
-                        .borrow()
-                        .current
-                        .as_ref()
-                        .unwrap()
-                        .owner
-                        .image
-                        .clone()
-                });
+                let cache = window.update(|_, cx| install_cover(&view, loaded.clone(), cx));
                 let (sender, receiver) = futures::channel::oneshot::channel();
                 let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 cache.update(window, |image, cx| {

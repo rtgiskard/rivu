@@ -181,20 +181,7 @@ mod tests {
     use std::path::Path;
 
     fn wav(path: &Path) {
-        let mut writer = hound::WavWriter::create(
-            path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )
-        .unwrap();
-        for _ in 0..80 {
-            writer.write_sample(0_i16).unwrap();
-        }
-        writer.finalize().unwrap();
+        crate::test_support::write_i16_wav(path, 1, 8_000, [0; 80]).unwrap();
     }
 
     #[test]

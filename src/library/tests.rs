@@ -8,7 +8,6 @@ use super::*;
 use anyhow::{Context, Result};
 use rivu_protocol::model::{CueSegment, ScanPhase, Track};
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -245,23 +244,8 @@ fn scan_paths_at_depth(
     )
 }
 
-// Mono PCM WAVs with exactly 100 samples per CD frame, no audio device.
 fn wav(path: &Path, frames: u32) -> Result<()> {
-    let data_len = frames * 100 * 2;
-    let mut file = File::create(path)?;
-    file.write_all(b"RIFF")?;
-    file.write_all(&(36 + data_len).to_le_bytes())?;
-    file.write_all(b"WAVEfmt ")?;
-    file.write_all(&16_u32.to_le_bytes())?;
-    file.write_all(&1_u16.to_le_bytes())?;
-    file.write_all(&1_u16.to_le_bytes())?;
-    file.write_all(&7500_u32.to_le_bytes())?;
-    file.write_all(&15000_u32.to_le_bytes())?;
-    file.write_all(&2_u16.to_le_bytes())?;
-    file.write_all(&16_u16.to_le_bytes())?;
-    file.write_all(b"data")?;
-    file.write_all(&data_len.to_le_bytes())?;
-    file.write_all(&vec![0; data_len as usize])?;
+    crate::test_support::write_cd_frame_wav(path, frames)?;
     Ok(())
 }
 

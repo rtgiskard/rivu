@@ -730,6 +730,17 @@ mod deletion_tests {
     use super::*;
     use std::path::Path;
 
+    fn stored_playlist_entries() -> Result<Store> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
+             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
+        )?;
+        Ok(store)
+    }
+
     #[test]
     fn page_and_batch_decode_identical_track_fields_and_matching_offsets() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
@@ -760,13 +771,7 @@ mod deletion_tests {
 
     #[test]
     fn playlist_entry_location_tracks_reorder_and_deletion_by_identity() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
-            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
-             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
-             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
-                (100,10,1,0),(101,10,2,1),(102,10,3,2),(200,20,1,0);",
-        )?;
+        let store = stored_playlist_entries()?;
         assert_eq!(
             store
                 .playlist_summary_page(None, 0, 10)?
@@ -845,14 +850,10 @@ mod deletion_tests {
 
     #[test]
     fn remove_playlist_entry_preserves_identity_and_other_references() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
+        let store = stored_playlist_entries()?;
         store.conn.execute_batch(
-            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three');
-             INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second');
-             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
-                (100,10,1,0),(101,10,2,1),(102,10,3,2),
-                (200,20,1,0),(201,20,2,1),(202,20,3,2);
-             INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES (300,0,2,0);
+            "INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
+                (201,20,2,1),(202,20,3,2),(300,0,2,0);
              UPDATE rivu_meta SET current_queue_entry_id=300 WHERE singleton=1;",
         )?;
         assert_eq!(store.remove_playlist_entry(101)?, 10);
@@ -887,17 +888,18 @@ mod deletion_tests {
 }
 
 #[cfg(test)]
-mod request_tests {
-    use super::*;
-    use std::path::Path;
+fn four_track_store() -> Result<Store> {
+    let store = Store::open(std::path::Path::new(":memory:"))?;
+    store.conn.execute_batch(
+        "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four');",
+    )?;
+    Ok(store)
+}
 
-    fn store() -> Result<Store> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
-            "INSERT INTO tracks(id,path) VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four');",
-        )?;
-        Ok(store)
-    }
+#[cfg(test)]
+mod request_tests {
+    use super::four_track_store as store;
+    use super::*;
 
     #[test]
     fn create_and_rename_share_name_rules_without_normalizing_whitespace() -> Result<()> {
@@ -1643,17 +1645,9 @@ mod group_tests {
 
 #[cfg(test)]
 mod occurrence_tests {
+    use super::four_track_store as fixture;
     use super::*;
     use rivu_protocol::model::{CollectionDestination, CollectionSource};
-    use std::path::Path;
-
-    fn fixture() -> Result<Store> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
-            "INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two'),(3,'three'),(4,'four');",
-        )?;
-        Ok(store)
-    }
 
     #[test]
     fn dedup_keeps_first_occurrences_and_isolates_queue_and_other_playlists() -> Result<()> {

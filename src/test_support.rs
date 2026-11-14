@@ -2,6 +2,61 @@ pub mod catalog;
 pub mod frontend;
 pub mod ipc;
 
+#[cfg(test)]
+pub(crate) fn write_i16_wav(
+    path: &std::path::Path,
+    channels: u16,
+    sample_rate: u32,
+    samples: impl IntoIterator<Item = i16>,
+) -> hound::Result<()> {
+    let mut writer = hound::WavWriter::create(
+        path,
+        hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )?;
+    for sample in samples {
+        writer.write_sample(sample)?;
+    }
+    writer.finalize()
+}
+
+#[cfg(test)]
+pub(crate) fn write_float_wav(
+    path: &std::path::Path,
+    channels: u16,
+    sample_rate: u32,
+    samples: impl IntoIterator<Item = f32>,
+) -> hound::Result<()> {
+    let mut writer = hound::WavWriter::create(
+        path,
+        hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )?;
+    for sample in samples {
+        writer.write_sample(sample)?;
+    }
+    writer.finalize()
+}
+
+// Mono PCM with exactly 100 samples per CD frame, preserving CUE boundaries.
+#[cfg(test)]
+pub(crate) fn write_cd_frame_wav(path: &std::path::Path, frames: u32) -> hound::Result<()> {
+    write_i16_wav(
+        path,
+        1,
+        7_500,
+        std::iter::repeat_n(0, frames as usize * 100),
+    )
+}
+
 /// Re-run a potentially blocking regression in a killable process, not a thread
 /// whose destructor could join the same stuck worker during unwinding.
 pub fn run_in_subprocess(test: &str, timeout: std::time::Duration) -> bool {

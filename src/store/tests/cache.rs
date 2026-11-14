@@ -138,17 +138,25 @@ fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
     );
 }
 
+// Seed scanned metadata only; callers choose the first cache read and capacity.
+fn scanned_cache_tracks(count: usize) -> (Store, Vec<i64>) {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let records = [
+        rec("/music/a.mp3", "a", "A", 10.),
+        rec("/music/b.mp3", "b", "B", 10.),
+        rec("/music/c.mp3", "c", "C", 10.),
+        rec("/music/d.mp3", "d", "D", 10.),
+    ];
+    store
+        .apply_scan(&scan(records.into_iter().take(count).collect()))
+        .unwrap();
+    let ids = all_tracks(&store).iter().map(|track| track.id).collect();
+    (store, ids)
+}
+
 #[test]
 fn track_cache_refreshes_hits_before_lru_eviction() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![
-            rec("/music/a.mp3", "a", "A", 10.),
-            rec("/music/b.mp3", "b", "B", 10.),
-            rec("/music/c.mp3", "c", "C", 10.),
-        ]))
-        .unwrap();
-    let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+    let (store, ids) = scanned_cache_tracks(3);
     store.set_track_cache_query_batch_size(1); // capacity is two tracks
     store.track(ids[0]).unwrap();
     store.track(ids[1]).unwrap();
@@ -176,16 +184,7 @@ fn track_cache_refreshes_hits_before_lru_eviction() {
 
 #[test]
 fn track_cache_resize_shrinks_and_does_not_cache_misses() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![
-            rec("/music/a.mp3", "a", "A", 10.),
-            rec("/music/b.mp3", "b", "B", 10.),
-            rec("/music/c.mp3", "c", "C", 10.),
-            rec("/music/d.mp3", "d", "D", 10.),
-        ]))
-        .unwrap();
-    let ids: Vec<_> = all_tracks(&store).iter().map(|track| track.id).collect();
+    let (store, ids) = scanned_cache_tracks(4);
     store.set_track_cache_query_batch_size(2); // capacity is four tracks
     for id in &ids {
         store.track(*id).unwrap();
@@ -208,11 +207,8 @@ fn track_cache_resize_shrinks_and_does_not_cache_misses() {
 
 #[test]
 fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
-        .unwrap();
-    let id = all_tracks(&store)[0].id;
+    let (store, ids) = scanned_cache_tracks(1);
+    let id = ids[0];
     assert_eq!(store.track(id).unwrap().unwrap().title, "A");
 
     store.set_favorite(&[id], true).unwrap();
@@ -244,11 +240,8 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
 
 #[test]
 fn track_cache_rescan_invalidation_returns_new_metadata() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
-        .unwrap();
-    let id = all_tracks(&store)[0].id;
+    let (store, ids) = scanned_cache_tracks(1);
+    let id = ids[0];
     store.track(id).unwrap();
     store
         .edit_track(id, None, None, None, Some(DecoderHint::Native), None)
@@ -264,11 +257,8 @@ fn track_cache_rescan_invalidation_returns_new_metadata() {
 
 #[test]
 fn failed_track_batch_rollback_exposes_no_uncommitted_values() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    store
-        .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "A", 10.)]))
-        .unwrap();
-    let id = all_tracks(&store)[0].id;
+    let (store, ids) = scanned_cache_tracks(1);
+    let id = ids[0];
     assert!(!store.track(id).unwrap().unwrap().favorite);
 
     assert!(store.set_favorite(&[id, 999], true).is_err());

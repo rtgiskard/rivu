@@ -378,43 +378,14 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext;
     use rivu_protocol::model::LibrarySort;
+    use std::{rc::Rc, sync::Arc};
 
     fn with_library(
         cx: &mut gpui::TestAppContext,
         run: impl FnOnce(&mut Library, &mut Context<Library>),
     ) {
-        use crate::test_support::ConfigFixture;
-        use std::{rc::Rc, sync::Arc};
-
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime =
-            crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
-        let i18n = Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
-        let context = crate::gui::feature::FeatureContext {
-            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), gpui::SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
-        let owner = cx.new(|cx| Library::new(context, cx));
-        owner.update(cx, |owner, cx| {
+        super::super::test_support::with_library(cx, |owner, cx| {
             Rc::make_mut(&mut owner.state).current_track =
                 Some(Arc::new(rivu_protocol::model::Track {
                     id: 7,

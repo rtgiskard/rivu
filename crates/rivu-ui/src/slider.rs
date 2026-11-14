@@ -296,18 +296,22 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn disabling_slider_blocks_pointer_and_focused_keyboard_intents(cx: &mut TestAppContext) {
+    fn slider_window(cx: &mut TestAppContext) -> gpui::WindowHandle<SliderHost> {
         cx.update(crate::theme::init_test);
-        let focus = cx.update(|cx| cx.focus_handle());
-        let window = cx.add_window(|_, cx| SliderHost {
-            focus: focus.clone(),
+        cx.add_window(|_, cx| SliderHost {
+            focus: cx.focus_handle(),
             other_focus: cx.focus_handle(),
             disabled: true,
             requests: 0,
             releases: 0,
-        });
+        })
+    }
+
+    #[gpui::test]
+    fn disabling_slider_blocks_pointer_and_focused_keyboard_intents(cx: &mut TestAppContext) {
+        let window = slider_window(cx);
         let host = window.root(cx).unwrap();
+        let focus = host.read_with(cx, |this, _| this.focus.clone());
         let handle = window.into();
         for (disabled, expected, releases) in [(true, 0, 1), (false, 2, 2), (true, 2, 3)] {
             host.update(cx, |this, cx| {
@@ -358,17 +362,10 @@ mod tests {
 
     #[gpui::test]
     fn disabled_slider_preserves_other_control_focus_on_pointer_input(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init_test);
-        let focus = cx.update(|cx| cx.focus_handle());
-        let other_focus = cx.update(|cx| cx.focus_handle());
-        let window = cx.add_window(|_, _| SliderHost {
-            focus: focus.clone(),
-            other_focus: other_focus.clone(),
-            disabled: true,
-            requests: 0,
-            releases: 0,
-        });
+        let window = slider_window(cx);
         let host = window.root(cx).unwrap();
+        let (focus, other_focus) =
+            host.read_with(cx, |this, _| (this.focus.clone(), this.other_focus.clone()));
         let handle = window.into();
         for disabled in [true, false, true] {
             host.update(cx, |this, cx| {

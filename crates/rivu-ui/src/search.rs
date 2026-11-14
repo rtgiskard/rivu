@@ -299,6 +299,40 @@ mod tests {
     use core::prelude::v1::test;
     use std::{cell::RefCell, rc::Rc};
 
+    type PublishedQueries = Rc<RefCell<Vec<Option<String>>>>;
+
+    fn labels() -> SearchLabels {
+        SearchLabels {
+            name: "Search".into(),
+            placeholder: "Search".into(),
+            toggle: "Search".into(),
+            clear: "Clear".into(),
+        }
+    }
+
+    fn observed_search_window(
+        cx: &mut TestAppContext,
+        delay: Duration,
+    ) -> (
+        WindowHandle<SearchField>,
+        Entity<SearchField>,
+        PublishedQueries,
+        Subscription,
+    ) {
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(move |_, cx| SearchField::new(labels(), delay, cx));
+        let search = window.root(cx).unwrap();
+        let published = Rc::new(RefCell::new(Vec::new()));
+        let subscription = cx.update(|cx| {
+            let published = published.clone();
+            cx.subscribe(&search, move |_, event, _| {
+                let SearchEvent::Changed(query) = event;
+                published.borrow_mut().push(query.clone());
+            })
+        });
+        (window, search, published, subscription)
+    }
+
     struct SearchColumn {
         search: Entity<SearchField>,
         remaining: Rc<RefCell<Option<Bounds<Pixels>>>>,
@@ -327,20 +361,7 @@ mod tests {
     fn expanding_search_in_a_column_does_not_take_the_content_height() {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
-        let search = cx.update(|cx| {
-            cx.new(|cx| {
-                SearchField::new(
-                    SearchLabels {
-                        name: "Search".into(),
-                        placeholder: "Search".into(),
-                        toggle: "Search".into(),
-                        clear: "Clear".into(),
-                    },
-                    Duration::ZERO,
-                    cx,
-                )
-            })
-        });
+        let search = cx.update(|cx| cx.new(|cx| SearchField::new(labels(), Duration::ZERO, cx)));
         let remaining = Rc::new(RefCell::new(None));
         let window = cx.add_window({
             let search = search.clone();
@@ -379,20 +400,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
         let delay = Duration::from_millis(100);
-        let search = cx.update(|cx| {
-            cx.new(|cx| {
-                SearchField::new(
-                    SearchLabels {
-                        name: "Search".into(),
-                        placeholder: "Search".into(),
-                        toggle: "Search".into(),
-                        clear: "Clear".into(),
-                    },
-                    delay,
-                    cx,
-                )
-            })
-        });
+        let search = cx.update(|cx| cx.new(|cx| SearchField::new(labels(), delay, cx)));
         let outside = cx.update(|cx| cx.focus_handle());
         let window = cx.add_window({
             let search = search.clone();
@@ -453,29 +461,8 @@ mod tests {
     #[test]
     fn clearing_search_cancels_pending_query_and_new_edits_still_publish() {
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
         let delay = Duration::from_millis(100);
-        let window = cx.add_window(move |_, cx| {
-            SearchField::new(
-                SearchLabels {
-                    name: "Search".into(),
-                    placeholder: "Search".into(),
-                    toggle: "Search".into(),
-                    clear: "Clear".into(),
-                },
-                delay,
-                cx,
-            )
-        });
-        let search = window.root(&mut cx).unwrap();
-        let published = Rc::new(RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| {
-            let published = published.clone();
-            cx.subscribe(&search, move |_, event, _| {
-                let SearchEvent::Changed(query) = event;
-                published.borrow_mut().push(query.clone());
-            })
-        });
+        let (window, search, published, _subscription) = observed_search_window(&mut cx, delay);
         let handle = window.into();
         let edit = |text: &str, cx: &mut TestAppContext| {
             cx.update_window(handle, |_, window, cx| {
@@ -518,29 +505,8 @@ mod tests {
     #[test]
     fn search_keeps_live_preedit_and_escape_restores_the_replaced_query() {
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
         let delay = Duration::from_millis(100);
-        let window = cx.add_window(move |_, cx| {
-            SearchField::new(
-                SearchLabels {
-                    name: "Search".into(),
-                    placeholder: "Search".into(),
-                    toggle: "Search".into(),
-                    clear: "Clear".into(),
-                },
-                delay,
-                cx,
-            )
-        });
-        let search = window.root(&mut cx).unwrap();
-        let published = Rc::new(RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| {
-            let published = published.clone();
-            cx.subscribe(&search, move |_, event, _| {
-                let SearchEvent::Changed(query) = event;
-                published.borrow_mut().push(query.clone());
-            })
-        });
+        let (window, search, published, _subscription) = observed_search_window(&mut cx, delay);
         let handle = window.into();
         cx.update_window(handle, |_, window, cx| {
             search.update(cx, |search, cx| {

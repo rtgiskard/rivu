@@ -311,6 +311,30 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
+    struct WriterGate {
+        started: mpsc::Sender<String>,
+        releases: mpsc::Receiver<()>,
+    }
+
+    impl WriterGate {
+        fn wait(&self, snapshot: &LayoutSet) -> Result<(), String> {
+            self.started
+                .send(snapshot.active_name().to_owned())
+                .unwrap();
+            self.releases
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    fn writer_gate() -> (WriterGate, mpsc::Receiver<String>, mpsc::Sender<()>) {
+        let (started, starts) = mpsc::channel();
+        let (release, releases) = mpsc::channel();
+        // Keep release separate: callers bind it again after the owner so that
+        // unwinding disconnects a blocked writer before the owner's Drop joins it.
+        (WriterGate { started, releases }, starts, release)
+    }
+
     fn named(name: &str) -> LayoutSet {
         let mut set = LayoutSet::default();
         set.rename(name).unwrap();
@@ -373,15 +397,10 @@ mod tests {
 
     #[test]
     fn successful_running_snapshot_not_newer_memory_becomes_baseline() {
-        let (started, starts) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
+        let (gate, starts, release) = writer_gate();
         let original = named("disk");
         let owner = LayoutPersistence::start(original.clone(), None, true, move |snapshot| {
-            started.send(snapshot.active_name().to_owned()).unwrap();
-            releases
-                .recv_timeout(WAIT)
-                .map_err(|error| error.to_string())?;
-            Ok(())
+            gate.wait(snapshot)
         });
         // Move the sender after the owner: unwinding disconnects blocked writers
         // before the production owner's Drop joins them.
@@ -506,17 +525,13 @@ mod tests {
 
     #[test]
     fn sync_coalesces_captured_requests_and_feedback_survives_later_edits() {
-        let (started, starts) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
+        let (gate, starts, release) = writer_gate();
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
         let gui_thread = std::thread::current().id();
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
             assert_ne!(std::thread::current().id(), gui_thread);
-            started.send(snapshot.active_name().to_owned()).unwrap();
-            releases
-                .recv_timeout(WAIT)
-                .map_err(|error| error.to_string())?;
+            gate.wait(snapshot)?;
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
@@ -544,14 +559,9 @@ mod tests {
 
     #[test]
     fn flush_waits_for_latest_memory_including_edits_during_a_write() {
-        let (started, starts) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
+        let (gate, starts, release) = writer_gate();
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
-            started.send(snapshot.active_name().to_owned()).unwrap();
-            releases
-                .recv_timeout(WAIT)
-                .map_err(|error| error.to_string())?;
-            Ok(())
+            gate.wait(snapshot)
         });
         let release_after_owner = release;
         let handle = owner.handle();
@@ -586,8 +596,7 @@ mod tests {
 
     #[test]
     fn failure_feedback_survives_edits_and_manual_retry_needs_no_new_edit() {
-        let (started, starts) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
+        let (gate, starts, release) = writer_gate();
         let mut attempts = 0;
         let owner = LayoutPersistence::start(
             LayoutSet::default(),
@@ -595,10 +604,7 @@ mod tests {
             false,
             move |snapshot| {
                 attempts += 1;
-                started.send(snapshot.active_name().to_owned()).unwrap();
-                releases
-                    .recv_timeout(WAIT)
-                    .map_err(|error| error.to_string())?;
+                gate.wait(snapshot)?;
                 if attempts == 1 {
                     Err("save failure".into())
                 } else {
@@ -631,15 +637,11 @@ mod tests {
 
     #[test]
     fn owner_drop_drains_requests_without_persisting_later_window_edits() {
-        let (started, starts) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
+        let (gate, starts, release) = writer_gate();
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
         let owner = LayoutPersistence::start(LayoutSet::default(), None, true, move |snapshot| {
-            started.send(snapshot.active_name().to_owned()).unwrap();
-            releases
-                .recv_timeout(WAIT)
-                .map_err(|error| error.to_string())?;
+            gate.wait(snapshot)?;
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });

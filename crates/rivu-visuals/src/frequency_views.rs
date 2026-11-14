@@ -1809,57 +1809,39 @@ mod tests {
     }
 
     #[test]
-    fn gpu_spectrum_outline_caps_dense_fractional_instances() {
-        for width in [3.125, 7.25, 1200.375, 4096.125] {
-            let mut visuals = configured_visuals();
-            visuals.configure_config(&Config {
-                spectrum_style: SpectrumStyle::Outline,
-                spectrum_bar_layout: SpectrumBarLayout::Fixed { count: u32::MAX },
-                spectrum_gap: 10.0,
-                spectrum_interpolate: true,
-                ..Config::default()
-            });
-            visuals.update(&frame(1.0, 0.0), Duration::from_secs_f64(1.0));
-            let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
-            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
-                unreachable!()
-            };
-            assert_eq!(
-                rectangles.len(),
-                4 * (width.floor() as usize).min(MAX_SPECTRUM_BARS)
-            );
-            for rectangle in rectangles {
-                let [x, y, w, h] = rectangle.bounds;
-                assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && h > 0.0);
-                assert!(x + w <= 1.0 && y + h <= 1.0);
-            }
-        }
-    }
-
-    #[test]
-    fn gpu_spectrum_dense_fractional_bounds_stay_inside_plot() {
-        for width in [3.125, 7.25, 1200.375, 4096.125] {
-            let mut visuals = configured_visuals();
-            visuals.configure_config(&Config {
-                spectrum_style: SpectrumStyle::Bars,
-                spectrum_bar_layout: SpectrumBarLayout::Fixed { count: u32::MAX },
-                spectrum_gap: 10.0,
-                spectrum_interpolate: true,
-                ..Config::default()
-            });
-            visuals.update(&frame(1.0, 0.0), Duration::from_secs_f64(1.0));
-            let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
-            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
-                unreachable!()
-            };
-            assert_eq!(
-                rectangles.len(),
-                (width.floor() as usize).min(MAX_SPECTRUM_BARS)
-            );
-            for rectangle in rectangles {
-                let [x, y, w, h] = rectangle.bounds;
-                assert!(x >= 0.0 && w > 0.0 && x + w <= 1.0);
-                assert_eq!([y, h], [0.0, 1.0]);
+    fn gpu_spectrum_dense_fractional_instances_stay_bounded() {
+        for style in [SpectrumStyle::Outline, SpectrumStyle::Bars] {
+            for width in [3.125, 7.25, 1200.375, 4096.125] {
+                let mut visuals = configured_visuals();
+                visuals.configure_config(&Config {
+                    spectrum_style: style,
+                    spectrum_bar_layout: SpectrumBarLayout::Fixed { count: u32::MAX },
+                    spectrum_gap: 10.0,
+                    spectrum_interpolate: true,
+                    ..Config::default()
+                });
+                visuals.update(&frame(1.0, 0.0), Duration::from_secs_f64(1.0));
+                let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
+                let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
+                    unreachable!()
+                };
+                let instances_per_bar = if style == SpectrumStyle::Outline {
+                    4
+                } else {
+                    1
+                };
+                assert_eq!(
+                    rectangles.len(),
+                    instances_per_bar * (width.floor() as usize).min(MAX_SPECTRUM_BARS)
+                );
+                for rectangle in rectangles {
+                    let [x, y, w, h] = rectangle.bounds;
+                    assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && h > 0.0);
+                    assert!(x + w <= 1.0 && y + h <= 1.0);
+                    if style == SpectrumStyle::Bars {
+                        assert_eq!([y, h], [0.0, 1.0]);
+                    }
+                }
             }
         }
     }

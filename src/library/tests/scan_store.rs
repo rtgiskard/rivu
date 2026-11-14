@@ -1,5 +1,41 @@
 use super::*;
 
+struct StoredCue {
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+    audio: PathBuf,
+    sheet: PathBuf,
+    store: crate::store::Store,
+    ids: [i64; 2],
+}
+
+fn stored_two_track_cue() -> Result<StoredCue> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    let sheet = root.join("album.cue");
+    wav(&audio, 225)?;
+    two_track_sheet(&sheet)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let ids = [
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+            .unwrap(),
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
+            .unwrap(),
+    ];
+    Ok(StoredCue {
+        _directory: directory,
+        root,
+        audio,
+        sheet,
+        store,
+        ids,
+    })
+}
+
 #[test]
 fn source_tag_edit_refreshes_tags_without_losing_library_state() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -284,21 +320,14 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
 
 #[test]
 fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let root = directory.path().to_path_buf();
-    wav(&root.join("audio.wav"), 225)?;
-    let sheet = root.join("album.cue");
-    two_track_sheet(&sheet)?;
-    let store = crate::store::Store::open(Path::new(":memory:"))?;
-    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let ids = [
-        store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
-            .unwrap(),
-        store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
-            .unwrap(),
-    ];
+    let StoredCue {
+        _directory,
+        root,
+        sheet,
+        store,
+        ids,
+        ..
+    } = stored_two_track_cue()?;
     store.set_favorite(&ids, true)?;
     store.edit_track(ids[0], Some("Owned title"), None, None, None, None)?;
     // A sparse 32 MiB sheet must be rejected by size, before decoding/parsing.
@@ -326,21 +355,14 @@ fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
 fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_tracks() -> Result<()> {
     for (replace_after_discovery, explicit_sheet) in [(false, false), (false, true), (true, false)]
     {
-        let directory = tempfile::tempdir()?;
-        let root = directory.path().to_path_buf();
-        wav(&root.join("audio.wav"), 225)?;
-        let sheet = root.join("album.cue");
-        two_track_sheet(&sheet)?;
-        let store = crate::store::Store::open(Path::new(":memory:"))?;
-        store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-        let ids = [
-            store
-                .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
-                .unwrap(),
-            store
-                .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
-                .unwrap(),
-        ];
+        let StoredCue {
+            _directory,
+            root,
+            sheet,
+            store,
+            ids,
+            ..
+        } = stored_two_track_cue()?;
         let replace = |sheet: &Path| {
             fs::remove_file(sheet).unwrap();
             let name = std::ffi::CString::new(sheet.as_os_str().as_encoded_bytes()).unwrap();
@@ -822,20 +844,14 @@ fn discovered_file_not_found_is_uncertain_until_a_later_explicit_request() -> Re
 
 #[test]
 fn failed_cue_read_preserves_owned_tracks_and_independent_whole_audio() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let root = directory.path().to_path_buf();
-    let audio = root.join("audio.wav");
-    let sheet = root.join("album.cue");
-    wav(&audio, 225)?;
-    two_track_sheet(&sheet)?;
-    let store = crate::store::Store::open(Path::new(":memory:"))?;
-    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let first_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
-        .unwrap();
-    let second_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 2))?
-        .unwrap();
+    let StoredCue {
+        _directory,
+        root,
+        audio,
+        sheet,
+        store,
+        ids: [first_id, second_id],
+    } = stored_two_track_cue()?;
     store.set_favorite(&[first_id], true)?;
     let failed = scan_paths_at_depth(
         std::slice::from_ref(&root),

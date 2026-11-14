@@ -157,6 +157,20 @@ pub fn budget_unsynchronised_wav(path: &Path, version: u8, tag_wide: bool) {
     finish_test_wave(&mut file, 10 + body.len());
 }
 
+pub(super) fn probe_gate() -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    impl FnOnce() -> Result<(), std::sync::mpsc::RecvError>,
+) {
+    let (started, entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let wait = move || {
+        started.send(()).unwrap();
+        released.recv()
+    };
+    (entered, release, wait)
+}
+
 #[cfg(feature = "test-support")]
 /// Hold a real singleflight probe until the test drops its release sender.
 pub fn block_probe(
@@ -164,8 +178,7 @@ pub fn block_probe(
     source: Source<'_>,
 ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let identity = ArtworkIdentity::new(source);
-    let (started, entered) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (entered, release, wait) = probe_gate();
     let worker = std::thread::spawn(move || {
         let source = Source {
             id: identity.id,
@@ -173,8 +186,7 @@ pub fn block_probe(
             path: &identity.path,
         };
         let _ = manager.load_with(source, || {
-            started.send(()).unwrap();
-            let _ = released.recv();
+            let _ = wait();
             manager.source_uri(source, manager.max_image_bytes)
         });
     });

@@ -823,6 +823,37 @@ mod tests {
     use super::*;
     use crate::test_support::CoreRuntime;
 
+    fn test_config() -> Config {
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+    }
+
+    fn fixture(config: &Config) -> (tempfile::TempDir, CoreRuntime) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        config.save_fixture(&config_path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        (directory, runtime)
+    }
+
+    fn new_owner(runtime: &CoreRuntime, cx: &mut gpui::App) -> Entity<VisualizerRuntime> {
+        let waveform =
+            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
+        cx.new(|cx| {
+            VisualizerRuntime::new(
+                runtime.handle.clone(),
+                Arc::new(Localizer::new("en-US")),
+                waveform,
+                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
+                cx,
+            )
+        })
+    }
+
     #[test]
     fn current_transport_gap_invalidation_retires_the_staged_picture() {
         crate::transport::visual::tests::with_gap_invalidation(|client, previous, invalidation| {
@@ -1039,29 +1070,9 @@ mod tests {
 
     #[gpui::test]
     fn optional_tab_switch_keeps_other_consumers_running(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let (_directory, runtime) = fixture(&test_config());
         let config = runtime.handle.config_snapshot();
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         let panel = |id, kind: &str, style: Option<AudioVisualizerStyle>| layout::Panel {
             id,
             kind: kind.to_owned(),
@@ -1257,29 +1268,9 @@ mod tests {
     fn pause_discards_unpresented_input_before_a_queued_display_callback(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let (_directory, runtime) = fixture(&test_config());
         let config = runtime.handle.config_snapshot();
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         let mut layout = layout::Layout {
             root: None,
             next_id: 1,
@@ -1358,27 +1349,9 @@ mod tests {
     fn pause_preserves_displayed_publication_instead_of_consuming_worker_reset(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        let config = Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        };
-        config.save_fixture(&config_path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let config = test_config();
+        let (_directory, runtime) = fixture(&config);
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         owner.update(cx, |owner, cx| {
             // Cached input is the last publication already drawn by the renderers.
             owner.staging = AnalysisFrame {
@@ -1452,17 +1425,11 @@ mod tests {
     fn cadence_changes_preserve_playing_and_paused_input_but_signal_changes_revoke_it(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
         let config = Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
             analysis_rate_hz: 5,
-            ..Config::default()
+            ..test_config()
         };
-        config.save_fixture(&config_path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let (_directory, runtime) = fixture(&config);
         let config = Arc::new(config);
         let mut layout = layout::Layout {
             root: None,
@@ -1471,17 +1438,7 @@ mod tests {
         };
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         owner.update(cx, |owner, cx| {
             for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
                 let inputs = |config| VisualizerInputs {
@@ -1566,16 +1523,8 @@ mod tests {
 
     #[gpui::test]
     fn hidden_and_paused_semantic_changes_discard_retained_input(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        let config = Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        };
-        config.save_fixture(&config_path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let config = test_config();
+        let (_directory, runtime) = fixture(&config);
         let config = Arc::new(config);
         let mut layout = layout::Layout {
             root: None,
@@ -1593,17 +1542,7 @@ mod tests {
             },
         );
         let panels = demand(&layout);
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         owner.update(cx, |owner, cx| {
             owner.status = PlaybackStatus::Paused;
             for transition in 0..4 {
@@ -1644,32 +1583,10 @@ mod tests {
     fn presentation_bounds_frames_and_cancels_hidden_still_and_shutdown_demand(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let (_directory, runtime) = fixture(&test_config());
         let config = runtime.handle.config_snapshot();
         let window = cx.add_empty_window();
-        let owner = window.update(|_, cx| {
-            let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-            cx.new(|cx| {
-                VisualizerRuntime::new(
-                    runtime.handle.clone(),
-                    Arc::new(Localizer::new("en-US")),
-                    waveform,
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                    cx,
-                )
-            })
-        });
+        let owner = window.update(|_, cx| new_owner(&runtime, cx));
         let empty_layout = layout::Layout {
             root: None,
             next_id: 1,
@@ -2013,18 +1930,10 @@ mod tests {
     fn confirmed_stop_keeps_a_bounded_fade_but_idle_stop_cannot_create_one(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
+        let (directory, runtime) = fixture(&Config {
             radial_fade_when_idle: true,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+            ..test_config()
+        });
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -2033,17 +1942,7 @@ mod tests {
         };
         layout.add("audio_visualizer", None);
         let panels = demand(&layout);
-        let waveform =
-            cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-        let owner = cx.new(|cx| {
-            VisualizerRuntime::new(
-                runtime.handle.clone(),
-                Arc::new(Localizer::new("en-US")),
-                waveform,
-                cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                cx,
-            )
-        });
+        let owner = cx.update(|cx| new_owner(&runtime, cx));
         let before = runtime.handle.gui_snapshot();
         let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let state = |status, source_generation, seek_revision, stopped_source_generation| {
@@ -2152,18 +2051,10 @@ mod tests {
     fn stopped_fade_does_not_cross_resume_source_seek_still_or_shutdown(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
+        let (directory, runtime) = fixture(&Config {
             radial_fade_when_idle: true,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+            ..test_config()
+        });
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -2176,17 +2067,7 @@ mod tests {
         let mut replacement = track.clone();
         replacement.id += 1;
         for boundary in 0..8 {
-            let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-            let owner = cx.new(|cx| {
-                VisualizerRuntime::new(
-                    runtime.handle.clone(),
-                    Arc::new(Localizer::new("en-US")),
-                    waveform,
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                    cx,
-                )
-            });
+            let owner = cx.update(|cx| new_owner(&runtime, cx));
             let mut state = VisualizerInputs {
                 stopped_source_generation: None,
                 config: Arc::clone(&config),
@@ -2269,18 +2150,10 @@ mod tests {
     fn stop_fade_requires_a_matching_physical_source_not_revision_arithmetic(
         cx: &mut gpui::TestAppContext,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
+        let (directory, runtime) = fixture(&Config {
             radial_fade_when_idle: true,
-            ..Config::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+            ..test_config()
+        });
         let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
@@ -2393,17 +2266,7 @@ mod tests {
                 false,
             ),
         ] {
-            let waveform =
-                cx.new(|_| visualization::Waveform::new(Arc::clone(&runtime.handle.waveform)));
-            let owner = cx.new(|cx| {
-                VisualizerRuntime::new(
-                    runtime.handle.clone(),
-                    Arc::new(Localizer::new("en-US")),
-                    waveform,
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                    cx,
-                )
-            });
+            let owner = cx.update(|cx| new_owner(&runtime, cx));
             owner.update(cx, |owner, cx| {
                 let state = |status, current_track_id, source_generation, seek_revision| {
                     VisualizerInputs {

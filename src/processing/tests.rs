@@ -1,6 +1,7 @@
 use super::export::prepare_export;
 use super::render::ProgressReporter;
 use super::*;
+use crate::test_support::write_float_wav;
 use std::time::Duration;
 
 fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
@@ -55,26 +56,22 @@ fn completed(service: &mut Service, track: &Track, config: &Arc<Config>) -> Proc
     }
 }
 
-fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
+fn source_fixture(
+    channels: u16,
+    sample_rate: u32,
+    samples: impl IntoIterator<Item = f32>,
+) -> (tempfile::TempDir, Track, Arc<Config>) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source.wav");
-    let mut writer = hound::WavWriter::create(
-        &path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: 8_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for sample in PCM {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
+    write_float_wav(&path, channels, sample_rate, samples).unwrap();
     let mut track = crate::test_support::artwork_track(path);
     track.bits_per_sample = Some(32);
     let config = Arc::new(Config::default());
+    (directory, track, config)
+}
+
+fn fixture() -> (tempfile::TempDir, Service, Track, Arc<Config>) {
+    let (directory, track, config) = source_fixture(1, 8_000, PCM);
     let mut service = Service::new();
     let mut result = completed(&mut service, &track, &config);
     let stem = result.outputs.denoised.take().unwrap();
@@ -394,28 +391,15 @@ fn standalone_profile_rejects_empty_frame_and_out_of_source_selections() {
 #[test]
 fn standalone_native_tail_preserves_operation_outputs_and_single_pcm_budget() {
     for frames in [1, 63, 256, 257, 4093] {
-        let (_directory, old, track, _) = fixture();
-        // fixture intentionally retains selected audition stems; this regression
-        // measures only the new standalone result, not that independent old PCM.
-        drop(old);
+        let (_directory, track, _) = source_fixture(
+            1,
+            8_000,
+            (0..frames).map(|frame| (frame as f32 * 0.07).sin() * 0.2),
+        );
         let mut service = Service::with_memory_limit(100_000);
         let data: Vec<f32> = (0..frames)
             .map(|frame| (frame as f32 * 0.07).sin() * 0.2)
             .collect();
-        let mut writer = hound::WavWriter::create(
-            &track.path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )
-        .unwrap();
-        for &sample in &data {
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
         let mut config = Config::default();
         config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Stationary;
         config.denoise.fft_size = 256;
@@ -559,23 +543,9 @@ fn completed_graph(
 
 #[test]
 fn graph_models_retain_only_remaining_target_stems_with_bounded_pcm() {
-    let (directory, old, track, _) = fixture();
-    drop(old);
+    let (directory, track, _) =
+        source_fixture(2, 48_000, (0..4096 * 2).map(|i| PCM[i % PCM.len()]));
     let data: Vec<f32> = (0..4096 * 2).map(|i| PCM[i % PCM.len()]).collect();
-    let mut source = hound::WavWriter::create(
-        &track.path,
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for &sample in &data {
-        source.write_sample(sample).unwrap();
-    }
-    source.finalize().unwrap();
     let probe_budget = audio::PcmBudget::new(MEMORY_LIMIT);
     let mut probe = audio::PcmBuilder::new(
         48_000,
@@ -760,21 +730,13 @@ sys.stdout.buffer.flush()
 #[test]
 fn graph_model_failure_keeps_each_nodes_provenance_and_original_operation() {
     let (directory, mut service, track, _) = fixture();
-    let mut source = hound::WavWriter::create(
+    write_float_wav(
         &track.path,
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 8_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
+        2,
+        8_000,
+        PCM.into_iter().flat_map(|sample| [sample; 2]),
     )
     .unwrap();
-    for sample in PCM {
-        source.write_sample(sample).unwrap();
-        source.write_sample(sample).unwrap();
-    }
-    source.finalize().unwrap();
     let worker = directory.path().join("models.py");
     fs::write(
         &worker,
@@ -865,23 +827,7 @@ sys.stdout.buffer.flush()
 }
 
 fn preparation_fixture() -> (tempfile::TempDir, Track, Arc<Config>) {
-    let (directory, old, track, config) = fixture();
-    drop(old);
-    let mut writer = hound::WavWriter::create(
-        &track.path,
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 8_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for sample in PCM {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
-    (directory, track, config)
+    source_fixture(2, 8_000, PCM)
 }
 
 fn preparation_only_model(
@@ -1210,20 +1156,7 @@ fn offline_off_denoise_keeps_hum_and_impulse_active_but_wet_zero_bypasses_both()
         let (_directory, mut service, track, _) = fixture();
         let mut input = [0.125_f32; 64];
         input[32] = 0.875;
-        let mut writer = hound::WavWriter::create(
-            &track.path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )
-        .unwrap();
-        for sample in input {
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
+        write_float_wav(&track.path, 1, 8_000, input).unwrap();
         let mut denoise = rivu_dsp::denoise::DenoiseConfig::default();
         match mode {
             0 => denoise.hum.enabled = true,
@@ -1296,8 +1229,7 @@ fn offline_non_profile_selection_failure_reports_its_node_after_decoding() {
 
 #[test]
 fn native_graph_decode_budget_failure_reports_requested_output_once() {
-    let (_directory, mut old, track, _) = fixture();
-    old.shutdown();
+    let (_directory, track, _) = source_fixture(1, 8_000, PCM);
     let mut service = Service::with_memory_limit(1);
     assert_graph_failure(&mut service, &track, graph_config(Vec::new()), 2);
     assert_eq!(service.memory_bytes(), 0);
@@ -1471,22 +1403,7 @@ fn model_capability_rejections_precede_source_pcm_allocation() {
                 "8000..192000",
             ),
         ] {
-            let (directory, old, track, mut config) = fixture();
-            drop(old);
-            let mut writer = hound::WavWriter::create(
-                &track.path,
-                hound::WavSpec {
-                    channels: 2,
-                    sample_rate: rate,
-                    bits_per_sample: 32,
-                    sample_format: hound::SampleFormat::Float,
-                },
-            )
-            .unwrap();
-            for sample in PCM {
-                writer.write_sample(sample).unwrap();
-            }
-            writer.finalize().unwrap();
+            let (directory, track, mut config) = source_fixture(2, rate, PCM);
             let manifest = directory.path().join("manifest.json");
             fs::write(&manifest, metadata.to_string()).unwrap();
             let neural = rivu_format::config::NeuralConfig {
@@ -1538,22 +1455,13 @@ fn neural_channel_rejection_uses_actual_decoder_not_stale_track_fields() {
     settings.neural.separation_manifest = Some(manifest.clone());
     // Format rejection must precede interpreting either admitted file.
     settings.neural.worker = manifest;
-    let mut writer = hound::WavWriter::create(
+    write_float_wav(
         &track.path,
-        hound::WavSpec {
-            channels: 3,
-            sample_rate: 8000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
+        3,
+        8_000,
+        (0..16).flat_map(|_| [0.1_f32, 0.2, 0.3]),
     )
     .unwrap();
-    for _ in 0..16 {
-        for sample in [0.1_f32, 0.2, 0.3] {
-            writer.write_sample(sample).unwrap();
-        }
-    }
-    writer.finalize().unwrap();
     track.channels = 2;
     for operation in [ProcessingOperation::Speech, ProcessingOperation::Separate] {
         service
@@ -1781,8 +1689,7 @@ fn cancelled_admitted_worker_releases_its_barrier_and_allows_retry() {
 
 #[test]
 fn pcm_budget_rejects_inflight_allocation_without_creating_processing_directory() {
-    let (directory, mut old, track, config) = fixture();
-    old.shutdown();
+    let (directory, track, config) = source_fixture(1, 8_000, PCM);
     let entries = || {
         std::fs::read_dir(directory.path())
             .unwrap()
@@ -2222,25 +2129,14 @@ fn rejected_admission_preserves_unselected_pcm_until_successful_spawn() {
 
 #[test]
 fn native_decoder_streams_fit_one_output_budget_including_profile_passes() {
-    let (directory, old, track, _) = fixture();
-    drop(old);
-    let mut writer = hound::WavWriter::create(
-        &track.path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: 8000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
+    let (directory, track, _) = source_fixture(
+        1,
+        8_000,
+        (0..20000).map(|frame| (frame as f32 * 0.07).sin() * 0.2),
+    );
     let data: Vec<f32> = (0..20000)
         .map(|frame| (frame as f32 * 0.07).sin() * 0.2)
         .collect();
-    for &sample in &data {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
     for selection in [
         None,
         Some(NoiseSelection {
@@ -2345,20 +2241,7 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
     let mut data: Vec<f32> = (0..1400).map(|i| (i as f32 * 0.07).sin() * 0.3).collect();
     data[26] = 0.9;
     data[27] = -0.7;
-    let mut writer = hound::WavWriter::create(
-        &track.path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: 48_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for &sample in &data {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
+    write_float_wav(&track.path, 1, 48_000, data.iter().copied()).unwrap();
     for selection in [
         NoiseSelection {
             start_seconds: 0.0005625,
@@ -2514,24 +2397,11 @@ fn native_file_exports_match_retained_timeline_without_pcm_budget() {
         equalizer::config::{EqBand, EqualizerConfig, FilterKind},
     };
     for frames in [1, 63, 257, 4093] {
-        let (_directory, old, track, _) = fixture();
-        drop(old);
-        let mut writer = hound::WavWriter::create(
-            &track.path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )
-        .unwrap();
-        for index in 0..frames {
-            writer
-                .write_sample((index as f32 * 0.17).cos() * 0.3)
-                .unwrap();
-        }
-        writer.finalize().unwrap();
+        let (_directory, track, _) = source_fixture(
+            1,
+            8_000,
+            (0..frames).map(|index| (index as f32 * 0.17).cos() * 0.3),
+        );
         let eq = EqualizerConfig {
             enabled: true,
             bands: vec![EqBand {

@@ -58,6 +58,17 @@ impl ConfigFixture for Config {
     }
 }
 
+pub(crate) fn relocation_artwork_paths(directory: &Path) -> [std::path::PathBuf; 2] {
+    [("before", [255, 0, 0]), ("after", [0, 255, 0])].map(|(name, colour)| {
+        let path = directory.join(name);
+        std::fs::create_dir(&path).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb(colour))
+            .save(path.join("cover.png"))
+            .unwrap();
+        path.join("track.wav")
+    })
+}
+
 pub(crate) fn artwork_track(path: std::path::PathBuf) -> rivu_protocol::model::Track {
     let fingerprint = path
         .is_file()

@@ -74,9 +74,7 @@ fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
     draw(cx, window);
 }
 
-#[test]
-fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
-    let mut cx = TestAppContext::single();
+fn keyboard_controls(cx: &mut TestAppContext, disabled: bool) -> (FocusScope, AnyWindowHandle) {
     cx.update(crate::theme::init_test);
     let scope = cx.update(FocusScope::new);
     let window = cx.add_window({
@@ -84,11 +82,18 @@ fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
         move |_, _| KeyboardControls {
             scope,
             counts: [0; 4],
-            disabled: true,
+            disabled,
         }
     });
     let handle = window.into();
-    draw(&mut cx, handle);
+    draw(cx, handle);
+    (scope, handle)
+}
+
+#[test]
+fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
+    let mut cx = TestAppContext::single();
+    let (scope, handle) = keyboard_controls(&mut cx, true);
     cx.update_window(handle, |_, window, cx| {
         scope.handle().focus(window, cx);
         scope.advance(false, window, cx);
@@ -120,18 +125,7 @@ fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
 #[test]
 fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
     let mut cx = TestAppContext::single();
-    cx.update(crate::theme::init_test);
-    let scope = cx.update(FocusScope::new);
-    let window = cx.add_window({
-        let scope = scope.clone();
-        move |_, _| KeyboardControls {
-            scope,
-            counts: [0; 4],
-            disabled: true,
-        }
-    });
-    let handle = window.into();
-    draw(&mut cx, handle);
+    let (scope, handle) = keyboard_controls(&mut cx, true);
     cx.update_window(handle, |_, window, cx| {
         scope.handle().focus(window, cx);
         scope.advance(false, window, cx);
@@ -157,18 +151,7 @@ fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
 #[test]
 fn disabling_a_focused_control_cancels_keyboard_activation() {
     let mut cx = TestAppContext::single();
-    cx.update(crate::theme::init_test);
-    let scope = cx.update(FocusScope::new);
-    let window = cx.add_window({
-        let scope = scope.clone();
-        move |_, _| KeyboardControls {
-            scope,
-            counts: [0; 4],
-            disabled: false,
-        }
-    });
-    let handle = window.into();
-    draw(&mut cx, handle);
+    let (scope, handle) = keyboard_controls(&mut cx, false);
     cx.update_window(handle, |_, window, cx| {
         scope.handle().focus(window, cx);
         scope.advance(false, window, cx);

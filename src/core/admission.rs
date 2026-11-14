@@ -1037,20 +1037,8 @@ mod tests {
     fn lost_commit_facts_block_database_operations_without_replaying_the_save() {
         let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let path = directory.path().join("uncertain.wav");
-        let mut writer = hound::WavWriter::create(
-            &path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )
-        .unwrap();
-        for _ in 0..40_000 {
-            writer.write_sample(0_i16).unwrap();
-        }
-        writer.finalize().unwrap();
+        crate::test_support::write_i16_wav(&path, 1, 8_000, std::iter::repeat_n(0, 40_000))
+            .unwrap();
         let before = core.store.queue_ids().unwrap();
         let before_total = core.state.queue.total;
         core.command(Command::QueueExternalPaths {

@@ -193,6 +193,14 @@ class FramingTests(unittest.TestCase):
 
 
 class StreamEntrypointTests(unittest.TestCase):
+    def read_events(self, data):
+        stream, events = io.BytesIO(data), []
+        while stream.tell() < len(data):
+            kind, payload = worker.read_frame(stream)
+            self.assertEqual(kind, worker.JSON_FRAME)
+            events.append(json.loads(payload))
+        return events
+
     def test_invalid_requests_fail_without_pcm_or_manifest_access(self):
         request = {"version":worker.VERSION,"task_id":"invalid-stream","operation":"speech","sample_rate":8000,
                    "channels":1,"frames":8,"model_manifest":"/missing-manifest.json"}
@@ -231,11 +239,7 @@ class StreamEntrypointTests(unittest.TestCase):
                 completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
                                            input=wire, capture_output=True, timeout=30)
                 self.assertNotEqual(completed.returncode, 0)
-                stream, events = io.BytesIO(completed.stdout), []
-                while stream.tell() < len(completed.stdout):
-                    kind, payload = worker.read_frame(stream)
-                    self.assertEqual(kind, worker.JSON_FRAME)
-                    events.append(json.loads(payload))
+                events = self.read_events(completed.stdout)
                 self.assertEqual(events[-1]["type"], "error")
                 models = [event["model"] for event in events if "model" in event]
                 self.assertEqual(models, [] if corrupted else [
@@ -262,11 +266,7 @@ class StreamEntrypointTests(unittest.TestCase):
                     completed = subprocess.run([interpreter, "-B", str(script), "--stream"],
                                                input=wire, capture_output=True, cwd=base, timeout=30)
                     self.assertNotEqual(completed.returncode, 0, completed.stderr.decode())
-                    stream, events = io.BytesIO(completed.stdout), []
-                    while stream.tell() < len(completed.stdout):
-                        kind, payload = worker.read_frame(stream)
-                        self.assertEqual(kind, worker.JSON_FRAME)
-                        events.append(json.loads(payload))
+                    events = self.read_events(completed.stdout)
                     self.assertEqual(events[-1]["code"], "model_runtime")
                     self.assertIn(message, events[-1]["message"])
                     self.assertFalse(any(event["type"] == "complete" for event in events))
@@ -281,12 +281,9 @@ class StreamEntrypointTests(unittest.TestCase):
             completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
                                        input=input_stream(request, b""), capture_output=True, cwd=base, timeout=30)
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-            stream, events = io.BytesIO(completed.stdout), []
-            while stream.tell() < len(completed.stdout):
-                self.assertFalse(events and events[-1]["type"] in ("complete", "error"))
-                kind, payload = worker.read_frame(stream)
-                self.assertEqual(kind, worker.JSON_FRAME)
-                events.append(json.loads(payload))
+            events = self.read_events(completed.stdout)
+            for event in events[:-1]:
+                self.assertNotIn(event["type"], ("complete", "error"))
             self.assertEqual(events[-1]["type"], "complete")
             self.assertEqual(events[-1]["outputs"], {"speech":"input"})
             self.assertEqual((events[-1]["frames"], events[-1]["channels"], events[-1]["sample_rate"]),

@@ -1582,14 +1582,7 @@ fn container_scan_restores_scroll_and_discards_nonvisible_scan_batches() {
 
 #[test]
 fn entry_navigation_and_search_do_not_reopen_failed_title_demand() {
-    let mut state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-    tui.ui.view = playlist_view(1);
-    super::tests::load_visible(&mut tui.ui, &state);
-    state.library.playlist_revision += 1;
-    tui.apply_snapshot(state.clone());
-    let title = tui.ui.query_request(&state).unwrap();
-    assert_eq!(title.demand.kind(), ReadKind::PlaylistSummary(1));
+    let (mut tui, state, title) = super::tests::playlist_title_request();
     assert!(tui.ui.apply_query(
         &state,
         &title,

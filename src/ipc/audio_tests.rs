@@ -11,6 +11,15 @@ use std::{
     time::Duration,
 };
 
+fn audio_service(
+    directory: &Path,
+    handle: CoreHandle,
+) -> (crate::execution::TaskRuntime, AudioServer) {
+    let tasks = crate::execution::TaskRuntime::start().unwrap();
+    let service = AudioServer::start(directory, handle, 7, &tasks.handle, &tasks.workers).unwrap();
+    (tasks, service)
+}
+
 async fn request(stream: &mut Async<UnixStream>, request: &Request, bytes: &mut Vec<u8>) {
     encode_frame_into(request, bytes).unwrap();
     write_frame(stream, bytes).await.unwrap();
@@ -74,26 +83,16 @@ fn track(path: std::path::PathBuf) -> Track {
 fn finite_pcm_preserves_cue_relative_positions_and_lossless_requested_ranges() {
     let directory = crate::test_support::ipc::socket_test_directory();
     let path = directory.path().join("source.wav");
-    let mut writer = hound::WavWriter::create(
+    crate::test_support::write_float_wav(
         &path,
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 8_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
+        2,
+        8_000,
+        (0..24_000).flat_map(|frame| [frame as f32 / 32_768.0, -(frame as f32) / 65_536.0]),
     )
     .unwrap();
-    for frame in 0..24_000 {
-        writer.write_sample(frame as f32 / 32_768.0).unwrap();
-        writer.write_sample(-(frame as f32) / 65_536.0).unwrap();
-    }
-    writer.finalize().unwrap();
     let track = Arc::new(track(path));
     let (handle, queries) = CoreHandle::test_query_port();
-    let tasks = crate::execution::TaskRuntime::start().unwrap();
-    let service =
-        AudioServer::start(directory.path(), handle, 7, &tasks.handle, &tasks.workers).unwrap();
+    let (_tasks, service) = audio_service(directory.path(), handle);
     async_io::block_on(timeout(Duration::from_secs(10), async {
         for range in [None, Some(PlaybackRange { start_seconds: 0.25, end_seconds: Some(0.75) })] {
             let (mut stream, mut bytes) = connect(directory.path()).await;
@@ -143,9 +142,7 @@ fn finite_pcm_preserves_cue_relative_positions_and_lossless_requested_ranges() {
 fn finite_stream_rejects_wrong_authority_and_unbound_connections() {
     let directory = crate::test_support::ipc::socket_test_directory();
     let (handle, queries) = CoreHandle::test_query_port();
-    let tasks = crate::execution::TaskRuntime::start().unwrap();
-    let service =
-        AudioServer::start(directory.path(), handle, 7, &tasks.handle, &tasks.workers).unwrap();
+    let (_tasks, service) = audio_service(directory.path(), handle);
     async_io::block_on(timeout(Duration::from_secs(5), async {
         for (version, instance) in [(VERSION + 1, 7), (VERSION, 8)] {
             let mut stream = rivu_protocol::audio::connect(directory.path())
@@ -194,9 +191,7 @@ fn finite_stream_rejects_wrong_authority_and_unbound_connections() {
 fn idle_connections_release_admission_slots_before_hello_and_before_read() {
     let directory = crate::test_support::ipc::socket_test_directory();
     let (handle, queries) = CoreHandle::test_query_port();
-    let tasks = crate::execution::TaskRuntime::start().unwrap();
-    let service =
-        AudioServer::start(directory.path(), handle, 7, &tasks.handle, &tasks.workers).unwrap();
+    let (_tasks, service) = audio_service(directory.path(), handle);
     async_io::block_on(timeout(IO_TIMEOUT * 3, async {
         for hello in [false, true] {
             let mut idle = Vec::new();
@@ -384,20 +379,8 @@ fn cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns
     }
     let directory = crate::test_support::ipc::socket_test_directory();
     let path = directory.path().join("long.wav");
-    let mut writer = hound::WavWriter::create(
-        &path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: 8_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for _ in 0..800_000 {
-        writer.write_sample(0.25_f32).unwrap();
-    }
-    writer.finalize().unwrap();
+    crate::test_support::write_float_wav(&path, 1, 8_000, std::iter::repeat_n(0.25, 800_000))
+        .unwrap();
     let mut track = track(path);
     track.cue = None;
     track.duration = Some(100.0);

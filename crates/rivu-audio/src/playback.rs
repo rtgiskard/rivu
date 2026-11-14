@@ -811,6 +811,19 @@ pub(super) mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
 
+    fn attach_capture(
+        playback: &mut Playback,
+        signal: VisualizationSignal,
+    ) -> (Arc<PcmControl>, crate::capture::TestCapture) {
+        let worker = Arc::new(PcmControl::default());
+        worker.set_playback_active(true);
+        worker.set_enabled(true);
+        let (producer, captured) = PcmProducer::capture_for_test(&worker, playback.source.layout());
+        playback.visualization.producer = Some(producer);
+        playback.set_signal(signal);
+        (worker, captured)
+    }
+
     #[test]
     fn late_capture_and_pause_resume_restart_capture_coordinates() {
         use rivu_format::config::processing_graph::GraphPort;
@@ -982,13 +995,7 @@ pub(super) mod tests {
         let file = pcm();
         for pause in [false, true] {
             let (mut playback, _) = test_playback_selected(file.path(), None);
-            let worker = Arc::new(PcmControl::default());
-            worker.set_playback_active(true);
-            worker.set_enabled(true);
-            let (producer, mut captured) =
-                PcmProducer::capture_for_test(&worker, playback.source.layout());
-            playback.visualization.producer = Some(producer);
-            playback.set_signal(VisualizationSignal::Before);
+            let (worker, mut captured) = attach_capture(&mut playback, VisualizationSignal::Before);
             playback
                 .visualization
                 .stage_before(0, &[0.5; 32], 1, 32)
@@ -1041,13 +1048,7 @@ pub(super) mod tests {
     fn before_staging_survives_redundant_enable_without_a_gap() {
         let file = pcm();
         let (mut playback, _) = test_playback_selected(file.path(), None);
-        let worker = Arc::new(PcmControl::default());
-        worker.set_playback_active(true);
-        worker.set_enabled(true);
-        let (producer, mut captured) =
-            PcmProducer::capture_for_test(&worker, playback.source.layout());
-        playback.visualization.producer = Some(producer);
-        playback.set_signal(VisualizationSignal::Before);
+        let (worker, mut captured) = attach_capture(&mut playback, VisualizationSignal::Before);
         playback
             .visualization
             .stage_before(0, &[0.5; 32], 1, 32)
@@ -1307,13 +1308,7 @@ pub(super) mod tests {
                 1,
             )
             .unwrap();
-            let worker = Arc::new(PcmControl::default());
-            worker.set_playback_active(true);
-            worker.set_enabled(true);
-            let (producer, mut captured) =
-                PcmProducer::capture_for_test(&worker, playback.source.layout());
-            playback.visualization.producer = Some(producer);
-            playback.set_signal(signal);
+            let (_worker, mut captured) = attach_capture(&mut playback, signal);
             let (output, mut render) = crate::output::test_backend_with_capacity(
                 8_000,
                 false,
@@ -1512,13 +1507,7 @@ pub(super) mod tests {
                         )
                         .unwrap();
                     }
-                    let worker = Arc::new(PcmControl::default());
-                    worker.set_playback_active(true);
-                    worker.set_enabled(true);
-                    let (producer, mut captured) =
-                        PcmProducer::capture_for_test(&worker, playback.source.layout());
-                    playback.visualization.producer = Some(producer);
-                    playback.set_signal(signal);
+                    let (_worker, mut captured) = attach_capture(&mut playback, signal);
                     let (output, mut render) = crate::output::test_backend_with_capacity(
                         rate,
                         false,
@@ -1698,13 +1687,7 @@ pub(super) mod tests {
                     )
                     .unwrap();
                 }
-                let worker = Arc::new(PcmControl::default());
-                worker.set_playback_active(true);
-                worker.set_enabled(true);
-                let (producer, mut captured) =
-                    PcmProducer::capture_for_test(&worker, playback.source.layout());
-                playback.visualization.producer = Some(producer);
-                playback.set_signal(signal);
+                let (_worker, mut captured) = attach_capture(&mut playback, signal);
                 let (output, mut render) = crate::output::test_backend_with_capacity(
                     8_000,
                     false,
@@ -1944,13 +1927,7 @@ pub(super) mod tests {
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             let file = pcm();
             let (mut playback, _) = test_playback_selected(file.path(), None);
-            let worker = Arc::new(PcmControl::default());
-            worker.set_playback_active(true);
-            worker.set_enabled(true);
-            let (producer, mut captured) =
-                PcmProducer::capture_for_test(&worker, playback.source.layout());
-            playback.visualization.producer = Some(producer);
-            playback.set_signal(signal);
+            let (_worker, mut captured) = attach_capture(&mut playback, signal);
             let (output, mut old_render) = crate::output::test_backend_with_capacity(
                 8_000,
                 false,

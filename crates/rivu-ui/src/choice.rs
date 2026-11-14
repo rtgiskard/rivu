@@ -575,14 +575,18 @@ mod tests {
         }
     }
 
+    fn popup_choice_window(cx: &mut TestAppContext) -> WindowHandle<PopupChoice> {
+        cx.update(crate::theme::init_test);
+        cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        })
+    }
+
     #[test]
     fn choice_callbacks_commit_only_current_candidate_values() {
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let window = cx.add_window(|_, _| PopupChoice {
-            choices: ChoiceState::default(),
-            committed: Vec::new(),
-        });
+        let window = popup_choice_window(&mut cx);
         let choice = window.root(&mut cx).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             choice.update(cx, |this, cx| {
@@ -637,11 +641,7 @@ mod tests {
     #[test]
     fn page_navigation_before_repaint_keeps_the_rendered_row_height() {
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let window = cx.add_window(|_, _| PopupChoice {
-            choices: ChoiceState::default(),
-            committed: Vec::new(),
-        });
+        let window = popup_choice_window(&mut cx);
         let choice = window.root(&mut cx).unwrap();
         for font_size in [11, 18] {
             cx.update(|cx| {
@@ -687,11 +687,7 @@ mod tests {
     fn painted_outside_dismissal_cannot_close_a_replacement_popup() {
         use gpui::InputEvent as _;
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let window = cx.add_window(|_, _| PopupChoice {
-            choices: ChoiceState::default(),
-            committed: Vec::new(),
-        });
+        let window = popup_choice_window(&mut cx);
         let choice = window.root(&mut cx).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             for close_first in [false, true] {
@@ -748,11 +744,7 @@ mod tests {
     #[test]
     fn painted_pointer_callbacks_do_not_commit_after_choice_lifecycle_changes() {
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let window = cx.add_window(|_, _| PopupChoice {
-            choices: ChoiceState::default(),
-            committed: Vec::new(),
-        });
+        let window = popup_choice_window(&mut cx);
         let choice = window.root(&mut cx).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             for (close_first, replacement) in [
@@ -797,11 +789,7 @@ mod tests {
     fn repainted_popup_press_belongs_to_candidate_revision_not_highlight() {
         use gpui::InputEvent as _;
         let mut cx = TestAppContext::single();
-        cx.update(crate::theme::init_test);
-        let window = cx.add_window(|_, _| PopupChoice {
-            choices: ChoiceState::default(),
-            committed: Vec::new(),
-        });
+        let window = popup_choice_window(&mut cx);
         let choice = window.root(&mut cx).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             let position = point(px(16.), px(40.));
@@ -907,10 +895,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn selecting_on_native_trigger_does_not_reopen_on_key_up() {
-        use gpui::InputEvent as _;
-        let mut cx = TestAppContext::single();
+    fn native_choice_window(
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<NativeChoice>, crate::FocusScope) {
         cx.update(crate::theme::init_test);
         let scope = cx.update(crate::FocusScope::new);
         let window = cx.add_window({
@@ -924,6 +911,14 @@ mod tests {
                 owns_choices: true,
             }
         });
+        (window, scope)
+    }
+
+    #[test]
+    fn selecting_on_native_trigger_does_not_reopen_on_key_up() {
+        use gpui::InputEvent as _;
+        let mut cx = TestAppContext::single();
+        let (window, scope) = native_choice_window(&mut cx);
         let handle: AnyWindowHandle = window.into();
         cx.update_window(handle, |_, window, cx| {
             window.draw(cx).clear(cx);
@@ -967,19 +962,7 @@ mod tests {
             .flat_map(|key| [true, false].map(|owned| (key, owned)))
         {
             let mut cx = TestAppContext::single();
-            cx.update(crate::theme::init_test);
-            let scope = cx.update(crate::FocusScope::new);
-            let window = cx.add_window({
-                let scope = scope.clone();
-                move |_, _| NativeChoice {
-                    scope,
-                    choices: ChoiceState::default(),
-                    opens: 0,
-                    committed: None,
-                    dismissed: 0,
-                    owns_choices: true,
-                }
-            });
+            let (window, scope) = native_choice_window(&mut cx);
             cx.update_window(window.into(), |root, window, cx| {
                 window.draw(cx).clear(cx);
                 scope.handle().focus(window, cx);

@@ -1271,12 +1271,9 @@ fn fitted_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::feature::SnapshotSource;
-    use crate::test_support::{ConfigFixture, CoreRuntime};
+    use crate::test_support::CoreRuntime;
     use core::prelude::v1::test;
     use gpui::InputEvent as _;
-    use rivu_format::config::Config;
-    use rivu_presentation::i18n::Localizer;
 
     const PANEL: u64 = 7;
 
@@ -1353,28 +1350,8 @@ mod tests {
         FocusHandle,
     ) {
         cx.executor().allow_parking();
-        cx.update(|cx| {
-            Input::init(cx);
-            rivu_ui::theme::set_palette(
-                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
-                cx,
-            );
-            rivu_ui::theme::set_typography(
-                gpui::font("sans-serif"),
-                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
-                12,
-                cx,
-            );
-        });
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let mut config = Config {
-            volume: 0.,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            tray_enabled: false,
-            ..Default::default()
-        };
+        cx.update(Input::init);
+        let mut config = crate::gui::audio_processing::test_support::config();
         for id in [3, 4] {
             config.processing_graph.nodes.push(GraphNode {
                 id,
@@ -1385,20 +1362,8 @@ mod tests {
             });
         }
         config.processing_graph.next_id = 5;
-        config.save_fixture(&path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
-        let owner = cx.new(|cx| AudioProcessing::new(context, cx));
+        let (directory, runtime, owner) =
+            crate::gui::audio_processing::test_support::owner(cx, config);
         owner.update(cx, |this, cx| {
             this.graph_select(3, cx);
             this.graph_editor.workbench.wide = true;

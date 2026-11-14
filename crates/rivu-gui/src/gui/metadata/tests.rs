@@ -995,17 +995,11 @@ fn visible_details_keep_negative_artwork_after_shared_cache_eviction(cx: &mut Te
 #[gpui::test]
 fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAppContext) {
     let (directory, _runtime, metadata) = fixture(cx);
-    for (name, colour) in [("before", [255, 0, 0]), ("after", [0, 255, 0])] {
-        let path = directory.path().join(name);
-        std::fs::create_dir(&path).unwrap();
-        image::RgbImage::from_pixel(2, 2, image::Rgb(colour))
-            .save(path.join("cover.png"))
-            .unwrap();
-    }
+    let [before, after] = crate::test_support::relocation_artwork_paths(directory.path());
     let mut first = track(7, "Cover");
-    first.path = directory.path().join("before/track.wav");
+    first.path = before;
     let mut latest = first.clone();
-    latest.path = directory.path().join("after/track.wav");
+    latest.path = after;
     let expected = metadata.update(cx, |this, cx| {
         artwork_selection(this, first.clone(), cx);
         this.visible = true;

@@ -852,15 +852,13 @@ fn unfinished_directory_lookup_cannot_complete_a_relocated_request() {
     let mut relocated = original.clone();
     relocated.path = second.join("track.wav");
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
-    let (started, loading) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (loading, release, wait) = probe_gate();
     std::thread::scope(|scope| {
         let manager = &manager;
         let original = &original;
         let old = scope.spawn(move || {
             manager.load_with(original.source(), || {
-                started.send(()).unwrap();
-                released.recv().unwrap();
+                wait().unwrap();
                 manager.source_uri(original.source(), manager.max_image_bytes)
             })
         });
@@ -1054,16 +1052,14 @@ fn cache_only_reads_do_not_wait_for_an_inflight_probe() {
     let directory = tempfile::tempdir().unwrap();
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(directory.path().join("missing.wav"));
-    let (started, loading) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (loading, release, wait) = probe_gate();
     let (read, reads) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let manager = &manager;
         let selected = &selected;
         let loader = scope.spawn(move || {
             manager.load_with(selected.source(), || {
-                started.send(()).unwrap();
-                released.recv().unwrap();
+                wait().unwrap();
                 ArtworkSource::Directory(None)
             })
         });
@@ -1087,15 +1083,13 @@ fn held_old_version_survives_pressure_and_late_completion_does_not_replace_new()
     let old_track = source_fixture(source.clone());
     let mut current = old_track.clone();
     current.fingerprint = None;
-    let (started, loading) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (loading, release, wait) = probe_gate();
     let (old, new) = std::thread::scope(|scope| {
         let manager = &manager;
         let old_track = &old_track;
         let loader = scope.spawn(move || {
             manager.load_with(old_track.source(), || {
-                started.send(()).unwrap();
-                released.recv().unwrap();
+                wait().unwrap();
                 manager.source_uri(old_track.source(), manager.max_image_bytes)
             })
         });

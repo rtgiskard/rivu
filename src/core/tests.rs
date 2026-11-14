@@ -299,22 +299,7 @@ fn write_pcm(path: &Path) {
 }
 
 fn write_pcm_frames(path: &Path, frames: u32) {
-    use std::io::Write;
-    let data_len = frames * 200;
-    let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(b"RIFF").unwrap();
-    file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
-    file.write_all(b"WAVEfmt ").unwrap();
-    file.write_all(&16_u32.to_le_bytes()).unwrap();
-    file.write_all(&1_u16.to_le_bytes()).unwrap();
-    file.write_all(&1_u16.to_le_bytes()).unwrap();
-    file.write_all(&7500_u32.to_le_bytes()).unwrap();
-    file.write_all(&15000_u32.to_le_bytes()).unwrap();
-    file.write_all(&2_u16.to_le_bytes()).unwrap();
-    file.write_all(&16_u16.to_le_bytes()).unwrap();
-    file.write_all(b"data").unwrap();
-    file.write_all(&data_len.to_le_bytes()).unwrap();
-    file.write_all(&vec![0; data_len as usize]).unwrap();
+    crate::test_support::write_cd_frame_wav(path, frames).unwrap();
 }
 
 // Commit a deletion, then fail its scalar queue projection independently of

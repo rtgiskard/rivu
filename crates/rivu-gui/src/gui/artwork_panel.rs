@@ -675,9 +675,53 @@ impl Render for ArtworkPanel {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn runtime(
+        manager: Arc<ArtworkManager>,
+        cx: &mut gpui::TestAppContext,
+    ) -> Entity<ArtworkRuntime> {
+        cx.update(|cx| {
+            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
+            cx.new(|cx| {
+                ArtworkRuntime::new(
+                    manager,
+                    default,
+                    ArtworkImageRegistry::default(),
+                    cx.new(|_| AnimationFrames::default()),
+                )
+            })
+        })
+    }
+
+    fn panel_demand(
+        node_id: u64,
+        panel_id: u64,
+        show_tab_bar: bool,
+        options: ArtworkOptions,
+    ) -> super::super::workspace::WorkspacePanels {
+        use super::super::layout::{Layout, Node, Panel};
+
+        let mut panels = super::super::workspace::WorkspacePanels::default();
+        panels.reconcile(&Layout {
+            root: Some(Node::Tabs {
+                id: node_id,
+                active: panel_id,
+                panels: vec![Panel {
+                    id: panel_id,
+                    kind: "artwork".into(),
+                    show_tab_bar,
+                    audio_visualizer: None,
+                    artwork: Some(options),
+                }],
+            }),
+            next_id: node_id.max(panel_id) + 1,
+            locked: true,
+        });
+        panels
+    }
+
     #[gpui::test]
     fn hidden_image_release_preserves_panel_and_rotation_on_reveal(cx: &mut gpui::TestAppContext) {
-        use super::super::layout::{Node, Panel};
         cx.update(|cx| {
             crate::gui::appearance::theme::set_theme(
                 rivu_presentation::theme::Theme::default(),
@@ -692,36 +736,16 @@ mod tests {
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         assert!(manager.load(crate::artwork_source(&track)).is_none());
         let config = Config::default();
-        let mut panels = super::super::workspace::WorkspacePanels::default();
-        panels.reconcile(&super::super::layout::Layout {
-            root: Some(Node::Tabs {
-                id: 1,
-                active: 2,
-                panels: vec![Panel {
-                    id: 2,
-                    kind: "artwork".into(),
-                    show_tab_bar: false,
-                    audio_visualizer: None,
-                    artwork: Some(ArtworkOptions {
-                        mode: ArtworkMode::Rotating,
-                        ..(&config).into()
-                    }),
-                }],
-            }),
-            next_id: 3,
-            locked: true,
-        });
-        let owner = cx.update(|cx| {
-            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
-            cx.new(|cx| {
-                ArtworkRuntime::new(
-                    manager,
-                    default,
-                    ArtworkImageRegistry::default(),
-                    cx.new(|_| AnimationFrames::default()),
-                )
-            })
-        });
+        let panels = panel_demand(
+            1,
+            2,
+            false,
+            ArtworkOptions {
+                mode: ArtworkMode::Rotating,
+                ..(&config).into()
+            },
+        );
+        let owner = runtime(manager, cx);
         owner.update(cx, |owner, cx| {
             owner.sync(
                 Some(&track),
@@ -769,56 +793,26 @@ mod tests {
 
     #[gpui::test]
     fn relocation_replaces_display_without_resetting_rotation(cx: &mut gpui::TestAppContext) {
-        use super::super::layout::{Node, Panel};
-
         let directory = tempfile::tempdir_in(".cache").unwrap();
-        for (name, colour) in [("before", [255, 0, 0]), ("after", [0, 255, 0])] {
-            let path = directory.path().join(name);
-            std::fs::create_dir(&path).unwrap();
-            image::RgbImage::from_pixel(2, 2, image::Rgb(colour))
-                .save(path.join("cover.png"))
-                .unwrap();
-        }
-        let original =
-            crate::test_support::artwork_track(directory.path().join("before/track.wav"));
+        let [before, after] = crate::test_support::relocation_artwork_paths(directory.path());
+        let original = crate::test_support::artwork_track(before);
         let mut relocated = original.clone();
-        relocated.path = directory.path().join("after/track.wav");
+        relocated.path = after;
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         let old = manager.load(crate::artwork_source(&original)).unwrap();
         let new = manager.load(crate::artwork_source(&relocated)).unwrap();
         assert_ne!(old, new);
         let config = Config::default();
-        let root = Node::Tabs {
-            id: 1,
-            active: 2,
-            panels: vec![Panel {
-                id: 2,
-                kind: "artwork".into(),
-                show_tab_bar: false,
-                audio_visualizer: None,
-                artwork: Some(ArtworkOptions {
-                    mode: ArtworkMode::Rotating,
-                    ..(&config).into()
-                }),
-            }],
-        };
-        let mut panels = super::super::workspace::WorkspacePanels::default();
-        panels.reconcile(&super::super::layout::Layout {
-            root: Some(root),
-            next_id: 3,
-            locked: true,
-        });
-        let owner = cx.update(|cx| {
-            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
-            cx.new(|cx| {
-                ArtworkRuntime::new(
-                    manager,
-                    default,
-                    ArtworkImageRegistry::default(),
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                )
-            })
-        });
+        let panels = panel_demand(
+            1,
+            2,
+            false,
+            ArtworkOptions {
+                mode: ArtworkMode::Rotating,
+                ..(&config).into()
+            },
+        );
+        let owner = runtime(manager, cx);
         owner.update(cx, |owner, cx| {
             owner.sync(
                 Some(&original),
@@ -1020,9 +1014,6 @@ mod tests {
     fn repaired_path_retries_lookup_without_resetting_the_panel_rotation(
         cx: &mut gpui::TestAppContext,
     ) {
-        use super::super::layout::{Node, Panel};
-        use gpui::AppContext;
-
         std::fs::create_dir_all(".cache").unwrap();
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let manager = Arc::new(ArtworkManager::new(directory.path()));
@@ -1032,38 +1023,17 @@ mod tests {
         repaired.path = directory.path().join("repaired.wav");
         rivu_metadata::artwork::test_support::tagged_wav(&repaired.path);
         let config = Config::default();
-        let root = Node::Tabs {
-            id: 10,
-            active: 1,
-            panels: vec![Panel {
-                id: 1,
-                kind: "artwork".into(),
-                show_tab_bar: true,
-                audio_visualizer: None,
-                artwork: Some(ArtworkOptions {
-                    mode: ArtworkMode::Rotating,
-                    style: ArtworkStyle::Plain,
-                    ..(&config).into()
-                }),
-            }],
-        };
-        let mut panels = super::super::workspace::WorkspacePanels::default();
-        panels.reconcile(&super::super::layout::Layout {
-            root: Some(root),
-            next_id: 11,
-            locked: true,
-        });
-        let artwork = cx.update(|cx| {
-            let default = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
-            cx.new(|cx| {
-                ArtworkRuntime::new(
-                    manager.clone(),
-                    default,
-                    ArtworkImageRegistry::default(),
-                    cx.new(|_| crate::gui::animation_frames::AnimationFrames::default()),
-                )
-            })
-        });
+        let panels = panel_demand(
+            10,
+            1,
+            true,
+            ArtworkOptions {
+                mode: ArtworkMode::Rotating,
+                style: ArtworkStyle::Plain,
+                ..(&config).into()
+            },
+        );
+        let artwork = runtime(manager.clone(), cx);
         artwork.update(cx, |this, cx| {
             this.sync(
                 Some(&original),

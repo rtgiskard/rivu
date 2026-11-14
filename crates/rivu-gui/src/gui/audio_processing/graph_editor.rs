@@ -1412,12 +1412,8 @@ impl AudioProcessing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::feature::SnapshotSource;
-    use crate::test_support::ConfigFixture;
     use crate::test_support::CoreRuntime;
     use core::prelude::v1::test;
-    use rivu_format::config::Config;
-    use rivu_presentation::i18n::Localizer;
 
     const PANEL: u64 = 7;
 
@@ -1438,36 +1434,11 @@ mod tests {
         }
     }
 
-    fn fixture(
+    fn owner_fixture(
         cx: &mut TestAppContext,
-    ) -> (
-        tempfile::TempDir,
-        CoreRuntime,
-        Entity<AudioProcessing>,
-        AnyWindowHandle,
-    ) {
+    ) -> (tempfile::TempDir, CoreRuntime, Entity<AudioProcessing>) {
         cx.executor().allow_parking();
-        cx.update(|cx| {
-            rivu_ui::theme::set_palette(
-                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
-                cx,
-            );
-            rivu_ui::theme::set_typography(
-                gpui::font("sans-serif"),
-                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
-                12,
-                cx,
-            );
-        });
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let mut config = Config {
-            volume: 0.,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            tray_enabled: false,
-            ..Default::default()
-        };
+        let mut config = crate::gui::audio_processing::test_support::config();
         config.processing_graph.nodes.push(GraphNode {
             id: 3,
             position: [360., 240.],
@@ -1476,20 +1447,18 @@ mod tests {
             },
         });
         config.processing_graph.next_id = 4;
-        config.save_fixture(&path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
-        let processing = cx.new(|cx| AudioProcessing::new(context, cx));
+        crate::gui::audio_processing::test_support::owner(cx, config)
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        CoreRuntime,
+        Entity<AudioProcessing>,
+        AnyWindowHandle,
+    ) {
+        let (directory, runtime, processing) = owner_fixture(cx);
         let input = cx.new(|cx| Input::new("Editor", "12", "", cx));
         let window = cx.add_window({
             let processing = processing.clone();
@@ -1909,7 +1878,7 @@ mod tests {
             }
         }
 
-        let (_directory, _runtime, processing, _) = fixture(cx);
+        let (_directory, _runtime, processing) = owner_fixture(cx);
         let workbench = cx.add_window({
             let processing = processing.clone();
             move |_, _| WorkbenchWindow(processing)
@@ -2376,7 +2345,7 @@ mod tests {
     #[gpui::test]
     fn master_switch_queues_relative_intents_independently_of_eq(cx: &mut TestAppContext) {
         cx.update(Input::init);
-        let (_directory, _runtime, processing, _) = fixture(cx);
+        let (_directory, _runtime, processing) = owner_fixture(cx);
         processing.update(cx, |this, _| this.command_active = true);
         let window = cx.open_window(size(px(900.), px(700.)), {
             let processing = processing.clone();

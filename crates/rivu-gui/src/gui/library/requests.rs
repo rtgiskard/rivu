@@ -1,8 +1,6 @@
 //! Library logical demand and physical worker gates have separate lifetimes.
 use super::Library;
 use crate::gui::library;
-#[cfg(test)]
-use crate::test_support::ConfigFixture;
 use rivu_protocol::{
     model::Query,
     query_tracking::QuerySubmission,
@@ -371,42 +369,8 @@ impl Library {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::with_library;
     use super::*;
-    use gpui::AppContext;
-
-    fn with_library(
-        cx: &mut gpui::TestAppContext,
-        run: impl FnOnce(&mut Library, &mut gpui::Context<Library>),
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&config_path)
-        .unwrap();
-        let runtime =
-            crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
-        let i18n = std::sync::Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
-        let labels = std::rc::Rc::new(
-            i18n.fixed_texts()
-                .map(|(id, text)| (id.to_owned(), gpui::SharedString::from(text.to_owned())))
-                .collect(),
-        );
-        let context = crate::gui::feature::FeatureContext {
-            snapshots: std::rc::Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n,
-            labels,
-            scroll: Default::default(),
-        };
-        let owner = cx.new(|cx| Library::new(context, cx));
-        owner.update(cx, |owner, cx| run(owner, cx));
-    }
 
     #[gpui::test]
     fn obsolete_directory_demand_parks_quietly_until_retry_or_fresh_authority(

@@ -2,18 +2,7 @@ use super::*;
 use rivu_format::tags::{TagEncoding, TagValues};
 
 fn wav(path: &Path) {
-    let mut file = hound::WavWriter::create(
-        path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: 8000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        },
-    )
-    .unwrap();
-    file.write_sample(123_i16).unwrap();
-    file.finalize().unwrap();
+    crate::test_support::write_i16_wav(path, 1, 8_000, [123]).unwrap();
 }
 
 fn finish(core: &mut Core) -> Ack {

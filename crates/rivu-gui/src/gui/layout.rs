@@ -2252,27 +2252,6 @@ mod tests {
         json!({"type":"tabs", "panels":[{"kind":kind}]})
     }
 
-    struct TemporaryDirectory(std::path::PathBuf);
-
-    impl TemporaryDirectory {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(1);
-            let path = std::env::temp_dir().join(format!(
-                "rivu-layout-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TemporaryDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn panel_queries_preserve_tree_order_and_active_tab_visibility() {
         let mut layout = empty();
@@ -2661,8 +2640,8 @@ mod tests {
 
     #[test]
     fn depth_32_persists_and_depth_33_is_rejected_without_replacing_saved_bytes() {
-        let directory = TemporaryDirectory::new();
-        let path = directory.0.join("layout.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
         let mut set = LayoutSet::default();
         *set.current_mut() = nested_layout(32);
         set.current().validate().unwrap();
@@ -2676,15 +2655,15 @@ mod tests {
         assert!(set.current().validate().is_err());
         assert!(set.save(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), previous_bytes);
-        let invalid_path = directory.0.join("too-deep.json");
+        let invalid_path = directory.path().join("too-deep.json");
         fs::write(&invalid_path, serde_json::to_vec(&encoded(&set)).unwrap()).unwrap();
         assert!(LayoutSet::load(&invalid_path).is_err());
     }
 
     #[test]
     fn invalid_runtime_boundaries_never_replace_saved_bytes() {
-        let directory = TemporaryDirectory::new();
-        let path = directory.0.join("layout.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
         let mut set = LayoutSet::default();
         *set.current_mut() = Layout {
             next_id: 8,
@@ -2737,8 +2716,8 @@ mod tests {
             locked: false,
         };
         layout.validate().unwrap();
-        let directory = TemporaryDirectory::new();
-        let path = directory.0.join("wide.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wide.json");
         let mut set = LayoutSet::default();
         *set.current_mut() = layout;
         set.save(&path).unwrap();
@@ -2875,8 +2854,8 @@ mod tests {
 
     #[test]
     fn loading_does_not_restore_deleted_templates_or_replace_user_layouts() {
-        let directory = TemporaryDirectory::new();
-        let path = directory.0.join("layout.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
         let mut set = LayoutSet::default();
         set.current_mut().add("custom", None);
         let removed: Vec<_> = set
@@ -3195,8 +3174,8 @@ mod tests {
 
     #[test]
     fn atomic_save_failure_preserves_disk_and_valid_named_ui_state() {
-        let directory = TemporaryDirectory::new();
-        let path = directory.0.join("layout.json");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layout.json");
         let mut set = single_layout_set();
         set.duplicate("Work").unwrap();
         set.current_mut().add("custom", None);
@@ -3210,7 +3189,7 @@ mod tests {
         set.current_mut().next_id = next_id;
 
         // Rename over a directory fails after the complete temporary write.
-        let blocked = directory.0.join("blocked");
+        let blocked = directory.path().join("blocked");
         fs::create_dir(&blocked).unwrap();
         fs::write(blocked.join("keep"), b"unchanged").unwrap();
         set.remove("Default").unwrap();
@@ -3219,7 +3198,7 @@ mod tests {
         assert_eq!(encoded(&set), intended);
         assert_eq!(fs::read(blocked.join("keep")).unwrap(), b"unchanged");
         assert_eq!(fs::read(&path).unwrap(), previous_bytes);
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
         set.save(&path).unwrap();
         assert_eq!(
             LayoutSet::load(&path).unwrap().names().collect::<Vec<_>>(),

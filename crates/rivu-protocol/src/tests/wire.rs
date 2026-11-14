@@ -7,6 +7,59 @@ use crate::{
 };
 use std::{path::PathBuf, sync::Arc};
 
+fn query_round_trip(encoded: &mut Vec<u8>, query: Query) -> Query {
+    encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), encoded).unwrap();
+    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected query");
+    };
+    Query::try_from(wire).unwrap()
+}
+
+fn assert_query_round_trip(encoded: &mut Vec<u8>, expected: Query) {
+    assert_eq!(query_round_trip(encoded, expected.clone()), expected);
+}
+
+fn command_round_trip(encoded: &mut Vec<u8>, command: Command) -> Command {
+    encode_request_frame_into(&WireRequest::Command(WireCommand::from(command)), encoded).unwrap();
+    let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected command");
+    };
+    Command::try_from(wire).unwrap()
+}
+
+fn assert_command_round_trip(encoded: &mut Vec<u8>, command: Command) {
+    let expected = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        serde_json::to_value(command_round_trip(encoded, command)).unwrap(),
+        expected
+    );
+}
+
+fn assert_configuration_round_trip(
+    config: Arc<rivu_format::config::Config>,
+    encoded: &mut Vec<u8>,
+) {
+    let response = WireResponse::State(wire_state(StateResponse {
+        configuration: Some(crate::model::ConfigurationState {
+            config: Arc::clone(&config),
+            config_path: "/test/config.toml".into(),
+        }),
+        ..Default::default()
+    }));
+    encode_response_frame_into(&response, encoded).unwrap();
+    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state response");
+    };
+    assert_eq!(
+        state_response(decoded)
+            .configuration
+            .unwrap()
+            .config
+            .as_ref(),
+        config.as_ref()
+    );
+}
+
 #[test]
 fn master_bypass_wire_requires_explicit_boolean_and_preserves_direction() {
     for bypassed in [false, true] {
@@ -183,101 +236,99 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 fn other_tracks_requests_round_trip_boundaries() {
     use rivu_protocol::model::LibrarySort;
     let mut encoded = Vec::new();
-    let mut assert_query_round_trip = |expected: Query| {
-        encode_request_frame_into(
-            &WireRequest::Query(WireQuery::from(expected.clone())),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected query")
-        };
-        assert_eq!(Query::try_from(wire).unwrap(), expected);
-    };
-    assert_query_round_trip(Query::OtherTracksCount);
+    assert_query_round_trip(&mut encoded, Query::OtherTracksCount);
     for query in [None, Some(String::new()), Some("Été_100%".into())] {
         for favorite in [None, Some(false), Some(true)] {
             for missing in [None, Some(false), Some(true)] {
                 for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
-                    assert_query_round_trip(Query::OtherTracksLocate {
-                        track_id: i64::MAX,
-                        query: query.clone(),
-                        favorite,
-                        missing,
-                        sort,
-                    });
-                    for offset in [0, usize::MAX] {
-                        assert_query_round_trip(Query::OtherTracksPage {
+                    assert_query_round_trip(
+                        &mut encoded,
+                        Query::OtherTracksLocate {
+                            track_id: i64::MAX,
                             query: query.clone(),
                             favorite,
                             missing,
                             sort,
-                            offset,
-                            limit: usize::MAX,
-                        });
+                        },
+                    );
+                    for offset in [0, usize::MAX] {
+                        assert_query_round_trip(
+                            &mut encoded,
+                            Query::OtherTracksPage {
+                                query: query.clone(),
+                                favorite,
+                                missing,
+                                sort,
+                                offset,
+                                limit: usize::MAX,
+                            },
+                        );
                     }
                 }
             }
         }
     }
-    let mut assert_command_round_trip = |command: Command| {
-        let expected = serde_json::to_value(&command).unwrap();
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(command)),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected command")
-        };
-        assert_eq!(
-            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
-    };
     for other_tracks in [false, true] {
-        assert_command_round_trip(Command::CheckOtherTracks {
-            force: other_tracks,
-        });
-        assert_command_round_trip(Command::EnqueueSources {
-            directories: vec![],
-            track_ids: vec![],
-            other_tracks,
-        });
-        assert_command_round_trip(Command::AddPlaylistSources {
-            playlist_id: i64::MAX,
-            directories: vec![],
-            track_ids: vec![],
-            other_tracks,
-        });
+        assert_command_round_trip(
+            &mut encoded,
+            Command::CheckOtherTracks {
+                force: other_tracks,
+            },
+        );
+        assert_command_round_trip(
+            &mut encoded,
+            Command::EnqueueSources {
+                directories: vec![],
+                track_ids: vec![],
+                other_tracks,
+            },
+        );
+        assert_command_round_trip(
+            &mut encoded,
+            Command::AddPlaylistSources {
+                playlist_id: i64::MAX,
+                directories: vec![],
+                track_ids: vec![],
+                other_tracks,
+            },
+        );
         for index in [0, usize::MAX] {
             for expected_revision in [0, u64::MAX] {
-                assert_command_round_trip(Command::InsertQueueSources {
-                    directories: vec!["/music".into()],
-                    track_ids: vec![1, i64::MAX],
-                    other_tracks,
-                    index,
-                    expected_revision,
-                });
-                assert_command_round_trip(Command::InsertPlaylistSources {
-                    playlist_id: i64::MAX,
-                    directories: vec![],
-                    track_ids: vec![],
-                    other_tracks,
-                    index,
-                    expected_revision,
-                });
+                assert_command_round_trip(
+                    &mut encoded,
+                    Command::InsertQueueSources {
+                        directories: vec!["/music".into()],
+                        track_ids: vec![1, i64::MAX],
+                        other_tracks,
+                        index,
+                        expected_revision,
+                    },
+                );
+                assert_command_round_trip(
+                    &mut encoded,
+                    Command::InsertPlaylistSources {
+                        playlist_id: i64::MAX,
+                        directories: vec![],
+                        track_ids: vec![],
+                        other_tracks,
+                        index,
+                        expected_revision,
+                    },
+                );
             }
         }
     }
     for index in [None, Some(0), Some(usize::MAX)] {
         for expected_revision in [None, Some(0), Some(u64::MAX)] {
             for paths in [vec!["/音楽/track.wav".into(), "/music".into()], vec![]] {
-                assert_command_round_trip(Command::QueueExternalPaths {
-                    paths,
-                    index,
-                    expected_revision,
-                });
+                assert_command_round_trip(
+                    &mut encoded,
+                    Command::QueueExternalPaths {
+                        paths,
+                        index,
+                        expected_revision,
+                    },
+                );
             }
         }
     }
@@ -578,6 +629,7 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 #[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     use std::path::Path;
+    let mut encoded = Vec::new();
     for (favorite, missing) in [None, Some(true), Some(false)]
         .into_iter()
         .flat_map(|favorite| {
@@ -587,19 +639,17 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
         })
     {
         for query in [None, Some(""), Some("Été_100%")] {
-            let request = WireRequest::Query(WireQuery::from(Query::DirectoryPage {
-                path: "/music".into(),
-                query: query.map(str::to_owned),
-                favorite,
-                missing,
-                offset: 7,
-                limit: 11,
-            }));
-            let mut encoded = Vec::new();
-            encode_request_frame_into(&request, &mut encoded).unwrap();
-            let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-                panic!("expected query");
-            };
+            let decoded = query_round_trip(
+                &mut encoded,
+                Query::DirectoryPage {
+                    path: "/music".into(),
+                    query: query.map(str::to_owned),
+                    favorite,
+                    missing,
+                    offset: 7,
+                    limit: 11,
+                },
+            );
             let Query::DirectoryPage {
                 path,
                 query: decoded_query,
@@ -607,7 +657,7 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
                 missing: decoded_missing,
                 offset,
                 limit,
-            } = Query::try_from(wire).unwrap()
+            } = decoded
             else {
                 panic!("expected directory query");
             };
@@ -622,6 +672,7 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
 
 #[test]
 fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
+    let mut encoded = Vec::new();
     for tree in [false, true] {
         let query = Query::LibraryLocate {
             track_id: 42,
@@ -632,23 +683,14 @@ fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
             missing: Some(false),
             sort: rivu_protocol::model::LibrarySort::MostPlayed,
         };
-        let expected = serde_json::to_value(&query).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
-            .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected query");
-        };
-        assert_eq!(
-            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
+        assert_query_round_trip(&mut encoded, query);
     }
 }
 
 #[test]
 fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
     use rivu_protocol::model::LibrarySort;
+    let mut encoded = Vec::new();
     for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
         for query in [None, Some(""), Some("Été_100%")] {
             for favorite in [None, Some(true), Some(false)] {
@@ -662,21 +704,7 @@ fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
                         offset: 7,
                         limit: 11,
                     };
-                    let expected = serde_json::to_value(&query).unwrap();
-                    let mut encoded = Vec::new();
-                    encode_request_frame_into(
-                        &WireRequest::Query(WireQuery::from(query)),
-                        &mut encoded,
-                    )
-                    .unwrap();
-                    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap()
-                    else {
-                        panic!("expected query");
-                    };
-                    assert_eq!(
-                        serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-                        expected
-                    );
+                    assert_query_round_trip(&mut encoded, query);
                 }
             }
         }
@@ -697,17 +725,7 @@ fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
             },
             Query::LibraryRootStats { roots },
         ] {
-            let expected = serde_json::to_value(&query).unwrap();
-            let mut encoded = Vec::new();
-            encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
-                .unwrap();
-            let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-                panic!("expected query");
-            };
-            assert_eq!(
-                serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-                expected
-            );
+            assert_query_round_trip(&mut encoded, query);
         }
     }
 }
@@ -1002,32 +1020,7 @@ fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
             animation_fps: 240,
             ..Default::default()
         });
-        let configuration = rivu_protocol::model::ConfigurationState {
-            config: config.clone(),
-            config_path: "/test/config.toml".into(),
-        };
-        let mut encoded = Vec::new();
-        encode_response_frame_into(
-            &WireResponse::State(wire_state(StateResponse {
-                revisions: StateRevisions::default(),
-                playback: None,
-                queue: None,
-                library: None,
-                system: None,
-                configuration: Some(configuration),
-                processing: None,
-            })),
-            &mut encoded,
-        )
-        .unwrap();
-        let response = decode_response_frame(&encoded[4..]).unwrap();
-        let WireResponse::State(state) = response else {
-            panic!("expected state")
-        };
-        assert_eq!(
-            state_response(state).configuration.unwrap().config.as_ref(),
-            config.as_ref()
-        );
+        assert_configuration_round_trip(config, &mut Vec::new());
     }
 }
 
@@ -1161,20 +1154,7 @@ fn state_round_trip_preserves_optional_config_field_and_library_columns() {
             animation_fps: 30,
             ..Default::default()
         };
-        let response = WireResponse::State(wire_state(StateResponse {
-            configuration: Some(crate::model::ConfigurationState {
-                config: Arc::new(config.clone()),
-                config_path: "/test/config.toml".into(),
-            }),
-            ..Default::default()
-        }));
-        let mut encoded = Vec::new();
-        encode_response_frame_into(&response, &mut encoded).unwrap();
-        let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-            panic!("expected state response");
-        };
-        let decoded = state_response(decoded).configuration.unwrap().config;
-        assert_eq!(decoded.as_ref(), &config);
+        assert_configuration_round_trip(Arc::new(config), &mut Vec::new());
     }
 }
 
@@ -1846,20 +1826,7 @@ fn shared_configuration_encoding_rejects_oversize_and_recovers() {
     assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
 
     let config = rivu_format::config::Config::default();
-    let response = WireResponse::State(wire_state(StateResponse {
-        configuration: Some(crate::model::ConfigurationState {
-            config: Arc::new(config.clone()),
-            config_path: "/test/config.toml".into(),
-        }),
-        ..Default::default()
-    }));
-    let mut encoded = Vec::new();
-    encode_response_frame_into(&response, &mut encoded).unwrap();
-    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-        panic!("expected state response");
-    };
-    let decoded = state_response(decoded).configuration.unwrap().config;
-    assert_eq!(decoded.as_ref(), &config);
+    assert_configuration_round_trip(Arc::new(config), &mut encoded);
 }
 
 #[test]
@@ -1894,6 +1861,7 @@ fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() 
 #[test]
 fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_paths() {
     use rivu_protocol::model::{GraphEdit, GraphExecutionMode, GraphNodeKind, GraphPort};
+    let mut encoded = Vec::new();
     let port = GraphPort {
         node: u64::MAX,
         port: u16::MAX,
@@ -1934,20 +1902,7 @@ fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_pa
         }),
     );
     for command in commands {
-        let expected = serde_json::to_value(&command).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(command)),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected graph command frame");
-        };
-        assert_eq!(
-            serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
-            expected,
-        );
+        assert_command_round_trip(&mut encoded, command);
     }
 }
 
@@ -1969,20 +1924,7 @@ fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges
             },
         )
         .unwrap();
-    let response = WireResponse::State(wire_state(StateResponse {
-        configuration: Some(crate::model::ConfigurationState {
-            config: Arc::new(config.clone()),
-            config_path: "/test/config.toml".into(),
-        }),
-        ..Default::default()
-    }));
-    let mut encoded = Vec::new();
-    encode_response_frame_into(&response, &mut encoded).unwrap();
-    let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-        panic!("expected state response");
-    };
-    let decoded = state_response(decoded).configuration.unwrap().config;
-    assert_eq!(decoded.as_ref(), &config);
+    assert_configuration_round_trip(Arc::new(config), &mut Vec::new());
 }
 
 #[test]
@@ -2267,15 +2209,8 @@ fn quick_config_mutations_round_trip_without_full_config_payloads() {
     let mut encoded = Vec::new();
     for change in changes {
         let expected = serde_json::to_value(&change).unwrap();
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(Command::MutateConfig { change })),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected config command");
-        };
-        let Command::MutateConfig { change } = Command::try_from(command).unwrap() else {
+        let command = command_round_trip(&mut encoded, Command::MutateConfig { change });
+        let Command::MutateConfig { change } = command else {
             panic!("expected mutation");
         };
         assert_eq!(serde_json::to_value(change).unwrap(), expected);

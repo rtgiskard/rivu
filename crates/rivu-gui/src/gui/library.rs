@@ -7,6 +7,44 @@ pub(in crate::gui) mod selection;
 pub(super) mod tree;
 mod view;
 
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    use crate::test_support::{ConfigFixture, CoreRuntime};
+
+    pub(super) fn with_library(
+        cx: &mut gpui::TestAppContext,
+        run: impl FnOnce(&mut Library, &mut Context<Library>),
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        rivu_format::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save_fixture(&config_path)
+        .unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
+        let i18n = Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let owner = cx.new(|cx| Library::new(context, cx));
+        owner.update(cx, run);
+    }
+}
+
 use crate::{
     gui::{
         components::search::{SearchScope, new_search},

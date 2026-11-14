@@ -3682,12 +3682,8 @@ impl AudioProcessing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::feature::SnapshotSource;
-    use crate::test_support::ConfigFixture;
     use crate::test_support::CoreRuntime;
     use core::prelude::v1::test;
-    use rivu_format::config::Config;
-    use rivu_presentation::i18n::Localizer;
 
     const PANEL: u64 = 7;
 
@@ -5728,10 +5724,8 @@ mod tests {
     fn parent_inspector_live_pending_frame_keeps_slider_bounds_and_capture(
         cx: &mut TestAppContext,
     ) {
-        let (_directory, runtime, owner, editor, old_handle) = fixture_with_owner(cx);
+        let (_directory, runtime, owner, editor) = editor_fixture(cx);
         let id = select_node_target(cx, &runtime, &owner, &editor);
-        cx.update_window(old_handle, |_, window, _| window.remove_window())
-            .unwrap();
         let window = cx.open_window(size(px(1200.), px(1200.)), {
             let owner = owner.clone();
             move |_, cx| ParentInspectorWindow {
@@ -6256,37 +6250,16 @@ mod tests {
         }
     }
 
-    fn fixture_with_owner(
+    fn editor_fixture(
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
         CoreRuntime,
         Entity<AudioProcessing>,
         Entity<EqualizerEditor>,
-        AnyWindowHandle,
     ) {
-        cx.update(|cx| {
-            Input::init(cx);
-            rivu_ui::theme::set_palette(
-                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
-                cx,
-            );
-            rivu_ui::theme::set_typography(
-                gpui::font("sans-serif"),
-                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
-                12,
-                cx,
-            );
-        });
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let mut config = Config {
-            volume: 0.,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            tray_enabled: false,
-            ..Default::default()
-        };
+        cx.update(Input::init);
+        let mut config = crate::gui::audio_processing::test_support::config();
         config.equalizer.enabled = true;
         config.equalizer.bands = [(80., -8.), (800., 0.), (8_000., 8.)]
             .into_iter()
@@ -6298,20 +6271,8 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        config.save_fixture(&path).unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
-        let processing = cx.new(|cx| AudioProcessing::new(context, cx));
+        let (directory, runtime, processing) =
+            crate::gui::audio_processing::test_support::owner(cx, config);
         let owner = processing.downgrade();
         let editor = processing.update(cx, |parent, cx| {
             let editor = cx.new(|cx| {
@@ -6331,6 +6292,20 @@ mod tests {
             parent.equalizer_editors.active = Some((PANEL, EqTarget::Monitor));
             editor
         });
+        assert!(editor.read_with(cx, |editor, _| editor.format.is_none()));
+        (directory, runtime, processing, editor)
+    }
+
+    fn fixture_with_owner(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        CoreRuntime,
+        Entity<AudioProcessing>,
+        Entity<EqualizerEditor>,
+        AnyWindowHandle,
+    ) {
+        let (directory, runtime, processing, editor) = editor_fixture(cx);
         let window = cx.open_window(size(px(1200.), px(900.)), {
             let editor = editor.clone();
             move |_, _| EditorWindow(editor)
@@ -6389,6 +6364,34 @@ mod tests {
         }
     }
 
+    fn preset_window(
+        cx: &mut TestAppContext,
+        owner: &Entity<AudioProcessing>,
+    ) -> (
+        AnyWindowHandle,
+        rivu_ui::FocusScope,
+        Rc<Cell<usize>>,
+        Rc<Cell<u64>>,
+    ) {
+        let scope = cx.update(rivu_ui::FocusScope::new);
+        let outside_clicks = Rc::new(Cell::new(0));
+        let panel = Rc::new(Cell::new(7));
+        let window = cx.open_window(size(px(800.), px(600.)), {
+            let owner = owner.clone();
+            let scope = scope.clone();
+            let outside_clicks = outside_clicks.clone();
+            let panel = panel.clone();
+            move |_, cx| PresetWindow {
+                _subscription: cx.observe(&owner, |_, _, cx| cx.notify()),
+                owner,
+                scope,
+                outside_clicks,
+                panel,
+            }
+        });
+        (window.into(), scope, outside_clicks, panel)
+    }
+
     #[gpui::test]
     fn preset_choices_follow_names_across_candidate_reordering(cx: &mut TestAppContext) {
         let (_directory, _runtime, owner, _editor, handle) = fixture_with_owner(cx);
@@ -6420,25 +6423,8 @@ mod tests {
 
     #[gpui::test]
     fn preset_popup_keeps_controls_and_following_content_in_place(cx: &mut TestAppContext) {
-        let (_directory, _runtime, owner, _editor, old_handle) = fixture_with_owner(cx);
-        cx.update_window(old_handle, |_, window, _| window.remove_window())
-            .unwrap();
-        let scope = cx.update(rivu_ui::FocusScope::new);
-        let window = cx.open_window(size(px(800.), px(600.)), {
-            let owner = owner.clone();
-            let scope = scope.clone();
-            move |_, cx| {
-                let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
-                PresetWindow {
-                    owner,
-                    scope,
-                    outside_clicks: Rc::new(Cell::new(0)),
-                    panel: Rc::new(Cell::new(7)),
-                    _subscription: subscription,
-                }
-            }
-        });
-        let handle = window.into();
+        let (_directory, _runtime, owner, _editor) = editor_fixture(cx);
+        let (handle, scope, _, _) = preset_window(cx, &owner);
         for names in [&[][..], &["First", "Second"][..]] {
             owner.update(cx, |owner, cx| {
                 let mut state = (*owner.state).clone();
@@ -6487,9 +6473,7 @@ mod tests {
     fn preset_keyboard_management_restores_origin_and_disabled_trigger_is_inert(
         cx: &mut TestAppContext,
     ) {
-        let (_directory, _runtime, owner, _editor, old_handle) = fixture_with_owner(cx);
-        cx.update_window(old_handle, |_, window, _| window.remove_window())
-            .unwrap();
+        let (_directory, _runtime, owner, _editor) = editor_fixture(cx);
         owner.update(cx, |owner, cx| {
             owner.command_active = true;
             owner.page = Page::Equalizer;
@@ -6503,26 +6487,7 @@ mod tests {
                 .collect();
             owner.reconcile(Rc::new(state), cx);
         });
-        let scope = cx.update(rivu_ui::FocusScope::new);
-        let outside_clicks = Rc::new(Cell::new(0));
-        let panel = Rc::new(Cell::new(7));
-        let window = cx.open_window(size(px(800.), px(600.)), {
-            let owner = owner.clone();
-            let scope = scope.clone();
-            let outside_clicks = outside_clicks.clone();
-            let panel = panel.clone();
-            move |_, cx| {
-                let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
-                PresetWindow {
-                    owner,
-                    scope,
-                    outside_clicks,
-                    panel,
-                    _subscription: subscription,
-                }
-            }
-        });
-        let handle = window.into();
+        let (handle, scope, outside_clicks, panel) = preset_window(cx, &owner);
         draw(cx, handle);
         cx.update_window(handle, |_, window, cx| {
             window.activate_window();

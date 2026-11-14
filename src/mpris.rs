@@ -1563,18 +1563,7 @@ mod tests {
         unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address) };
         let (directory, mut runtime) = runtime_fixture();
         let path = directory.path().join("selected.wav");
-        let mut writer = hound::WavWriter::create(
-            &path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )
-        .unwrap();
-        writer.write_sample(0_i16).unwrap();
-        writer.finalize().unwrap();
+        crate::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
         let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
             paths: vec![path],
             index: None,
@@ -1835,18 +1824,7 @@ mod tests {
         let bus = TestBus::start();
         let (directory, mut runtime) = runtime_fixture();
         let path = directory.path().join("selected.wav");
-        let mut writer = hound::WavWriter::create(
-            &path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 8_000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )
-        .unwrap();
-        writer.write_sample(0_i16).unwrap();
-        writer.finalize().unwrap();
+        crate::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
         let other_path = directory.path().join("other.wav");
         std::fs::copy(&path, &other_path).unwrap();
         // A real PNG cover must remain distinct from the trusted SVG fallback.
@@ -2051,18 +2029,7 @@ mod tests {
             .map(|id| directory.path().join(format!("{id}.wav")))
             .collect();
         for path in &paths {
-            let mut writer = hound::WavWriter::create(
-                path,
-                hound::WavSpec {
-                    channels: 1,
-                    sample_rate: 8_000,
-                    bits_per_sample: 16,
-                    sample_format: hound::SampleFormat::Int,
-                },
-            )
-            .unwrap();
-            writer.write_sample(0_i16).unwrap();
-            writer.finalize().unwrap();
+            crate::test_support::write_i16_wav(path, 1, 8_000, [0]).unwrap();
         }
         let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
             paths,

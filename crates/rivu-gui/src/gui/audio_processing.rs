@@ -30,6 +30,60 @@ use equalizer_editor::EqualizerEditors;
 mod results;
 use results::ResultsState;
 
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    use crate::gui::feature::SnapshotSource;
+    use crate::test_support::{ConfigFixture, CoreRuntime};
+    use rivu_format::config::Config;
+    use rivu_presentation::i18n::Localizer;
+
+    pub(super) fn config() -> Config {
+        Config {
+            volume: 0.,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn owner(
+        cx: &mut TestAppContext,
+        config: Config,
+    ) -> (tempfile::TempDir, CoreRuntime, Entity<AudioProcessing>) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(
+                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
+                cx,
+            );
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
+                cx,
+            );
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        config.save_fixture(&path).unwrap();
+        let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let owner = cx.new(|cx| AudioProcessing::new(context, cx));
+        (directory, runtime, owner)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
     Graph,

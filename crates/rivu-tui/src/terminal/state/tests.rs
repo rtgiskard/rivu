@@ -1239,6 +1239,18 @@ pub(in crate::terminal) fn query_snapshot() -> TuiSnapshot {
     state
 }
 
+pub(super) fn playlist_title_request() -> (TuiState, TuiSnapshot, QueryRequest) {
+    let mut state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+    tui.ui.view = playlist_view(1);
+    load_visible(&mut tui.ui, &state);
+    state.library.playlist_revision += 1;
+    tui.apply_snapshot(state.clone());
+    let title = tui.ui.query_request(&state).unwrap();
+    assert_eq!(title.demand.kind(), ReadKind::PlaylistSummary(1));
+    (tui, state, title)
+}
+
 fn recent_entry(id: i64, played_at: i64) -> HistoryEntry {
     HistoryEntry {
         track_id: id,
@@ -3257,15 +3269,7 @@ fn failed_playlist_entries_do_not_block_title_refresh_or_retry_after_it() {
 
 #[test]
 fn failed_playlist_title_does_not_block_pages_or_retry_when_they_load() {
-    let state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-    tui.ui.view = playlist_view(1);
-    load_visible(&mut tui.ui, &state);
-    let mut next = state.clone();
-    next.library.playlist_revision += 1;
-    tui.apply_snapshot(next.clone());
-    let summary = tui.ui.query_request(&next).unwrap();
-    assert_eq!(summary.demand.kind(), ReadKind::PlaylistSummary(1));
+    let (mut tui, mut next, summary) = playlist_title_request();
     assert!(tui.ui.apply_query(
         &next,
         &summary,
@@ -3319,14 +3323,7 @@ fn failed_playlist_title_survives_entry_payload_and_batch_invalidation() {
         QueryError::Cancelled,
     ] {
         let noisy = matches!(&error, QueryError::Message(_));
-        let mut state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-        tui.ui.view = playlist_view(1);
-        load_visible(&mut tui.ui, &state);
-        state.library.playlist_revision += 1;
-        tui.apply_snapshot(state.clone());
-        let failed = tui.ui.query_request(&state).unwrap();
-        assert_eq!(failed.demand.kind(), ReadKind::PlaylistSummary(1));
+        let (mut tui, mut state, failed) = playlist_title_request();
         assert_eq!(failed.demand.limit, 1);
         assert_eq!(tui.ui.apply_query(&state, &failed, Err(error)), noisy);
         assert!(tui.ui.reads.requested.is_none());
@@ -3399,13 +3396,7 @@ fn failed_playlist_title_survives_entry_payload_and_batch_invalidation() {
 
 #[test]
 fn reopening_playlist_view_retries_failed_title_and_rejects_old_completion() {
-    let mut state = query_snapshot();
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-    tui.ui.view = playlist_view(1);
-    load_visible(&mut tui.ui, &state);
-    state.library.playlist_revision += 1;
-    tui.apply_snapshot(state.clone());
-    let failed = tui.ui.query_request(&state).unwrap();
+    let (mut tui, state, failed) = playlist_title_request();
     assert!(tui.ui.apply_query(
         &state,
         &failed,
@@ -3741,15 +3732,7 @@ fn iteration_details_accept_original_completion_across_source_and_page_size_chan
 #[test]
 fn iteration_failed_summary_stays_parked_through_entry_and_bitrate_refills() {
     for bitrate_only in [false, true] {
-        let state = query_snapshot();
-        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-        tui.ui.view = playlist_view(1);
-        load_visible(&mut tui.ui, &state);
-        let mut next = state.clone();
-        next.library.playlist_revision += 1;
-        tui.apply_snapshot(next.clone());
-        let summary = tui.ui.query_request(&next).unwrap();
-        assert_eq!(summary.demand.kind(), ReadKind::PlaylistSummary(1));
+        let (mut tui, mut next, summary) = playlist_title_request();
         assert!(tui.ui.apply_query(
             &next,
             &summary,

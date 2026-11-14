@@ -9,6 +9,48 @@ use rivu_protocol::{
     response::{QueryResponse, StateSections},
 };
 
+fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
+    use std::io::Read;
+    let mut prefix = [0; 4];
+    stream.read_exact(&mut prefix).unwrap();
+    let length = u32::from_le_bytes(prefix) as usize;
+    assert!(length <= MAX_RESPONSE);
+    let mut frame = vec![0; length];
+    stream.read_exact(&mut frame).unwrap();
+    decode_response_frame(&frame).unwrap()
+}
+
+fn command_config(directory: &std::path::Path) -> std::path::PathBuf {
+    let path = directory.join("config.toml");
+    crate::config::Config {
+        media_read_buffer_mib: 1,
+        ffmpeg_enabled: false,
+        ..Default::default()
+    }
+    .save(&path)
+    .unwrap();
+    path
+}
+
+// Return ownership to each test so shutdown and socket acquisition remain explicit.
+fn command_service(
+    directory: &std::path::Path,
+    config_path: &std::path::Path,
+    handle: Option<crate::core::CoreHandle>,
+) -> (SocketOwner, crate::core::CoreRuntime, AppHandle, Server) {
+    let owner = SocketOwner::acquire(directory).unwrap();
+    let runtime = crate::core::CoreRuntime::start(directory, config_path).unwrap();
+    let app = AppHandle::new(&runtime, directory);
+    let server = Server::start(
+        &owner,
+        handle.unwrap_or_else(|| runtime.handle.clone()),
+        app.clone(),
+        runtime.test_executor(),
+    )
+    .unwrap();
+    (owner, runtime, app, server)
+}
+
 #[test]
 fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots() {
     if crate::test_support::run_in_subprocess(
@@ -20,30 +62,11 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     use std::io::{Read, Write};
     use std::time::Duration;
 
-    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
-        let mut prefix = [0; 4];
-        stream.read_exact(&mut prefix).unwrap();
-        let length = u32::from_le_bytes(prefix) as usize;
-        assert!(length <= MAX_RESPONSE);
-        let mut frame = vec![0; length];
-        stream.read_exact(&mut frame).unwrap();
-        decode_response_frame(&frame).unwrap()
-    }
-
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
+    let config_path = command_config(directory.path());
     let (handle, queries) = crate::core::CoreHandle::test_query_port();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(&owner, handle.clone(), app, runtime.test_executor()).unwrap();
+    let (_owner, mut runtime, _app, server) =
+        command_service(directory.path(), &config_path, Some(handle.clone()));
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let connect = || {
         let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
@@ -121,19 +144,8 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
 #[test]
 fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server =
-        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
+    let config_path = command_config(directory.path());
+    let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let initial = control.get_state(StateSections::ALL).unwrap();
@@ -204,19 +216,8 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
         return;
     }
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server =
-        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
+    let config_path = command_config(directory.path());
+    let (owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut client = client_session(directory.path());
     // Fence the initial database projection before comparing business state.
     client.query(Query::ScanTask { id: 0 }).unwrap();
@@ -273,35 +274,11 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
 #[test]
 fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
     use rivu_protocol::response::StateWatch;
-    use std::{
-        io::{Read, Write},
-        time::Duration,
-    };
-
-    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
-        let mut prefix = [0; 4];
-        stream.read_exact(&mut prefix).unwrap();
-        let length = u32::from_le_bytes(prefix) as usize;
-        assert!(length <= MAX_RESPONSE);
-        let mut frame = vec![0; length];
-        stream.read_exact(&mut frame).unwrap();
-        decode_response_frame(&frame).unwrap()
-    }
+    use std::{io::Write, time::Duration};
 
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server =
-        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
+    let config_path = command_config(directory.path());
+    let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
@@ -356,30 +333,9 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     }
     use std::io::{Read, Write};
 
-    fn read_response(stream: &mut std::os::unix::net::UnixStream) -> WireResponse {
-        let mut prefix = [0; 4];
-        stream.read_exact(&mut prefix).unwrap();
-        let length = u32::from_le_bytes(prefix) as usize;
-        assert!(length <= MAX_RESPONSE);
-        let mut frame = vec![0; length];
-        stream.read_exact(&mut frame).unwrap();
-        decode_response_frame(&frame).unwrap()
-    }
-
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server =
-        Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor()).unwrap();
+    let config_path = command_config(directory.path());
+    let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
@@ -427,7 +383,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     ) {
         return;
     }
-    use crate::{config::Config, core::CoreRuntime, store::Store};
+    use crate::{config::Config, store::Store};
     use rivu_protocol::{
         model::{LibrarySort, MAX_QUERY_ROWS},
         response::{QueryError, ViewResponse},
@@ -464,16 +420,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     }
     .save(&config_path)
     .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(
-        &owner,
-        runtime.handle.clone(),
-        app.clone(),
-        runtime.test_executor(),
-    )
-    .unwrap();
+    let (owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
     assert!(SocketOwner::acquire(directory.path()).is_err());
     let mut session = client_session(directory.path());
     let count_query = Query::LibraryRootCounts {
@@ -540,7 +487,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
 
 #[test]
 fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
-    use crate::{config::Config, core::CoreRuntime, store::Store};
+    use crate::store::Store;
     use rivu_protocol::response::{PlaylistEntryRevision, QueryError, ViewResponse};
     let directory = socket_test_directory();
     let database = directory.path().join("library.db");
@@ -555,24 +502,8 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         )
         .unwrap();
     drop(connection);
-    let config_path = directory.path().join("config.toml");
-    Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Config::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(
-        &owner,
-        runtime.handle.clone(),
-        app.clone(),
-        runtime.test_executor(),
-    )
-    .unwrap();
+    let config_path = command_config(directory.path());
+    let (owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
     let mut session = client_session(directory.path());
     let summaries = Query::PlaylistSummaries {
         query: None,
@@ -1192,24 +1123,8 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
          INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 20,id,id-1 FROM tracks;",
     ).unwrap();
     drop(connection);
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(
-        &owner,
-        runtime.handle.clone(),
-        app.clone(),
-        runtime.test_executor(),
-    )
-    .unwrap();
+    let config_path = command_config(directory.path());
+    let (_owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
     let mut session = client_session(directory.path());
     let queue_query = |query: &str, after| Query::QueueBatch {
         query: Some(query.into()),
@@ -1347,24 +1262,9 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
 fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted() {
     use rivu_protocol::model::{ConfigMutation, ConfigPatch};
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    let config = crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    };
-    config.save(&config_path).unwrap();
+    let config_path = command_config(directory.path());
     let saved = std::fs::read(&config_path).unwrap();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(
-        &owner,
-        runtime.handle.clone(),
-        app.clone(),
-        runtime.test_executor(),
-    )
-    .unwrap();
+    let (_owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
     let mut session = client_session(directory.path());
     let initial = session.get_state(StateSections::ALL).unwrap();
     let baseline = initial.configuration.unwrap().config;
@@ -1417,19 +1317,10 @@ fn retained_remote_query_owner_cancellation_keeps_its_physical_reply_until_compl
     use rivu_protocol::{query_tracking::QueryEpoch, response::QueryError};
     use std::time::Duration;
     let directory = socket_test_directory();
-    let config_path = directory.path().join("config.toml");
-    crate::config::Config {
-        media_read_buffer_mib: 1,
-        ffmpeg_enabled: false,
-        ..Default::default()
-    }
-    .save(&config_path)
-    .unwrap();
-    let mut runtime = crate::core::CoreRuntime::start(directory.path(), &config_path).unwrap();
+    let config_path = command_config(directory.path());
     let (handle, queries) = crate::core::CoreHandle::test_query_port();
-    let owner = SocketOwner::acquire(directory.path()).unwrap();
-    let app = AppHandle::new(&runtime, directory.path());
-    let server = Server::start(&owner, handle, app.clone(), runtime.test_executor()).unwrap();
+    let (_owner, mut runtime, app, server) =
+        command_service(directory.path(), &config_path, Some(handle));
     let mut session = client_session(directory.path());
     let mut query_owner = QueryEpoch::default();
     let ticket = query_owner.ticket();
