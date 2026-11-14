@@ -3,6 +3,23 @@ use gpui::{
     Context, Div, ElementId, Role, SharedString, Stateful, Toggled, Window, div, prelude::*, rgb,
 };
 
+/// Background material for controls hosted on solid or textured surfaces.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SurfaceStyle {
+    #[default]
+    Opaque,
+    Translucent,
+}
+
+impl SurfaceStyle {
+    pub(crate) fn fill(self, color: u32, alpha: f32) -> gpui::Rgba {
+        match self {
+            Self::Opaque => rgb(color),
+            Self::Translucent => rgb(color).alpha(alpha),
+        }
+    }
+}
+
 /// Keep keyboard, pointer, and GPUI's accessible Click on the same action path.
 pub fn activate_control<T: 'static>(
     control: Stateful<Div>,
@@ -20,11 +37,14 @@ pub fn active_control(
     theme: &'static rivu_format::palette::Palette,
     control: Stateful<Div>,
     active: bool,
+    surface: SurfaceStyle,
 ) -> Stateful<Div> {
     control.when(active, |view| {
-        view.bg(rgb(theme.selected))
+        view.bg(surface.fill(theme.selected, 0.86))
             .text_color(rgb(theme.accent))
-            .group_hover("control", |style| style.bg(rgb(theme.selected_hover)))
+            .group_hover("control", move |style| {
+                style.bg(surface.fill(theme.selected_hover, 0.94))
+            })
     })
 }
 
@@ -33,6 +53,7 @@ pub fn active_control(
 fn control_surface(
     theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
+    surface: SurfaceStyle,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -49,10 +70,12 @@ fn control_surface(
         .text_sm()
         .text_color(rgb(theme.text))
         .cursor_pointer()
-        .bg(rgb(theme.control))
+        .bg(surface.fill(theme.control, 0.88))
         .border_1()
         .border_color(rgb(theme.border))
-        .group_hover("control", |style| style.bg(rgb(theme.highlight)))
+        .group_hover("control", move |style| {
+            style.bg(surface.fill(theme.highlight, 0.94))
+        })
 }
 
 /// Reusable visual button primitive. It has no application-specific behavior.
@@ -60,9 +83,10 @@ pub fn button_style(
     theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
+    surface: SurfaceStyle,
 ) -> Stateful<Div> {
     let label = label.into();
-    text_button_surface(theme, id, label.clone(), label)
+    text_button_surface(theme, id, label.clone(), label, surface)
 }
 
 fn text_button_surface(
@@ -70,8 +94,9 @@ fn text_button_surface(
     id: impl Into<ElementId>,
     label: SharedString,
     hint: SharedString,
+    surface: SurfaceStyle,
 ) -> Stateful<Div> {
-    control_surface(theme, id)
+    control_surface(theme, id, surface)
         .role(Role::Button)
         .aria_label(label.clone())
         .justify_center()
@@ -89,8 +114,19 @@ pub fn button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
+    button_on_surface(id, label, SurfaceStyle::Opaque, cx, action)
+}
+
+/// Text button hosted on an explicitly chosen background material.
+pub fn button_on_surface<T: 'static>(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    surface: SurfaceStyle,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
-    activate_control(button_style(theme, id, label), cx, action)
+    activate_control(button_style(theme, id, label, surface), cx, action)
 }
 
 /// Text button whose accessible label and tooltip carry distinct information.
@@ -103,7 +139,7 @@ pub fn button_with_hint<T: 'static>(
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     activate_control(
-        text_button_surface(theme, id, label.into(), hint.into()),
+        text_button_surface(theme, id, label.into(), hint.into(), SurfaceStyle::Opaque),
         cx,
         action,
     )
@@ -182,6 +218,7 @@ fn icon_button_surface(
     icon: impl Into<SharedString>,
     hint: impl Into<SharedString>,
     cx: &gpui::App,
+    surface: SurfaceStyle,
 ) -> Stateful<Div> {
     let hint = hint.into();
     let font_scale = crate::theme::font_size_scale(cx);
@@ -191,7 +228,7 @@ fn icon_button_surface(
         .flex()
         .items_center()
         .justify_center();
-    control_surface(theme, id)
+    control_surface(theme, id, surface)
         .role(Role::Button)
         .aria_label(hint.clone())
         .child(glyph)
@@ -240,6 +277,7 @@ pub struct IconButton {
     selected: bool,
     selected_fill: bool,
     semantics: IconButtonSemantics,
+    surface: SurfaceStyle,
 }
 
 impl IconButton {
@@ -256,7 +294,13 @@ impl IconButton {
             selected: false,
             selected_fill: true,
             semantics: IconButtonSemantics::Action,
+            surface: SurfaceStyle::Opaque,
         }
+    }
+
+    pub fn surface(mut self, surface: SurfaceStyle) -> Self {
+        self.surface = surface;
+        self
     }
 
     pub fn enabled(mut self, enabled: bool) -> Self {
@@ -311,7 +355,8 @@ impl IconButton {
         customize: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
     ) -> Stateful<Div> {
         let theme = crate::theme::palette(cx);
-        let mut control = icon_button_surface(theme, self.id, self.icon, self.hint, cx);
+        let mut control =
+            icon_button_surface(theme, self.id, self.icon, self.hint, cx, self.surface);
         if density == IconButtonDensity::Compact {
             control = control.px_1().py_2().min_w_6().min_h_8();
         }
@@ -321,13 +366,23 @@ impl IconButton {
                 .bg(rgb(theme.panel).alpha(0.0))
                 .text_color(rgb(theme.secondary));
         }
+        if style == IconButtonStyle::Quiet && self.surface == SurfaceStyle::Translucent {
+            control = control.group_hover("control", move |style| {
+                style.bg(rgb(theme.highlight).alpha(0.45))
+            });
+        }
         if let IconButtonSemantics::Toggled(on) | IconButtonSemantics::Switch(on) = self.semantics {
             control = control.aria_toggled(if on { Toggled::True } else { Toggled::False });
             if matches!(self.semantics, IconButtonSemantics::Switch(_)) {
                 control = control.role(Role::Switch);
             }
         }
-        control = active_control(theme, control, self.selected && self.selected_fill);
+        control = active_control(
+            theme,
+            control,
+            self.selected && self.selected_fill,
+            self.surface,
+        );
         if self.selected && !self.selected_fill {
             control = control.text_color(rgb(theme.accent));
         }
@@ -346,11 +401,11 @@ impl IconButton {
             control
         } else {
             let background = if self.selected && self.selected_fill {
-                rgb(theme.selected).into()
+                self.surface.fill(theme.selected, 0.86)
             } else if style == IconButtonStyle::Surface {
-                rgb(theme.control).into()
+                self.surface.fill(theme.control, 0.88)
             } else {
-                gpui::transparent_black()
+                gpui::transparent_black().into()
             };
             let border = if style == IconButtonStyle::Surface {
                 rgb(theme.structure_border).into()
@@ -377,6 +432,7 @@ pub struct IconButtonGroup {
     surface: Div,
     style: IconButtonStyle,
     density: IconButtonDensity,
+    material: SurfaceStyle,
 }
 
 impl IconButtonGroup {
@@ -391,7 +447,13 @@ impl IconButtonGroup {
                 .when(density == IconButtonDensity::Regular, |group| group.gap_1()),
             style,
             density,
+            material: SurfaceStyle::Opaque,
         }
+    }
+
+    pub fn surface(mut self, surface: SurfaceStyle) -> Self {
+        self.material = surface;
+        self
     }
 
     /// Wrap within the parent's width without shrinking individual hit areas.
@@ -418,9 +480,13 @@ impl IconButtonGroup {
         action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
         customize: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
     ) -> Self {
-        self.surface =
-            self.surface
-                .child(item.build_with(self.style, self.density, cx, action, customize));
+        self.surface = self.surface.child(item.surface(self.material).build_with(
+            self.style,
+            self.density,
+            cx,
+            action,
+            customize,
+        ));
         self
     }
 
@@ -498,7 +564,7 @@ pub fn dropdown_trigger(
     cx: &gpui::App,
 ) -> Stateful<Div> {
     let label = label.into();
-    control_surface(theme, id)
+    control_surface(theme, id, SurfaceStyle::Opaque)
         .role(Role::Button)
         .aria_label(label.clone())
         .aria_value(label.clone())
@@ -540,7 +606,7 @@ pub fn checkbox<T: 'static>(
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     let label = label.into();
-    let control = control_surface(theme, id)
+    let control = control_surface(theme, id, SurfaceStyle::Opaque)
         .role(Role::CheckBox)
         .aria_label(label.clone())
         .aria_toggled(if checked {
@@ -577,6 +643,7 @@ mod tests {
             let theme = crate::theme::palette(cx);
             let control = if self.grouped {
                 IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+                    .surface(SurfaceStyle::Translucent)
                     .button_with(
                         IconButton::new("action", "♥", "Favorite")
                             .toggled(true)

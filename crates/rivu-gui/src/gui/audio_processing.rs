@@ -10,8 +10,8 @@ use rivu_protocol::model::{
     ProcessingOperation, ProcessingPhase, ProcessingToggle, Track,
 };
 use rivu_ui::{
-    IconButton, IconButtonDensity, IconButtonStyle, Popover, activate_control, button, caption,
-    checkbox, column, disabled_control, dropdown_trigger, icon,
+    IconButton, IconButtonDensity, IconButtonStyle, Popover, activate_control, caption, checkbox,
+    column, disabled_control, dropdown_trigger, icon,
     input::{Input, InputEvent},
     menu_item, row, scrollable_area,
 };
@@ -1833,6 +1833,7 @@ impl AudioProcessing {
                         "󰒓",
                         self.tr("processing-preset-manage"),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .enabled(enabled)
                     .toggled(
                         self.preset_popup
@@ -2133,7 +2134,7 @@ impl AudioProcessing {
         let mut modes = row().gap_1();
         for &(slug, label) in DenoiseField::Mode.choices() {
             modes = modes.child(
-                button(
+                crate::gui::appearance::material::button(
                     SharedString::from(format!("denoise-mode-{slug}")),
                     self.tr(label),
                     cx,
@@ -2147,7 +2148,14 @@ impl AudioProcessing {
                 .debug_selector(move || format!("denoise-mode-{slug}"))
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .when(selected_mode == slug, |view| view.bg(rgb(theme.selected))),
+                .map(|view| {
+                    rivu_ui::active_control(
+                        theme,
+                        view,
+                        selected_mode == slug,
+                        crate::gui::appearance::material::surface(cx),
+                    )
+                }),
             );
         }
         let mut content = column()
@@ -2363,7 +2371,7 @@ impl AudioProcessing {
             let selected_device = NeuralField::Device.text(neural);
             for &(value, label) in NeuralField::Device.choices() {
                 devices = devices.child(
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("neural-device-{value}")),
                         self.tr(label),
                         cx,
@@ -2377,7 +2385,14 @@ impl AudioProcessing {
                         },
                     )
                     .debug_selector(move || format!("neural-device-{value}"))
-                    .when(selected_device == value, |v| v.bg(rgb(theme.selected))),
+                    .map(|view| {
+                        rivu_ui::active_control(
+                            theme,
+                            view,
+                            selected_device == value,
+                            crate::gui::appearance::material::surface(cx),
+                        )
+                    }),
                 );
             }
             runtime = runtime.child(Self::parameter_row(
@@ -2529,7 +2544,7 @@ impl AudioProcessing {
         if drafts {
             actions = actions.child(disabled_control(
                 theme,
-                button(
+                crate::gui::appearance::material::button(
                     ("apply-processing-parameters", panel),
                     self.tr("processing-apply-changes"),
                     cx,
@@ -2540,7 +2555,7 @@ impl AudioProcessing {
         }
         actions = actions.child(disabled_control(
             theme,
-            button(
+            crate::gui::appearance::material::button(
                 SharedString::from(format!("start-processing-{panel}-{operation:?}")),
                 self.tr("processing-start"),
                 cx,
@@ -2697,7 +2712,7 @@ impl AudioProcessing {
             (Page::Results, "processing-tab-results"),
         ] {
             tabs = tabs.child(
-                button(
+                crate::gui::appearance::material::button(
                     SharedString::from(format!("processing-page-{panel}-{label}")),
                     self.tr(label),
                     cx,
@@ -2826,6 +2841,7 @@ impl AudioProcessing {
                     "󰑖",
                     self.tr("processing-workspace-restore-original"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Compact,
@@ -2852,6 +2868,7 @@ impl AudioProcessing {
                     "processing-workspace-bypass"
                 }),
             )
+            .surface(crate::gui::appearance::material::surface(cx))
             .toggled(bypassed)
             .selected_fill(false)
             .build(

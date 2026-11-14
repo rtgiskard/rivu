@@ -1092,6 +1092,7 @@ impl Playlists {
                         "󰑐",
                         self.tr("gl-retry"),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .build(
                         IconButtonStyle::Surface,
                         IconButtonDensity::Regular,
@@ -1180,6 +1181,7 @@ impl Playlists {
                             "󰑐",
                             self.tr("gl-retry"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -1226,6 +1228,7 @@ impl Playlists {
                         "󰑐",
                         self.tr("gl-retry"),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .build(
                         IconButtonStyle::Surface,
                         IconButtonDensity::Regular,
@@ -1259,18 +1262,7 @@ impl Playlists {
                         let drag_label = name.clone();
                         let catalog_revision = this.state.library.playlist_revision;
                         let playable = p.entry_count > 0;
-                        list_row(
-                            theme,
-                            ("playlist", id as u64),
-                            this.browser.playlists().selected() == Some(id),
-                            row_height,
-                        )
-                        .bg(crate::gui::appearance::material::row_background(
-                            theme,
-                            this.browser.playlists().selected() == Some(id),
-                            false,
-                            cx,
-                        ))
+                        list_row(theme, ("playlist", id as u64), this.browser.playlists().selected() == Some(id), row_height, crate::gui::appearance::material::surface(cx))
                         .when(
                             (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
@@ -1301,9 +1293,9 @@ impl Playlists {
                             )
                                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(
-                                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+                                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact).surface(crate::gui::appearance::material::surface(cx))
                                         .button(
-                                            IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).enabled(playable),
+                                            IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).surface(crate::gui::appearance::material::surface(cx)).enabled(playable),
                                             cx,
                                             move |this, window, cx| {
                                         if !playable {
@@ -1320,7 +1312,7 @@ impl Playlists {
                                     },
                                         )
                                         .button(
-                                            IconButton::new(("playlist-row-menu", id as u64), "󰇙", this.tr("gl-playlist-actions")),
+                                            IconButton::new(("playlist-row-menu", id as u64), "󰇙", this.tr("gl-playlist-actions")).surface(crate::gui::appearance::material::surface(cx)),
                                             cx,
                                             move |this, window, cx| {
                                         this.focus_layout(window, cx);
@@ -1543,6 +1535,7 @@ impl Playlists {
                                     ("playlist-entry", id as u64),
                                     this.browser.playlists().track_selection.contains(id),
                                     row_height,
+                                    crate::gui::appearance::material::surface(cx),
                                 ),
                                 TrackText::from(e),
                                 e.position,
@@ -1551,12 +1544,6 @@ impl Playlists {
                                     .is_some_and(|track| track.id == track_id),
                                 &this.i18n,
                             )
-                            .bg(crate::gui::appearance::material::row_background(
-                                theme,
-                                this.browser.playlists().track_selection.contains(id),
-                                false,
-                                cx,
-                            ))
                             .when(e.missing, |row| {
                                 row.child(caption(theme, this.tr("gl-missing")))
                             })
@@ -1592,12 +1579,14 @@ impl Playlists {
                                         IconButtonStyle::Quiet,
                                         IconButtonDensity::Compact,
                                     )
+                                    .surface(crate::gui::appearance::material::surface(cx))
                                     .button(
                                         IconButton::new(
                                             ("playlist-entry-play", id as u64),
                                             "",
                                             this.tr("gl-play-track"),
-                                        ),
+                                        )
+                                        .surface(crate::gui::appearance::material::surface(cx)),
                                         cx,
                                         move |this, _, cx| {
                                             this.send(Command::Play { track_id }, cx)
@@ -1624,7 +1613,8 @@ impl Playlists {
                                             ("playlist-entry-remove", id as u64),
                                             "",
                                             this.tr("gl-remove-playlist"),
-                                        ),
+                                        )
+                                        .surface(crate::gui::appearance::material::surface(cx)),
                                         cx,
                                         move |this, _, cx| {
                                             this.refresh(cx);
@@ -2056,6 +2046,7 @@ impl Playlists {
                             "",
                             self.tr("playlist-create"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -2078,6 +2069,7 @@ impl Playlists {
                             "",
                             self.tr("gl-import-playlist"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -2091,6 +2083,7 @@ impl Playlists {
                             "",
                             self.tr("gl-export-playlist"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .enabled(playlist_id.is_some())
                         .build(
                             IconButtonStyle::Surface,

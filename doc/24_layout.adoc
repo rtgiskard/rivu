@@ -490,6 +490,15 @@ effect immediately and save automatically, independently of the Settings draft.
 They do not change semantic theme colors, playback, queue state or saved-layout
 syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
 
+Workspace rows, tabs and buttons receive an explicit opaque or translucent
+interaction surface from the host. Enabled materials leave idle rows and tabs
+clear and use theme-colored translucent hover and selection fills; active tabs
+also retain an accent underline. Button fills remain denser than row highlights.
+Text, icons and focus borders are not faded, and interaction fills do not follow
+the panel-opacity parameter. Inline action shields remain opaque so underlying
+titles cannot show through their controls. Floating surfaces and input fields
+keep their solid materials independently of workspace effects.
+
 The GUI projects the saved preferences into its material state. Factory defaults
 are compiled from
 link:../crates/rivu-format/data/presets/material.toml[`data/presets/material.toml`];

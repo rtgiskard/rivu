@@ -123,13 +123,15 @@ pub fn row_background(
     theme: &'static rivu_format::palette::Palette,
     selected: bool,
     hovered: bool,
+    surface: crate::SurfaceStyle,
 ) -> gpui::Rgba {
-    match (selected, hovered) {
-        (true, true) => rgb(theme.selected_hover),
-        (true, false) => rgb(theme.selected),
-        (false, true) => rgb(theme.highlight),
-        (false, false) => rgb(theme.panel),
-    }
+    let (color, alpha) = match (selected, hovered) {
+        (true, true) => (theme.selected_hover, 0.78),
+        (true, false) => (theme.selected, 0.68),
+        (false, true) => (theme.highlight, 0.42),
+        (false, false) => (theme.panel, 0.0),
+    };
+    surface.fill(color, alpha)
 }
 
 pub fn tree_row(
@@ -138,6 +140,7 @@ pub fn tree_row(
     depth: usize,
     selected: bool,
     height: gpui::Pixels,
+    surface: crate::SurfaceStyle,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -154,8 +157,8 @@ pub fn tree_row(
         .border_1()
         .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .bg(row_background(theme, selected, false))
-        .hover(move |style| style.bg(row_background(theme, selected, true)))
+        .bg(row_background(theme, selected, false, surface))
+        .hover(move |style| style.bg(row_background(theme, selected, true, surface)))
 }
 
 /// Standard compact option row used by anchored dropdowns.
@@ -166,7 +169,7 @@ pub fn dropdown_row(
     label: impl Into<SharedString>,
     height: gpui::Pixels,
 ) -> Stateful<Div> {
-    list_row_surface(theme, id, selected, height)
+    list_row_surface(theme, id, selected, height, crate::SurfaceStyle::Opaque)
         .hover(move |style| {
             style.bg(rgb(if selected {
                 theme.selected_hover
@@ -212,6 +215,7 @@ fn list_row_surface(
     id: impl Into<ElementId>,
     selected: bool,
     height: gpui::Pixels,
+    surface: crate::SurfaceStyle,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -228,7 +232,7 @@ fn list_row_surface(
         .border_color(gpui::transparent_black())
         .overflow_hidden()
         .cursor_pointer()
-        .bg(row_background(theme, selected, false))
+        .bg(row_background(theme, selected, false, surface))
 }
 
 /// Standard selectable row shared by library, queue, playlist, and history.
@@ -237,9 +241,10 @@ pub fn list_row(
     id: impl Into<ElementId>,
     selected: bool,
     height: gpui::Pixels,
+    surface: crate::SurfaceStyle,
 ) -> Stateful<Div> {
-    list_row_surface(theme, id, selected, height)
-        .hover(move |style| style.bg(row_background(theme, selected, true)))
+    list_row_surface(theme, id, selected, height, surface)
+        .hover(move |style| style.bg(row_background(theme, selected, true, surface)))
 }
 
 /// Two independently truncated text lines, without tooltip or input behavior.
@@ -299,9 +304,19 @@ pub fn hover_actions(
         .top_0()
         .h_full()
         .gap_0()
-        .bg(row_background(theme, selected, false))
+        .bg(row_background(
+            theme,
+            selected,
+            false,
+            crate::SurfaceStyle::Opaque,
+        ))
         .group_hover(group, move |style| {
-            style.opacity(1.).bg(row_background(theme, selected, true))
+            style.opacity(1.).bg(row_background(
+                theme,
+                selected,
+                true,
+                crate::SurfaceStyle::Opaque,
+            ))
         })
 }
 
@@ -320,9 +335,39 @@ mod tests {
                 (true, false, theme.selected),
                 (true, true, theme.selected_hover),
             ] {
-                assert_eq!(row_background(theme, selected, hovered), rgb(color));
-                assert_eq!(row_background(theme, selected, hovered).a, 1.);
+                assert_eq!(
+                    row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque),
+                    rgb(color)
+                );
+                assert_eq!(
+                    row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque).a,
+                    1.
+                );
             }
+        });
+    }
+
+    #[gpui::test]
+    fn translucent_rows_preserve_semantic_colors_and_state_order(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::theme::init_test(cx);
+            let theme = crate::theme::palette(cx);
+            let mut alphas = Vec::new();
+            for (selected, hovered) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let opaque = row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque);
+                let translucent =
+                    row_background(theme, selected, hovered, crate::SurfaceStyle::Translucent);
+                assert_eq!(
+                    (translucent.r, translucent.g, translucent.b),
+                    (opaque.r, opaque.g, opaque.b)
+                );
+                assert!(translucent.a < opaque.a);
+                alphas.push(translucent.a);
+            }
+            assert_eq!(alphas[0], 0.);
+            assert!(alphas.windows(2).all(|states| states[0] < states[1]));
+            assert_eq!(crate::SurfaceStyle::default(), crate::SurfaceStyle::Opaque);
         });
     }
 }

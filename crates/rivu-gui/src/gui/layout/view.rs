@@ -314,6 +314,7 @@ impl WindowView {
             Node::Tabs { id, panels, active } => {
                 let node_id = *id;
                 let active = *active;
+                let surface = crate::gui::appearance::material::surface(cx);
                 let show_tab_bar = panels
                     .iter()
                     .find(|panel| panel.id == active)
@@ -362,17 +363,19 @@ impl WindowView {
                             .when(!self.workspace.layouts.current().locked, |view| {
                                 view.cursor_move()
                             })
-                            .bg(rgb(if active == panel_id {
-                                theme.selected
-                            } else {
-                                theme.panel
-                            }))
-                            .hover(|style| {
-                                style.bg(rgb(if active == panel_id {
-                                    theme.selected_hover
-                                } else {
-                                    theme.highlight
-                                }))
+                            .bg(rivu_ui::row_background(
+                                theme,
+                                active == panel_id,
+                                false,
+                                surface,
+                            ))
+                            .hover(move |style| {
+                                style.bg(rivu_ui::row_background(
+                                    theme,
+                                    active == panel_id,
+                                    true,
+                                    surface,
+                                ))
                             })
                             .text_color(rgb(if active == panel_id {
                                 theme.text
@@ -431,6 +434,20 @@ impl WindowView {
                             })
                             .tooltip(rivu_ui::text_tooltip(title.clone()))
                             .child(div().min_w_0().truncate().child(title))
+                            .when(
+                                active == panel_id && surface == rivu_ui::SurfaceStyle::Translucent,
+                                |view| {
+                                    view.child(
+                                        div()
+                                            .absolute()
+                                            .bottom_0()
+                                            .left_1()
+                                            .right_1()
+                                            .h(px(2.))
+                                            .bg(rgb(theme.accent)),
+                                    )
+                                },
+                            )
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
                                 let close_focus = window
@@ -456,8 +473,16 @@ impl WindowView {
                                                 .justify_center()
                                                 .rounded_sm()
                                                 .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(theme.highlight)))
-                                                .focus(|style| style.bg(rgb(theme.highlight)))
+                                                .hover(move |style| {
+                                                    style.bg(rivu_ui::row_background(
+                                                        theme, false, true, surface,
+                                                    ))
+                                                })
+                                                .focus(move |style| {
+                                                    style.bg(rivu_ui::row_background(
+                                                        theme, false, true, surface,
+                                                    ))
+                                                })
                                                 .tooltip(rivu_ui::text_tooltip(
                                                     self.tr("shell-remove-panel"),
                                                 ))

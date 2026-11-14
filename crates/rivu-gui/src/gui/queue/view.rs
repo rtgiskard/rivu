@@ -15,8 +15,7 @@ use gpui::{
 use rivu_protocol::model::Command;
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
-    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, row,
-    status_message,
+    caption, hover_actions, list_panel_header, list_viewport, panel_surface, row, status_message,
 };
 use std::cell::RefCell;
 
@@ -239,6 +238,7 @@ impl Queue {
                         "󰑐",
                         self.tr("gl-retry-loading"),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .build(
                         IconButtonStyle::Surface,
                         IconButtonDensity::Regular,
@@ -253,6 +253,7 @@ impl Queue {
                     "",
                     self.tr("gl-locate-playing-entry"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(self.state.queue.current_id.is_some())
                 .build(
                     IconButtonStyle::Surface,
@@ -293,6 +294,7 @@ impl Queue {
                             "󰑐",
                             self.tr("gl-retry-selection"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -319,7 +321,7 @@ impl Queue {
                     .is_some_and(|id| Some(id) == self.state.queue.current_id),
                 |panel| {
                     panel.child(
-                        button(
+                        crate::gui::appearance::material::button(
                             ("queue-clear-and-locate", panel_id),
                             self.tr("search-clear-and-locate"),
                             cx,
@@ -404,18 +406,13 @@ impl Queue {
                                             ("queue-entry", id),
                                             this.model.contains(&id),
                                             row_height,
+                                            crate::gui::appearance::material::surface(cx),
                                         ),
                                         TrackText::from(&entry.track),
                                         position,
                                         playing,
                                         &this.context.i18n,
                                     )
-                                    .bg(crate::gui::appearance::material::row_background(
-                                        theme,
-                                        this.model.contains(&id),
-                                        false,
-                                        cx,
-                                    ))
                                     .when(entry.track.missing, |row| {
                                         row.child(caption(theme, this.tr("gl-missing")))
                                     })
@@ -444,11 +441,15 @@ impl Queue {
                                                 IconButtonStyle::Quiet,
                                                 IconButtonDensity::Compact,
                                             )
+                                            .surface(crate::gui::appearance::material::surface(cx))
                                             .button(
                                                 IconButton::new(
                                                     ("queue-entry-play", id),
                                                     "",
                                                     this.tr("gl-play-queue-entry"),
+                                                )
+                                                .surface(
+                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -479,6 +480,9 @@ impl Queue {
                                                     ("queue-entry-remove", id),
                                                     "",
                                                     this.tr("gl-remove-queue"),
+                                                )
+                                                .surface(
+                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -501,6 +505,9 @@ impl Queue {
                                                     "",
                                                     this.tr("gl-entry-up"),
                                                 )
+                                                .surface(crate::gui::appearance::material::surface(
+                                                    cx,
+                                                ))
                                                 .enabled(position > 0),
                                                 cx,
                                                 move |this, _, cx| {
@@ -527,6 +534,9 @@ impl Queue {
                                                     "",
                                                     this.tr("gl-entry-down"),
                                                 )
+                                                .surface(crate::gui::appearance::material::surface(
+                                                    cx,
+                                                ))
                                                 .enabled(can_move_down),
                                                 cx,
                                                 move |this, _, cx| {

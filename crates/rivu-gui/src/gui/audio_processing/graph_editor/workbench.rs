@@ -321,6 +321,7 @@ impl AudioProcessing {
                     glyph,
                     self.tr(label),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(!busy && !empty && !drafts)
                 .build(
                     IconButtonStyle::Quiet,
@@ -346,6 +347,7 @@ impl AudioProcessing {
                     "󰘖",
                     self.tr("processing-workspace-fit"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                     let target = target.clone();
                     move |this, _, cx| {
@@ -361,6 +363,7 @@ impl AudioProcessing {
                     "",
                     self.tr("processing-workspace-locate"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(selected)
                 .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                     let target = target.clone();
@@ -379,6 +382,7 @@ impl AudioProcessing {
                     "󰑐",
                     self.tr("processing-graph-reset-view"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                     let target = target.clone();
                     move |this, _, cx| {
@@ -411,6 +415,7 @@ impl AudioProcessing {
                     "󰌷",
                     self.tr("processing-graph-connections"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.graph_editor.workbench.connections)
                 .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                     let target = target.clone();
@@ -436,6 +441,7 @@ impl AudioProcessing {
                         "processing-workspace-show-inspector"
                     }),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(selected)
                 .toggled(parameters_visible)
                 .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
@@ -458,7 +464,7 @@ impl AudioProcessing {
             );
         if !self.graph_editor.workbench.wide && parameters_visible {
             inspection = inspection.child(
-                button(
+                crate::gui::appearance::material::button(
                     ("workbench-back", panel),
                     self.tr("processing-workspace-back-graph"),
                     cx,
@@ -518,7 +524,7 @@ impl AudioProcessing {
                             port.port
                         ),
                     ))
-                    .child(button(
+                    .child(crate::gui::appearance::material::button(
                         ("workbench-cancel-connect", panel),
                         self.tr("action-cancel"),
                         cx,
@@ -538,7 +544,7 @@ impl AudioProcessing {
                     row()
                         .flex_wrap()
                         .gap_1()
-                        .child(button(
+                        .child(crate::gui::appearance::material::button(
                             SharedString::from(format!(
                                 "locate-edge-{panel}-{}-{}",
                                 to.node, to.port
@@ -553,7 +559,7 @@ impl AudioProcessing {
                         ))
                         .child(disabled_control(
                             theme,
-                            button(
+                            crate::gui::appearance::material::button(
                                 SharedString::from(format!(
                                     "remove-edge-{panel}-{}-{}",
                                     to.node, to.port

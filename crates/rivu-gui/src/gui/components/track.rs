@@ -263,12 +263,11 @@ pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
     action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let id = id.into();
-    rivu_ui::row_action_region(id.clone()).child(favorite_button(id, favorite, text).build(
-        rivu_ui::IconButtonStyle::Quiet,
-        density,
-        cx,
-        action,
-    ))
+    rivu_ui::row_action_region(id.clone()).child(
+        favorite_button(id, favorite, text)
+            .surface(crate::gui::appearance::material::surface(cx))
+            .build(rivu_ui::IconButtonStyle::Quiet, density, cx, action),
+    )
 }
 
 #[cfg(test)]

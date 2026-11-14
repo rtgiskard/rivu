@@ -7,7 +7,7 @@ use rivu_format::config::{LibraryColumn, LibraryColumns};
 use rivu_presentation::track::track_title;
 use rivu_protocol::model::LibraryRow;
 use rivu_ui::{
-    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, lazy_row_tooltip,
+    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, caption, lazy_row_tooltip,
     list_panel_header, list_viewport, panel_surface, row,
 };
 
@@ -244,15 +244,8 @@ impl Library {
                             } => {
                                 let failed = status == BranchStatus::Error;
                                 let retired = status == BranchStatus::Retired;
-                                let placeholder = rivu_ui::tree_row(
-                                    theme,
-                                    gpui::ElementId::named_usize("library-loading", index),
-                                    0,
-                                    false,
-                                    row_height,
-                                )
+                                let placeholder = rivu_ui::tree_row(theme, gpui::ElementId::named_usize("library-loading", index), 0, false, row_height, crate::gui::appearance::material::surface(cx))
                                 .border_0()
-                                .bg(crate::gui::appearance::material::row_background(theme, false, false, cx))
                                 .gap_0()
                                 .overflow_hidden()
                                 .child(
@@ -275,7 +268,7 @@ impl Library {
                                                 )
                                                 .when(failed || retired, |view| {
                                                     view.child(
-                                                        IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                                                        IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).surface(crate::gui::appearance::material::surface(cx)).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                                             this.library.retry_directory(&branch);
                                                             this.request_directory_page(branch.clone(), offset, cx);
                                                         }, inline_action),
@@ -350,7 +343,7 @@ impl Library {
                             } else {
                                 this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                             };
-                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).surface(crate::gui::appearance::material::surface(cx)).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                 if this.library.root_count_failed(&scan_path) || this.library.root_counts_retired() {
                                     this.library.retry_root_counts();
                                     this.request_root_counts(cx);
@@ -373,7 +366,7 @@ impl Library {
                             } else {
                                 "library-other-check"
                             };
-                            IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint))
+                            IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint)).surface(crate::gui::appearance::material::surface(cx))
                                 .enabled(retry_counts || !this.state.system.scanning)
                                 .build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
                                     if this.library.other_count_failed() || this.library.root_counts_retired() {
@@ -489,15 +482,8 @@ impl Library {
                             if this.library.locate.highlight.is_some_and(|(id, started)|
                                 id == track.id && started.elapsed() < std::time::Duration::from_secs(2)));
                         let row_view = lazy_row_tooltip(
-                            rivu_ui::tree_row(
-                                theme,
-                                row_id,
-                                0,
-                                selected,
-                                row_height,
-                            )
+                            rivu_ui::tree_row(theme, row_id, 0, selected, row_height, crate::gui::appearance::material::surface(cx))
                             .border_0()
-                            .bg(crate::gui::appearance::material::row_background(theme, selected, false, cx))
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")
@@ -509,7 +495,7 @@ impl Library {
                                         .border_color(gpui::rgb(theme.accent)),
                                 )
                             })
-                            .when(located, |view| view.bg(gpui::rgb(theme.highlight)))
+                            .when(located, |view| view.bg(rivu_ui::row_background(theme, false, true, crate::gui::appearance::material::surface(cx))))
                             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 if !this.library_row_scope_valid(&menu_scope) { cx.stop_propagation(); return; }
                                 cx.emit(LibraryEvent::Focus);
@@ -728,6 +714,7 @@ impl Library {
                     "",
                     self.tr("gl-locate-library"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(self.state.current_track().is_some() && !self.library.locate.loading)
                 .build(
                     IconButtonStyle::Surface,
@@ -750,6 +737,7 @@ impl Library {
                         self.tr("gl-tree-view")
                     },
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(
                     IconButtonStyle::Surface,
                     IconButtonDensity::Regular,
@@ -763,6 +751,7 @@ impl Library {
                     "󰓎",
                     self.tr("gl-filter-favorites"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.library.favorites_only())
                 .build(
                     IconButtonStyle::Surface,
@@ -779,6 +768,7 @@ impl Library {
                     "󰩋",
                     self.tr("gl-filter-missing"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.library.missing_only())
                 .build(
                     IconButtonStyle::Surface,
@@ -800,6 +790,7 @@ impl Library {
                         self.tr("gl-force-off")
                     },
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.library.force_scan())
                 .build(
                     IconButtonStyle::Surface,
@@ -817,6 +808,7 @@ impl Library {
                     "󰐕",
                     self.tr("shell-add-library-folder"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(
                     IconButtonStyle::Surface,
                     IconButtonDensity::Regular,
@@ -846,7 +838,7 @@ impl Library {
                         .flex_wrap()
                         .child(caption(theme, self.tr(message)))
                         .when(matches!(result, LibraryLocateResult::Filtered), |view| {
-                            view.child(button(
+                            view.child(crate::gui::appearance::material::button(
                                 ("library-clear-filters-locate", panel_id),
                                 self.tr("gl-locate-clear-filters"),
                                 cx,
@@ -888,6 +880,7 @@ impl Library {
                         "",
                         self.tr("gl-dismiss-scan"),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .build(
                         IconButtonStyle::Quiet,
                         IconButtonDensity::Regular,

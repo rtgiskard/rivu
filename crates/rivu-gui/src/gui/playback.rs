@@ -352,6 +352,7 @@ impl Playback {
                         "gl-shuffle-off"
                     }),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.state.playback.shuffle)
                 .build(
                     IconButtonStyle::Quiet,
@@ -364,12 +365,14 @@ impl Playback {
             )
             .child(
                 IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Regular)
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .button_with(
                         IconButton::new(
                             ("previous", panel_id),
                             "󰒮",
                             self.context.tr("gl-previous-track"),
-                        ),
+                        )
+                        .surface(crate::gui::appearance::material::surface(cx)),
                         cx,
                         |this, _, cx| this.send(Command::Previous, cx),
                         |button| {
@@ -396,7 +399,8 @@ impl Playback {
                                     "gl-play"
                                 },
                             ),
-                        ),
+                        )
+                        .surface(crate::gui::appearance::material::surface(cx)),
                         cx,
                         |this, _, cx| this.send(Command::Toggle, cx),
                         |button| {
@@ -413,7 +417,8 @@ impl Playback {
                         },
                     )
                     .button_with(
-                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
+                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track"))
+                            .surface(crate::gui::appearance::material::surface(cx)),
                         cx,
                         |this, _, cx| this.send(Command::Next, cx),
                         |button| {
@@ -441,6 +446,7 @@ impl Playback {
                         RepeatMode::One => self.context.tr("gl-repeat-one"),
                     },
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .selected(self.state.playback.repeat != RepeatMode::Off)
                 .build_with(
                     IconButtonStyle::Quiet,
@@ -519,6 +525,7 @@ impl Playback {
                             "",
                             self.context.tr("gl-locate-playing-entry"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .enabled(self.state.queue.current_id.is_some())
                         .build_with(
                             IconButtonStyle::Bare,
@@ -566,6 +573,7 @@ impl Playback {
                                 favorite,
                                 |key| self.context.tr(key),
                             )
+                            .surface(crate::gui::appearance::material::surface(cx))
                             .build_with(
                                 IconButtonStyle::Bare,
                                 IconButtonDensity::Compact,

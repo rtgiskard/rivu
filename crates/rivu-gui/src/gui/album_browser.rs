@@ -567,6 +567,7 @@ impl AlbumBrowser {
             .when(error.is_some(), |view| {
                 view.child(
                     IconButton::new(("album-retry", index), "󰑐", self.tr("gl-retry-loading"))
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -840,8 +841,10 @@ impl AlbumBrowser {
                 ("album-action-reveal", index),
                 "album-card",
                 IconButtonGroup::new(IconButtonStyle::Bare, IconButtonDensity::Compact)
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .button(
-                        IconButton::new(("play-album", index), "", self.tr("gl-play-album")),
+                        IconButton::new(("play-album", index), "", self.tr("gl-play-album"))
+                            .surface(crate::gui::appearance::material::surface(cx)),
                         cx,
                         move |this, window, cx| {
                             this.dismissed_actions = Some(play_key.clone());
@@ -851,7 +854,8 @@ impl AlbumBrowser {
                         },
                     )
                     .button(
-                        IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album")),
+                        IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album"))
+                            .surface(crate::gui::appearance::material::surface(cx)),
                         cx,
                         move |this, window, cx| {
                             this.dismissed_actions = Some(enqueue_key.clone());
@@ -1029,15 +1033,17 @@ impl Render for AlbumBrowser {
             let heading = row()
                 .gap_1()
                 .child(
-                    IconButton::new("albums-back", "", self.tr("gl-back-albums")).build(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        |this, _, cx| {
-                            let change = this.model.select(None);
-                            this.reload(change.data, cx);
-                        },
-                    ),
+                    IconButton::new("albums-back", "", self.tr("gl-back-albums"))
+                        .surface(crate::gui::appearance::material::surface(cx))
+                        .build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, _, cx| {
+                                let change = this.model.select(None);
+                                this.reload(change.data, cx);
+                            },
+                        ),
                 )
                 .child(
                     div()
@@ -1069,6 +1075,7 @@ impl Render for AlbumBrowser {
                 .when(self.model.retired(), |actions| {
                     actions.child(
                         IconButton::new("album-retired-retry", "󰑐", self.tr("gl-retry-loading"))
+                            .surface(crate::gui::appearance::material::surface(cx))
                             .build(
                                 IconButtonStyle::Surface,
                                 IconButtonDensity::Regular,
@@ -1078,29 +1085,33 @@ impl Render for AlbumBrowser {
                     )
                 })
                 .child(
-                    IconButton::new("album-play-all", "", self.tr("gl-play-album")).build(
-                        IconButtonStyle::Surface,
-                        IconButtonDensity::Regular,
-                        cx,
-                        move |_, _, cx| {
-                            cx.emit(AlbumPlayRequest(play_key.clone()));
-                        },
-                    ),
+                    IconButton::new("album-play-all", "", self.tr("gl-play-album"))
+                        .surface(crate::gui::appearance::material::surface(cx))
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            move |_, _, cx| {
+                                cx.emit(AlbumPlayRequest(play_key.clone()));
+                            },
+                        ),
                 )
                 .child(
-                    IconButton::new("album-add-all", "󰐕", self.tr("gl-enqueue-album")).build(
-                        IconButtonStyle::Surface,
-                        IconButtonDensity::Regular,
-                        cx,
-                        move |this, _, cx| {
-                            this.send(
-                                Command::EnqueueAlbum {
-                                    key: enqueue_key.clone(),
-                                },
-                                cx,
-                            )
-                        },
-                    ),
+                    IconButton::new("album-add-all", "󰐕", self.tr("gl-enqueue-album"))
+                        .surface(crate::gui::appearance::material::surface(cx))
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::EnqueueAlbum {
+                                        key: enqueue_key.clone(),
+                                    },
+                                    cx,
+                                )
+                            },
+                        ),
                 );
             header = rivu_ui::panel_heading_row(heading, actions);
         } else {
@@ -1120,6 +1131,7 @@ impl Render for AlbumBrowser {
                 .when(self.model.retired(), |actions| {
                     actions.child(
                         IconButton::new("albums-retired-retry", "󰑐", self.tr("gl-retry-loading"))
+                            .surface(crate::gui::appearance::material::surface(cx))
                             .build(
                                 IconButtonStyle::Surface,
                                 IconButtonDensity::Regular,
@@ -1140,6 +1152,7 @@ impl Render for AlbumBrowser {
                             AlbumSort::Artist => self.tr("gl-album-sort-artist"),
                         },
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .build(
                         IconButtonStyle::Surface,
                         IconButtonDensity::Regular,
@@ -1200,6 +1213,7 @@ impl Render for AlbumBrowser {
                                         ("album-track", id as u64),
                                         false,
                                         row_height,
+                                        crate::gui::appearance::material::surface(cx),
                                     ),
                                     TrackText {
                                         album: None,
@@ -1210,9 +1224,6 @@ impl Render for AlbumBrowser {
                                         && this.playback_status == PlaybackStatus::Playing,
                                     &this.i18n,
                                 )
-                                .bg(crate::gui::appearance::material::row_background(
-                                    theme, false, false, cx,
-                                ))
                                 .group("album-track-row")
                                 .relative()
                                 .gap_0()
@@ -1263,12 +1274,14 @@ impl Render for AlbumBrowser {
                                             IconButtonStyle::Quiet,
                                             IconButtonDensity::Compact,
                                         )
+                                        .surface(crate::gui::appearance::material::surface(cx))
                                         .button(
                                             IconButton::new(
                                                 ("album-track-play", id as u64),
                                                 "",
                                                 this.tr("gl-play-track"),
-                                            ),
+                                            )
+                                            .surface(crate::gui::appearance::material::surface(cx)),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send(Command::Play { track_id: id }, cx)
@@ -1279,7 +1292,8 @@ impl Render for AlbumBrowser {
                                                 ("album-track-add", id as u64),
                                                 "󰐕",
                                                 this.tr("gl-enqueue-track"),
-                                            ),
+                                            )
+                                            .surface(crate::gui::appearance::material::surface(cx)),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send(

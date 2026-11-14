@@ -820,6 +820,7 @@ impl Metadata {
                         "gl-edit-value"
                     }),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(self.metadata.editable() && !self.metadata.saving(field))
                 .build_with(
                     IconButtonStyle::Quiet,
@@ -912,6 +913,7 @@ fn metadata_copy(
         label.clone(),
         "label-value-row",
         IconButton::new(label, "", hint)
+            .surface(crate::gui::appearance::material::surface(cx))
             .build_with(
                 IconButtonStyle::Quiet,
                 IconButtonDensity::Compact,
@@ -1301,6 +1303,7 @@ impl Metadata {
                                 favorite_button(("metadata-favorite", panel_id), favorite, |key| {
                                     self.tr(key)
                                 })
+                                .surface(crate::gui::appearance::material::surface(cx))
                                 .enabled(editable)
                                 .build(
                                     IconButtonStyle::Surface,
@@ -1330,6 +1333,7 @@ impl Metadata {
                                     "󰑐",
                                     self.tr("gl-reload-playback"),
                                 )
+                                .surface(crate::gui::appearance::material::surface(cx))
                                 .build(
                                     IconButtonStyle::Surface,
                                     IconButtonDensity::Regular,

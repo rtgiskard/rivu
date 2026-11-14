@@ -93,6 +93,7 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                     "",
                     i18n.text("shell-copy-message").to_owned(),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Regular,
@@ -110,6 +111,7 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                     "",
                     i18n.text("library-cancel-task").to_owned(),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(cancellable)
                 .build(
                     IconButtonStyle::Quiet,
@@ -135,6 +137,7 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                     })
                     .to_owned(),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .build(
                     IconButtonStyle::Quiet,
                     IconButtonDensity::Regular,

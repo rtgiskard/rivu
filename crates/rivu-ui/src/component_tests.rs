@@ -557,6 +557,7 @@ impl Render for RowSurfaces {
                     "geometry-list",
                     self.selected,
                     crate::row::list_row_height(window, cx),
+                    crate::SurfaceStyle::Opaque,
                 )
                 .child(text),
             )
@@ -567,6 +568,7 @@ impl Render for RowSurfaces {
                     1,
                     self.selected,
                     crate::row::tree_row_height(window, cx),
+                    crate::SurfaceStyle::Opaque,
                 )
                 .child(div().flex_1().min_w_0().truncate().child(label)),
             )
@@ -698,6 +700,7 @@ impl Render for RowActionFocus {
                     "track-row",
                     false,
                     crate::list_row_height(window, cx),
+                    crate::SurfaceStyle::Opaque,
                 )
                 .group("action-row")
                 .relative()
@@ -870,20 +873,26 @@ impl Render for ClippedDropTarget {
             )
             .child(
                 div().h(gpui::px(20.)).w_full().overflow_hidden().child(
-                    crate::list_row(theme, "partial-row", false, gpui::px(40.))
-                        .relative()
-                        .map(|mut row| {
-                            row.style().overflow.x = Some(gpui::Overflow::Visible);
-                            row.style().overflow.y = Some(gpui::Overflow::Visible);
-                            row
-                        })
-                        .children([false, true].map(|after| {
-                            crate::list_drop_overlay(
-                                crate::list_drop_target(("target", usize::from(after)), after)
-                                    .can_drop(|value, _, _| value.is::<u8>())
-                                    .on_drop(cx.listener(|this, _: &u8, _, _| this.drops += 1)),
-                            )
-                        })),
+                    crate::list_row(
+                        theme,
+                        "partial-row",
+                        false,
+                        gpui::px(40.),
+                        crate::SurfaceStyle::Opaque,
+                    )
+                    .relative()
+                    .map(|mut row| {
+                        row.style().overflow.x = Some(gpui::Overflow::Visible);
+                        row.style().overflow.y = Some(gpui::Overflow::Visible);
+                        row
+                    })
+                    .children([false, true].map(|after| {
+                        crate::list_drop_overlay(
+                            crate::list_drop_target(("target", usize::from(after)), after)
+                                .can_drop(|value, _, _| value.is::<u8>())
+                                .on_drop(cx.listener(|this, _: &u8, _, _| this.drops += 1)),
+                        )
+                    })),
                 ),
             )
     }

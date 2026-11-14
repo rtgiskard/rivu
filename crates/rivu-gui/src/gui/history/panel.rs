@@ -337,10 +337,8 @@ impl History {
                                             ("history-entry", id as u64),
                                             selected,
                                             row_height,
+                                            crate::gui::appearance::material::surface(cx),
                                         )
-                                        .bg(crate::gui::appearance::material::row_background(
-                                            theme, selected, false, cx,
-                                        ))
                                         .gap_0()
                                         .group("history-track-row")
                                         .relative()

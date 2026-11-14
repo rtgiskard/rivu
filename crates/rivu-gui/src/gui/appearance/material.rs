@@ -55,18 +55,22 @@ pub(in crate::gui) trait MaterialAppearance: Sized {
     fn floating(self, surface: Stateful<Div>, theme: &'static Palette) -> Stateful<Div>;
 }
 
-/// Enabled materials expose the panel scene through idle application rows.
-pub(in crate::gui) fn row_background(
-    theme: &'static Palette,
-    selected: bool,
-    hovered: bool,
-    cx: &App,
-) -> Rgba {
-    if !selected && !hovered && MaterialPreset::current(cx).is_some() {
-        transparent_black().into()
+/// Panel interactions expose the scene only while materials are enabled.
+pub(in crate::gui) fn surface(cx: &App) -> rivu_ui::SurfaceStyle {
+    if MaterialPreset::current(cx).is_some() {
+        rivu_ui::SurfaceStyle::Translucent
     } else {
-        rivu_ui::row_background(theme, selected, hovered)
+        rivu_ui::SurfaceStyle::Opaque
     }
+}
+
+pub(in crate::gui) fn button<T: 'static>(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Stateful<Div> {
+    rivu_ui::button_on_surface(id, label, surface(cx), cx, action)
 }
 
 impl MaterialAppearance for MaterialPreset {
@@ -1159,9 +1163,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn enabled_idle_rows_are_transparent_and_disabled_rows_keep_theme_background(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn material_surface_mapping_preserves_row_rendering_contract(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let theme =
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
@@ -1174,15 +1176,25 @@ mod tests {
                     for (selected, hovered) in
                         [(false, false), (false, true), (true, false), (true, true)]
                     {
-                        let background = super::row_background(theme, selected, hovered, cx);
-                        if !enabled || selected || hovered {
-                            assert_eq!(
-                                background,
-                                rivu_ui::row_background(theme, selected, hovered)
-                            );
-                            assert_eq!(background.a, 1.);
+                        let surface = super::surface(cx);
+                        let expected = if enabled {
+                            rivu_ui::SurfaceStyle::Translucent
                         } else {
+                            rivu_ui::SurfaceStyle::Opaque
+                        };
+                        assert_eq!(surface, expected);
+                        let background = rivu_ui::row_background(theme, selected, hovered, surface);
+                        let mut rendered =
+                            rivu_ui::list_row(theme, "material-row", selected, px(24.), surface);
+                        let mut expected_row =
+                            div().bg(rivu_ui::row_background(theme, selected, false, expected));
+                        assert_eq!(rendered.style().background, expected_row.style().background);
+                        if !enabled {
+                            assert_eq!(background.a, 1.);
+                        } else if !selected && !hovered {
                             assert_eq!(background.a, 0.);
+                        } else {
+                            assert!(background.a > 0. && background.a < 1.);
                         }
                     }
                 }

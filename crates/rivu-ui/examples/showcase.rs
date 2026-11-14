@@ -494,7 +494,7 @@ impl Render for Showcase {
                         }
                         let title: SharedString = row_title(this.filtered[index]).into();
                         let detail: SharedString = "Secondary line · compact leading follows each line's font size".into();
-                        list_row(colors,("row",index),false,row_height)
+                        list_row(colors,("row",index),false,row_height,rivu_ui::SurfaceStyle::Opaque)
                             .child(row_tooltip(two_line_text(colors,title.clone(),detail.clone()).id(("text",index)),title,detail)).into_any_element()
                     }).collect::<Vec<_>>()
                 })).h(rems(12.)).flex_shrink_0().w_full().scrollbar("example-scroll")

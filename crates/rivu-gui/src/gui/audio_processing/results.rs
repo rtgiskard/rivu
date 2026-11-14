@@ -173,7 +173,7 @@ impl AudioProcessing {
             }
             if !terminal {
                 content = content.child(
-                    button(
+                    crate::gui::appearance::material::button(
                         ("cancel-processing", panel),
                         self.tr("processing-cancel"),
                         cx,
@@ -214,7 +214,7 @@ impl AudioProcessing {
                 for (mode, label, _) in modes.into_iter().filter(|(_, _, available)| *available) {
                     auditions = auditions.child(disabled_control(
                         theme,
-                        button(
+                        crate::gui::appearance::material::button(
                             SharedString::from(format!("audition-{panel}-{mode:?}")),
                             self.tr(label),
                             cx,
@@ -241,7 +241,7 @@ impl AudioProcessing {
                         ))
                         .child(disabled_control(
                             theme,
-                            button(
+                            crate::gui::appearance::material::button(
                                 ("apply-mix-gains", panel),
                                 self.tr("processing-apply-mix"),
                                 cx,
@@ -382,7 +382,7 @@ impl AudioProcessing {
         let mut actions = row().min_w_0().flex_wrap().gap_1();
         if self.page != Page::Results {
             actions = actions.child(
-                button(
+                crate::gui::appearance::material::button(
                     ("graph-show-results", panel),
                     self.tr("processing-view-results"),
                     cx,
@@ -397,7 +397,7 @@ impl AudioProcessing {
             ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
         ) {
             actions = actions.child(
-                button(
+                crate::gui::appearance::material::button(
                     ("graph-cancel-task", panel),
                     self.tr("processing-cancel"),
                     cx,
@@ -594,7 +594,7 @@ impl AudioProcessing {
                     .child(caption(theme, self.tr("processing-export-path")))
                     .child(caption(theme, self.tr("processing-result-new-file")))
                     .child(
-                        button(
+                        crate::gui::appearance::material::button(
                             ("graph-choose-export", panel),
                             self.tr("processing-result-choose-path"),
                             cx,
@@ -650,7 +650,7 @@ impl AudioProcessing {
                         ))
                         .child(disabled_control(
                             theme,
-                            button(
+                            crate::gui::appearance::material::button(
                                 SharedString::from(format!(
                                     "graph-audition-{panel}-{id}-{}-{}",
                                     port.node, port.port
@@ -676,7 +676,7 @@ impl AudioProcessing {
                             self.state.system.config.processing_bypassed,
                         ))
                         .child(
-                            button(
+                            crate::gui::appearance::material::button(
                                 SharedString::from(format!(
                                     "graph-export-{panel}-{id}-{}-{}",
                                     port.node, port.port
@@ -727,7 +727,7 @@ impl AudioProcessing {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content = content.child(
-            button(
+            crate::gui::appearance::material::button(
                 ("graph-result-details", panel),
                 self.tr(if expanded {
                     "processing-result-hide-details"

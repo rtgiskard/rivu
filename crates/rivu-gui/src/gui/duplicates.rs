@@ -1296,6 +1296,7 @@ impl Duplicates {
                                 ),
                         ),
                         selected,
+                        rivu_ui::SurfaceStyle::Opaque,
                     ),
                     busy || review.confirming,
                 ));
@@ -1574,6 +1575,7 @@ impl Duplicates {
                             gpui::Toggled::False
                         }),
                         source_selected,
+                        rivu_ui::SurfaceStyle::Opaque,
                     ),
                     busy || review.confirming,
                 ));
@@ -1600,6 +1602,7 @@ impl Duplicates {
                             gpui::Toggled::False
                         }),
                         target_selected,
+                        rivu_ui::SurfaceStyle::Opaque,
                     ),
                     busy || review.confirming,
                 ));

@@ -499,7 +499,7 @@ impl AudioProcessing {
             for &(choice, label) in choices {
                 let target = target.clone();
                 options = options.child(
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("graph-choice-{panel}-{key:?}-{choice}")),
                         self.tr(label),
                         cx,
@@ -509,7 +509,14 @@ impl AudioProcessing {
                             }
                         },
                     )
-                    .when(text == choice, |view| view.bg(rgb(theme.selected))),
+                    .map(|view| {
+                        rivu_ui::active_control(
+                            theme,
+                            view,
+                            text == choice,
+                            crate::gui::appearance::material::surface(cx),
+                        )
+                    }),
                 );
             }
             options.into_any_element()
@@ -535,7 +542,7 @@ impl AudioProcessing {
                 for (sign, delta) in [("−", -step), ("+", step)] {
                     let target = target.clone();
                     numeric = numeric.step(
-                        button(
+                        crate::gui::appearance::material::button(
                             SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
                             SharedString::from(format!("{sign}{}", step)),
                             cx,
@@ -563,7 +570,7 @@ impl AudioProcessing {
                 let target = target.clone();
                 editor = editor.child(disabled_control(
                     theme,
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("graph-browse-{panel}-{key:?}")),
                         self.tr("processing-fields-browse"),
                         cx,
@@ -581,7 +588,7 @@ impl AudioProcessing {
         let apply_key = key;
         let mut field = FormField::new(theme, label, control).action(disabled_control(
             theme,
-            button(
+            crate::gui::appearance::material::button(
                 SharedString::from(format!("graph-apply-{panel}-{key:?}")),
                 self.tr("processing-fields-apply-one"),
                 cx,
@@ -692,6 +699,7 @@ impl AudioProcessing {
                             "",
                             self.tr("processing-graph-duplicate"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .enabled(!busy && !fixed && drafts == 0)
                         .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                             let target = target.clone();
@@ -709,6 +717,7 @@ impl AudioProcessing {
                             "󰆴",
                             self.tr("processing-graph-delete"),
                         )
+                        .surface(crate::gui::appearance::material::surface(cx))
                         .enabled(!busy && !fixed && drafts == 0)
                         .build(IconButtonStyle::Quiet, IconButtonDensity::Compact, cx, {
                             let target = target.clone();
@@ -739,7 +748,7 @@ impl AudioProcessing {
                     .gap_1()
                     .child(disabled_control(
                         theme,
-                        button(
+                        crate::gui::appearance::material::button(
                             ("graph-apply-all", panel),
                             self.tr("processing-fields-apply-all"),
                             cx,
@@ -756,7 +765,7 @@ impl AudioProcessing {
                     ))
                     .child(disabled_control(
                         theme,
-                        button(
+                        crate::gui::appearance::material::button(
                             ("graph-discard", panel),
                             self.tr("processing-fields-discard"),
                             cx,
@@ -782,7 +791,7 @@ impl AudioProcessing {
             let target = target.clone();
             content = content.child(disabled_control(
                 theme,
-                button(
+                crate::gui::appearance::material::button(
                     ("graph-profile", panel),
                     self.tr("processing-graph-add-profile"),
                     cx,
@@ -818,7 +827,7 @@ impl AudioProcessing {
                     };
                 lanes = lanes.child(disabled_control(
                     theme,
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("graph-lane-{panel}-{add}")),
                         self.tr(if add {
                             "processing-graph-add-lane"
@@ -886,7 +895,7 @@ impl AudioProcessing {
             if group == 2 && neural {
                 let target = target.clone();
                 content = content.child(
-                    button(
+                    crate::gui::appearance::material::button(
                         ("graph-backends", panel),
                         self.tr(if expanded {
                             "processing-fields-hide-backends"
@@ -941,7 +950,7 @@ impl AudioProcessing {
             for port in 0..output_count(&node.kind) {
                 let target = target.clone();
                 ports = ports.child(
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("graph-target-{panel}-{port}")),
                         self.tr(if port == 0 {
                             "processing-graph-vocals"
@@ -958,8 +967,13 @@ impl AudioProcessing {
                         },
                     )
                     .debug_selector(move || format!("graph-target-{panel}-{port}"))
-                    .when(self.graph_editor.target_port == port as u16, |view| {
-                        view.bg(rgb(theme.selected))
+                    .map(|view| {
+                        rivu_ui::active_control(
+                            theme,
+                            view,
+                            self.graph_editor.target_port == port as u16,
+                            crate::gui::appearance::material::surface(cx),
+                        )
                     }),
                 );
             }

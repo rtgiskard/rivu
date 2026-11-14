@@ -1520,6 +1520,7 @@ impl EqualizerEditor {
                         glyph,
                         self.tr(hint),
                     )
+                    .surface(crate::gui::appearance::material::surface(cx))
                     .enabled(enabled)
                     .build(
                         rivu_ui::IconButtonStyle::Quiet,
@@ -1541,6 +1542,7 @@ impl EqualizerEditor {
                     "",
                     self.tr("processing-apply"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(enabled)
                 .build(
                     rivu_ui::IconButtonStyle::Quiet,
@@ -2414,6 +2416,7 @@ impl EqualizerEditor {
                         "processing-eq-enable"
                     }),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .toggled(self.config.enabled)
                 .enabled(!self.blocked && self.pending == 0)
                 .build(
@@ -2451,6 +2454,7 @@ impl EqualizerEditor {
                         "processing-eq-clear-parameters"
                     }),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(!self.reset_locked(cx))
                 .build(
                     rivu_ui::IconButtonStyle::Quiet,
@@ -2596,6 +2600,7 @@ impl EqualizerEditor {
                                     "󰆴",
                                     self.tr("processing-remove-band"),
                                 )
+                                .surface(crate::gui::appearance::material::surface(cx))
                                 .enabled(!self.config_locked())
                                 .build(
                                     rivu_ui::IconButtonStyle::Quiet,
@@ -2623,7 +2628,7 @@ impl EqualizerEditor {
                 let identity = self.field_control(EqField::Band(index, BandField::Channels));
                 types = types.child(disabled_control(
                     theme,
-                    button(
+                    crate::gui::appearance::material::button(
                         SharedString::from(format!("band-kind-{kind:?}")),
                         self.tr(key),
                         cx,
@@ -2633,10 +2638,16 @@ impl EqualizerEditor {
                             }
                         },
                     )
-                    .when(kind == band.kind, |v| {
-                        v.bg(rgb(theme.selected))
-                            .border_color(rgb(theme.accent))
-                            .text_color(rgb(theme.accent))
+                    .map(|view| {
+                        rivu_ui::active_control(
+                            theme,
+                            view,
+                            kind == band.kind,
+                            crate::gui::appearance::material::surface(cx),
+                        )
+                    })
+                    .when(kind == band.kind, |view| {
+                        view.border_color(rgb(theme.accent))
                     }),
                     self.config_locked(),
                 ));
@@ -6369,7 +6380,7 @@ mod tests {
                         .debug_selector(|| "preset-controls".to_owned()),
                 )
                 .child(
-                    button("preset-outside", "Outside action", cx, |this, _, _| {
+                    rivu_ui::button("preset-outside", "Outside action", cx, |this, _, _| {
                         this.outside_clicks.set(this.outside_clicks.get() + 1);
                     })
                     .debug_selector(|| "preset-outside".to_owned())

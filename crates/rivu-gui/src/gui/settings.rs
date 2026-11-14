@@ -1837,6 +1837,7 @@ impl Settings {
                 },
             ),
             active,
+            rivu_ui::SurfaceStyle::Opaque,
         )
         .role(Role::Tab)
         .aria_selected(active)

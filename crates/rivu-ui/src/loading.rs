@@ -219,7 +219,7 @@ pub fn paged_loading_row<T: 'static>(
     retry: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
-    list_row(theme, id, false, height)
+    list_row(theme, id, false, height, crate::SurfaceStyle::Opaque)
         .child(
             caption(theme, labels.message)
                 .flex_1()
