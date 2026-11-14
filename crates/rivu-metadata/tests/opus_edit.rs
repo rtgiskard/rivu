@@ -94,7 +94,7 @@ fn payload(page: &[u8]) -> &[u8] {
 }
 
 #[test]
-fn opus_edit_transaction_updates_tags_and_keeps_audio_and_original_backup() {
+fn opus_edit_transaction_updates_tags_and_keeps_audio_without_backup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("track.opus");
     let mut original = headers();
@@ -111,10 +111,7 @@ fn opus_edit_transaction_updates_tags_and_keeps_audio_and_original_backup() {
     )
     .unwrap();
     assert!(report.changed());
-    assert_eq!(
-        std::fs::read(report.backup_path().unwrap()).unwrap(),
-        original
-    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     let saved = std::fs::read(&path).unwrap();
     let parsed = pages(&saved);
     assert_eq!(payload(parsed.last().unwrap()), audio);

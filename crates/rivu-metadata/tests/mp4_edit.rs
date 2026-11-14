@@ -15,7 +15,7 @@ fn atom(ident: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn explicit_patch_keeps_backup_and_unrelated_native_items() {
+fn explicit_patch_keeps_unrelated_native_items_without_backup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("edit.m4a");
     let mut tag = Ilst::new();
@@ -50,7 +50,7 @@ fn explicit_patch_keeps_backup_and_unrelated_native_items() {
     )
     .unwrap();
     assert!(report.changed());
-    assert_eq!(fs::read(report.backup_path().unwrap()).unwrap(), original);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     let parsed = Mp4File::read_from(
         &mut BufReader::new(File::open(&path).unwrap()),
         ParseOptions::new().read_properties(false),

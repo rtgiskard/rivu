@@ -5,17 +5,19 @@ edition = "2024"
 description = "Shared audio metadata reading and explicit file editing"
 
 [features]
-artwork = ["dep:blake3", "dep:image", "dep:parking_lot", "dep:tracing", "dep:url"]
+artwork = ["dep:image", "dep:parking_lot", "dep:tracing", "dep:url"]
 test-support = ["artwork"]
 
 [dependencies]
 anyhow = "1"
-blake3 = { version = "1", optional = true }
+blake3 = "1"
+encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"], optional = true }
 lofty = "=0.25.5"
 libc = "0.2"
 parking_lot = { version = "0.12", optional = true }
 rivu-utils = { path = "../rivu-utils", default-features = false }
+rivu-format = { path = "../rivu-format" }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3.27"
 tracing = { version = "0.1", optional = true }
