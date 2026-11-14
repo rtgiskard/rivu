@@ -44,9 +44,7 @@ pub fn run_in_subprocess(test: &str, timeout: std::time::Duration) -> bool {
 }
 
 #[cfg(test)]
-use rivu_metadata::artwork::test_support::{budget_unsynchronised_wav, pictures_wav};
-#[cfg(test)]
-use rivu_presentation::DEFAULT_IMAGE;
+use rivu_metadata::artwork::test_support::{PNG_IMAGE, budget_unsynchronised_wav, pictures_wav};
 #[cfg(test)]
 use rivu_protocol::model::Track;
 #[cfg(test)]
@@ -131,10 +129,7 @@ fn native_metadata_budget_skips_large_pictures_without_losing_tags_or_audio() {
         pictures_wav(
             &path,
             version,
-            &[
-                (DEFAULT_IMAGE, size, 3),
-                (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
-            ],
+            &[(PNG_IMAGE, size, 3), (PNG_IMAGE, PNG_IMAGE.len(), 3)],
         );
         assert_eq!(
             rivu_audio::probe(&path, false).unwrap().title,
@@ -148,7 +143,7 @@ fn native_metadata_budget_skips_large_pictures_without_losing_tags_or_audio() {
 fn native_metadata_budget_keeps_audio_after_many_picture_frames() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("many-pictures.wav");
-    let pictures = vec![(DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3); 64];
+    let pictures = vec![(PNG_IMAGE, PNG_IMAGE.len(), 3); 64];
     pictures_wav(&path, 4, &pictures);
     assert_eq!(
         rivu_audio::probe(&path, false).unwrap().title,

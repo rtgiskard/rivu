@@ -647,8 +647,8 @@ Core's manager serves MPRIS; the desktop manager serves its windows. A reopened
 desktop process starts a fresh lookup cache, independently of visualization
 enablement. Cache-only reads perform no filesystem I/O. Extraction runs on
 background executors and rejects non-regular sources; even a regular-file probe
-can block. GUI defaults use the embedded SVG, while MPRIS lazily exports a PNG
-fallback in the background.
+can block. GUI defaults and the installed application icon share one embedded SVG;
+MPRIS lazily exports those same SVG bytes in the background.
 
 Logical identity is track ID, fingerprint, and path. Concurrent CUE identities can
 share physical probing of the same path/fingerprint without sharing completion
@@ -708,8 +708,10 @@ to an evicted source can reacquire after the physical slot retires.
 Encoded images use immutable content-derived paths under `artwork/cache`.
 The first 128 bits of BLAKE3 form 32 lowercase hexadecimal characters: two name
 the bucket, the rest the file. Originals use `ab/<30-hex>.<format>` with a
-byte-sniffed `png`, `jpg`, `gif`, `webp`, `bmp`, `tiff`, or `ico` extension;
-thumbnails use `ab/<30-hex>-<tier>.webp` for tiers 200, 256, 400, 560, or 1024.
+byte-sniffed `png`, `jpg`, `gif`, `webp`, `bmp`, `tiff`, or `ico` extension.
+The trusted bundled default exports as `ab/<30-hex>.svg`; this does not admit
+external SVG covers. Thumbnails use `ab/<30-hex>-<tier>.webp` for tiers 200, 256,
+400, 560, or 1024.
 Runtime identity retains the full hash. Existing originals are byte-compared:
 identical content reuses the file regardless of track identity, while a mismatch
 fails without overwriting it. Contents, not the source extension, determine format.
@@ -736,7 +738,7 @@ Tier names have no processing-version suffix, so future processing changes requi
 explicit invalidation. Thumbnail reads have a separate 8 MiB cap and still require
 source admission under the encoded policy. Thumbnails remain disposable while a
 source lookup is resident: displayed pixels do not depend on those files.
-The exported MPRIS default PNG is disposable like other encoded originals.
+The exported MPRIS default SVG is disposable like other encoded originals.
 
 Only explicit link:01_config.adoc#artwork-cache-maintenance[Settings maintenance]
 enumerates and cleans files. It recognizes originals and thumbnails in one level
@@ -859,9 +861,10 @@ them at a frame boundary; hide/close flushes immediately. Cancelled synchronous
 work may finish but cannot publish, and old scenes cannot restart it. Reopening
 reuses only owners that have not retired.
 
-Default SVG covers use a separate window-local memory cache keyed by physical
-size and style. Background rasterization is serialized; consumers share immutable
-images, and obsolete sizes cannot replace newer demand.
+Default SVG covers and the About logo use
+one window-local memory cache keyed by physical size. Background rasterization
+is serialized; consumers share immutable images, and obsolete sizes cannot
+replace newer demand.
 
 This memory-only cache admits at most 16 pending/completed size keys and 32 MiB
 of final BGRA pixels. Least-recently-used eviction cancels pending assets and
@@ -872,8 +875,9 @@ at a time. The last shared owner releases its assets and GPU images on window
 close or reload; other windows have independent caches. More active sizes than
 these limits can regenerate evicted images. Generation failures are logged and
 display `Artwork unavailable`.
-Generated bitmaps remain in RAM/GPU memory and never create disk files; existing
-media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
+Generated GUI bitmaps remain in RAM/GPU memory and never create disk files.
+MPRIS exports the same SVG source separately for external clients. Installation
+provides the desktop/tray icon as SVG and leaves existing installed files intact.
 
 
 == Font and rendering resources

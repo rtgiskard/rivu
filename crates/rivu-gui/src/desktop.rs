@@ -344,7 +344,7 @@ impl Desktop {
         let layouts = gui::session::LoadedLayouts::load(data_dir.join("layout.json"));
         let artwork = Arc::new(
             ArtworkManager::new(data_dir)
-                .with_default_image(rivu_presentation::DEFAULT_IMAGE)
+                .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG)
                 .with_max_image_bytes(config.artwork_file_limit_mib as usize * 1024 * 1024),
         );
         let i18n = Arc::new(rivu_presentation::i18n::Localizer::new(&config.ui_language));

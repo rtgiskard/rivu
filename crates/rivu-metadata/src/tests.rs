@@ -1,4 +1,5 @@
 use super::*;
+use crate::fixtures::PNG_IMAGE;
 use std::{
     fs,
     io::{Seek, Write},
@@ -113,7 +114,7 @@ fn supported_untagged_content_has_empty_tags() {
 fn artwork_is_content_detected_and_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("misleading.mp3");
-    let image = include_bytes!("../../rivu-presentation/data/icons/rivu.png");
+    let image = PNG_IMAGE;
     fs::write(&path, flac(&[], Some(image))).unwrap();
     assert_eq!(
         read_artwork(File::open(&path).unwrap(), image.len(), |data| Some(
@@ -141,7 +142,7 @@ fn concrete_flac_edit_preserves_unknown_fields_pictures_multivalues_and_audio() 
     use lofty::ogg::OggPictureStorage;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("track.flac");
-    let image = include_bytes!("../../rivu-presentation/data/icons/rivu.png");
+    let image = PNG_IMAGE;
     let original = flac(
         &[
             "TITLE=Old",

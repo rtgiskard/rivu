@@ -233,7 +233,7 @@ impl App {
         )?;
         let artwork = Arc::new(
             ArtworkManager::new(&data_dir)
-                .with_default_image(rivu_presentation::DEFAULT_IMAGE)
+                .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG)
                 .with_max_image_bytes(artwork_limit_bytes),
         );
         let mut app = Self {

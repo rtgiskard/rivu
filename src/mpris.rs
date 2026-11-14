@@ -1174,7 +1174,7 @@ mod tests {
             AppHandle::new(&runtime, directory.path()),
             Arc::new(
                 ArtworkManager::new(directory.path())
-                    .with_default_image(rivu_presentation::DEFAULT_IMAGE),
+                    .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG),
             ),
             runtime.test_executor(),
             Arc::clone(runtime.test_workers()),
@@ -1266,7 +1266,7 @@ mod tests {
         let (directory, mut runtime) = runtime_fixture();
         let artwork = Arc::new(
             ArtworkManager::new(directory.path())
-                .with_default_image(rivu_presentation::DEFAULT_IMAGE),
+                .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG),
         );
         let state = MprisSnapshot {
             queue: QueueState {
@@ -1849,9 +1849,8 @@ mod tests {
         writer.finalize().unwrap();
         let other_path = directory.path().join("other.wav");
         std::fs::copy(&path, &other_path).unwrap();
-        // Distinct from the default export, so a fallback cannot satisfy the test.
-        let mut cover = rivu_presentation::DEFAULT_IMAGE.to_vec();
-        cover.push(1);
+        // A real PNG cover must remain distinct from the trusted SVG fallback.
+        let cover = rivu_metadata::artwork::test_support::PNG_IMAGE;
         std::fs::write(directory.path().join("cover.png"), cover).unwrap();
         let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
             paths: vec![path, other_path],
@@ -1883,7 +1882,7 @@ mod tests {
         assert!(async_io::block_on(runtime.handle.request_ack(Command::Previous)).is_success());
         let artwork = Arc::new(
             ArtworkManager::new(directory.path())
-                .with_default_image(rivu_presentation::DEFAULT_IMAGE),
+                .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG),
         );
         let app = AppHandle::new(&runtime, directory.path());
         let connection = bus.serve_root(app.clone());
@@ -2086,7 +2085,7 @@ mod tests {
         let current = runtime.handle.mpris_snapshot();
         assert_ne!(old.queue.current_id, current.queue.current_id);
         let artwork = ArtworkManager::new(directory.path())
-            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
+            .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
         let mut metadata = TrackMetadata::from_snapshot(&current, &artwork);
         let mut loaded = None;
         let connection = bus.connect();
@@ -2113,7 +2112,7 @@ mod tests {
     fn metadata_getter_leaves_cold_and_replaced_fingerprints_unprobed() {
         let directory = tempfile::tempdir().unwrap();
         let artwork = ArtworkManager::new(directory.path())
-            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
+            .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
         let mut current = track(7);
         current.path = directory.path().join("missing.flac");
         current.fingerprint = Some("original".into());
@@ -2146,6 +2145,11 @@ mod tests {
                 .contains_key("mpris:artUrl")
         );
         let default = artwork.export_default().unwrap();
+        assert_eq!(default.path().extension().unwrap(), "svg");
+        assert_eq!(
+            std::fs::read(default.path()).unwrap(),
+            rivu_presentation::DEFAULT_ARTWORK_SVG
+        );
         assert_eq!(
             TrackMetadata::from_snapshot(&state, &artwork)
                 .unwrap()
@@ -2174,8 +2178,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let blocked = directory.path().join("blocked");
         std::fs::write(&blocked, b"not a directory").unwrap();
-        let artwork =
-            ArtworkManager::new(&blocked).with_default_image(rivu_presentation::DEFAULT_IMAGE);
+        let artwork = ArtworkManager::new(&blocked)
+            .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
         assert!(artwork.export_default().is_none());
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();
@@ -2202,7 +2206,7 @@ mod tests {
     fn metadata_notification_follows_path_changes_without_queue_revision_changes() {
         let directory = tempfile::tempdir().unwrap();
         let artwork = ArtworkManager::new(directory.path())
-            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
+            .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
         let previous = MprisSnapshot {
             queue: QueueState {
                 total: 1,
@@ -2346,7 +2350,7 @@ mod tests {
     fn metadata_has_dbus_types_and_queue_occurrence_identity() {
         let directory = tempfile::tempdir().unwrap();
         let artwork = ArtworkManager::new(directory.path())
-            .with_default_image(rivu_presentation::DEFAULT_IMAGE);
+            .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
         let art = artwork.export_default().unwrap();
         let track = TrackMetadata {
             queue_id: 42,

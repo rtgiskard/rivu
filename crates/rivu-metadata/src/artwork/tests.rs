@@ -3,6 +3,8 @@ use super::*;
 use std::fs::File;
 
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_SVG: &[u8] =
+    br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path fill="white" d="M0 0h1v1H0z"/></svg>"#;
 
 #[derive(Clone)]
 struct TestSource {
@@ -78,32 +80,53 @@ fn manager_without_default_image_never_exports_a_fallback() {
 #[test]
 fn originals_use_bucketed_128_bit_names() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let root = directory.path().join("artwork/cache");
     fs::create_dir_all(&root).unwrap();
     let hash = blake3::hash(DEFAULT_IMAGE).to_hex();
     let image = manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).unwrap();
     let expected = root.join(&hash[..2]).join(format!("{}.png", &hash[2..32]));
     assert_eq!(image.path.as_ref(), expected.as_path());
-    assert_eq!(
-        manager.export_default().unwrap().path().as_ref(),
-        expected.as_path()
-    );
+    let fallback = manager.export_default().unwrap();
+    let svg_hash = blake3::hash(DEFAULT_SVG).to_hex();
+    let svg_path = root
+        .join(&svg_hash[..2])
+        .join(format!("{}.svg", &svg_hash[2..32]));
+    assert_eq!(fallback.path().as_ref(), svg_path.as_path());
+    assert_eq!(fs::read(&svg_path).unwrap(), DEFAULT_SVG);
     assert_eq!(fs::read(&expected).unwrap(), DEFAULT_IMAGE);
-    fs::remove_file(&expected).unwrap();
-    fs::create_dir(&expected).unwrap();
+    fs::remove_file(&svg_path).unwrap();
+    fs::create_dir(&svg_path).unwrap();
     assert!(
         ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .export_default()
             .is_none()
     );
 }
 
 #[test]
+fn trusted_svg_default_does_not_admit_untrusted_svg_covers() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("track.wav");
+    tagged_wav_image(&source, DEFAULT_SVG);
+    fs::write(directory.path().join("cover.svg"), DEFAULT_SVG).unwrap();
+    fs::write(directory.path().join("folder.png"), DEFAULT_SVG).unwrap();
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
+    let selected = source_fixture(source);
+    assert!(manager.load(selected.source()).is_none());
+    assert_eq!(manager.cached_result(selected.source()), Some(None));
+    assert!(manager.cached_default().is_none());
+    assert!(!directory.path().join("artwork").exists());
+    let fallback = manager.export_default().unwrap();
+    assert_eq!(fallback.path().extension().unwrap(), "svg");
+    assert_eq!(fs::read(fallback.path()).unwrap(), DEFAULT_SVG);
+}
+
+#[test]
 fn existing_originals_require_bounded_content_equality_without_overwriting() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let path = cache_paths::original_path(
         &directory.path().join("artwork/cache"),
         blake3::hash(DEFAULT_IMAGE),
@@ -120,7 +143,17 @@ fn existing_originals_require_bounded_content_equality_without_overwriting() {
         io::ErrorKind::InvalidData
     );
     assert!(manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).is_none());
+    let svg_path = cache_paths::original_path(
+        &directory.path().join("artwork/cache"),
+        blake3::hash(DEFAULT_SVG),
+        "svg",
+    );
+    fs::create_dir_all(svg_path.parent().unwrap()).unwrap();
+    let mut svg_collision = DEFAULT_SVG.to_vec();
+    *svg_collision.last_mut().unwrap() ^= 1;
+    fs::write(&svg_path, &svg_collision).unwrap();
     assert!(manager.export_default().is_none());
+    assert_eq!(fs::read(&svg_path).unwrap(), svg_collision);
     assert_eq!(fs::read(&path).unwrap(), collision);
     // A length mismatch is rejected before reading any existing content.
     File::options()
@@ -187,7 +220,7 @@ fn independent_managers_racing_identical_publications_share_a_complete_original(
             .map(|_| {
                 scope.spawn(|| {
                     let manager =
-                        ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+                        ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
                     barrier.wait();
                     manager.export_default().unwrap()
                 })
@@ -200,7 +233,7 @@ fn independent_managers_racing_identical_publications_share_a_complete_original(
     });
     for image in &images {
         assert_eq!(image.uri(), images[0].uri());
-        assert_eq!(fs::read(image.path()).unwrap(), DEFAULT_IMAGE);
+        assert_eq!(fs::read(image.path()).unwrap(), DEFAULT_SVG);
     }
     assert_eq!(
         fs::read_dir(images[0].path().parent().unwrap())
@@ -237,7 +270,7 @@ fn original_publication_never_reuses_a_symlink() {
 fn startup_and_negative_lookups_never_export_default_artwork() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");
-    let manager = ArtworkManager::new(&data).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(&data).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(directory.path().join("missing.wav"));
     assert!(manager.cached(selected.source()).is_none());
     assert!(manager.cached_default().is_none());
@@ -251,7 +284,7 @@ fn startup_and_negative_lookups_never_export_default_artwork() {
     );
     assert!(!data.exists());
     let exported = manager.export_default().unwrap();
-    assert_eq!(fs::read(file_path(exported.uri())).unwrap(), DEFAULT_IMAGE);
+    assert_eq!(fs::read(file_path(exported.uri())).unwrap(), DEFAULT_SVG);
     assert!(manager.cached(selected.source()).is_none());
     assert!(
         manager
@@ -260,13 +293,13 @@ fn startup_and_negative_lookups_never_export_default_artwork() {
             ))
             .is_none()
     );
-    assert!(!data.join("artwork/default.png").exists());
+    assert!(!data.join("artwork/default.svg").exists());
 }
 
 #[test]
 fn default_export_is_singleflight_without_track_lookups() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let barrier = std::sync::Barrier::new(4);
     let held = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..4)
@@ -286,7 +319,8 @@ fn default_export_is_singleflight_without_track_lookups() {
     let path = file_path(held[0].uri());
     assert!(managed_filename(path.file_name().unwrap()));
     assert_eq!(manager.cached_default(), Some(held[0].clone()));
-    assert_eq!(fs::read(path).unwrap(), DEFAULT_IMAGE);
+    assert_eq!(path.extension().unwrap(), "svg");
+    assert_eq!(fs::read(path).unwrap(), DEFAULT_SVG);
 }
 
 #[test]
@@ -294,7 +328,7 @@ fn failed_default_export_is_remembered_after_filesystem_recovers() {
     let directory = tempfile::tempdir().unwrap();
     let blocked = directory.path().join("data");
     fs::write(&blocked, b"not a directory").unwrap();
-    let manager = ArtworkManager::new(&blocked).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(&blocked).with_default_image(DEFAULT_SVG);
     assert!(manager.cached_default().is_none());
     assert!(manager.export_default().is_none());
     fs::remove_file(&blocked).unwrap();
@@ -312,15 +346,15 @@ fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
         let size = size * 1024 * 1024;
         pictures_wav(&source, version, &[(DEFAULT_IMAGE, size, 3)]);
         let selected = source_fixture(source);
-        let default = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+        let default = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let result = default.load(selected.source());
         assert_eq!(result.is_some(), size <= DEFAULT_MAX_IMAGE_BYTES);
         let small = ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .with_max_image_bytes(1024 * 1024);
         assert!(small.load(selected.source()).is_none());
         let large = ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .with_max_image_bytes(64 * 1024 * 1024);
         let image = large.load(selected.source()).unwrap();
         assert_eq!(
@@ -337,7 +371,7 @@ fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
         .set_len(DEFAULT_MAX_IMAGE_BYTES as u64)
         .unwrap();
     let selected = source_fixture(directory.path().join("missing.wav"));
-    let default = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let default = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     assert_eq!(
         fs::metadata(file_path(default.load(selected.source()).unwrap().uri()))
             .unwrap()
@@ -345,7 +379,7 @@ fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
         DEFAULT_MAX_IMAGE_BYTES as u64
     );
     let small = ArtworkManager::new(directory.path())
-        .with_default_image(DEFAULT_IMAGE)
+        .with_default_image(DEFAULT_SVG)
         .with_max_image_bytes(1024 * 1024);
     assert!(small.load(selected.source()).is_none());
     File::options()
@@ -356,12 +390,12 @@ fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
         .unwrap();
     assert!(
         ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .load(selected.source())
             .is_none()
     );
     let large = ArtworkManager::new(directory.path())
-        .with_default_image(DEFAULT_IMAGE)
+        .with_default_image(DEFAULT_SVG)
         .with_max_image_bytes(64 * 1024 * 1024);
     assert!(large.load(selected.source()).is_some());
 }
@@ -374,7 +408,7 @@ fn unsynchronised_covers_preserve_original_bytes() {
             .path()
             .join(format!("unsync-{version}-{tag_wide}.wav"));
         budget_unsynchronised_wav(&path, version, tag_wide);
-        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let artwork = manager.load(source_fixture(path).source()).unwrap();
         assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
     }
@@ -395,7 +429,7 @@ fn embedded_front_cover_wins_over_an_earlier_other_picture() {
                 (&front, front.len(), 3),
             ],
         );
-        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let artwork = manager.load(source_fixture(path).source()).unwrap();
         assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), front);
     }
@@ -418,7 +452,7 @@ fn unusable_front_cover_does_not_hide_a_later_usable_picture() {
                     (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), usage),
                 ],
             );
-            let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+            let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
             let artwork = manager.load(source_fixture(path).source()).unwrap();
             assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
         }
@@ -472,7 +506,7 @@ fn embedded_cover_size_boundary_applies_across_id3_versions() {
             let path = directory.path().join(format!("small-{version}-{size}.wav"));
             pictures_wav(&path, version, &[(DEFAULT_IMAGE, size, 3)]);
             let manager = ArtworkManager::new(directory.path())
-                .with_default_image(DEFAULT_IMAGE)
+                .with_default_image(DEFAULT_SVG)
                 .with_max_image_bytes(MAX_IMAGE_BYTES);
             let artwork = manager.load(source_fixture(path).source()).unwrap();
             let retained = fs::read(file_path(artwork.uri())).unwrap();
@@ -502,7 +536,7 @@ fn oversized_embedded_cover_does_not_hide_following_cover() {
                 ],
             );
             let manager = ArtworkManager::new(directory.path())
-                .with_default_image(DEFAULT_IMAGE)
+                .with_default_image(DEFAULT_SVG)
                 .with_max_image_bytes(MAX_IMAGE_BYTES);
             let artwork = manager.load(source_fixture(path).source()).unwrap();
             assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
@@ -515,7 +549,7 @@ fn oversized_embedded_cover_is_not_published() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("only-oversized.wav");
     pictures_wav(&path, 3, &[(DEFAULT_IMAGE, 27 * 1024 * 1024, 3)]);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(path);
     assert!(manager.load(selected.source()).is_none());
     assert_eq!(manager.cached_result(selected.source()), Some(None));
@@ -544,7 +578,7 @@ fn embedded_picture_is_deduplicated_and_relocated_content_does_not_reload() {
         .unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let mut selected = source_fixture(source);
     assert!(manager.cached(selected.source()).is_none());
     let first = manager.load(selected.source()).unwrap();
@@ -568,7 +602,7 @@ fn failed_source_paths_retry_after_relocation_without_changing_content_identity(
     let cover_source = directory.path().join("available.wav");
     tagged_wav(&cover_source);
     for old_path in ["missing.wav", "unprobeable.wav"] {
-        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let mut selected = source_fixture(directory.path().join(old_path));
         selected.fingerprint = Some(
             blake3::hash(&fs::read(&cover_source).unwrap())
@@ -603,7 +637,7 @@ fn no_cover_result_retries_directory_after_relocation() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("no-cover.wav");
     tagged_wav_image(&source, b"unsupported image bytes");
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let mut selected = source_fixture(source);
     assert!(manager.load(selected.source()).is_none());
     assert_eq!(manager.cached_result(selected.source()), Some(None));
@@ -633,7 +667,7 @@ fn directory_fifo_and_fifo_symlink_do_not_block_following_image() {
     std::os::unix::fs::symlink(&fifo, directory.path().join("folder.png")).unwrap();
     fs::write(directory.path().join("front.png"), DEFAULT_IMAGE).unwrap();
     let selected = source_fixture(directory.path().join("track.wav"));
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let (complete, completed) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let artwork = manager.load(selected.source()).unwrap();
@@ -673,7 +707,7 @@ fn directory_images_follow_embedded_covers_and_deterministic_filename_priority()
         .collect();
     tagged_wav(&source);
     let embedded = ArtworkManager::new(directory.path())
-        .with_default_image(DEFAULT_IMAGE)
+        .with_default_image(DEFAULT_SVG)
         .load(selected.source())
         .unwrap();
     assert_eq!(fs::read(file_path(embedded.uri())).unwrap(), DEFAULT_IMAGE);
@@ -681,7 +715,7 @@ fn directory_images_follow_embedded_covers_and_deterministic_filename_priority()
     for (name, expected) in candidates.iter().zip(&images) {
         // Each manager has a fresh session lookup; old immutable disk copies
         // must not become candidates or affect the chosen source image.
-        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+        let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let image = manager.load(selected.source()).unwrap();
         assert_eq!(fs::read(file_path(image.uri())).unwrap(), *expected);
         assert_eq!(file_path(image.uri()).extension().unwrap(), "png");
@@ -689,7 +723,7 @@ fn directory_images_follow_embedded_covers_and_deterministic_filename_priority()
     }
     assert!(
         ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .load(selected.source())
             .is_none()
     );
@@ -712,7 +746,7 @@ fn directory_images_require_exact_stems_and_supported_extensions() {
     }
     assert!(
         ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .load(selected.source())
             .is_none()
     );
@@ -722,7 +756,7 @@ fn directory_images_require_exact_stems_and_supported_extensions() {
         let path = directory.path().join(format!("FrOnT.{extension}"));
         let expected = directory_image(&path, 2);
         let image = ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .load(selected.source())
             .unwrap();
         assert_eq!(fs::read(file_path(image.uri())).unwrap(), expected);
@@ -757,7 +791,7 @@ fn directory_fallback_skips_invalid_oversized_and_nested_images() {
         .unwrap();
     let selected = source_fixture(source);
     let manager = ArtworkManager::new(directory.path())
-        .with_default_image(DEFAULT_IMAGE)
+        .with_default_image(DEFAULT_SVG)
         .with_max_image_bytes(MAX_IMAGE_BYTES);
     let accepted = manager.load(selected.source()).unwrap();
     assert_eq!(
@@ -767,7 +801,7 @@ fn directory_fallback_skips_invalid_oversized_and_nested_images() {
     fs::remove_file(boundary).unwrap();
     assert!(
         ArtworkManager::new(directory.path())
-            .with_default_image(DEFAULT_IMAGE)
+            .with_default_image(DEFAULT_SVG)
             .with_max_image_bytes(MAX_IMAGE_BYTES)
             .load(selected.source())
             .is_none()
@@ -784,7 +818,7 @@ fn directory_images_are_path_bound_and_cached_as_immutable_content() {
     let old_bytes = directory_image(&first.join("cover.png"), 1);
     let new_bytes = directory_image(&second.join("cover.png"), 2);
     let mut selected = source_fixture(first.join("missing.wav"));
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let original_identity = ArtworkIdentity::new(selected.source());
     // A missing or unprobeable audio file does not hide its directory cover.
     let old = manager.load(selected.source()).unwrap();
@@ -817,7 +851,7 @@ fn unfinished_directory_lookup_cannot_complete_a_relocated_request() {
     let original = source_fixture(first.join("track.wav"));
     let mut relocated = original.clone();
     relocated.path = second.join("track.wav");
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let (started, loading) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
@@ -848,7 +882,7 @@ fn concurrent_requests_probe_once_and_share_a_complete_image() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(source);
     let barrier = std::sync::Barrier::new(4);
     let probes = std::sync::atomic::AtomicUsize::new(0);
@@ -987,7 +1021,7 @@ fn fifo_without_writer_falls_back_and_releases_worker_and_maintenance() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     let alias = directory.path().join("linked.wav");
     std::os::unix::fs::symlink(&source, &alias).unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let cache = directory.path().join("artwork/cache/11");
     fs::create_dir_all(&cache).unwrap();
     let expired = cache.join(format!("{}.png", "1".repeat(30)));
@@ -1018,7 +1052,7 @@ fn fifo_without_writer_falls_back_and_releases_worker_and_maintenance() {
 #[test]
 fn cache_only_reads_do_not_wait_for_an_inflight_probe() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(directory.path().join("missing.wav"));
     let (started, loading) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
@@ -1049,7 +1083,7 @@ fn held_old_version_survives_pressure_and_late_completion_does_not_replace_new()
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let old_track = source_fixture(source.clone());
     let mut current = old_track.clone();
     current.fingerprint = None;
@@ -1086,7 +1120,7 @@ fn held_old_version_survives_pressure_and_late_completion_does_not_replace_new()
 #[test]
 fn held_results_can_exceed_target_and_idle_results_are_evicted() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
     let mut selected = source_fixture(source);
@@ -1113,7 +1147,7 @@ fn manual_cleanup_respects_age_and_regenerates_after_manager_restart() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
     tagged_wav(&source);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let selected = source_fixture(source);
     let held = manager.load(selected.source()).unwrap();
     let original = file_path(held.uri());
@@ -1158,10 +1192,10 @@ fn manual_cleanup_respects_age_and_regenerates_after_manager_restart() {
 #[test]
 fn cleanup_removes_resident_originals_and_all_thumbnail_tiers() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let original = manager.export_default().unwrap();
     let source = original.path();
-    let hash = blake3::hash(DEFAULT_IMAGE);
+    let hash = blake3::hash(DEFAULT_SVG);
     let thumbnails = [200, 256, 400, 560, 512, 1024]
         .map(|tier| cache_paths::thumbnail_path(&source, hash, tier).unwrap());
     for thumbnail in &thumbnails {
@@ -1176,6 +1210,13 @@ fn cleanup_removes_resident_originals_and_all_thumbnail_tiers() {
     assert_eq!(report.removed_files, 7);
     assert!(!source.exists());
     assert!(thumbnails.iter().all(|path| !path.exists()));
+    assert_eq!(manager.cached_default(), Some(original.clone()));
+    assert_eq!(manager.export_default(), Some(original));
+    assert!(!source.exists());
+    let restarted = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
+    let regenerated = restarted.export_default().unwrap();
+    assert_eq!(regenerated.path().as_ref(), source.as_ref());
+    assert_eq!(fs::read(regenerated.path()).unwrap(), DEFAULT_SVG);
 }
 
 #[test]
@@ -1187,6 +1228,7 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
     let short_hash = "1".repeat(30);
     let mut excluded = vec![
         root.join(format!("{short_hash}.png")),
+        root.join(format!("{short_hash}.svg")),
         root.join(format!("{short_hash}-256.webp")),
         bucket.join(format!("{}.png", "2".repeat(29))),
         bucket.join(format!("{}.png", "2".repeat(31))),
@@ -1195,6 +1237,8 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
         bucket.join(format!("{short_hash}-2048.webp")),
         bucket.join(format!("{short_hash}-0256.webp")),
         bucket.join(format!("{short_hash}-256.png")),
+        bucket.join(format!("{short_hash}-256.svg")),
+        bucket.join(format!("{short_hash}.SVG")),
         bucket.join(format!("{short_hash}-256-extra.webp")),
         bucket.join(format!("{short_hash}.PNG")),
         bucket.join("notes.txt"),
@@ -1223,10 +1267,12 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
         std::os::unix::fs::symlink(&outside, root.join("ef")).unwrap();
         std::os::unix::fs::symlink(&external, bucket.join(format!("{short_hash}-512.webp")))
             .unwrap();
+        std::os::unix::fs::symlink(&external, bucket.join(format!("{}.svg", "3".repeat(30))))
+            .unwrap();
     }
     let managed = bucket.join(format!("{short_hash}-256.webp"));
     fs::write(&managed, b"remove").unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let inventory = manager.maintain(Duration::ZERO, false).unwrap();
     assert_eq!((inventory.files, inventory.bytes), (1, 6));
     assert!(managed.is_file());
@@ -1244,7 +1290,7 @@ fn maintenance_excludes_unmanaged_names_symlinks_and_nested_directories() {
 #[test]
 fn failures_are_cached_and_manual_directory_errors_are_reported() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_IMAGE);
+    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let missing = source_fixture(directory.path().join("missing"));
     assert!(manager.load(missing.source()).is_none());
     assert!(
@@ -1259,7 +1305,7 @@ fn failures_are_cached_and_manual_directory_errors_are_reported() {
     assert!(manager.maintain(Duration::ZERO, false).is_err());
     let blocked = directory.path().join("blocked");
     fs::write(&blocked, b"not a directory").unwrap();
-    let unavailable = ArtworkManager::new(&blocked).with_default_image(DEFAULT_IMAGE);
+    let unavailable = ArtworkManager::new(&blocked).with_default_image(DEFAULT_SVG);
     assert_eq!(unavailable.load(missing.source()), None);
     assert_eq!(unavailable.cached_result(missing.source()), Some(None));
 }

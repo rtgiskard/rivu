@@ -239,8 +239,8 @@ impl ArtworkManager {
         }
     }
 
-    /// Provide the PNG exported on explicit fallback requests. Without one,
-    /// default-artwork reads and exports return `None` without filesystem work.
+    /// Provide trusted bundled SVG bytes exported on explicit fallback requests.
+    /// Without them, reads and exports return `None` without filesystem work.
     pub fn with_default_image(mut self, bytes: &'static [u8]) -> Self {
         self.default_image = Some(bytes);
         self
@@ -265,7 +265,7 @@ impl ArtworkManager {
                 let path = cache_paths::original_path(
                     &self.directory.join("cache"),
                     blake3::hash(bytes),
-                    "png",
+                    "svg",
                 );
                 match write_image(&path, bytes, self.max_image_bytes) {
                     Ok(file) => Some(Artwork { file, _entry: None }),
@@ -654,7 +654,7 @@ fn managed_filename(name: &std::ffi::OsStr) -> bool {
     lowercase_hex(hash, 30)
         && matches!(
             extension,
-            "png" | "jpg" | "gif" | "webp" | "bmp" | "tiff" | "ico"
+            "svg" | "png" | "jpg" | "gif" | "webp" | "bmp" | "tiff" | "ico"
         )
 }
 
@@ -763,6 +763,7 @@ mod fixtures;
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::fixtures::{block_probe, budget_unsynchronised_wav, pictures_wav, tagged_wav};
+    pub use crate::fixtures::PNG_IMAGE;
 }
 
 #[cfg(test)]

@@ -1210,6 +1210,9 @@ struct DefaultArtworkSizes {
 
 impl DefaultArtworkSizes {
     fn touch(&mut self, side: u32) -> bool {
+        if self.recent.back() == Some(&side) {
+            return true;
+        }
         let Some(index) = self.recent.iter().position(|&cached| cached == side) else {
             return false;
         };
@@ -1278,7 +1281,7 @@ impl DefaultArtworkBitmap {
                     source
                         .rasterizer
                         .renderer
-                        .parse_svg(include_bytes!("../../data/artwork/default.svg"))?,
+                        .parse_svg(rivu_presentation::DEFAULT_ARTWORK_SVG)?,
                 );
             }
             let side = source.side as i32;

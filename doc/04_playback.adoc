@@ -600,7 +600,8 @@ caches the original encoded bytes. Decoder scratch limits are best-effort;
 later animation frames are not validated. Invalid first-frame pixel data falls
 through to the next candidate just like invalid headers.
 The GUI shows a default cover until a real cover is ready or when none is found.
-MPRIS uses the bundled application icon as its fallback. Directory discovery is
+GUI defaults, the About logo, desktop/tray icons and the MPRIS fallback share the
+same bundled SVG. MPRIS publishes its exported file URL. Directory discovery is
 cached, not watched for edits; moving a track retries it, otherwise restart Rivu
 to reliably rediscover changed directory covers. Encoded-file and decoded-image
 limits are configured separately in

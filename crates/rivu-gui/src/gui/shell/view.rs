@@ -604,12 +604,6 @@ impl Render for WindowView {
                     }));
                 }
                 KeyboardSurface::Dialog(DialogSurface::About) => {
-                    static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
-                        Arc::new(Image::from_bytes(
-                            ImageFormat::Png,
-                            rivu_presentation::DEFAULT_IMAGE.to_vec(),
-                        ))
-                    });
                     let build_info = *cx.global::<crate::BuildInfo>();
                     let built =
                         chrono::DateTime::<chrono::Utc>::from_timestamp(build_info.timestamp, 0)
@@ -635,7 +629,9 @@ impl Render for WindowView {
                                         cx.notify();
                                     }))
                                     .child(
-                                        img(Arc::clone(&LOGO))
+                                        self.default_artwork
+                                            .read(cx)
+                                            .image(theme, window.rem_size() * 9.5, window)
                                             .w(rems(9.5))
                                             .h(rems(9.5))
                                             .flex_shrink_0(),

@@ -7,4 +7,4 @@ pub mod time;
 pub mod track;
 
 /// Application icon and fallback artwork shared by presentation owners.
-pub static DEFAULT_IMAGE: &[u8] = include_bytes!("../data/icons/rivu.png");
+pub static DEFAULT_ARTWORK_SVG: &[u8] = include_bytes!("../data/icons/rivu.svg");

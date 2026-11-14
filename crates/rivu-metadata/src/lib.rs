@@ -6,6 +6,9 @@ pub mod artwork;
 mod writer;
 mod xattrs;
 
+#[cfg(any(test, feature = "test-support"))]
+mod fixtures;
+
 #[cfg(test)]
 mod tests;
 
