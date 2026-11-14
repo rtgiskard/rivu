@@ -167,6 +167,8 @@ A supported database conversion follows this protocol; configuration stays read-
 . Create a unique SQLite backup, close it, and publish its final `.bak` name
   without replacement before permitting a write.
 . Apply the change, its validation, and authoritative markers in one transaction.
+. After commit, run `VACUUM`, `PRAGMA optimize`, and a truncating WAL checkpoint
+  once for the complete upgrade. Check and already-current databases skip this step.
 . Report the outcome and actual backup paths. Do not start the application,
   rewrite configuration, or delete backups.
 
@@ -196,6 +198,10 @@ Preflight or backup failure permits no database mutation; transaction failure ro
 back. Backup files and partial evidence are retained, never automatically restored
 or replaced. For an uncertain commit, inspect persisted version and structure
 before retrying: reentry follows persisted state, not a step journal.
+
+Optimization failure after commit does not roll back the migration. The report
+retains the committed status and backup; inspect the error before retrying
+maintenance. Re-running migration on the now-current database does not optimize it.
 
 Errors report targets, backups and known completed changes; failure does not imply
 nothing changed. Manual restoration requires choosing the appropriate backup with

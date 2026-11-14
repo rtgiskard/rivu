@@ -220,7 +220,6 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
                 }
                 track_tags::apply(transaction)
             })?;
-            report.needs_changes = false;
             report.resources.push(format!(
                 "Database {}: migrated to schema {}; effective tags and catalog order preserved",
                 plan.path.display(),
@@ -339,9 +338,25 @@ fn apply_plan(
         .commit()
         .context("Committing database migration")?;
     report.database_status = "database migration committed";
+    report.needs_changes = false;
     tracing::info!(
         elapsed = ?started.elapsed(),
         "Database transaction committed"
+    );
+    // Run once after the entire upgrade commits, on the existing writer. These
+    // operations cannot share the migration transaction or undo its commit.
+    optimize_migrated_database(&writer).context(
+        "Database migration already committed; post-migration optimization failed; the backup is retained and no automatic restore was attempted",
+    )?;
+    Ok(())
+}
+
+fn optimize_migrated_database(writer: &Connection) -> Result<()> {
+    writer.execute_batch("VACUUM; PRAGMA optimize;")?;
+    let busy: i64 = writer.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    ensure!(
+        busy == 0,
+        "Database checkpoint blocked by another reader; retry optimization after closing it"
     );
     Ok(())
 }

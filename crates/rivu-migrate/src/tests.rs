@@ -1021,6 +1021,145 @@ fn schema_four_tag_cutover_preserves_effective_empty_values_sequences_and_audio(
     assert!(execute(&options, Mode::Apply).unwrap().backups.is_empty());
 }
 
+fn leave_deleted_track_pages(conn: &Connection) -> (i64, i64) {
+    conn.execute_batch(
+        "WITH RECURSIVE ids(id) AS (
+             VALUES(10000) UNION ALL SELECT id+1 FROM ids WHERE id<10511
+         )
+         INSERT INTO tracks(id,path,codec)
+             SELECT id,printf('/deleted/%d.flac',id),printf('%04096d',id) FROM ids;
+         DELETE FROM tracks WHERE id>=10000;",
+    )
+    .unwrap();
+    let pages = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap();
+    let free = conn
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .unwrap();
+    assert!(free > 0);
+    (pages, free)
+}
+
+#[test]
+fn real_migrations_reclaim_deleted_pages_collect_statistics_and_truncate_wal() {
+    for source_version in [2, 4] {
+        let (_directory, options) = version_two_fixture();
+        let path = options.data_dir.join("library.db");
+        let conn = Connection::open(&path).unwrap();
+        if source_version == 4 {
+            catalog_order::apply(&conn).unwrap();
+        }
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let (pages_before, free_before) = leave_deleted_track_pages(&conn);
+        let effective_tracks = effective_track_snapshot(&conn);
+        let checked = execute(&options, Mode::Check).unwrap();
+        assert!(checked.needs_changes);
+        assert!(checked.backups.is_empty());
+        assert_eq!(format_version(&conn), source_version);
+        assert_eq!(
+            conn.query_row("PRAGMA freelist_count", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            free_before
+        );
+
+        let applied = execute(&options, Mode::Apply).unwrap();
+        assert_eq!(applied.database_status, "database migration committed");
+        assert!(!applied.needs_changes);
+        assert_eq!(applied.backups.len(), 1);
+        assert_eq!(applied.backups[0].status, BackupStatus::Complete);
+        assert_eq!(format_version(&conn), 6);
+        assert_eq!(track_snapshot(&conn), effective_tracks);
+        assert_eq!(
+            conn.query_row("PRAGMA freelist_count", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let pages_after: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        assert!(pages_after < pages_before);
+        let statistics: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_stat1 WHERE tbl='tracks' AND idx IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(statistics > 0);
+        assert_eq!(
+            fs::metadata(path.with_file_name("library.db-wal"))
+                .unwrap()
+                .len(),
+            0
+        );
+        let tracks_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='tracks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for column in ["title", "artist", "album"] {
+            assert!(tracks_sql.contains(&format!("\"{column}\" TEXT NOT NULL DEFAULT ''")));
+        }
+        target_schema::validate(&conn).unwrap();
+    }
+}
+
+#[test]
+fn current_schema_check_and_apply_do_not_optimize_deleted_pages() {
+    let (_directory, options) = fixture();
+    let path = options.data_dir.join("library.db");
+    let conn = Connection::open(&path).unwrap();
+    leave_deleted_track_pages(&conn);
+    drop(conn);
+    let before = fs::read(&path).unwrap();
+    for mode in [Mode::Check, Mode::Apply] {
+        let report = execute(&options, mode).unwrap();
+        assert!(!report.needs_changes);
+        assert!(report.backups.is_empty());
+        assert_eq!(report.database_status, "unchanged");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn blocked_post_migration_checkpoint_reports_committed_state_and_keeps_backup() {
+    let (_directory, options) = version_two_fixture();
+    let path = options.data_dir.join("library.db");
+    let reader = Connection::open(&path).unwrap();
+    reader.pragma_update(None, "journal_mode", "WAL").unwrap();
+    reader.execute_batch("BEGIN;").unwrap();
+    assert_eq!(format_version(&reader), 2);
+    let mut report = Report::default();
+    let error = apply_database_change(&options, &mut report, |transaction| {
+        transaction.busy_timeout(std::time::Duration::ZERO)?;
+        catalog_order::apply(transaction)?;
+        track_tags::apply(transaction)
+    })
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("migration already committed"), "{message}");
+    assert!(
+        message.contains("checkpoint blocked by another reader"),
+        "{message}"
+    );
+    assert_eq!(report.database_status, "database migration committed");
+    assert!(!report.needs_changes);
+    assert_eq!(report.backups.len(), 1);
+    assert_eq!(report.backups[0].status, BackupStatus::Complete);
+    let backup = Connection::open(&report.backups[0].path).unwrap();
+    assert_eq!(format_version(&backup), 2);
+    target_schema::validate_tag_source(&backup).unwrap();
+    let committed = Connection::open(&path).unwrap();
+    assert_eq!(format_version(&committed), 6);
+    target_schema::validate(&committed).unwrap();
+    // The old reader still sees its snapshot; no automatic backup restore occurs.
+    assert_eq!(format_version(&reader), 2);
+    reader.execute_batch("ROLLBACK;").unwrap();
+}
+
 #[test]
 fn target_schema_keeps_quoted_identifier_spelling_significant() {
     let conn = Connection::open_in_memory().unwrap();
