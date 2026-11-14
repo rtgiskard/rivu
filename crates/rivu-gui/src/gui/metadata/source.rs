@@ -421,7 +421,17 @@ impl Metadata {
         let reason = self.source_reason();
         let supported = reason.is_none();
         let enabled = self.source_menu_enabled();
-        let mut menu = column().w(gpui::rems(18.));
+        // Only action rows contribute to the menu's intrinsic width.
+        let notice = |text| {
+            div().w_0().min_w_full().child(
+                caption(theme, text)
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .whitespace_normal(),
+            )
+        };
+        let mut menu = column();
         if self.source_menu.encodings {
             menu = menu.child(rivu_ui::menu_back(
                 "metadata-tags-back",
@@ -496,15 +506,10 @@ impl Metadata {
                 menu = menu.child(disabled_control(theme, control, !allowed));
             }
             if let Some(reason) = reason {
-                menu = menu.child(caption(theme, reason).px_2().py_1().whitespace_normal());
+                menu = menu.child(notice(reason));
             }
             if self.metadata.source.sync_only {
-                menu = menu.child(
-                    caption(theme, self.tr("gl-tags-sync-only"))
-                        .px_2()
-                        .py_1()
-                        .whitespace_normal(),
-                );
+                menu = menu.child(notice(self.tr("gl-tags-sync-only")));
             }
         }
         let surface = self
