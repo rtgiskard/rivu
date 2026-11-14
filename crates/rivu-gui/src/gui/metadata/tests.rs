@@ -33,6 +33,24 @@ pub(super) fn track(id: i64, title: &str) -> Track {
     }
 }
 
+#[test]
+fn source_support_accepts_decoder_names_and_profiles() {
+    for (extension, codec, supported) in [
+        ("wav", "ADPCM_MS", true),
+        ("wav", "ADPCM_IMA_WAV", true),
+        ("aiff", "ADPCM_IMA_QT", true),
+        ("aac", "aac (LC)", true),
+        ("m4a", "aac (HE-AAC)", true),
+        ("flac", "dts (DTS-HD MA)", false),
+        ("m4a", "opus", false),
+    ] {
+        let mut target = track(1, "track");
+        target.path = format!("/track.{extension}").into();
+        target.codec = codec.into();
+        assert_eq!(source::source_support(Some(&target)).is_ok(), supported);
+    }
+}
+
 #[gpui::test]
 fn decoder_choice_does_not_close_or_submit_while_source_is_busy(cx: &mut TestAppContext) {
     use rivu_format::tags::TagEncoding;

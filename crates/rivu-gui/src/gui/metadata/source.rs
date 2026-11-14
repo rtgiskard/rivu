@@ -213,21 +213,25 @@ pub(super) fn source_support(track: Option<&Track>) -> Result<(), SupportReason>
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     let codec = track.codec.to_ascii_lowercase();
+    let codec = codec
+        .split_once(" (")
+        .map_or(codec.as_str(), |(name, _)| name);
     let supported = match extension.to_ascii_lowercase().as_str() {
-        "mp3" | "mp2" | "mp1" => matches!(codec.as_str(), "mp3" | "mp2" | "mp1" | "mpeg"),
-        "aac" => matches!(codec.as_str(), "aac"),
+        "mp3" | "mp2" | "mp1" => matches!(codec, "mp3" | "mp2" | "mp1" | "mpeg"),
+        "aac" => matches!(codec, "aac"),
         "wav" | "wave" | "aif" | "aiff" | "aifc" => {
             codec.starts_with("pcm")
-                || matches!(codec.as_str(), "wav" | "aiff" | "alaw" | "mulaw" | "adpcm")
+                || codec.starts_with("adpcm_")
+                || matches!(codec, "wav" | "aiff" | "alaw" | "mulaw" | "adpcm")
         }
         "flac" => codec == "flac",
-        "ogg" | "oga" => matches!(codec.as_str(), "vorbis" | "opus" | "speex" | "flac"),
+        "ogg" | "oga" => matches!(codec, "vorbis" | "opus" | "speex" | "flac"),
         "opus" => codec == "opus",
         "spx" => codec == "speex",
-        "m4a" | "m4b" | "mp4" => matches!(codec.as_str(), "aac" | "alac"),
-        "ape" => matches!(codec.as_str(), "ape" | "monkey's audio"),
-        "wv" => matches!(codec.as_str(), "wavpack" | "wv"),
-        "mpc" | "mpp" | "mp+" => matches!(codec.as_str(), "mpc" | "musepack" | "mpc7" | "mpc8"),
+        "m4a" | "m4b" | "mp4" => matches!(codec, "aac" | "alac"),
+        "ape" => matches!(codec, "ape" | "monkey's audio"),
+        "wv" => matches!(codec, "wavpack" | "wv"),
+        "mpc" | "mpp" | "mp+" => matches!(codec, "mpc" | "musepack" | "mpc7" | "mpc8"),
         _ => false,
     };
     if supported {
