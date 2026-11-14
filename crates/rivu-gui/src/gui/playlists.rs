@@ -1176,7 +1176,7 @@ impl Playlists {
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| this.request_playlist_selection(cx));
         });
-        let matched = self.browser.playlists().summaries().rows.total();
+        let matched = self.browser.playlists().summaries().rows.display_total();
         let total = self.state.library.playlist_total;
         self.playlist_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
@@ -1185,8 +1185,14 @@ impl Playlists {
                 search.clear_counts(cx);
             }
         });
-        let matched = self.browser.playlists().entries().rows.total();
-        let total = self.browser.playlists().selected_total();
+        let entries = self.browser.playlists().entries();
+        let matched = entries.rows.display_total();
+        // Unfiltered entries of the selected playlist carry the same count while
+        // the catalog summary refreshes.
+        let selected = self.browser.playlists().selected();
+        let total = self.browser.playlists().selected_total().or_else(|| {
+            matched.filter(|_| entries.query.is_none() && entries.playlist_id == selected)
+        });
         self.playlist_entries_search.update(cx, |search, cx| {
             if let (Some(matched), Some(total)) = (matched, total) {
                 set_search_counts(search, matched, total, &self.i18n, cx);
@@ -2088,7 +2094,7 @@ impl Playlists {
                 list_panel_header(
                     theme,
                     self.tr("shell-panel-playlists"),
-                    if let Some(total) = self.browser.playlists().summaries().rows.total() {
+                    if let Some(total) = self.browser.playlists().summaries().rows.display_total() {
                         self.i18n
                             .format(
                                 "gl-playlist-count",

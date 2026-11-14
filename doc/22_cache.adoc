@@ -262,7 +262,8 @@ directly, without an empty intermediate frame. Expiry exposes the normal loading
 or failure surface; an identical reply after expiry must restore that surface.
 Failures or rejected authority may discard the affected old presentation sooner.
 Retained rows never authorize positional actions or commands requiring current
-facts. Inline edit drafts have their own lifetime, not this display deadline.
+facts. Header and match counts follow the retained rows and leave with them.
+Inline edit drafts have their own lifetime, not this display deadline.
 
 The policy covers Library tree rows, Album cards and member rows, Queue and
 Playlist pages, and same-object query-backed details, duplicate review and library

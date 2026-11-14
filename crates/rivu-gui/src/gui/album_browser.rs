@@ -403,14 +403,7 @@ impl AlbumBrowser {
     }
 
     fn apply_data_change(&mut self, change: DataChange, cx: &mut App) {
-        if change.albums && self.model.albums().total().is_none() {
-            self.album_search
-                .update(cx, |search, cx| search.clear_counts(cx));
-        }
-        if change.tracks && self.model.tracks().total().is_none() {
-            self.tracks_search
-                .update(cx, |search, cx| search.clear_counts(cx));
-        }
+        self.clear_stale_counts(change, cx);
         if (self.model.selected().is_none() && change.albums)
             || (self.model.selected().is_some() && change.tracks)
         {
@@ -418,10 +411,23 @@ impl AlbumBrowser {
         }
     }
 
+    /// Counts stay with retained rows and disappear only with them.
+    fn clear_stale_counts(&mut self, change: DataChange, cx: &mut App) {
+        if change.albums && self.model.albums().display_total().is_none() {
+            self.album_search
+                .update(cx, |search, cx| search.clear_counts(cx));
+        }
+        if change.tracks && self.model.tracks().display_total().is_none() {
+            self.tracks_search
+                .update(cx, |search, cx| search.clear_counts(cx));
+        }
+    }
+
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         self.refresh_wake
             .schedule(self.model.refresh_deadline(), cx, |this, now, cx| {
                 let expired = this.model.expire_refresh(now);
+                this.clear_stale_counts(expired, cx);
                 if expired.albums {
                     this.sync_covers(cx);
                 }
@@ -547,8 +553,9 @@ impl AlbumBrowser {
         // Equal payloads still restore row controls that were disabled while stale.
         let changed =
             completion.changed || completion.data.any() || completion.published != Published::None;
+        // Failure or rejection may also withdraw retained cards and their cover demand.
         let albums_changed = completion.data.albums
-            || (completion.published == Published::Albums && completion.changed);
+            || (completion.changed && completion.published != Published::Tracks);
         self.apply_data_change(completion.data, cx);
         if let Some((matches, total)) = completion.counts {
             let search = match completion.published {
@@ -1044,7 +1051,7 @@ impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
-        let total = self.model.total();
+        let total = self.model.display_total();
         let header;
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();

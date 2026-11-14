@@ -44,6 +44,13 @@ impl<T> PagedRows<T> {
     pub(super) fn total(&self) -> Option<usize> {
         self.total
     }
+    /// Display-only: retained geometry while stale rows remain visible; never authorizes.
+    pub(super) fn display_total(&self) -> Option<usize> {
+        self.total.or_else(|| {
+            (!self.retained.is_empty() && self.retention.visible(Instant::now()))
+                .then_some(self.layout_len)
+        })
+    }
     pub(super) fn len(&self) -> usize {
         self.layout_len
     }
@@ -395,6 +402,11 @@ mod tests {
         assert_eq!(rows.iter().next(), None);
         assert_eq!(rows.position(|row| *row == 3), None);
         assert_eq!(rows.total(), None);
+        assert_eq!(
+            rows.display_total(),
+            Some(100),
+            "count stays with retained rows"
+        );
         assert_eq!(rows.demand(0..30, 20), Some(0));
         rows.begin(0, 20);
         rows.accept(Page {
@@ -409,6 +421,11 @@ mod tests {
         assert_eq!(rows.demand(60..70, 20), Some(60));
         assert_eq!(rows.display(3), None);
         assert_eq!(rows.display(23), None);
+        assert_eq!(
+            rows.display_total(),
+            None,
+            "count leaves with the last retained row"
+        );
     }
 
     #[test]

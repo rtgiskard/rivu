@@ -10,7 +10,7 @@ use super::super::paged::PagedRows;
 
 const ALBUM_PAGE: usize = 24;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct DataChange {
     pub albums: bool,
     pub tracks: bool,
@@ -175,6 +175,17 @@ impl AlbumModel {
         total
             .filter(|(revision, _)| *revision == self.revisions.album)
             .map(|(_, total)| total)
+    }
+
+    /// Display-only: the previous count while the active listing still shows retained rows.
+    pub fn display_total(&self) -> Option<usize> {
+        let (cached, pages) = if self.selected.is_some() {
+            (self.tracks_total, self.tracks.display_total())
+        } else {
+            (self.albums_total, self.albums.display_total())
+        };
+        self.total()
+            .or_else(|| pages.and(cached.map(|(_, total)| total)))
     }
 
     pub fn sync(

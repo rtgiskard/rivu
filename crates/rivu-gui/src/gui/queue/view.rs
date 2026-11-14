@@ -203,7 +203,7 @@ impl Queue {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let matched = self.model.rows.total();
+        let matched = self.model.rows.display_total();
         let total = self.state.queue.total;
         self.queue_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
