@@ -34,12 +34,13 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 
 == Pinned renderer maintenance
 
-`Cargo.toml` overrides `gpui` and `gpui_wgpu` with the same fixed commit
-`a7fcc341793ee115ea07565c1b6e5e9d5d8ba364` from
-https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. Both crates are maintained
+`Cargo.toml` overrides `gpui`, `gpui_wgpu`, `gpui_linux` and `gpui_platform`
+with the same `v0.2.2` tag from
+https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. `Cargo.lock` records the
+resolved commit `c87defed1058ac1e3986e99070c2e104b227f87f`. These crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
 https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
-the remaining GPUI platform crates retain that pinned dependency baseline.
+the remaining GPUI support and non-Linux platform crates retain that pinned baseline.
 This is a maintained capability patch, not a framework replacement or upgrade.
 The layout engine follows the Taffy 0.15 update in
 https://github.com/zed-industries/zed/commit/b488c4e81451f2042d5f47d93f6158732ac28212[Zed revision b488c4e81451f2042d5f47d93f6158732ac28212],
@@ -67,8 +68,8 @@ Linux/Vulkan runtime evidence does not establish Metal or browser support.
 The extra fields also increase shared vertex/sprite record sizes, so this
 patch is not a universal rendering or memory improvement.
 
-Maintain framework and renderer changes in `gpui-wgpu`, then update both Rivu
-patch revisions together. When updating the upstream baseline, compare these
+Maintain framework, renderer and Linux platform changes in `gpui-wgpu`, then update
+all four Rivu patch tags together. When updating the upstream baseline, compare these
 extensions against it, keep Rust and shader record layouts synchronized, and
 preserve transformed image clipping, palette Path mapping, atlas lifetime and
 drawing order. Revalidate ordinary untransformed images and plain paths as well
@@ -87,7 +88,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout a7fcc341793ee115ea07565c1b6e5e9d5d8ba364
+git checkout v0.2.2
 make test
 ----
 
@@ -149,11 +150,11 @@ inherited opacity independently of shared content. Rectangle segmentation and
 bottom-to-top palette coordinates retain their initial behavior. Palette samples
 are straight-alpha sRGB values, interpolated in sRGB numerical space.
 
-The interface and retirement contracts are tied to the paired `Cargo.toml` patches
-at `a7fcc341793ee115ea07565c1b6e5e9d5d8ba364`:
-https://github.com/rtgiskard/gpui-wgpu/blob/a7fcc341793ee115ea07565c1b6e5e9d5d8ba364/crates/gpui/src/gpu.rs[`gpui::gpu`] and
-https://github.com/rtgiskard/gpui-wgpu/blob/a7fcc341793ee115ea07565c1b6e5e9d5d8ba364/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
-Update both revisions together and check these contracts; historical timings do
+The interface and retirement contracts are tied to the coordinated `Cargo.toml`
+patches at `v0.2.2`:
+https://github.com/rtgiskard/gpui-wgpu/blob/v0.2.2/crates/gpui/src/gpu.rs[`gpui::gpu`] and
+https://github.com/rtgiskard/gpui-wgpu/blob/v0.2.2/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
+Update all four patch tags together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
 Attached-window state and import belong only to the
@@ -491,9 +492,9 @@ the fixed encoders and publication constructors remain the available path.
 === Scope
 
 GPUI owns drawing/state/scene support; GPUI-WGPU owns device execution and
-reclamation. Rivu owns consumers and application integration tests. Keep both
-renderer patch revisions aligned, the pinned `gpui_linux` dependency, and the
-existing `GPUI Scene -> PlatformWindow::draw(&Scene) -> WgpuRenderer` transport.
+reclamation. Rivu owns consumers and application integration tests. Keep all four
+GPUI patch tags aligned and preserve the existing
+`GPUI Scene -> PlatformWindow::draw(&Scene) -> WgpuRenderer` transport.
 Wayland/X11 already forward the complete scene. Do not expose device/queue
 handles, change presentation or callbacks, replace layout/text, or move audio
 analysis/simulation into the renderer. Any concrete boundary limitation needs

@@ -17,22 +17,24 @@ The locked graph retains the following RustSec maintenance advisories:
 
 * `paste` 1.0.15, through Lofty and platform-specific Metal:
   https://rustsec.org/advisories/RUSTSEC-2024-0436[RUSTSEC-2024-0436]
-* `rustybuzz` 0.20.1, through GPUI's SVG stack:
-  https://rustsec.org/advisories/RUSTSEC-2026-0206[RUSTSEC-2026-0206]
-* `ttf-parser` 0.25.1, through GPUI's font and SVG stacks:
+* `ttf-parser` 0.25.1, through GPUI's font stack:
   https://rustsec.org/advisories/RUSTSEC-2026-0192[RUSTSEC-2026-0192]
 * `zbus_names` 4.3.5, `zvariant` 5.15.1 and `zvariant_derive` 5.15.1, through
-  GPUI's accessibility, portal and secret-service dependencies:
+  GPUI's AccessKit/AT-SPI accessibility dependencies:
   https://rustsec.org/advisories/RUSTSEC-2026-0371[RUSTSEC-2026-0371],
   https://rustsec.org/advisories/RUSTSEC-2026-0370[RUSTSEC-2026-0370] and
   https://rustsec.org/advisories/RUSTSEC-2026-0372[RUSTSEC-2026-0372]
 
 These are unmaintained-package notices, not evidence of an exploitable defect.
-Rivu's direct D-Bus consumers use zbus 6; the old standalone crates remain in
-upstream consumers. Removing them requires compatible upstream migrations rather
+Rivu's direct D-Bus consumers and GPUI's portal and secret-service consumers use
+zbus 6; the old standalone crates remain in the accessibility stack. Removing
+them requires compatible upstream migrations rather
 than forcing a semver-incompatible lockfile substitution. The findings use a
 cached advisory database; they do not establish a current, exhaustive security
 assessment or imply that every platform-specific chain is built on Linux.
+
+The GPUI `v0.2.2` migration removes `rustybuzz` 0.20.1 from the locked graph
+by updating the SVG stack to resvg/usvg 0.50 with `harfrust`.
 
 
 [[pipewire-context-retention]]
