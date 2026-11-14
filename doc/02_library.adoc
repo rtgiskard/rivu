@@ -273,13 +273,13 @@ Track rows show duration, missing-file status, and playback state by library tra
 not queue occurrence. Missing artists use `-` on cards and the shared person symbol
 in track rows.
 
-Albums group tracks by exact effective album title and immediate parent directory.
-Blank titles, including empty overrides, form no album; those tracks remain in
+Albums group tracks by exact album title and immediate parent directory.
+Blank titles form no album; those tracks remain in
 Library and other collections. Titles retain spelling and whitespace. Same-name
 albums in different directories stay separate; disc subdirectories are not merged.
 Different artists within one group form a compilation labeled `Various artists`.
 Members sort by disc number, track number (unknown last), title, then library ID.
-Metadata overrides affect grouping.
+Metadata edits affect grouping.
 
 == Recent tracks
 
@@ -376,10 +376,10 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 [[database-edits]]
 === Database edits
 
-Title, artist, album, release-date, favorite, play-count, and decoder-hint edits in
-the library change Rivu's database only; they do not rewrite media files, tags, or CUE sheets.
-Rescans preserve matching IDs, overrides, favorites, decoder hints, counts, and
-last-played timestamps. `library remove` and `library clean-missing` atomically
+Library edits change the database only, not media files or CUE sheets.
+Title, artist, album, date and track/disc numbers have one stored value; rescans
+may replace them from source metadata. Matching IDs, favorites, decoder hints,
+counts and last-played timestamps are preserved. `library remove` and `library clean-missing` atomically
 remove records and their queue/playlist
 references, compacting positions without changing surviving occurrence identities
 or relative order. They never delete media files. Missing rows remain visible in
@@ -389,15 +389,9 @@ Failed writes leave saved data unchanged. A refresh error after a committed edit
 does not roll it back; older rows may remain visible until refresh succeeds.
 Repeating an already-saved edit is not a refresh retry.
 
-Title, artist, and album edits override only fields you change. An omitted CLI option or an
-unchanged Track details field keeps its current value and continues to follow
-rescanned metadata if it has no previous override. Concurrent edits to different
-fields preserve both changes; edits to the same field use the last applied value.
-Passing an empty string explicitly clears that field's displayed text.
-An explicitly supplied title, artist, or album records an override even when its
-value equals the current scanned metadata; that field then stays fixed across rescans.
-Release-date edits directly update the stored date without normalization;
-later metadata rescans may replace it from the source file.
+Omitted fields remain unchanged; an empty string clears a text field.
+Concurrent edits to different fields preserve both changes; edits to the same
+field use the last applied value.
 
 [source,sh]
 ----
@@ -411,11 +405,10 @@ rivu library clean-missing
 [[source-file-tags]]
 === Source-file tags
 
-`rivu library tags PATH` reads source tags without opening a player instance or
-loading its configuration. Supplying `--title`, `--artist`, or `--album` explicitly
-writes those fields to the source file. Omitted fields remain untouched; an empty
-string clears the selected field. This is distinct from `library edit ID`, which
-only records database overrides.
+`rivu library tags PATH` reads source tags offline, without loading configuration.
+Supplying `--title`, `--artist`, `--album`, `--release-date`, `--track-number` or
+`--disc-number` normalizes and writes the source file. Omitted fields retain
+their values; empty text or a zero number clears that field.
 
 [source,sh]
 ----
@@ -423,41 +416,26 @@ rivu --json library tags /path/to/track.flac
 rivu library tags /path/to/track.flac --title "New title" --artist "Artist"
 ----
 
-Source editing makes an independent original-file backup and reports its path.
-Unchanged edits neither rewrite the source nor create a backup. Replacement uses
-a verified same-directory temporary copy and checks that the source has not changed.
-Allow space for two complete files in addition to the source. Stop other writers
-first: the lock is advisory. Keep the backup until the result has been checked.
+Source editing uses a verified same-directory temporary copy and atomic replacement,
+preserving ownership, permissions and extended attributes. The temporary first uses
+a reflink/COW clone when available, otherwise a complete ordinary copy; see
+link:91_design_decisions.adoc#DEC-024[the save contract]. Symlinks and multiply
+linked files are rejected. No original-file backup is kept; allow space for one
+complete temporary copy and stop other writers first (the lock is advisory).
 
-Source-edit results distinguish `unchanged` and `replaced`; a replacement reports
-the independent `backup_path`. Failures report `before_replace`, including any
-retained backup. Inspect the source and reported original backup before retrying
-or rescanning; failure does not authorize replay. With `--json`, structured
-failures go to stderr and retain the outcome, source path and backup evidence.
-Neither source replacement nor backup publication requests a storage sync;
-successful completion does not promise survival of power or operating-system failure.
-See link:91_design_decisions.adoc#DEC-018[file publication policy].
+ID3 tags are normalized to v2.4 with UTF-8; WAV/AIFF use ID3, and FLAC/Ogg use
+Vorbis Comments. Convertible secondary values and artwork are merged before
+secondary tags are removed; unsupported native-only data may be lost.
+Dates retain year, month or full-date precision. Audio is not transcoded.
+GUI saves also update the library's full-file BLAKE3 fingerprint, size and modification
+time from the verified output; no rescan is needed for those facts.
 
-For tag inspection, edit results (including failures), and offline `library probe`,
-JSON `path` and `backup_path` values are strings when the path is valid UTF-8. Other Unix paths
-use `{"unix_bytes":[...]}` containing the complete original path bytes as integers
-from 0 to 255; consumers can reconstruct the path without character replacement.
-An absent optional backup remains `null`. This representation applies to the
-whole path, including non-UTF-8 parent directories.
+Results distinguish `unchanged` (already normalized) and `replaced`; failures report
+`before_replace`. JSON paths are strings for UTF-8 paths, otherwise
+`{"unix_bytes":[...]}` preserves the complete Unix path. No storage synchronization
+is requested; see link:91_design_decisions.adoc#DEC-018[file publication policy].
 
-Symlinks and multiply linked files are rejected. Replacement must preserve ownership,
-permissions, and extended attributes, including POSIX ACLs; inability to preserve
-them fails the edit. Native tag structures retain non-target fields and artwork.
-Upstream Lofty may normalize tag representations; parsing and encoding follow its
-allocation limits.
-ID3v2.2 edits requiring a version conversion are rejected. Clearing a field also
-fails if a secondary tag would make the old value reappear, rather than silently
-deleting that secondary tag.
-
-This offline command does not update the running library. Rescan the affected
-source afterward; matching IDs, user overrides, favorites, history, and list
-references remain intact. Existing overrides still take precedence over newly
-read source fields. Restoring a backup also requires a rescan.
+The offline command does not update the library; rescan afterward.
 
 Lofty supplies source tags and embedded artwork; containers outside its metadata
 coverage may still play but have no audio-backend tag fallback. Inspection
@@ -468,10 +446,9 @@ lost text cannot be reconstructed.
 
 === Inline Track details edits
 
-Hover Title, Artist, Album, Release date, or Play count for Edit and Copy. Edit
-selects the current value; Enter saves that field, while Escape or leaving the input cancels
-unsubmitted text. Unchanged values send no write. Empty text displays as `-` but
-starts empty in the editor; saving it clears the database field, not source tags.
+Hover Title, Artist, Album, Release date, Track number, Disc number or Play count
+for Edit and Copy. Enter saves that database field; Escape or leaving the input
+cancels unsubmitted text. Empty text clears a field; unknown values display as `—`.
 
 Play count accepts integers from `0` to `9223372036854775807`. Setting it does not
 change last-played time or reset the current playback's already-counted state;
@@ -489,6 +466,15 @@ Submitted saves can finish after cancellation or a selection change, but cannot
 replace a newer editor or another track's details. A refresh failure does not undo
 a saved edit; see <<database-edits,Database edits>>. Decoder hint saves immediately,
 independently of text edits, and applies on the next track open or full waveform request.
+
+The header menu loads file tags into the six displayed tag fields, synchronizes
+those fields to the database, or saves them to the source file and then the database.
+Loading alone changes neither store. Explicit legacy decoding applies only to
+Latin-1-labelled ID3 text; Unicode fields are preserved. Check the loaded text
+before saving. CUE subtracks do not support file-tag operations.
+
+File writes keep no backup. If the file is saved but database synchronization fails,
+retry database synchronization only; the UI blocks another file write until resolved.
 
 === Loading and unavailable records
 
@@ -689,7 +675,7 @@ to Settings without applying or discarding its draft; Tab stays within the revie
 manual relocation, including after rescanning. No audio files are deleted.
 
 Confirmation verifies the destination's current full-file hash, file identity,
-and source absence before an atomic database update. The old ID, overrides,
+and source absence before an atomic database update. The old ID, stored tags,
 favorite, history, and references survive at the destination; its redundant row
 is removed. Destinations with user state or references, active source/destination
 playback, changed files or database identities, and a reappearing source are
@@ -745,7 +731,7 @@ Full workflow and compatibility: link:26_migration.adoc[Database and configurati
 === Database operations
 
 Keep backups of `library.db` and its committed WAL contents: scanning media
-cannot reconstruct playlists, saved queue, favorites, metadata overrides,
+cannot reconstruct playlists, saved queue, favorites, database-only tag edits,
 decoder hints, or playback statistics. Audio files, `config.toml`, and
 `layout.json` are independent. Do not copy a running database's `.db` alone as
 a complete backup; stop all connections before making a file-level copy.

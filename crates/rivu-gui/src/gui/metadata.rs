@@ -1,10 +1,11 @@
 //! Compact track details with one cancellable inline editor per window.
 //! Each Enter submits only that field; decoder hint writes are independent.
-//! Selection epochs and edit serials prevent late work from touching a new editor.
+//! Selection epochs and edit serials reject late results; source tags are staged explicitly.
 
 mod artwork;
 mod read;
 pub(in crate::gui) mod session;
+mod source;
 
 #[cfg(test)]
 mod tests;
@@ -62,6 +63,7 @@ pub(in crate::gui) struct Metadata {
     hint_panel: Option<u64>,
     hint_bounds: HashMap<u64, Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>>,
     visible: bool,
+    source_menu: source::SourceMenu,
     preview_demand: bool,
     error: Option<String>,
     ui_font: Font,
@@ -95,6 +97,7 @@ impl Metadata {
             hint_panel: None,
             hint_bounds: HashMap::new(),
             visible: false,
+            source_menu: source::SourceMenu::new(cx),
             preview_demand: false,
             error: None,
             ui_font,
@@ -165,6 +168,7 @@ impl Metadata {
         } else {
             self.cancel_edit(cx);
             self.close_hint(cx);
+            self.source_menu.close();
             self.artwork_loader.retain_negative(None);
             self.artwork_view.replace(None, cx);
         }
@@ -190,6 +194,7 @@ impl Metadata {
     pub(in crate::gui) fn retain_artwork_consumers(&mut self, visible: &[u64]) {
         self.artwork_view.retain_consumers(visible);
         self.hint_bounds.retain(|panel, _| visible.contains(panel));
+        self.source_menu.retain(visible);
         if self
             .hint_panel
             .is_some_and(|panel| !visible.contains(&panel))
@@ -233,21 +238,19 @@ impl Metadata {
     }
 
     fn begin_edit(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
+        if field == Field::DecoderHint {
+            return;
+        }
         let Some(track) = self.metadata.track() else {
             return;
         };
         if self.metadata.saving(field) {
             return;
         }
-        let baseline = match field {
-            Field::Title => track.title.clone(),
-            Field::Artist => track.artist.clone(),
-            Field::Album => track.album.clone(),
-            Field::ReleaseDate => track.release_date.clone().unwrap_or_default(),
-            Field::PlayCount => track.play_count.to_string(),
-            Field::DecoderHint => return,
-        };
+        let baseline = self.metadata.source.field_text(field, track);
         self.cancel_edit(cx);
+        self.metadata.source.edited();
+        self.source_menu.close();
         self.error = None;
         self.edit_serial = self.edit_serial.wrapping_add(1);
         let serial = self.edit_serial;
@@ -266,7 +269,10 @@ impl Metadata {
             }
             match event {
                 InputEvent::Submit => this.submit_field(field, cx),
-                InputEvent::Changed { user: true, .. } => cx.notify(),
+                InputEvent::Changed { user: true, .. } => {
+                    this.metadata.source.edited();
+                    cx.notify();
+                }
                 _ => {}
             }
         });
@@ -305,14 +311,10 @@ impl Metadata {
         let Some(edit) = self.edit.as_ref().filter(|edit| edit.field == field) else {
             return;
         };
-        if self.metadata.saving(field) {
+        if self.metadata.saving(field) || self.metadata.source.busy() {
             return;
         }
         let text = edit.input.read(cx).text();
-        if text == edit.baseline {
-            self.cancel_edit(cx);
-            return;
-        }
         let serial = edit.serial;
         let value = match field {
             Field::Title => SavedValue::Title(text.to_owned()),
@@ -343,6 +345,7 @@ impl Metadata {
         if self.metadata.select(id) {
             self.cancel_edit(cx);
             self.close_hint(cx);
+            self.source_menu.close();
             self.error = None;
         }
         let query = Query::Track { track_id: id };
@@ -464,6 +467,7 @@ impl Metadata {
         self.metadata.clear_selection();
         self.cancel_edit(cx);
         self.close_hint(cx);
+        self.source_menu.close();
         self.error = None;
         self.sync_metadata_default(cx);
         self.sync_metadata_query();
@@ -477,6 +481,7 @@ impl Metadata {
         if self.metadata.editor_identity() != previous {
             self.cancel_edit(cx);
             self.close_hint(cx);
+            self.source_menu.close();
             self.error = None;
         }
     }
@@ -487,7 +492,11 @@ impl Metadata {
         serial: Option<u64>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.metadata.source.busy() || self.metadata.saving(value.field()) {
+            return false;
+        }
         let Some((token, command)) = self.metadata.begin_save(&value) else {
+            self.metadata.source.field_saved(value.field());
             return false;
         };
         let submitted = serial.and_then(|serial| {
@@ -527,6 +536,9 @@ impl Metadata {
             return;
         }
         if result.is_ok() {
+            if self.metadata.source.generation() == token.overlay_serial {
+                self.metadata.source.field_saved(token.field);
+            }
             if let Some((serial, text)) = submitted
                 && let Some(edit) = self.edit.as_mut().filter(|edit| edit.serial == serial)
             {
@@ -577,6 +589,9 @@ impl Metadata {
     }
 
     fn choose_hint(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
+        if self.metadata.source.busy() {
+            return;
+        }
         let hint = self.hint_choices.item(index).map(|item| item.value);
         self.close_hint(cx);
         if let Some(hint) = hint {
@@ -601,7 +616,9 @@ impl Metadata {
             DecoderHint::Native => self.tr("gl-native"),
             DecoderHint::Ffmpeg => "FFmpeg".into(),
         };
-        let enabled = self.metadata.editable() && !self.metadata.saving(Field::DecoderHint);
+        let enabled = self.metadata.editable()
+            && !self.metadata.source.busy()
+            && !self.metadata.saving(Field::DecoderHint);
         let identity = self.metadata.editor_identity();
         let bounds = self
             .hint_bounds
@@ -614,7 +631,10 @@ impl Metadata {
             move |this| (this.hint_panel == Some(panel)).then_some(&mut this.hint_choices),
             cx,
             move |this, _, cx| {
-                if !enabled || this.metadata.editor_identity() != identity {
+                if !enabled
+                    || this.metadata.source.busy()
+                    || this.metadata.editor_identity() != identity
+                {
                     return;
                 }
                 if this.hint_panel == Some(panel) {
@@ -748,14 +768,7 @@ impl Metadata {
     ) -> Div {
         let value: SharedString = self.metadata.track().map_or_else(
             || self.tr("gl-not-loaded"),
-            |track| match field {
-                Field::Title => track.title.clone().into(),
-                Field::Artist => track.artist.clone().into(),
-                Field::Album => track.album.clone().into(),
-                Field::ReleaseDate => track.release_date.clone().unwrap_or_default().into(),
-                Field::PlayCount => track.play_count.to_string().into(),
-                Field::DecoderHint => unreachable!(),
-            },
+            |track| self.metadata.source.field_text(field, track).into(),
         );
         let identity = self.metadata.editor_identity();
         if let Some(edit) = self.edit.as_ref().filter(|edit| edit.field == field) {
@@ -975,6 +988,7 @@ impl Metadata {
         });
         self.prepare_artwork(cx);
         let track = self.metadata.track();
+        let tag_numbers = track.map(|track| self.metadata.source.numbers(track));
         let id = track.map(|track| track.id);
         let favorite = track.is_some_and(|track| track.favorite);
         let editable = self.metadata.editable();
@@ -1201,24 +1215,16 @@ impl Metadata {
         let tags: [[(SharedString, SharedString); 2]; 1] = [[
             (
                 self.tr("gl-disc"),
-                track.map_or_else(
+                tag_numbers.map_or_else(
                     || placeholder.clone(),
-                    |track| {
-                        track
-                            .disc_number
-                            .map_or("-".into(), |value| value.to_string().into())
-                    },
+                    |(_, disc)| disc.map_or("-".into(), |value| value.to_string().into()),
                 ),
             ),
             (
                 self.tr("gl-track-number"),
-                track.map_or_else(
+                tag_numbers.map_or_else(
                     || placeholder.clone(),
-                    |track| {
-                        track
-                            .track_number
-                            .map_or("-".into(), |value| value.to_string().into())
-                    },
+                    |(number, _)| number.map_or("-".into(), |value| value.to_string().into()),
                 ),
             ),
         ]];
@@ -1266,6 +1272,9 @@ impl Metadata {
         let label_widths = [label_width; 2];
         let has_cue = cue.is_some();
         let decoder = self.decoder_view(panel_id, label_widths[1], window, cx);
+        let source_trigger = self.source_menu_trigger(panel_id, cx);
+        let source_menu = self.render_source_menu(panel_id, window, cx);
+        let source_status = self.source_status();
         let scroll = self
             .context
             .scroll
@@ -1331,8 +1340,12 @@ impl Metadata {
                                         }
                                     },
                                 ),
-                            ),
+                            )
+                            .child(source_trigger),
                     ))
+                    .when_some(source_status, |content, status| {
+                        content.child(caption(theme, status).whitespace_normal())
+                    })
                     .child(metadata_group(
                         theme,
                         self.tr("gl-file"),
@@ -1499,6 +1512,7 @@ impl Metadata {
             );
         panel_surface(("metadata-panel", panel_id))
             .child(details)
+            .children(source_menu)
             .into_any_element()
     }
 }

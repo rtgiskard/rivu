@@ -66,6 +66,12 @@ impl WindowView {
         let modifiers = modifiers(event);
         let plain = modifiers == KeyModifiers::default();
         let cancel = key == "escape" && plain;
+        if self.metadata.update(cx, |metadata, cx| {
+            metadata.source_menu_key(event, window, cx)
+        }) {
+            cx.stop_propagation();
+            return;
+        }
         if cancel && self.dismiss_input_composition(window, cx) {
             cx.stop_propagation();
             return;

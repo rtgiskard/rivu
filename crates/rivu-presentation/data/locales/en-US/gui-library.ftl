@@ -177,11 +177,36 @@ gl-ready = Ready
 gl-track-unavailable = Track unavailable
 
 gl-metadata-saving = Saving metadata…
-gl-metadata-edit-note = Enter saves to Rivu’s database; Escape or leaving cancels. File tags stay unchanged.
+gl-metadata-edit-note = Enter saves only this field to Rivu’s database; Escape or leaving cancels. File tags stay unchanged. Use the details menu for all six tag values.
 
 gl-copy-value = Copy value
 gl-edit-value = Edit value
 gl-play-count-invalid = Enter a whole number from 0 to 9223372036854775807.
+
+gl-tags-actions = Tag actions
+gl-tags-load = Load from file
+gl-tags-sync = Sync to database
+gl-tags-save = Save tags to file
+gl-tags-encoding-declared = Declared encoding (default)
+gl-tags-encoding-utf8 = UTF-8
+gl-tags-encoding-gb18030 = GB18030
+gl-tags-encoding-big5 = Big5
+gl-tags-encoding-shift-jis = Shift JIS
+gl-tags-encoding-euc-kr = EUC-KR
+gl-tags-encoding-windows-1252 = Windows-1252
+gl-tags-encoding-windows-1251 = Windows-1251
+gl-tags-unavailable = Load track details before reading or writing file tags.
+gl-tags-missing = The source file is marked missing. Database sync is still available.
+gl-tags-cue = File tag operations are unavailable for CUE tracks. Database sync affects only this track.
+gl-tags-unsupported = File tag operations are not enabled for this known container and codec. Database sync is still available.
+gl-tags-working = Working with tags…
+gl-tags-staged = File tags are staged; loading does not change the database. Enter saves one field, or use Sync to database for all six values.
+gl-tags-synced = All six tag values synced to the database. File tags are unchanged.
+gl-tags-saved = Tags saved to the file and synced to the database.
+gl-tags-sync-only = The file was already saved. Use Sync to database to retry without writing the file again.
+gl-tags-file-saved-db-failed = File saved, but database sync failed: { $error }. Staged values are retained; retry Sync to database only.
+gl-tags-failed = Tag operation failed: { $error }
+gl-tags-response-invalid = The tag operation returned no tag values.
 
 gl-file-path = Source path
 gl-track-kind = Type
@@ -417,7 +442,7 @@ gl-use-target = Use as destination
 
 gl-target-state-warning = Destination has user state/references: relocation into this row will be rejected, not merged
 
-gl-confirm-relocation-note = Confirm relocation? Preserve the old ID, favorite, overrides, play history and references at the selected destination. The destination row must have no user state/references. Rivu rehashes its full bytes and revalidates the database before commit. No audio files are deleted.
+gl-confirm-relocation-note = Confirm relocation? Preserve the old ID, favorite, decoder preference, play history and references at the selected destination. The destination row must have no user state/references. Rivu rehashes its full bytes and revalidates the database before commit. No audio files are deleted.
 
 gl-confirm-relocation = Confirm relocation and verify
 
@@ -480,7 +505,7 @@ gl-yes = Yes
 
 gl-no = No
 
-gl-member-user-state = Favorite: { $favorite } · Overrides: { $overrides } · Plays: { $plays } · Last played: { $last_played }
+gl-member-user-state = Favorite: { $favorite } · Decoder preference: { $decoder_hint } · Plays: { $plays } · Last played: { $last_played }
 
 gl-member-references = Playlist references: { $playlists } · Queue references: { $queue } · { $role }
 

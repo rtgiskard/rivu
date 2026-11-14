@@ -177,11 +177,36 @@ gl-ready = 就绪
 gl-track-unavailable = 曲目不可用
 
 gl-metadata-saving = 正在保存元数据…
-gl-metadata-edit-note = Enter 保存到数据库；Escape 或离开输入框取消。不改文件标签。
+gl-metadata-edit-note = Enter 仅将当前字段保存到 Rivu 数据库；Escape 或离开输入框取消。不改文件标签。六项标签的整体操作位于详情菜单。
 
 gl-copy-value = 复制值
 gl-edit-value = 编辑值
 gl-play-count-invalid = 请输入 0 至 9223372036854775807 之间的整数。
+
+gl-tags-actions = 标签操作
+gl-tags-load = 从文件加载
+gl-tags-sync = 同步到数据库
+gl-tags-save = 保存标签到文件
+gl-tags-encoding-declared = 声明的编码（默认）
+gl-tags-encoding-utf8 = UTF-8
+gl-tags-encoding-gb18030 = GB18030
+gl-tags-encoding-big5 = Big5
+gl-tags-encoding-shift-jis = Shift JIS
+gl-tags-encoding-euc-kr = EUC-KR
+gl-tags-encoding-windows-1252 = Windows-1252
+gl-tags-encoding-windows-1251 = Windows-1251
+gl-tags-unavailable = 加载曲目详情后才能读写文件标签。
+gl-tags-missing = 源文件已标记为缺失，仍可同步到数据库。
+gl-tags-cue = CUE 曲目不支持文件标签操作；同步到数据库仅影响当前曲目。
+gl-tags-unsupported = 当前已知容器与音频编码尚未启用文件标签操作，仍可同步到数据库。
+gl-tags-working = 正在处理标签…
+gl-tags-staged = 文件标签已暂存；加载操作不改动数据库。Enter 保存单个字段，或通过“同步到数据库”保存全部六项标签。
+gl-tags-synced = 六项标签已同步到数据库，文件标签未改动。
+gl-tags-saved = 标签已保存到文件并同步到数据库。
+gl-tags-sync-only = 文件已保存；请使用“同步到数据库”重试，避免再次写入文件。
+gl-tags-file-saved-db-failed = 文件已保存，但数据库同步失败：{ $error }。暂存值已保留，请仅重试“同步到数据库”。
+gl-tags-failed = 标签操作失败：{ $error }
+gl-tags-response-invalid = 标签操作未返回标签值。
 
 gl-file-path = 源路径
 gl-track-kind = 类型
@@ -375,7 +400,7 @@ gl-use-target = 用作目标文件
 
 gl-target-state-warning = 目标记录已有用户状态或引用，迁移将被拒绝，不会合并记录
 
-gl-confirm-relocation-note = 确认位置迁移？将在目标路径保留原 ID、收藏、自定义元数据、播放历史和引用。目标记录不能有用户状态或引用。Rivu 会重新计算完整文件哈希并在提交前再次验证数据库。不会删除音频文件。
+gl-confirm-relocation-note = 确认位置迁移？将在目标路径保留原 ID、收藏、解码偏好、播放历史和引用。目标记录不能有用户状态或引用。Rivu 会重新计算完整文件哈希并在提交前再次验证数据库。不会删除音频文件。
 
 gl-confirm-relocation = 确认迁移并验证
 
@@ -435,7 +460,7 @@ gl-yes = 是
 
 gl-no = 否
 
-gl-member-user-state = 收藏：{ $favorite } · 自定义元数据：{ $overrides } · 播放：{ $plays } 次 · 上次播放：{ $last_played }
+gl-member-user-state = 收藏：{ $favorite } · 解码偏好：{ $decoder_hint } · 播放：{ $plays } 次 · 上次播放：{ $last_played }
 
 gl-member-references = 播放列表引用：{ $playlists } · 队列引用：{ $queue } · { $role }
 

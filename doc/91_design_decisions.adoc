@@ -486,8 +486,8 @@ Status: implemented, 2026-11-09.
 
 Application-managed file writes do not call `fsync`, `fdatasync`, or their
 file/directory synchronization wrappers. This includes configuration, layouts,
-caches, exports, source-tag replacement and its original-file backup, and
-migration backups. Avoid explicit storage-flush waits; the operating system
+caches, exports, source-tag replacement and migration backups.
+Avoid explicit storage-flush waits; the operating system
 controls writeback. Retain required buffered flushes, format finalization,
 normal I/O error handling, source validation and atomic replacement or
 no-clobber publication.
@@ -569,6 +569,30 @@ at Core. Full client snapshots can overwrite unrelated concurrent controls;
 revision-gating them would retain a second write convention rather than express
 field-level intent. See link:21_ipc.adoc#configuration-mutations[the contract] and
 link:26_migration.adoc#settings-protocol-cutover[client upgrade requirements].
+
+[[DEC-024]]
+=== DEC-024: Explicit tag writes publish verified file facts
+
+Status: implemented, 2026-11-14.
+
+Keep one stored value per descriptive tag (database format 6); rescans may replace
+it. Loading file tags only stages display values. Database synchronization and
+file saving are explicit actions, guarded by the displayed database baseline.
+
+The metadata worker normalizes a same-directory temporary copy and verifies the
+requested fields. Core saves additionally hash its final bytes with BLAKE3 before
+atomic replacement and publish the verified tags, fingerprint, size and modification
+time; do not leave the old digest authoritative or require a rescan to obtain the
+new digest. Offline CLI edits do not compute an unused library fingerprint.
+Core's full-file hashing runs outside the Core/UI threads.
+The temporary copy first attempts a reflink/COW clone and falls back to ordinary
+copying if cloning fails. This preserves atomic replacement and final-byte hashing;
+filesystems without clone support still require a complete data copy.
+
+Keep no source-file backup. File replacement and database commit are separate
+boundaries: report physical success even if database synchronization fails, and
+retry database synchronization without rewriting the file. Offline edits do not
+open the library database. See link:02_library.adoc#source-file-tags[operation and limits].
 
 [[unapproved-candidates]]
 == Unapproved candidates

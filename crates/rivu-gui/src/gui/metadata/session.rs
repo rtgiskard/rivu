@@ -2,7 +2,9 @@
 //! Unsubmitted inline text belongs to the view, never to selection arbitration.
 //! Epochs reject late reads and acknowledgements after leaving and reopening a track.
 
+use super::source::{SourceAction, SourceTags, SourceToken, database_tags};
 use rivu_format::decoder_hint::DecoderHint;
+use rivu_format::tags::TagValues;
 use rivu_protocol::model::{Command, Track};
 use std::{collections::HashMap, sync::Arc};
 
@@ -105,7 +107,8 @@ pub(super) struct SaveToken {
     epoch: u64,
     request: u64,
     pub(super) track_id: i64,
-    field: Field,
+    pub(super) field: Field,
+    pub(super) overlay_serial: u64,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -133,7 +136,9 @@ pub(in crate::gui) struct MetadataSession {
     read_state: MetadataReadState,
     epoch: u64,
     request_serial: u64,
+    database_serial: u64,
     saves: HashMap<Field, SaveToken>,
+    pub(super) source: SourceTags,
 }
 
 impl MetadataSession {
@@ -174,11 +179,91 @@ impl MetadataSession {
         self.saves.contains_key(&field)
     }
 
+    pub(super) fn any_saving(&self) -> bool {
+        !self.saves.is_empty()
+    }
+
+    fn advance_database_serial(&mut self, next: Option<&Track>) {
+        let unchanged = match (self.track(), next) {
+            (Some(previous), Some(next)) => {
+                previous.title == next.title
+                    && previous.artist == next.artist
+                    && previous.album == next.album
+                    && previous.release_date == next.release_date
+                    && previous.track_number == next.track_number
+                    && previous.disc_number == next.disc_number
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            self.database_serial = self.database_serial.wrapping_add(1);
+        }
+    }
+
+    pub(super) fn begin_source(&mut self, action: SourceAction) -> Option<(SourceToken, Command)> {
+        if self.any_saving() {
+            return None;
+        }
+        let identity = self.editor_identity()?;
+        let track = self.track()?;
+        let track_id = track.id;
+        let command = match action {
+            SourceAction::Load(encoding) => Command::LoadSourceTags { track_id, encoding },
+            SourceAction::Sync | SourceAction::Save => {
+                let tags = self.source.values(track);
+                let expected = Box::new(database_tags(track));
+                match action {
+                    SourceAction::Sync => Command::SyncTrackTags {
+                        track_id,
+                        tags,
+                        expected,
+                    },
+                    SourceAction::Save => Command::SaveSourceTags {
+                        track_id,
+                        tags,
+                        expected,
+                    },
+                    SourceAction::Load(_) => unreachable!(),
+                }
+            }
+        };
+        let token = self.source.begin(identity, action, self.database_serial)?;
+        Some((token, command))
+    }
+
+    /// Rebase only the six tag fields, never playback bookkeeping or preferences.
+    pub(super) fn commit_tags(&mut self, token: SourceToken, tags: &TagValues) {
+        if self.database_serial != token.database_serial {
+            return;
+        }
+        if let MetadataAvailability::Present(track) = &mut self.availability {
+            if track.title == tags.title
+                && track.artist == tags.artist
+                && track.album == tags.album
+                && track.release_date == tags.release_date
+                && track.track_number == tags.track_number
+                && track.disc_number == tags.disc_number
+            {
+                return;
+            }
+            self.database_serial = self.database_serial.wrapping_add(1);
+            let track = Arc::make_mut(track);
+            track.title.clone_from(&tags.title);
+            track.artist.clone_from(&tags.artist);
+            track.album.clone_from(&tags.album);
+            track.release_date.clone_from(&tags.release_date);
+            track.track_number = tags.track_number;
+            track.disc_number = tags.disc_number;
+        }
+    }
+
     fn change_identity(&mut self, id: Option<i64>) {
         self.identity = id;
         self.epoch = self.epoch.wrapping_add(1);
         self.availability = MetadataAvailability::Unknown;
         self.saves.clear();
+        self.source = SourceTags::default();
         self.read_state = MetadataReadState::Idle;
     }
 
@@ -242,6 +327,7 @@ impl MetadataSession {
             return false;
         }
         self.read_state = MetadataReadState::Idle;
+        self.advance_database_serial(track.as_ref());
         self.availability = track.map_or(MetadataAvailability::Unavailable, |track| {
             MetadataAvailability::Present(Arc::new(track))
         });
@@ -260,6 +346,7 @@ impl MetadataSession {
         {
             return false;
         }
+        self.advance_database_serial(track);
         self.availability = track.map_or(MetadataAvailability::Unknown, |track| {
             MetadataAvailability::Present(Arc::new(track.clone()))
         });
@@ -269,7 +356,7 @@ impl MetadataSession {
     pub(super) fn begin_save(&mut self, value: &SavedValue) -> Option<(SaveToken, Command)> {
         let field = value.field();
         let track = self.track()?;
-        if self.saving(field) || !value.changed(track) {
+        if self.source.busy() || self.saving(field) || !value.changed(track) {
             return None;
         }
         let track_id = track.id;
@@ -279,6 +366,7 @@ impl MetadataSession {
             request: self.request_serial,
             track_id,
             field,
+            overlay_serial: self.source.generation(),
         };
         self.saves.insert(field, token);
         Some((token, value.command(track_id)))

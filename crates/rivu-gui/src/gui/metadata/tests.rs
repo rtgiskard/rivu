@@ -33,6 +33,34 @@ pub(super) fn track(id: i64, title: &str) -> Track {
     }
 }
 
+#[gpui::test]
+fn decoder_choice_does_not_close_or_submit_while_source_is_busy(cx: &mut TestAppContext) {
+    use rivu_format::tags::TagEncoding;
+
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.hint_panel = Some(1);
+            this.hint_choices
+                .open([ChoiceItem::new(DecoderHint::Native, "Native")], 0);
+            this.metadata
+                .begin_source(source::SourceAction::Load(TagEncoding::Declared))
+                .unwrap();
+            this.choose_hint(0, window, cx);
+            assert_eq!(this.hint_panel, Some(1));
+            assert!(!this.metadata.saving(Field::DecoderHint));
+            assert_eq!(
+                this.metadata.track().unwrap().decoder_hint,
+                DecoderHint::Auto
+            );
+        });
+    })
+    .unwrap();
+}
+
 fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<Metadata>) {
     cx.update(|cx| {
         crate::gui::appearance::theme::set_theme(rivu_presentation::theme::Theme::default(), cx);
@@ -230,9 +258,331 @@ fn ack(ok: bool) -> crate::frontend::CommandDelivery {
             relocation_id: None,
             processing_id: None,
             database_optimization: None,
+            source_tags: None,
+            source_file_saved: false,
         },
         observation: crate::frontend::CommandObservation::Refreshed,
     }
+}
+
+fn file_tags() -> rivu_format::tags::TagValues {
+    rivu_format::tags::TagValues {
+        title: "file title".into(),
+        artist: "file artist".into(),
+        album: "file album".into(),
+        release_date: Some("2026-11-14".into()),
+        track_number: Some(7),
+        disc_number: Some(2),
+    }
+}
+
+fn source_ack(ok: bool, file_saved: bool) -> crate::frontend::CommandDelivery {
+    let mut delivery = ack(ok);
+    delivery.ack.source_tags = Some(file_tags());
+    delivery.ack.source_file_saved = file_saved;
+    delivery
+}
+
+#[test]
+fn bulk_source_commands_include_six_staged_values_and_database_expectation() {
+    use source::{SourceAction, database_tags};
+    let mut session = MetadataSession::default();
+    let mut original = track(1, "database title");
+    original.play_count = 42;
+    original.favorite = true;
+    original.decoder_hint = DecoderHint::Native;
+    session.sync_playback(Some(&original));
+    session.source.stage(file_tags());
+    assert_eq!(session.track(), Some(&original));
+    for action in [SourceAction::Sync, SourceAction::Save] {
+        let (token, command) = session.begin_source(action).unwrap();
+        match command {
+            Command::SyncTrackTags {
+                track_id,
+                tags,
+                expected,
+            }
+            | Command::SaveSourceTags {
+                track_id,
+                tags,
+                expected,
+            } => {
+                assert_eq!(track_id, 1);
+                assert_eq!(tags, file_tags());
+                assert_eq!(*expected, database_tags(&original));
+                assert_ne!(*expected, tags);
+            }
+            other => panic!("unexpected tag command: {other:?}"),
+        }
+        assert!(session.begin_save(&SavedValue::PlayCount(43)).is_none());
+        assert_eq!(session.source.finish(token), Some(true));
+    }
+    let (save, _) = session
+        .begin_save(&SavedValue::Title("single field".into()))
+        .unwrap();
+    assert!(session.begin_source(SourceAction::Sync).is_none());
+    assert!(session.complete_save(save));
+    assert_eq!(session.track(), Some(&original));
+}
+
+#[test]
+fn source_capability_uses_container_and_codec_hints_without_file_access() {
+    let mut target = track(1, "supported");
+    target.path = "/does/not/exist/test.flac".into();
+    target.codec = "FLAC".into();
+    assert_eq!(source::source_support(Some(&target)), Ok(()));
+    target.codec = "dts".into();
+    assert_eq!(
+        source::source_support(Some(&target)),
+        Err(source::SupportReason::Unsupported)
+    );
+    target.codec = "flac".into();
+    target.missing = true;
+    assert_eq!(
+        source::source_support(Some(&target)),
+        Err(source::SupportReason::Missing)
+    );
+    assert_eq!(
+        source::source_support(None),
+        Err(source::SupportReason::Unavailable)
+    );
+    target.missing = false;
+    target.cue = Some(rivu_protocol::model::CueSegment {
+        sheet: "/does/not/exist/disc.cue".into(),
+        number: 1,
+        start_frame: 0,
+        end_frame: None,
+    });
+    assert_eq!(
+        source::source_support(Some(&target)),
+        Err(source::SupportReason::Cue)
+    );
+}
+
+#[gpui::test]
+fn file_load_stages_six_values_even_when_observation_is_unavailable(cx: &mut TestAppContext) {
+    use rivu_format::tags::TagEncoding;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let original = this.metadata.track().unwrap().clone();
+        let (token, command) = this
+            .metadata
+            .begin_source(source::SourceAction::Load(TagEncoding::Gb18030))
+            .unwrap();
+        assert!(matches!(
+            command,
+            Command::LoadSourceTags {
+                track_id: 1,
+                encoding: TagEncoding::Gb18030
+            }
+        ));
+        let mut delivery = source_ack(true, false);
+        delivery.observation =
+            crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
+        this.finish_source_action(token, delivery, cx);
+        assert_eq!(this.metadata.track(), Some(&original));
+        assert_eq!(this.metadata.source.values(&original), file_tags());
+        assert_eq!(
+            this.metadata.source.status,
+            Some(source::SourceStatus::Staged)
+        );
+        assert!(!this.metadata.any_saving());
+        assert!(!this.metadata.source.busy());
+        assert_eq!(this.error.as_deref(), Some("refresh unavailable"));
+    });
+}
+
+#[gpui::test]
+fn late_source_load_cannot_cross_selection_epoch_or_replace_newer_operation(
+    cx: &mut TestAppContext,
+) {
+    use rivu_format::tags::TagEncoding;
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let (old, _) = this
+            .metadata
+            .begin_source(SourceAction::Load(TagEncoding::Declared))
+            .unwrap();
+        artwork_selection(this, track(2, "other"), cx);
+        artwork_selection(this, track(1, "returned"), cx);
+        let (new, _) = this
+            .metadata
+            .begin_source(SourceAction::Load(TagEncoding::Utf8))
+            .unwrap();
+        this.finish_source_action(old, source_ack(true, false), cx);
+        assert!(this.metadata.source.busy());
+        assert_eq!(
+            this.metadata
+                .source
+                .values(this.metadata.track().unwrap())
+                .title,
+            "returned"
+        );
+        this.finish_source_action(new, source_ack(true, false), cx);
+        assert_eq!(
+            this.metadata.source.values(this.metadata.track().unwrap()),
+            file_tags()
+        );
+        let (latest, _) = this
+            .metadata
+            .begin_source(SourceAction::Load(TagEncoding::Big5))
+            .unwrap();
+        this.finish_source_action(new, source_ack(true, false), cx);
+        assert!(this.metadata.source.busy());
+        this.finish_source_action(latest, source_ack(false, false), cx);
+        assert!(!this.metadata.source.busy());
+    });
+}
+
+#[gpui::test]
+fn newer_inline_edit_rejects_pending_load_values(cx: &mut TestAppContext) {
+    use rivu_format::tags::TagEncoding;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            let (token, _) = this
+                .metadata
+                .begin_source(source::SourceAction::Load(TagEncoding::Declared))
+                .unwrap();
+            this.begin_edit(Field::Title, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("newer input", cx));
+            this.finish_source_action(token, source_ack(true, false), cx);
+            assert_eq!(
+                this.metadata
+                    .source
+                    .values(this.metadata.track().unwrap())
+                    .title,
+                "A"
+            );
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "newer input"
+            );
+            assert!(!this.metadata.source.busy());
+        });
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn successful_inline_save_releases_only_its_staged_field_after_refresh(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        this.metadata.source.stage(file_tags());
+        let (token, command) = this.metadata.begin_save(&SavedValue::Title("edited title".into())).unwrap();
+        assert!(matches!(&command, Command::EditTrack {
+            title: Some(title), artist: None, album: None, release_date: None, decoder_hint: None, ..
+        } if title == "edited title"));
+        this.finish_save(token, None, ack(true), cx);
+        let mut refreshed = track(1, "edited title");
+        refreshed.artist = "database artist changed".into();
+        refreshed.track_number = Some(99);
+        let read = this.metadata.begin_load(1);
+        assert!(this.metadata.accept_load(read, Some(refreshed)));
+        let mut expected = file_tags();
+        expected.title = "edited title".into();
+        assert_eq!(this.metadata.source.values(this.metadata.track().unwrap()), expected);
+        let (count, _) = this.metadata.begin_save(&SavedValue::PlayCount(4)).unwrap();
+        this.finish_save(count, None, ack(true), cx);
+        assert_eq!(this.metadata.source.values(this.metadata.track().unwrap()), expected);
+    });
+}
+
+#[gpui::test]
+fn physical_save_failure_retains_values_and_only_database_sync_can_retry(cx: &mut TestAppContext) {
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let original = this.metadata.track().unwrap().clone();
+        this.metadata.source.stage(file_tags());
+        let (token, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
+        let mut delivery = source_ack(false, true);
+        delivery.observation = crate::frontend::CommandObservation::Unavailable("observation also failed".into());
+        this.finish_source_action(token, delivery, cx);
+        assert_eq!(this.metadata.track(), Some(&original));
+        assert_eq!(this.metadata.source.values(&original), file_tags());
+        assert!(this.metadata.source.sync_only);
+        assert!(matches!(&this.metadata.source.status, Some(source::SourceStatus::FileSavedDatabaseFailed(error)) if error == "save failed"));
+        assert!(this.metadata.begin_source(SourceAction::Save).is_none());
+        let (retry, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+        assert!(matches!(command, Command::SyncTrackTags { tags, expected, .. } if tags == file_tags() && *expected == source::database_tags(&original)));
+        this.finish_source_action(retry, source_ack(true, false), cx);
+        assert!(!this.metadata.source.sync_only);
+        assert_eq!(source::database_tags(this.metadata.track().unwrap()), file_tags());
+        assert_eq!(this.metadata.source.status, Some(source::SourceStatus::Synced));
+    });
+}
+
+#[gpui::test]
+fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAppContext) {
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let mut original = track(1, "database title");
+        original.favorite = true;
+        original.play_count = 37;
+        original.decoder_hint = DecoderHint::Native;
+        artwork_selection(this, original, cx);
+        let (token, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
+        let mut delivery = source_ack(true, true);
+        delivery.observation =
+            crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
+        this.finish_source_action(token, delivery, cx);
+        let saved = this.metadata.track().unwrap();
+        assert_eq!(source::database_tags(saved), file_tags());
+        assert!(saved.favorite);
+        assert_eq!(saved.play_count, 37);
+        assert_eq!(saved.decoder_hint, DecoderHint::Native);
+        assert_eq!(
+            this.metadata.source.status,
+            Some(source::SourceStatus::Saved)
+        );
+    });
+}
+
+#[gpui::test]
+fn newer_database_read_and_inline_input_survive_old_bulk_completion(cx: &mut TestAppContext) {
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.metadata.source.stage(file_tags());
+            let (token, _) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+            let read = this.metadata.begin_load(1);
+            assert!(
+                this.metadata
+                    .accept_load(read, Some(track(1, "newer database")))
+            );
+            this.begin_edit(Field::Album, window, cx);
+            this.edit
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |input, cx| input.set_text("newer album", cx));
+            this.finish_source_action(token, source_ack(true, false), cx);
+            assert_eq!(this.metadata.track().unwrap().title, "newer database");
+            assert_eq!(
+                this.metadata.source.values(this.metadata.track().unwrap()),
+                file_tags()
+            );
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "newer album"
+            );
+        });
+    })
+    .unwrap();
 }
 
 #[gpui::test]
