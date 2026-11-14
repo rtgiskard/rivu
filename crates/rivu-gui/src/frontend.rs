@@ -991,8 +991,17 @@ mod tests {
         let (shutdown, shutdown_receiver) = async_channel::bounded(1);
         handle.commands = commands;
         handle.shutdown = shutdown;
+        let mut replies = Vec::with_capacity(QUEUE_CAPACITY);
         for _ in 0..QUEUE_CAPACITY {
-            handle.send(Command::DismissError).unwrap();
+            let (reply, delivery) = oneshot::channel();
+            handle
+                .commands
+                .try_send(CommandRequest {
+                    command: Command::DismissError.into(),
+                    reply: Some(reply),
+                })
+                .unwrap();
+            replies.push(delivery);
         }
         assert!(handle.send(Command::DismissError).is_err());
         handle.request_shutdown().unwrap();
@@ -1004,18 +1013,24 @@ mod tests {
         });
         let session = handle.session().unwrap();
         let shared = Arc::clone(&handle.shared);
-        let pending = receiver.clone();
         let worker = thread::spawn(move || {
             command_worker(shared, session, receiver, shutdown_receiver);
         });
         completion
             .recv_timeout(Duration::from_secs(5))
             .expect("priority shutdown did not reach Core");
-        assert_eq!(pending.len(), QUEUE_CAPACITY);
-        assert!(handle.shutdown.is_empty());
         handle.commands.close();
         handle.shutdown.close();
         worker.join().unwrap();
+        assert!(handle.shutdown.is_empty());
+        // The watcher can cancel the shutdown ACK wait. A subsequent receive may
+        // dequeue an edit before checking cancellation, but must not execute it.
+        for mut reply in replies {
+            assert!(
+                !matches!(reply.try_recv(), Ok(Some(_))),
+                "queued edit was executed before shutdown"
+            );
+        }
     }
 
     #[test]
