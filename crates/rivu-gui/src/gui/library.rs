@@ -98,6 +98,7 @@ pub(in crate::gui) struct Library {
     library_search: gpui::Entity<rivu_ui::search::SearchField>,
     requests: requests::LibraryRequests,
     loading_text: rivu_ui::loading::LoadingText<TreeBranch>,
+    refresh_wake: rivu_ui::refresh::RefreshWake,
     scan_error: Option<String>,
     visible: bool,
     available: bool,
@@ -163,6 +164,7 @@ impl Library {
             library_search,
             requests: Default::default(),
             loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
+            refresh_wake: Default::default(),
             scan_error: None,
             visible: false,
             available: false,
@@ -173,6 +175,7 @@ impl Library {
     }
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        let now = Instant::now();
         let display_changed = display_changed(&self.state, &state);
         let roots_changed =
             self.state.system.config.library_roots != state.system.config.library_roots;
@@ -181,7 +184,9 @@ impl Library {
         }
         self.library
             .refresh_tree(state.system.config.query_batch_size as usize);
-        let projection_changed = self.library.sync_projection(state.query_revisions(None));
+        let projection_changed = self
+            .library
+            .sync_projection_at(state.query_revisions(None), now);
         if projection_changed {
             self.requests.cancel_directory_demand();
         }
@@ -190,10 +195,15 @@ impl Library {
         {
             self.fail_selection(intent, cx);
         }
-        self.library.sync_root_counts(
+        self.library.sync_search_counts(
             &state.system.config.library_roots,
-            state.library.structure_revision,
+            state.query_revisions(None),
+            now,
         );
+        if self.library.search_counts().is_none() {
+            self.library_search
+                .update(cx, |search, cx| search.clear_counts(cx));
+        }
         self.state = state;
         if !self.demanded() {
             if let Some(intent) = self.library.navigation_intent {
@@ -202,9 +212,23 @@ impl Library {
             self.cancel_reads();
         }
         self.sync_loading_text(cx);
+        self.schedule_refresh_wake(cx);
         if display_changed || projection_changed {
             cx.notify();
         }
+    }
+
+    fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
+        self.refresh_wake
+            .schedule(self.library.refresh_deadline(), cx, |this, now, cx| {
+                let changed = this.library.expire_refresh(now);
+                if changed && this.library.search_counts().is_none() {
+                    this.library_search
+                        .update(cx, |search, cx| search.clear_counts(cx));
+                }
+                this.schedule_refresh_wake(cx);
+                changed
+            });
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {

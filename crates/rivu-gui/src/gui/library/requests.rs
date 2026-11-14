@@ -373,6 +373,96 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn stalled_library_refresh_expires_without_another_snapshot_or_response(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut owner = None;
+        let mut pending = None;
+        with_library(cx, |browser, cx| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let baseline = browser.state.query_revisions(None);
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            std::rc::Rc::make_mut(&mut browser.state).library.revision += 1;
+            let current = browser.state.query_revisions(None);
+            browser.library.sync_projection_at(
+                current,
+                std::time::Instant::now() - rivu_ui::refresh::REFRESH_RETENTION,
+            );
+            browser.prepare_directory_read(library::TreeBranch::default(), 0, 20, &roots, current);
+            let read = browser
+                .prepare_directory_read(branch, 0, 20, &roots, current)
+                .read
+                .unwrap();
+            assert!(browser.library.refresh_deadline().is_some());
+            browser.schedule_refresh_wake(cx);
+            pending = Some(read);
+            owner = Some(cx.entity());
+        });
+        cx.run_until_parked();
+        let pending = pending.unwrap();
+        owner.unwrap().read_with(cx, |browser, _| {
+            assert!(browser.library.refresh_deadline().is_none());
+            assert!(matches!(
+                browser.library.tree().display_item(1),
+                Some(library::tree::TreeItem::Placeholder { .. })
+            ));
+            assert!(browser.directory_read_current(&pending, browser.state.query_revisions(None)));
+            assert!(pending.ticket.is_current());
+        });
+    }
+
+    #[gpui::test]
+    fn retained_rows_reject_actions_and_equal_results_restore_current_callbacks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser, _| {
+            let roots = vec!["/music".into()];
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let baseline = browser.state.query_revisions(None);
+            let initial = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            browser.complete_directory_read(&initial, baseline, track_response(baseline, false));
+            let node = library::LibraryNode::Track(7);
+            let old_scope = browser.library_row_scope();
+            assert!(browser.library_row_current(&old_scope, 1, &node));
+            std::rc::Rc::make_mut(&mut browser.state).library.revision += 1;
+            let current = browser.state.query_revisions(None);
+            browser
+                .library
+                .sync_projection_at(current, std::time::Instant::now());
+            assert!(!initial.ticket.is_current());
+            let scope = browser.library_row_scope();
+            assert!(matches!(
+                browser.library.tree().display_item(1),
+                Some(library::tree::TreeItem::Entry(_))
+            ));
+            assert!(!browser.library_row_current(&scope, 1, &node));
+            assert!(browser.library.navigate_tree_row(1).is_none());
+            browser.prepare_directory_read(library::TreeBranch::default(), 0, 20, &roots, current);
+            let fresh = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, current)
+                .read
+                .unwrap();
+            let scope = browser.library_row_scope();
+            browser.publish_directory_read(&initial, current, track_response(baseline, false));
+            assert!(browser.directory_read_current(&fresh, current));
+            assert!(!browser.library_row_current(&scope, 1, &node));
+            browser.complete_directory_read(&fresh, current, track_response(current, false));
+            assert!(browser.library_row_current(&scope, 1, &node));
+            assert!(!browser.library_row_current(&old_scope, 1, &node));
+        });
+    }
+
+    #[gpui::test]
     fn obsolete_directory_demand_parks_quietly_until_retry_or_fresh_authority(
         cx: &mut gpui::TestAppContext,
     ) {

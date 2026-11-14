@@ -387,11 +387,15 @@ impl PlaylistModel {
         &mut self,
         page: Page<PlaylistSummary>,
         revisions: QueryRevisions,
-    ) {
-        if page.total == 0 && self.playlists.summaries().query.is_none() {
+    ) -> bool {
+        let removed = page.total == 0
+            && self.playlists.summaries().query.is_none()
+            && self.playlists.selected().is_some();
+        if removed {
             self.remove_playlist_selection();
         }
-        let contains_selected = self.playlists.accept_summaries(page);
+        let (contains_selected, mut changed) = self.playlists.accept_summaries(page);
+        changed |= removed;
         if contains_selected {
             let key = self.playlist_lookup(revisions).map(|(_, key)| key);
             if self
@@ -402,9 +406,10 @@ impl PlaylistModel {
                 == key
             {
                 // A page can restore the fact, but cannot retire a newer lookup intent.
-                self.requests.selection_failure = None;
+                changed |= self.requests.selection_failure.take().is_some();
             }
         }
+        changed
     }
 
     /// Resolve selection by identity independently of catalog order and pagination.
@@ -412,15 +417,16 @@ impl PlaylistModel {
         &mut self,
         id: i64,
         first: Option<PlaylistSummary>,
-    ) {
+    ) -> bool {
         if self.playlists.selected() != Some(id) {
-            return;
+            return false;
         }
         if let Some(summary) = first.filter(|summary| summary.id == id) {
-            self.playlists.accept_selected_summary(summary);
-            self.requests.selection_failure = None;
+            let changed = self.playlists.accept_selected_summary(summary);
+            self.requests.selection_failure.take().is_some() || changed
         } else {
             self.remove_playlist_selection();
+            true
         }
     }
     fn playlist_request(&self, kind: ViewRequestKind) -> ViewRequest {
@@ -734,7 +740,7 @@ impl PlaylistModel {
         read: &ViewRead,
         current: QueryRevisions,
         response: QueryResponse,
-    ) -> Option<String> {
+    ) -> (bool, Option<String>) {
         self.requests.slot_mut(read.kind).release_worker();
         self.publish_playlist_read(read, current, response)
     }
@@ -745,7 +751,7 @@ impl PlaylistModel {
         read: &ViewRead,
         current: QueryRevisions,
         response: QueryResponse,
-    ) -> Option<String> {
+    ) -> (bool, Option<String>) {
         self.publish_playlist_read(read, current, response)
     }
 
@@ -754,17 +760,17 @@ impl PlaylistModel {
         read: &ViewRead,
         current: QueryRevisions,
         response: QueryResponse,
-    ) -> Option<String> {
+    ) -> (bool, Option<String>) {
         match self.requests.slot_mut(read.kind).publish(
             read,
             current,
             self.playlists.selection_generation(),
             &response,
         ) {
-            ViewPublication::Obsolete => return None,
+            ViewPublication::Obsolete => return (false, None),
             ViewPublication::Cancelled => {
                 self.cancel_playlist_state(read.kind);
-                return None;
+                return (false, None);
             }
             ViewPublication::Retired => {
                 match read.kind {
@@ -773,33 +779,39 @@ impl PlaylistModel {
                     // Preserve the baseline so render cannot resubmit this lookup.
                     ViewRequestKind::Selection => {}
                 }
-                return None;
+                return (false, None);
             }
             ViewPublication::Publish => {}
         }
         match response.result {
-            Err(error) => self.fail_playlist_read(read, current, error.to_string()),
+            Err(error) => (
+                true,
+                self.fail_playlist_read(read, current, error.to_string()),
+            ),
             Ok(ViewResponse::PlaylistSummaries(page))
                 if read.kind == ViewRequestKind::Summaries =>
             {
                 self.accept_playlist_summaries(page, current);
-                None
+                (true, None)
             }
             Ok(ViewResponse::PlaylistEntries(page)) if read.kind == ViewRequestKind::Entries => {
                 self.playlists.accept_entries(page);
-                None
+                (true, None)
             }
             Ok(ViewResponse::PlaylistSummary(summary))
                 if read.kind == ViewRequestKind::Selection =>
             {
-                if let Query::PlaylistSummary { playlist_id: id } = &read.query {
-                    self.accept_playlist_lookup(*id, summary);
-                }
-                None
+                let changed = if let Query::PlaylistSummary { playlist_id: id } = &read.query {
+                    self.accept_playlist_lookup(*id, summary)
+                } else {
+                    false
+                };
+                (changed, None)
             }
-            _ => {
-                self.fail_playlist_read(read, current, "Unexpected playlist query response".into())
-            }
+            _ => (
+                true,
+                self.fail_playlist_read(read, current, "Unexpected playlist query response".into()),
+            ),
         }
     }
 
@@ -856,6 +868,156 @@ mod tests {
             missing: false,
             favorite: false,
         }
+    }
+
+    #[test]
+    fn playlist_refresh_deadlines_expire_independently_without_positional_authority() {
+        let mut browser = PlaylistModel::default();
+        browser.select_playlist(1, "one".into(), 0);
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.playlists.accept_summaries(Page {
+            total: 1,
+            rows: vec![summary(1, 1)],
+        });
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.playlists.accept_entries(Page {
+            total: 1,
+            rows: vec![entry(10, 0)],
+        });
+        browser.playlists.select_entry(10, 0);
+        let generation = browser.playlists.entry_generation();
+        let source = crate::gui::playlists::selection::EntryIdentity::row(
+            browser.playlists.entries().rows.get(0).unwrap(),
+            0,
+        );
+        let now = Instant::now();
+        browser.playlists.summaries.rows.refresh_at(now);
+        browser
+            .playlists
+            .entries
+            .rows
+            .refresh_at(now + Duration::from_millis(50));
+        let summaries_deadline = browser.playlists.summaries.rows.refresh_deadline().unwrap();
+        let entries_deadline = browser.playlists.entries.rows.refresh_deadline().unwrap();
+        browser
+            .playlists
+            .summaries
+            .rows
+            .refresh_at(now + Duration::from_millis(100));
+        assert_eq!(
+            browser.playlists.refresh_deadline(),
+            Some(summaries_deadline)
+        );
+        assert!(
+            !browser
+                .playlists
+                .expire(summaries_deadline - Duration::from_nanos(1))
+        );
+        assert!(browser.playlists.summaries().rows.display(0).is_some());
+        assert!(browser.playlists.entries().rows.display(0).is_some());
+        assert!(browser.playlists.summaries().rows.get(0).is_none());
+        assert!(browser.playlists.entries().rows.get(0).is_none());
+        assert!(
+            browser
+                .playlists
+                .operation_rows(1, generation, source)
+                .is_empty()
+        );
+        assert_eq!(browser.playlists.selected(), Some(1));
+        assert_eq!(browser.playlists.selected_entry(), Some(10));
+        assert_eq!(browser.playlists.entry_generation(), generation);
+
+        assert!(browser.playlists.expire(summaries_deadline));
+        assert!(browser.playlists.summaries().rows.display(0).is_none());
+        assert!(browser.playlists.entries().rows.display(0).is_some());
+        assert_eq!(browser.playlists.refresh_deadline(), Some(entries_deadline));
+        assert!(browser.playlists.expire(entries_deadline));
+        assert!(browser.playlists.entries().rows.display(0).is_none());
+        assert_eq!(browser.playlists.refresh_deadline(), None);
+        assert!(!browser.playlists.expire(entries_deadline));
+    }
+
+    #[test]
+    fn equal_playlist_refresh_restores_current_rows() {
+        let mut browser = PlaylistModel::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(1, "playlist 1".into(), 0);
+        for kind in [ViewRequestKind::Summaries, ViewRequestKind::Entries] {
+            let response = || QueryResponse {
+                revisions,
+                result: Ok(match kind {
+                    ViewRequestKind::Summaries => ViewResponse::PlaylistSummaries(Page {
+                        total: 1,
+                        rows: vec![summary(1, 1)],
+                    }),
+                    ViewRequestKind::Entries => ViewResponse::PlaylistEntries(Page {
+                        total: 1,
+                        rows: vec![entry(10, 0)],
+                    }),
+                    ViewRequestKind::Selection => unreachable!(),
+                }),
+            };
+            let prepared = if kind == ViewRequestKind::Summaries {
+                browser.request_playlist_summaries(0, 20, revisions)
+            } else {
+                browser.request_playlist_entries(1, 0, 20, revisions)
+            };
+            let (read, _) = prepared.into_read().unwrap();
+            browser.complete_playlist_read(&read, revisions, response());
+            browser.refresh_playlists(PlaylistRefresh {
+                summaries: kind == ViewRequestKind::Summaries,
+                entries: kind == ViewRequestKind::Entries,
+                entry_payload_only: true,
+            });
+            if kind == ViewRequestKind::Summaries {
+                assert!(browser.playlists.summaries().rows.get(0).is_none());
+                assert!(browser.playlists.summaries().rows.display(0).is_some());
+            } else {
+                assert!(browser.playlists.entries().rows.get(0).is_none());
+                assert!(browser.playlists.entries().rows.display(0).is_some());
+            }
+            let prepared = if kind == ViewRequestKind::Summaries {
+                browser.request_playlist_summaries(0, 20, revisions)
+            } else {
+                browser.request_playlist_entries(1, 0, 20, revisions)
+            };
+            let (read, _) = prepared.into_read().unwrap();
+            browser.complete_playlist_read(&read, revisions, response());
+            if kind == ViewRequestKind::Summaries {
+                assert_eq!(browser.playlists.summaries().rows.get(0).unwrap().id, 1);
+            } else {
+                assert_eq!(browser.playlists.entries().rows.get(0).unwrap().id, 10);
+            }
+            assert_eq!(browser.playlists.refresh_deadline(), None);
+        }
+    }
+
+    #[test]
+    fn playlist_identity_changes_clear_retained_display_and_deadlines() {
+        let mut browser = PlaylistModel::default();
+        browser.select_playlist(1, "one".into(), 0);
+        browser.playlists.prepare_page(true, 0, 20);
+        browser.playlists.accept_entries(Page {
+            total: 1,
+            rows: vec![entry(10, 0)],
+        });
+        browser.playlists.prepare_entries(1);
+        assert!(browser.playlists.entries().rows.display(0).is_some());
+        browser.search_playlist_entries(Some("new filter".into()));
+        assert!(browser.playlists.entries().rows.display(0).is_none());
+        assert_eq!(browser.playlists.refresh_deadline(), None);
+
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.playlists.accept_summaries(Page {
+            total: 1,
+            rows: vec![summary(1, 1)],
+        });
+        browser.playlists.invalidate_summaries();
+        assert!(browser.playlists.summaries().rows.display(0).is_some());
+        browser.search_playlists(Some("another catalog".into()));
+        assert!(browser.playlists.summaries().rows.display(0).is_none());
+        assert_eq!(browser.playlists.selected(), None);
+        assert_eq!(browser.playlists.refresh_deadline(), None);
     }
 
     #[test]
@@ -1051,6 +1213,7 @@ mod tests {
         assert!(
             browser
                 .complete_playlist_read(&read, revisions, lookup_error(revisions, "offline"))
+                .1
                 .is_some()
         );
         let (key, _) = browser.playlist_lookup_failure().unwrap();
@@ -1119,12 +1282,16 @@ mod tests {
         assert_ne!(generation, old.generation);
         assert_eq!(browser.playlist_lookup_failure(), None);
         assert_eq!(
-            browser.timeout_playlist_read(&old, revisions, lookup_error(revisions, "late timeout")),
+            browser
+                .timeout_playlist_read(&old, revisions, lookup_error(revisions, "late timeout"))
+                .1,
             None
         );
         assert!(browser.view_loading(ViewRequestKind::Selection, generation));
         assert_eq!(
-            browser.complete_playlist_read(&old, revisions, lookup_success(revisions, 41, 99)),
+            browser
+                .complete_playlist_read(&old, revisions, lookup_success(revisions, 41, 99))
+                .1,
             None
         );
         assert_eq!(browser.playlists.selected_total(), None);
@@ -1362,6 +1529,7 @@ mod tests {
             assert!(
                 browser
                     .timeout_playlist_read(&read, revisions, timeout())
+                    .1
                     .is_some()
             );
             assert!(!browser.view_pending(kind));
@@ -1378,14 +1546,16 @@ mod tests {
                 ViewRequestKind::Selection => ViewResponse::PlaylistSummary(Some(summary(1, 99))),
             };
             assert_eq!(
-                browser.complete_playlist_read(
-                    &read,
-                    revisions,
-                    QueryResponse {
+                browser
+                    .complete_playlist_read(
+                        &read,
                         revisions,
-                        result: Ok(late),
-                    }
-                ),
+                        QueryResponse {
+                            revisions,
+                            result: Ok(late),
+                        }
+                    )
+                    .1,
                 None
             );
             assert!(!browser.requests.slot(kind).worker_active);
@@ -1424,6 +1594,7 @@ mod tests {
         assert!(
             browser
                 .timeout_playlist_read(&read, revisions, timeout())
+                .1
                 .is_some()
         );
         browser.search_playlist_entries(Some("latest".into()));
@@ -1431,13 +1602,15 @@ mod tests {
         let generation = queued.pending_generation().unwrap();
         assert!(queued.into_read().is_none());
         assert_eq!(
-            browser.timeout_playlist_read(&read, revisions, timeout()),
+            browser.timeout_playlist_read(&read, revisions, timeout()).1,
             None
         );
         assert!(browser.view_loading(ViewRequestKind::Entries, generation));
         assert_eq!(browser.playlists.entries().rows.error(0), None);
         assert_eq!(
-            browser.complete_playlist_read(&read, revisions, timeout()),
+            browser
+                .complete_playlist_read(&read, revisions, timeout())
+                .1,
             None
         );
         assert!(browser.view_loading(ViewRequestKind::Entries, generation));
@@ -1951,7 +2124,7 @@ mod tests {
         assert!(browser.view_pending(kind));
 
         assert_eq!(
-            browser.complete_playlist_read(&read, revisions, empty()),
+            browser.complete_playlist_read(&read, revisions, empty()).1,
             None
         );
         assert_eq!(browser.playlists.selected(), Some(41));
@@ -1972,17 +2145,19 @@ mod tests {
             .unwrap();
         assert!(browser.view_pending(kind));
         assert_eq!(
-            browser.complete_playlist_read(
-                &read,
-                revisions,
-                QueryResponse {
-                    // Transport failures lack the playlist-local revision scope.
-                    revisions: QueryRevisions::default(),
-                    result: Err(rivu_protocol::response::QueryError::Message(
-                        "unavailable".into()
-                    )),
-                }
-            ),
+            browser
+                .complete_playlist_read(
+                    &read,
+                    revisions,
+                    QueryResponse {
+                        // Transport failures lack the playlist-local revision scope.
+                        revisions: QueryRevisions::default(),
+                        result: Err(rivu_protocol::response::QueryError::Message(
+                            "unavailable".into()
+                        )),
+                    }
+                )
+                .1,
             Some("unavailable".into())
         );
         assert_eq!(browser.playlists.entries().rows.total(), None);
@@ -2000,7 +2175,7 @@ mod tests {
         assert!(browser.view_pending(kind));
         assert_eq!(browser.playlists.entries().rows.error(0), None);
         assert_eq!(
-            browser.complete_playlist_read(&read, revisions, empty()),
+            browser.complete_playlist_read(&read, revisions, empty()).1,
             None
         );
         assert!(browser.playlists.entries().rows.is_empty());
@@ -2136,14 +2311,16 @@ mod tests {
                     .into_read()
                     .unwrap();
                 assert_eq!(
-                    browser.complete_playlist_read(
-                        &read,
-                        revisions,
-                        QueryResponse {
+                    browser
+                        .complete_playlist_read(
+                            &read,
                             revisions,
-                            result: Err(error)
-                        },
-                    ),
+                            QueryResponse {
+                                revisions,
+                                result: Err(error)
+                            },
+                        )
+                        .1,
                     None
                 );
                 assert!(!ticket.is_current());
@@ -2199,6 +2376,7 @@ mod tests {
                         result: Ok(ViewResponse::Track(None)),
                     },
                 )
+                .1
                 .expect("unexpected payload must fail");
             assert!(!browser.view_pending(kind));
             assert!(
@@ -2240,14 +2418,16 @@ mod tests {
                 ViewRequestKind::Selection => ViewResponse::PlaylistSummary(Some(summary(1, 0))),
             };
             assert_eq!(
-                browser.complete_playlist_read(
-                    &retry,
-                    revisions,
-                    QueryResponse {
+                browser
+                    .complete_playlist_read(
+                        &retry,
                         revisions,
-                        result: Ok(result)
-                    },
-                ),
+                        QueryResponse {
+                            revisions,
+                            result: Ok(result)
+                        },
+                    )
+                    .1,
                 None
             );
             assert!(!browser.view_pending(kind));

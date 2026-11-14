@@ -25,6 +25,7 @@ use crate::gui::{
 use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 use rivu_ui::loading::LoadingText;
+use rivu_ui::refresh::RefreshWake;
 use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind,
     VirtualList, caption, column, danger_control, hover_actions,
@@ -103,6 +104,7 @@ pub(in crate::gui) struct Playlists {
     playlist_editor: Option<editor::PlaylistEditor>,
     playlist_action: Option<PlaylistAction>,
     loading_text: LoadingText<ViewRequestKind>,
+    refresh_wake: RefreshWake,
     intent: Option<ManualIntentId>,
     window_visible: bool,
     panel_visible: bool,
@@ -130,7 +132,17 @@ impl Playlists {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.can_move_catalog(drag) && target != Some(drag.playlist_id) {
+        if self.can_move_catalog(drag)
+            && target != Some(drag.playlist_id)
+            && target.is_none_or(|id| {
+                self.browser
+                    .playlists()
+                    .summaries()
+                    .rows
+                    .iter()
+                    .any(|row| row.id == id)
+            })
+        {
             self.send(
                 Command::MovePlaylist {
                     playlist_id: drag.playlist_id,
@@ -192,6 +204,7 @@ impl Playlists {
             playlist_editor: None,
             playlist_action: None,
             loading_text: LoadingText::new(std::time::Duration::from_millis(150)),
+            refresh_wake: RefreshWake::default(),
             intent: None,
             window_visible: true,
             panel_visible: false,
@@ -206,6 +219,7 @@ impl Playlists {
     }
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        self.schedule_refresh_wake(cx);
         if Rc::ptr_eq(&self.state, &state) {
             return;
         }
@@ -259,6 +273,7 @@ impl Playlists {
             self.request_playlist_selection(cx);
         }
         self.sync_loading(cx);
+        self.schedule_refresh_wake(cx);
         if changed || refresh_selection || selected != self.browser.playlists().selected() {
             cx.notify();
         }
@@ -266,6 +281,17 @@ impl Playlists {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reconcile(self.context.snapshot(), cx);
+    }
+    fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
+        self.refresh_wake.schedule(
+            self.browser.playlists().refresh_deadline(),
+            cx,
+            |this, now, cx| {
+                let changed = this.browser.playlists.expire(now);
+                this.schedule_refresh_wake(cx);
+                changed
+            },
+        );
     }
     fn tr(&self, id: &str) -> SharedString {
         self.context.tr(id)
@@ -503,6 +529,7 @@ impl Playlists {
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.cancel_selection(cx);
         self.browser.remove_playlist_selection();
+        self.schedule_refresh_wake(cx);
         cx.notify();
     }
     pub(in crate::gui) fn catalog_len(&self) -> usize {
@@ -519,6 +546,12 @@ impl Playlists {
         index: usize,
     ) -> Option<&rivu_protocol::model::PlaylistSummary> {
         self.browser.playlists().summaries().rows.get(index)
+    }
+    pub(in crate::gui) fn catalog_display_row(
+        &self,
+        index: usize,
+    ) -> Option<&rivu_protocol::model::PlaylistSummary> {
+        self.browser.playlists().summaries().rows.display(index)
     }
     pub(in crate::gui) fn catalog_loading_row(
         &self,
@@ -638,6 +671,13 @@ impl Playlists {
             && self.browser.playlists().entries().playlist_id == destination.playlist_id()
             && self.browser.playlists().entries().query.is_none()
             && self.browser.playlists().track_selection.ready()
+            && self
+                .browser
+                .playlists()
+                .entries()
+                .rows
+                .iter()
+                .any(|row| row.id == anchor)
             && self.can_transfer_content(value, destination)
             && value
                 .downcast_ref::<ListDrag>()
@@ -743,6 +783,14 @@ impl Playlists {
             && self.playlist_occurrence_stamp(drag.playlist_id) == drag.stamp
             && self.playlist_revision(drag.playlist_id) == drag.revision
             && drag.accepts(target)
+            && target.is_none_or(|id| {
+                self.browser
+                    .playlists()
+                    .entries()
+                    .rows
+                    .iter()
+                    .any(|row| row.id == id)
+            })
     }
 
     pub(super) fn move_playlist_entries(
@@ -1249,20 +1297,16 @@ impl Playlists {
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 range
                     .map(|index| {
-                        let Some(p) = this.browser.playlists().summaries().rows.get(index) else {
+                        let Some(p) = this.browser.playlists().summaries().rows.display(index) else {
                             return this
                                 .paged_loading_row(ViewRequestKind::Summaries, index, row_height, cx)
                                 .into_any_element();
                         };
+                        let fresh = this.browser.playlists().summaries().rows.get(index).is_some();
                         let id = p.id;
                         let name = gpui::SharedString::from(p.name.clone());
-                        let play_name = name.clone();
-                        let menu_name = name.clone();
-                        let context_name = name.clone();
-                        let drag_label = name.clone();
-                        let catalog_revision = this.state.library.playlist_revision;
                         let playable = p.entry_count > 0;
-                        list_row(theme, ("playlist", id as u64), this.browser.playlists().selected() == Some(id), row_height, crate::gui::appearance::material::surface(cx))
+                        let row = list_row(theme, ("playlist", id as u64), this.browser.playlists().selected() == Some(id), row_height, crate::gui::appearance::material::surface(cx))
                         .when(
                             (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
@@ -1283,7 +1327,16 @@ impl Playlists {
                             name.clone(),
                             this.i18n
                                 .format("gl-track-count", &[("count", (p.entry_count).into())]),
-                        ))
+                        ));
+                        if !fresh {
+                            return row.into_any_element();
+                        }
+                        let play_name = name.clone();
+                        let menu_name = name.clone();
+                        let context_name = name.clone();
+                        let drag_label = name.clone();
+                        let catalog_revision = this.state.library.playlist_revision;
+                        row
                         .child(
                             hover_actions(
                                 theme,
@@ -1500,7 +1553,8 @@ impl Playlists {
                 cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .map(|index| {
-                            let Some(e) = this.browser.playlists().entries().rows.get(index) else {
+                            let Some(e) = this.browser.playlists().entries().rows.display(index)
+                            else {
                                 return this
                                     .paged_loading_row(
                                         ViewRequestKind::Entries,
@@ -1510,25 +1564,13 @@ impl Playlists {
                                     )
                                     .into_any_element();
                             };
+                            let fresh =
+                                this.browser.playlists().entries().rows.get(index).is_some();
                             let id = e.id;
                             let track_id = e.track_id;
                             let position = e.position;
                             let favorite = e.favorite;
-                            let revision = this.playlist_revision(playlist_id);
-                            let stamp = this.playlist_occurrence_stamp(playlist_id);
-                            let entry_generation = this.browser.playlists().entry_generation();
-                            let source = selection::EntryIdentity::row(e, index);
-                            let drag_owner = cx.entity().downgrade();
-                            let drag = PlaylistDrag {
-                                i18n: std::sync::Arc::clone(&this.i18n),
-                                playlist_id,
-                                entry_ids: Default::default(),
-                                track_ids: Default::default(),
-                                revision,
-                                stamp,
-                                entry_generation,
-                            };
-                            track_list_row(
+                            let row = track_list_row(
                                 theme,
                                 rivu_ui::list_row(
                                     theme,
@@ -1563,8 +1605,25 @@ impl Playlists {
                                 row.style().overflow.x = Some(gpui::Overflow::Visible);
                                 row
                             })
-                            .gap_0()
-                            .child(
+                            .gap_0();
+                            if !fresh {
+                                return row.into_any_element();
+                            }
+                            let revision = this.playlist_revision(playlist_id);
+                            let stamp = this.playlist_occurrence_stamp(playlist_id);
+                            let entry_generation = this.browser.playlists().entry_generation();
+                            let source = selection::EntryIdentity::row(e, index);
+                            let drag_owner = cx.entity().downgrade();
+                            let drag = PlaylistDrag {
+                                i18n: std::sync::Arc::clone(&this.i18n),
+                                playlist_id,
+                                entry_ids: Default::default(),
+                                track_ids: Default::default(),
+                                revision,
+                                stamp,
+                                entry_generation,
+                            };
+                            row.child(
                                 hover_actions(
                                     theme,
                                     ("playlist-track-actions", id as u64),
@@ -1704,6 +1763,18 @@ impl Playlists {
                             )
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
+                                    this.refresh(cx);
+                                    if this.browser.playlists().selected() != Some(playlist_id)
+                                        || this
+                                            .browser
+                                            .playlists()
+                                            .entries()
+                                            .rows
+                                            .get(index)
+                                            .is_none_or(|row| row.id != id)
+                                    {
+                                        return;
+                                    }
                                     this.focus_layout(window, cx);
                                     this.focus_list(cx);
                                     let modifiers = event.modifiers();
@@ -2891,6 +2962,54 @@ mod content_menu_keyboard_tests {
             cx.notify();
         });
         entry
+    }
+
+    #[gpui::test]
+    fn playlist_owner_expires_both_retained_pages_without_render_or_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, _save, app, _window) = fixture(cx);
+        let entry = select_source_entry(&app, &runtime, cx);
+        page(&app, 0, 2, 72, cx);
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists.browser.playlists.invalidate_summaries();
+                playlists.browser.playlists.prepare_entries(1);
+                playlists.schedule_refresh_wake(cx);
+                assert!(
+                    playlists
+                        .browser
+                        .playlists()
+                        .summaries()
+                        .rows
+                        .display(0)
+                        .is_some()
+                );
+                assert!(
+                    playlists
+                        .browser
+                        .playlists()
+                        .entries()
+                        .rows
+                        .display(0)
+                        .is_some()
+                );
+                playlists.select_playlist_container(2, "Target 2".into(), 1, cx);
+                assert_eq!(playlists.browser.playlists().selected(), Some(1));
+            });
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            let playlists = app.playlists.read(cx).browser.playlists();
+            assert!(playlists.summaries().rows.display(0).is_none());
+            assert!(playlists.entries().rows.display(0).is_none());
+            assert_eq!(playlists.refresh_deadline(), None);
+            assert_eq!(playlists.selected(), Some(1));
+            assert_eq!(playlists.selected_entry(), Some(entry));
+        });
     }
 
     #[gpui::test]

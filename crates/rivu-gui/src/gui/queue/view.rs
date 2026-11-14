@@ -379,6 +379,24 @@ impl Queue {
                                 .flatten();
                             range
                                 .map(|index| {
+                                    if this.model.rows.get(index).is_none()
+                                        && let Some(entry) = this.model.rows.display(index)
+                                    {
+                                        return track_list_row(
+                                            theme,
+                                            rivu_ui::list_row(
+                                                theme,
+                                                ("queue-entry", entry.id),
+                                                false,
+                                                row_height,
+                                                crate::gui::appearance::material::surface(cx),
+                                            ),
+                                            TrackText::from(&entry.track),
+                                            entry.position,
+                                            this.state.queue.current_id == Some(entry.id),
+                                            &this.context.i18n,
+                                        );
+                                    }
                                     let Some(entry) = this.model.rows.get(index) else {
                                         return this.paged_loading_row(index, row_height, cx);
                                     };

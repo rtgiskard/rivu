@@ -479,11 +479,11 @@ impl QueueBrowser {
         generation: u64,
         response: rivu_protocol::response::QueryResponse,
         unexpected: impl FnOnce() -> String,
-    ) {
+    ) -> bool {
         if self.page_projection.generation() != generation
             || !self.page_projection.matches_identity(query)
         {
-            return;
+            return false;
         }
         if matches!(
             &response.result,
@@ -495,12 +495,21 @@ impl QueueBrowser {
         {
             self.page_projection.cancel();
             self.rows.retire_pending();
-            return;
+            return true;
         }
         match response.result {
-            Ok(ViewResponse::QueuePage(page)) => self.rows.accept(page),
-            Err(error) => self.rows.fail(error.to_string()),
-            _ => self.rows.fail(unexpected()),
+            Ok(ViewResponse::QueuePage(page)) => {
+                self.rows.accept(page);
+                true
+            }
+            Err(error) => {
+                self.rows.fail(error.to_string());
+                true
+            }
+            _ => {
+                self.rows.fail(unexpected());
+                true
+            }
         }
     }
     fn reconcile_query(&self) -> Query {
@@ -893,6 +902,57 @@ mod tests {
         assert!(queue.operation_rows(identity(12, 2), generation).is_empty());
         assert_eq!(frozen, [identity(10, 0), identity(12, 2)]);
     }
+    #[test]
+    fn retained_queue_rows_never_authorize_old_positional_operations() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 3,
+            rows: vec![row(10, 0), row(11, 1), row(12, 2)],
+        });
+        let generation = queue.page_projection.generation();
+        assert!(queue.sync(revisions(8), 3));
+        assert_eq!(queue.rows.display(1).map(|row| row.id), Some(11));
+        assert!(queue.rows.get(1).is_none());
+        assert!(queue.rows.position(|row| row.id == 11).is_none());
+        assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
+        let deadline = queue.rows.refresh_deadline().unwrap();
+        assert!(queue.rows.expire(deadline));
+        assert!(queue.rows.display(1).is_none());
+    }
+
+    #[test]
+    fn equal_queue_refresh_reports_restored_action_authority() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 1,
+            rows: vec![row(10, 0)],
+        });
+        assert!(queue.sync(revisions(8), 1));
+        let (query, generation) = queue.demand_page(0..1, 20).unwrap();
+        let changed = queue.accept_page(
+            &query,
+            generation,
+            rivu_protocol::response::QueryResponse {
+                revisions: revisions(8),
+                result: Ok(rivu_protocol::response::ViewResponse::QueuePage(Page {
+                    total: 1,
+                    rows: vec![row(10, 0)],
+                })),
+            },
+            || "unexpected".into(),
+        );
+        assert!(
+            changed,
+            "fresh authority must rebuild inert retained controls"
+        );
+        assert_eq!(
+            queue.operation_rows(identity(10, 0), generation),
+            [identity(10, 0)]
+        );
+    }
+
     #[test]
     fn bitrate_revision_retires_payload_preserving_identity_geometry_and_worker() {
         let mut queue = queue(7);

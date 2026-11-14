@@ -690,6 +690,7 @@ pub(super) struct Settings {
     handle: FrontendHandle,
     artwork_manager: Arc<ArtworkManager>,
     root_stats: library_stats::RootStats,
+    root_stats_wake: rivu_ui::refresh::RefreshWake,
     artwork_cache_age: Entity<Input>,
     artwork_cache_age_revision: u64,
     artwork_cache_busy: Option<(u64, bool)>,
@@ -766,6 +767,7 @@ impl Settings {
             handle,
             artwork_manager,
             root_stats: library_stats::RootStats::default(),
+            root_stats_wake: rivu_ui::refresh::RefreshWake::default(),
             artwork_cache_age,
             artwork_cache_age_revision: 0,
             artwork_cache_busy: None,
@@ -847,6 +849,7 @@ impl Settings {
         }
         self.active = false;
         self.root_stats.cancel();
+        self.schedule_library_stats_expiry(cx);
         self.dropdown.close();
         self.reset(&self.handle.config_snapshot(), cx);
         cx.emit(SettingsEvent::Closed);
@@ -2008,6 +2011,7 @@ impl Settings {
             self.sync_library_stats(cx);
         } else {
             self.root_stats.cancel();
+            self.schedule_library_stats_expiry(cx);
         }
         self.scope.focus(window, cx);
         cx.notify();

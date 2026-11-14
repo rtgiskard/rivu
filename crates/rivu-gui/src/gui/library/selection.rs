@@ -671,8 +671,14 @@ impl Library {
         Scope::capture(&self.library, self.state.query_revisions(None))
     }
 
-    pub(super) fn library_row_scope_valid(&self, scope: &Scope) -> bool {
+    pub(super) fn library_row_current(
+        &self,
+        scope: &Scope,
+        index: usize,
+        node: &LibraryNode,
+    ) -> bool {
         scope.matches(&self.library, self.state.query_revisions(None))
+            && self.library.tree().row_matches(index, node)
     }
 
     pub(in crate::gui) fn select_library_row(

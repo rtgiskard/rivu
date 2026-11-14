@@ -151,6 +151,7 @@ impl Library {
                         ) {
                             this.report_error(error, cx);
                         }
+                        this.schedule_refresh_wake(cx);
                         cx.notify();
                     });
                 },
@@ -170,6 +171,7 @@ impl Library {
                     this.report_error(error, cx);
                 }
                 this.request_root_counts(cx);
+                this.schedule_refresh_wake(cx);
                 cx.notify();
             });
         })
@@ -180,14 +182,15 @@ impl Library {
         self.state.system.config.query_batch_size as usize
     }
     fn request_library_search_counts(&mut self, cx: &mut Context<Self>) {
-        let (changed, request) = self.library.prepare_search_counts(
+        let (_, request) = self.library.prepare_search_counts(
             &self.state.system.config.library_roots,
             self.state.query_revisions(None),
         );
-        if changed {
+        if self.library.search_counts().is_none() {
             self.library_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
+        self.schedule_refresh_wake(cx);
         let Some(request) = request else {
             return;
         };
@@ -215,6 +218,11 @@ impl Library {
                         {
                             this.report_error(error.to_string(), cx);
                         }
+                        this.schedule_refresh_wake(cx);
+                        if this.library.search_counts().is_none() {
+                            this.library_search
+                                .update(cx, |search, cx| search.clear_counts(cx));
+                        }
                         cx.notify();
                     });
                 },
@@ -222,12 +230,13 @@ impl Library {
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
+                let previous_counts = this.library.search_counts();
                 if timed_out {
                     this.library.retire_search_counts(&request);
                     if this.demanded() {
                         this.request_library_search_counts(cx);
                     }
-                    cx.notify();
+                    this.schedule_refresh_wake(cx);
                     return;
                 }
                 if this.library.accept_search_counts(
@@ -236,14 +245,21 @@ impl Library {
                     this.state.query_revisions(None),
                     counts,
                 ) {
-                    if let Some((matched, total)) = this.library.search_counts() {
+                    if let Some((matched, total)) = this.library.search_counts()
+                        && previous_counts != Some((matched, total))
+                    {
                         this.library_search.update(cx, |search, cx| {
                             set_search_counts(search, matched, total, &this.i18n, cx);
                         });
                     }
+                    if this.library.search_counts().is_none() && previous_counts.is_some() {
+                        this.library_search
+                            .update(cx, |search, cx| search.clear_counts(cx));
+                    }
                 } else if this.demanded() {
                     this.request_library_search_counts(cx);
                 }
+                this.schedule_refresh_wake(cx);
                 cx.notify();
             });
         })
@@ -276,6 +292,7 @@ impl Library {
             &state.system.config.library_roots,
             state.query_revisions(None),
         );
+        self.schedule_refresh_wake(cx);
         if request.published {
             self.resume_library_navigation(cx);
             cx.notify();
@@ -323,6 +340,7 @@ impl Library {
                         ) {
                             this.report_error(error, cx);
                         }
+                        this.schedule_refresh_wake(cx);
                         cx.notify();
                     });
                 },
@@ -340,6 +358,7 @@ impl Library {
                 }
                 this.resume_library_navigation(cx);
                 this.dispatch_directory_demand(cx);
+                this.schedule_refresh_wake(cx);
                 cx.notify();
             });
         })

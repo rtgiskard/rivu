@@ -15,13 +15,19 @@ use rivu_protocol::{
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
-    column, panel_toolbar, row, status_message,
+    column, panel_toolbar,
+    refresh::{RefreshDeadline, RefreshWake},
+    row, status_message,
 };
-use std::{rc::Rc, time::Duration};
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 const GROUP_PAGE: usize = 12;
 const MEMBER_PAGE: usize = 8;
 
+#[derive(PartialEq)]
 struct Member {
     value: DuplicateMember,
     // Only NotFound is absence. Permission and other probe errors remain unknown.
@@ -67,6 +73,7 @@ pub(super) struct Duplicates {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
     duplicate_review: DuplicateReview,
+    refresh_wake: RefreshWake,
 }
 
 impl EventEmitter<DuplicatesEvent> for Duplicates {}
@@ -89,6 +96,8 @@ struct DuplicateReview {
     groups_failed: bool,
     members_failed: bool,
     groups: Option<Page<DuplicateGroup>>,
+    groups_retention: RefreshDeadline,
+    members_retention: RefreshDeadline,
     members: Vec<Member>,
     members_total: usize,
     groups_offset: usize,
@@ -342,7 +351,12 @@ impl DuplicateReview {
     }
 
     fn select_group(&mut self, fingerprint: &str, revisions: QueryRevisions) -> bool {
-        if self.busy.is_some() || self.confirming {
+        if self.busy.is_some()
+            || self.confirming
+            || self.groups_dirty
+            || self.groups_loading
+            || self.groups_failed
+        {
             return false;
         }
         self.feedback = None;
@@ -368,6 +382,11 @@ impl DuplicateReview {
             || projection.generation() != generation
             || self.busy.is_some()
             || self.confirming
+            || if groups {
+                self.groups_dirty || self.groups_loading || self.groups_failed
+            } else {
+                !self.members_current
+            }
         {
             return false;
         }
@@ -384,8 +403,12 @@ impl DuplicateReview {
     fn request_groups(&mut self, offset: usize, revisions: QueryRevisions) {
         if self.groups_offset != offset {
             self.groups = None;
+            self.groups_retention.clear();
         }
         self.groups_offset = offset;
+        if self.groups.is_some() {
+            self.groups_retention.begin(Instant::now());
+        }
         self.sync_queries(revisions);
         self.groups_projection.cancel();
         self.groups_dirty = true;
@@ -393,15 +416,21 @@ impl DuplicateReview {
     }
 
     fn request_members(&mut self, fingerprint: String, offset: usize, revisions: QueryRevisions) {
-        if self.fingerprint.as_ref() != Some(&fingerprint) {
-            self.clear_selection();
+        if self.fingerprint.as_ref() != Some(&fingerprint) || self.members_offset != offset {
+            if self.fingerprint.as_ref() != Some(&fingerprint) {
+                self.clear_selection();
+            }
+            self.members.clear();
             self.members_total = 0;
+            self.members_retention.clear();
         }
         self.fingerprint = Some(fingerprint);
         self.members_offset = offset;
         self.sync_queries(revisions);
         self.members_projection.cancel();
-        self.members.clear();
+        if !self.members.is_empty() {
+            self.members_retention.begin(Instant::now());
+        }
         self.members_current = false;
         self.members_dirty = true;
         self.members_failed = false;
@@ -524,7 +553,11 @@ impl DuplicateReview {
                     self.request_groups(0, revisions);
                     return false;
                 }
-                self.groups = Some(page);
+                let unchanged = self.visible_groups(Instant::now()) == Some(&page);
+                if !unchanged {
+                    self.groups = Some(page);
+                }
+                self.groups_retention.clear();
             }
             result => {
                 self.groups_failed = true;
@@ -600,13 +633,19 @@ impl DuplicateReview {
                     }
                     return false;
                 }
-                self.members_total = page.total;
-                self.members = page
+                let members = page
                     .rows
                     .into_iter()
                     .zip(existence)
                     .map(|(value, exists)| Member { value, exists })
-                    .collect();
+                    .collect::<Vec<_>>();
+                let unchanged = self.visible_members(Instant::now()) == members
+                    && self.members_total == page.total;
+                self.members_total = page.total;
+                if !unchanged {
+                    self.members = members;
+                }
+                self.members_retention.clear();
                 self.reconcile_selection(&selected);
             }
             result => self.fail_members(result.err().map(|error| error.to_string())),
@@ -639,10 +678,16 @@ impl DuplicateReview {
     }
 
     fn sync_queries(&mut self, revisions: QueryRevisions) -> bool {
+        self.sync_queries_at(revisions, Instant::now())
+    }
+
+    fn sync_queries_at(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         let groups_query = self.groups_query();
         let groups_changed = self.groups_projection.sync(&groups_query, revisions);
         if groups_changed {
-            self.groups = None;
+            if self.groups.is_some() {
+                self.groups_retention.begin(now);
+            }
             self.groups_dirty = true;
             self.groups_failed = false;
         }
@@ -659,7 +704,9 @@ impl DuplicateReview {
                 self.source = None;
                 self.target = None;
             }
-            self.members.clear();
+            if !self.members.is_empty() || self.source.is_some() || self.target.is_some() {
+                self.members_retention.begin(now);
+            }
             self.members_current = false;
             self.members_dirty = true;
             self.members_failed = false;
@@ -722,9 +769,51 @@ impl DuplicateReview {
         self.members_failed = false;
         self.groups = None;
         self.members.clear();
+        self.groups_retention.clear();
+        self.members_retention.clear();
         self.members_total = 0;
         self.clear_selection();
         // Logical cancellation must not release either physical worker gate.
+    }
+
+    fn visible_groups(&self, now: Instant) -> Option<&Page<DuplicateGroup>> {
+        self.groups.as_ref().filter(|_| {
+            self.groups_retention.deadline().is_none() || self.groups_retention.visible(now)
+        })
+    }
+
+    fn visible_members(&self, now: Instant) -> &[Member] {
+        if self.members_retention.deadline().is_some() && !self.members_retention.visible(now) {
+            &[]
+        } else {
+            &self.members
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.groups_retention
+            .deadline()
+            .into_iter()
+            .chain(self.members_retention.deadline())
+            .min()
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if self.groups_retention.expired(now) {
+            changed |= self.groups.take().is_some();
+            self.groups_retention.clear();
+        }
+        if self.members_retention.expired(now) {
+            changed |= !self.members.is_empty() || self.source.is_some() || self.target.is_some();
+            self.members.clear();
+            self.members_total = 0;
+            self.retired_selection = Some(self.selection_ids());
+            self.source = None;
+            self.target = None;
+            self.members_retention.clear();
+        }
+        changed
     }
 
     fn reconcile_selection(&mut self, selected: &[Member]) {
@@ -770,6 +859,7 @@ impl Duplicates {
             state: context.snapshot(),
             context,
             duplicate_review: DuplicateReview::default(),
+            refresh_wake: RefreshWake::default(),
         }
     }
 
@@ -810,6 +900,7 @@ impl Duplicates {
             let _ = self.context.handle().send(Command::CancelRelocation { id });
         }
         cx.emit(DuplicatesEvent::RestoreFocus);
+        self.schedule_duplicate_expiry(cx);
         cx.notify();
     }
 
@@ -831,7 +922,19 @@ impl Duplicates {
         self.start_duplicate_groups(cx);
     }
 
+    fn schedule_duplicate_expiry(&mut self, cx: &mut Context<Self>) {
+        if self.duplicate_review.expire(Instant::now()) {
+            cx.notify();
+        }
+        self.refresh_wake
+            .schedule(self.duplicate_review.deadline(), cx, |this, now, cx| {
+                let changed = this.duplicate_review.expire(now);
+                this.schedule_duplicate_expiry(cx);
+                changed
+            });
+    }
     fn start_duplicate_groups(&mut self, cx: &mut Context<Self>) {
+        self.schedule_duplicate_expiry(cx);
         if !self.context.handle().is_connected() {
             return;
         }
@@ -903,6 +1006,7 @@ impl Duplicates {
                     this.start_duplicate_groups(cx);
                     return;
                 }
+                this.schedule_duplicate_expiry(cx);
                 cx.notify();
             });
         })
@@ -924,6 +1028,7 @@ impl Duplicates {
     }
 
     fn start_duplicate_members(&mut self, cx: &mut Context<Self>) {
+        self.schedule_duplicate_expiry(cx);
         if !self.context.handle().is_connected() {
             return;
         }
@@ -1042,6 +1147,7 @@ impl Duplicates {
                     this.start_duplicate_members(cx);
                     return;
                 }
+                this.schedule_duplicate_expiry(cx);
                 cx.notify();
             });
         })
@@ -1227,9 +1333,9 @@ impl Duplicates {
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
         let mut groups = column().flex_shrink_0().gap_2();
-        if review.groups_loading {
-            groups = groups.child(caption(theme, self.tr("gl-groups-loading")));
-        } else if let Some(page) = &review.groups {
+        let now = Instant::now();
+        let members_visible = !review.members_retention.expired(now);
+        if let Some(page) = review.visible_groups(now) {
             if page.total == 0 {
                 groups = groups.child(caption(theme, self.tr("gl-groups-empty")));
             }
@@ -1298,9 +1404,12 @@ impl Duplicates {
                         selected,
                         rivu_ui::SurfaceStyle::Opaque,
                     ),
-                    busy || review.confirming,
+                    busy || review.confirming || review.groups_retention.deadline().is_some(),
                 ));
             }
+        }
+        if review.groups_loading && review.visible_groups(now).is_none() {
+            groups = groups.child(caption(theme, self.tr("gl-groups-loading")));
         }
         if review.groups_failed && !review.groups_loading {
             groups = groups.child(
@@ -1320,7 +1429,7 @@ impl Duplicates {
                     .self_start(),
             );
         }
-        let group_total = review.groups.as_ref().map_or(0, |page| page.total);
+        let group_total = review.visible_groups(now).map_or(0, |page| page.total);
         let group_offset = review.groups_offset;
         let group_pager = self.review_pager(
             true,
@@ -1357,7 +1466,7 @@ impl Duplicates {
                 }),
             );
         }
-        if review.members_loading {
+        if review.members_loading && review.visible_members(now).is_empty() {
             members = members.child(caption(theme, self.tr("gl-members-loading")));
         } else if review.fingerprint.is_none() {
             members = members.child(caption(theme, self.tr("gl-select-relocation")));
@@ -1384,7 +1493,7 @@ impl Duplicates {
                     .self_start(),
             );
         }
-        for member in &review.members {
+        for member in review.visible_members(now) {
             let value = &member.value;
             let track = &value.track;
             let source_selected = review
@@ -1577,7 +1686,7 @@ impl Duplicates {
                         source_selected,
                         rivu_ui::SurfaceStyle::Opaque,
                     ),
-                    busy || review.confirming,
+                    busy || review.confirming || !review.members_current,
                 ));
             }
             if selectable_target {
@@ -1604,7 +1713,7 @@ impl Duplicates {
                         target_selected,
                         rivu_ui::SurfaceStyle::Opaque,
                     ),
-                    busy || review.confirming,
+                    busy || review.confirming || !review.members_current,
                 ));
             }
             if selectable_target && has_target_state(value) {
@@ -1620,7 +1729,7 @@ impl Duplicates {
             members = members.child(card);
         }
         let mut decisions = column().gap_2();
-        if let Some(source) = &review.source {
+        if let Some(source) = review.source.as_ref().filter(|_| members_visible) {
             decisions = decisions.child(caption(
                 theme,
                 self.context.i18n.format(
@@ -1632,7 +1741,7 @@ impl Duplicates {
                 ),
             ));
         }
-        if let Some(target) = &review.target {
+        if let Some(target) = review.target.as_ref().filter(|_| members_visible) {
             decisions = decisions.child(caption(
                 theme,
                 self.context.i18n.format(
@@ -1851,7 +1960,11 @@ impl Duplicates {
                                     pane.child(self.review_pager(
                                         false,
                                         review.members_offset,
-                                        review.members_total,
+                                        if members_visible {
+                                            review.members_total
+                                        } else {
+                                            0
+                                        },
                                         MEMBER_PAGE,
                                         busy || review.members_loading || review.confirming,
                                         cx,
@@ -2010,6 +2123,7 @@ mod tests {
         assert!(!review.change_page(false, epoch, generation, 8, revisions));
         assert_eq!(review.fingerprint.as_deref(), Some("replacement"));
         assert_eq!(review.members_offset, 0);
+        load_members(&mut review, revisions);
 
         let generation = review.members_projection.generation();
         assert!(review.change_page(false, epoch, generation, 8, revisions));
@@ -2020,9 +2134,11 @@ mod tests {
         let generation = review.members_projection.generation();
         review.close();
         review.open(revisions);
+        load_groups(&mut review, revisions);
         assert!(review.select_group("replacement", revisions));
         assert!(!review.change_page(false, epoch, generation, 8, revisions));
         assert_eq!(review.members_offset, 0);
+        load_members(&mut review, revisions);
         let current_epoch = review.epoch;
         let generation = review.members_projection.generation();
         assert!(review.change_page(false, current_epoch, generation, 8, revisions));
@@ -2042,6 +2158,9 @@ mod tests {
         review.sync_queries(changed);
         assert!(!review.change_page(true, epoch, generation, 12, changed));
         assert_eq!(review.groups_offset, 0);
+        let current_generation = review.groups_projection.generation();
+        assert!(!review.change_page(true, epoch, current_generation, 12, changed));
+        load_groups(&mut review, changed);
         let generation = review.groups_projection.generation();
         assert!(review.change_page(true, epoch, generation, 12, changed));
         assert_eq!(review.groups_offset, 12);
@@ -2527,7 +2646,48 @@ mod tests {
         review.sync_queries(QueryRevisions::default());
         review.groups_dirty = false;
         review.members_dirty = false;
+        review.members_current = true;
         review
+    }
+
+    fn load_groups(review: &mut DuplicateReview, revisions: QueryRevisions) {
+        let read = review.begin_groups().unwrap();
+        review.groups_worker_finished();
+        assert!(review.accept_groups(
+            read.epoch,
+            &read.query,
+            read.generation,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::DuplicateGroups(Page {
+                    total: 24,
+                    rows: Vec::new()
+                })),
+            },
+            revisions
+        ));
+    }
+
+    fn load_members(review: &mut DuplicateReview, revisions: QueryRevisions) {
+        let (read, _) = review.begin_members().unwrap();
+        review.members_worker_finished();
+        assert!(review.accept_members(
+            read.epoch,
+            &read.query,
+            read.generation,
+            (
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::DuplicateMembers(Page {
+                        total: 24,
+                        rows: Vec::new()
+                    })),
+                },
+                Vec::new(),
+                None
+            ),
+            revisions
+        ));
     }
 
     fn member(id: i64, missing: bool) -> Member {
@@ -3083,7 +3243,7 @@ mod tests {
             revisions,
         ));
         assert!(!review.members_current);
-        assert!(review.members.is_empty());
+        assert_eq!(review.members.len(), 2);
         assert!(!review.members_dirty);
         assert!(review.feedback.is_none());
         assert!(review.begin_members().is_none());
@@ -3192,5 +3352,153 @@ mod tests {
             assert!(!review.open);
             assert!(review.busy.is_none());
         }
+    }
+    #[test]
+    fn duplicate_retention_expires_hung_readers_without_extending_or_authorizing_actions() {
+        use std::time::{Duration, Instant};
+
+        let mut review = ready_review();
+        review.groups = Some(Page {
+            total: 24,
+            rows: Vec::new(),
+        });
+        review.members_total = 2;
+        let start = Instant::now();
+        let old_groups = review.groups_projection.ticket();
+        let old_members = review.members_projection.ticket();
+        let revisions = QueryRevisions {
+            duplicate_groups: 1,
+            duplicate_members: 1,
+            ..Default::default()
+        };
+        review.sync_queries_at(revisions, start);
+        assert!(!old_groups.is_current());
+        assert!(!old_members.is_current());
+        assert!(!review.select_group("fingerprint", revisions));
+        assert!(!review.select_member(1, true));
+        assert!(review.submit(false).is_none());
+        let groups = review.begin_groups().unwrap();
+        let (members, _) = review.begin_members().unwrap();
+        let deadline = review.deadline();
+        review.sync_queries_at(
+            QueryRevisions {
+                duplicate_groups: 2,
+                duplicate_members: 2,
+                ..revisions
+            },
+            start + Duration::from_millis(150),
+        );
+        assert_eq!(review.deadline(), deadline);
+        assert!(review.groups_pending && review.members_pending);
+        assert!(!groups.ticket.is_current() && !members.ticket.is_current());
+        assert!(
+            review
+                .visible_groups(start + Duration::from_millis(199))
+                .is_some()
+        );
+        assert_eq!(
+            review
+                .visible_members(start + Duration::from_millis(199))
+                .len(),
+            2
+        );
+        assert!(
+            review
+                .visible_groups(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .is_none()
+        );
+        assert!(
+            review
+                .visible_members(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .is_empty()
+        );
+        assert!(review.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(review.groups.is_none() && review.members.is_empty());
+        assert!(review.source.is_none() && review.target.is_none());
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
+        assert!(review.groups_pending && review.members_pending);
+        assert!(!review.expire(start + Duration::from_secs(1)));
+        assert!(!review.change_page(
+            true,
+            review.epoch,
+            review.groups_projection.generation(),
+            12,
+            revisions
+        ));
+    }
+
+    #[test]
+    fn equal_duplicate_pages_reuse_display_and_restore_fresh_actions() {
+        let mut review = ready_review();
+        review.members_total = 2;
+        let allocation = review.members.as_ptr();
+        let revisions = QueryRevisions::default();
+        review.request_members("fingerprint".into(), 0, revisions);
+        let (read, _) = review.begin_members().unwrap();
+        review.members_worker_finished();
+        assert!(review.accept_members(
+            read.epoch,
+            &read.query,
+            read.generation,
+            (
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::DuplicateMembers(Page {
+                        total: 2,
+                        rows: vec![member(1, true).value, member(2, false).value],
+                    })),
+                },
+                vec![Some(false), Some(true)],
+                None
+            ),
+            revisions
+        ));
+        assert_eq!(review.members.as_ptr(), allocation);
+        assert!(review.members_current);
+        assert!(review.select_member(1, true));
+        assert!(review.can_relocate());
+        assert!(review.members_retention.deadline().is_none());
+    }
+
+    #[test]
+    fn duplicate_identity_changes_hard_reset_instead_of_retaining_old_rows() {
+        let mut review = ready_review();
+        review.groups = Some(Page {
+            total: 24,
+            rows: Vec::new(),
+        });
+        review.request_groups(12, QueryRevisions::default());
+        assert!(review.groups.is_none());
+        assert!(review.groups_retention.deadline().is_none());
+        review.request_members("other group".into(), 0, QueryRevisions::default());
+        assert!(review.members.is_empty());
+        assert!(review.source.is_none() && review.target.is_none());
+        assert!(review.members_retention.deadline().is_none());
+    }
+
+    #[test]
+    fn duplicate_expiry_rearms_the_remaining_earliest_cache_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut review = ready_review();
+        review.groups = Some(Page {
+            total: 1,
+            rows: Vec::new(),
+        });
+        let start = Instant::now();
+        review.groups_retention.begin(start);
+        review
+            .members_retention
+            .begin(start + Duration::from_millis(50));
+        let first = start + rivu_ui::refresh::REFRESH_RETENTION;
+        let next = first + Duration::from_millis(50);
+        assert_eq!(review.deadline(), Some(first));
+        assert!(review.expire(first));
+        assert!(review.groups.is_none());
+        assert_eq!(review.members.len(), 2);
+        assert_eq!(review.deadline(), Some(next));
+        assert!(review.expire(next));
+        assert!(review.members.is_empty());
+        assert!(review.deadline().is_none());
     }
 }

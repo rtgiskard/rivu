@@ -5,7 +5,8 @@ use gpui::ScrollStrategy;
 use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
-use std::{collections::HashSet, ops::Range, sync::Arc};
+use rivu_ui::refresh::RefreshDeadline;
+use std::{collections::HashSet, ops::Range, sync::Arc, time::Instant};
 
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
@@ -34,6 +35,8 @@ struct RootCounts {
     roots: Vec<std::path::PathBuf>,
     counted_roots: Arc<[usize]>,
     totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
+    retained: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
+    retention: RefreshDeadline,
     pending: HashSet<usize>,
     failed: HashSet<usize>,
     settled: bool,
@@ -44,6 +47,8 @@ impl RootCounts {
     fn invalidate(&mut self) {
         self.owner.cancel();
         self.totals = Arc::default();
+        self.retained = Arc::default();
+        self.retention.clear();
         self.pending.clear();
         self.failed.clear();
         self.settled = false;
@@ -63,6 +68,8 @@ struct SearchCounts {
     other_tracks: Option<(usize, usize)>,
     // Membership is structure-owned, not the current filter's matched count.
     other_total: Option<usize>,
+    stale: bool,
+    retention: RefreshDeadline,
 }
 
 #[derive(Clone)]
@@ -133,15 +140,18 @@ impl Default for LibraryBrowser {
 }
 
 impl LibraryBrowser {
-    /// Reconcile the complete demand before reserving the sole physical worker.
-    /// The boolean tells the presentation layer to forget its previous counts.
-    pub(super) fn prepare_search_counts(
-        &mut self,
-        roots: &[std::path::PathBuf],
-        revisions: QueryRevisions,
-    ) -> (bool, Option<SearchCountRequest>) {
-        self.sync_root_counts(roots, revisions.structure);
-        let query = Query::LibraryRootPage {
+    fn reset_search_counts(&mut self) {
+        let counts = &mut self.search_counts;
+        counts.projection.cancel();
+        counts.totals = None;
+        counts.root_counts.clear();
+        counts.other_tracks = None;
+        counts.failed = false;
+        counts.stale = false;
+        counts.retention.clear();
+    }
+    fn search_count_query(&self) -> Query {
+        Query::LibraryRootPage {
             path: Default::default(),
             query: self.buffer.query.clone(),
             favorite: self.buffer.favorite,
@@ -150,13 +160,25 @@ impl LibraryBrowser {
             sort: LibrarySort::Id,
             offset: 0,
             limit: 0,
-        };
+        }
+    }
+
+    /// Reconcile authority even while hidden, independently of the worker slot.
+    pub(super) fn sync_search_counts(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        now: Instant,
+    ) -> bool {
+        self.sync_root_counts_at(roots, revisions.structure, now);
+        let query = self.search_count_query();
         let counts = &mut self.search_counts;
         let roots_changed = counts.roots != roots;
         let structure_changed = counts
             .projection
             .stamp()
             .is_none_or(|stamp| stamp.revisions().structure != revisions.structure);
+        let same_query = counts.projection.matches_identity(&query) && !roots_changed;
         let changed = counts.projection.sync(&query, revisions) || roots_changed;
         if roots_changed || structure_changed {
             counts.other_total = None;
@@ -166,18 +188,37 @@ impl LibraryBrowser {
                 counts.projection.cancel();
                 counts.roots = roots.to_vec();
             }
-            counts.totals = None;
-            counts.root_counts.clear();
-            counts.other_tracks = None;
+            if same_query && counts.totals.is_some() {
+                counts.stale = true;
+                counts.retention.begin(now);
+            } else {
+                counts.totals = None;
+                counts.root_counts.clear();
+                counts.other_tracks = None;
+                counts.stale = false;
+                counts.retention.clear();
+            }
             counts.failed = false;
         }
-        // The batched root-count owner is the sole producer of unfiltered totals.
-        // Wait before reserving a worker so its immutable snapshot is complete.
+        changed
+    }
+
+    /// Reconcile complete demand before reserving the sole physical worker.
+    /// The boolean reports changed authority, not a reason to erase retained text.
+    pub(super) fn prepare_search_counts(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+    ) -> (bool, Option<SearchCountRequest>) {
+        let changed = self.sync_search_counts(roots, revisions, Instant::now());
+        let query = self.search_count_query();
+        let counts = &mut self.search_counts;
+        // Only current batched counts may seed a new filtered-count request.
         let roots_ready = roots
             .iter()
             .all(|root| self.counts.totals.contains_key(root));
         let request = if !roots_ready
-            || counts.totals.is_some()
+            || (counts.totals.is_some() && !counts.stale)
             || counts.failed
             || counts.worker.is_some()
         {
@@ -251,16 +292,27 @@ impl LibraryBrowser {
             return false;
         }
         counts.failed = result.is_none();
+        counts.stale = false;
+        counts.retention.clear();
         if let Some(result) = result {
             for (root, (_, total)) in &result.roots {
                 if self.counts.totals.get(root) != Some(total) {
                     Arc::make_mut(&mut self.counts.totals).insert(root.clone(), *total);
                 }
             }
-            counts.totals = Some(result.totals);
-            counts.root_counts = result.roots;
-            counts.other_tracks = Some(result.other_tracks);
+            if counts.totals != Some(result.totals)
+                || counts.root_counts != result.roots
+                || counts.other_tracks != Some(result.other_tracks)
+            {
+                counts.totals = Some(result.totals);
+                counts.root_counts = result.roots;
+                counts.other_tracks = Some(result.other_tracks);
+            }
             counts.other_total = Some(result.other_tracks.1);
+        } else {
+            counts.totals = None;
+            counts.root_counts.clear();
+            counts.other_tracks = None;
         }
         self.reconcile_forest(roots);
         true
@@ -271,7 +323,10 @@ impl LibraryBrowser {
     }
 
     pub(super) fn search_counts(&self) -> Option<(usize, usize)> {
-        self.search_counts.totals
+        let counts = &self.search_counts;
+        (!counts.stale || counts.retention.visible(Instant::now()))
+            .then_some(counts.totals)
+            .flatten()
     }
 
     pub(super) fn other_tracks_empty(&self) -> bool {
@@ -303,7 +358,9 @@ impl LibraryBrowser {
     }
 
     pub(super) fn other_count_label(&self) -> String {
-        self.search_counts.other_tracks.map_or_else(
+        let counts = &self.search_counts;
+        let visible = !counts.stale || counts.retention.visible(Instant::now());
+        counts.other_tracks.filter(|_| visible).map_or_else(
             || "—".to_owned(),
             |(matched, total)| {
                 if self.buffer.query.is_some()
@@ -342,7 +399,12 @@ impl LibraryBrowser {
     }
 
     pub(super) fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
+        self.sync_projection_at(revisions, Instant::now())
+    }
+
+    pub(super) fn sync_projection_at(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         let query = self.projection_query();
+        let same_query = self.projection.matches_identity(&query);
         let payload_only = self.projection.stamp().is_some_and(|stamp| {
             let mut previous = stamp.revisions();
             previous.bitrate = revisions.bitrate;
@@ -353,17 +415,59 @@ impl LibraryBrowser {
             return false;
         }
         if payload_only {
-            self.tree.invalidate_payloads();
+            self.tree.invalidate_payloads_at(now);
         } else {
             self.invalidate_projection();
-            self.tree.invalidate();
+            if same_query {
+                self.tree.refresh(now);
+            } else {
+                self.tree.invalidate();
+            }
         }
         true
     }
+
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        [
+            self.tree.refresh_deadline(),
+            self.counts.retention.deadline(),
+            self.search_counts.retention.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
+        let mut changed = self.tree.expire_refresh(now);
+        if self.counts.retention.expired(now) {
+            changed |= !self.counts.retained.is_empty();
+            self.counts.retained = Arc::default();
+            self.counts.retention.clear();
+        }
+        if self.search_counts.retention.expired(now) {
+            changed |= self.search_counts.totals.is_some();
+            self.search_counts.totals = None;
+            self.search_counts.root_counts.clear();
+            self.search_counts.other_tracks = None;
+            self.search_counts.retention.clear();
+        }
+        changed
+    }
+
     pub(super) fn sync_root_counts(
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
+    ) {
+        self.sync_root_counts_at(roots, structure_revision, Instant::now());
+    }
+
+    fn sync_root_counts_at(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        structure_revision: u64,
+        now: Instant,
     ) {
         let revisions = QueryRevisions {
             structure: structure_revision,
@@ -392,7 +496,18 @@ impl LibraryBrowser {
                     })
                     .collect();
             }
-            self.counts.totals = Arc::default();
+            if self.counts.roots == roots {
+                if !self.counts.totals.is_empty() {
+                    self.counts.retained = std::mem::take(&mut self.counts.totals);
+                }
+                if !self.counts.retained.is_empty() {
+                    self.counts.retention.begin(now);
+                }
+            } else {
+                self.counts.totals = Arc::default();
+                self.counts.retained = Arc::default();
+                self.counts.retention.clear();
+            }
             self.counts.pending.clear();
             self.counts.failed.clear();
             self.counts.settled = false;
@@ -477,8 +592,18 @@ impl LibraryBrowser {
         counts: Vec<rivu_protocol::model::LibraryRootCount>,
     ) {
         if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
-            Arc::make_mut(&mut self.counts.totals)
-                .extend(counts.into_iter().map(|count| (count.path, count.total)));
+            for count in counts {
+                Arc::make_mut(&mut self.counts.totals).insert(count.path, count.total);
+            }
+            if self
+                .counts
+                .roots
+                .iter()
+                .all(|root| self.counts.totals.contains_key(root))
+            {
+                self.counts.retained = Arc::default();
+                self.counts.retention.clear();
+            }
         }
     }
 
@@ -504,17 +629,32 @@ impl LibraryBrowser {
         self.counts.totals.get(path).copied()
     }
 
+    fn root_count_display_at(&self, path: &std::path::Path, now: Instant) -> Option<usize> {
+        self.root_count(path).or_else(|| {
+            self.counts
+                .retention
+                .visible(now)
+                .then(|| self.counts.retained.get(path).copied())
+                .flatten()
+        })
+    }
+
     pub(super) fn root_count_label(&self, path: &std::path::Path) -> String {
         if self.buffer.query.is_some()
             || self.buffer.favorite.is_some()
             || self.buffer.missing.is_some()
         {
-            self.search_counts.root_counts.get(path).map_or_else(
-                || "—".to_owned(),
-                |(matched, total)| format!("{matched} / {total}"),
-            )
+            let counts = &self.search_counts;
+            counts
+                .root_counts
+                .get(path)
+                .filter(|_| !counts.stale || counts.retention.visible(Instant::now()))
+                .map_or_else(
+                    || "—".to_owned(),
+                    |(matched, total)| format!("{matched} / {total}"),
+                )
         } else {
-            self.root_count(path)
+            self.root_count_display_at(path, Instant::now())
                 .map_or_else(|| "—".to_owned(), |total| total.to_string())
         }
     }
@@ -557,6 +697,7 @@ impl LibraryBrowser {
 
     pub(super) fn refresh_tree(&mut self, page_size: usize) {
         if self.tree.configure_page_size(page_size) {
+            self.projection.cancel();
             self.invalidate_projection();
         }
     }
@@ -569,6 +710,7 @@ impl LibraryBrowser {
         generation: u64,
     ) -> usize {
         if self.tree.configure_page_size(page_size) {
+            self.projection.cancel();
             self.invalidate_projection();
         }
         let offset = offset / page_size * page_size;
@@ -656,6 +798,7 @@ impl LibraryBrowser {
             || self.buffer.missing.is_some()
         {
             self.projection.cancel();
+            self.reset_search_counts();
         }
         self.favorites_only = false;
         self.missing_only = false;
@@ -807,6 +950,8 @@ impl LibraryBrowser {
 
     pub(super) fn roots_changed(&mut self) {
         self.invalidate_projection();
+        self.projection.cancel();
+        self.reset_search_counts();
         self.tree.clear();
         self.counts.invalidate();
         self.search_counts.other_total = None;
@@ -822,6 +967,7 @@ impl LibraryBrowser {
 
     pub(super) fn toggle_favorites(&mut self) {
         self.projection.cancel();
+        self.reset_search_counts();
         self.favorites_only = !self.favorites_only;
         self.invalidate_projection();
         self.tree.invalidate();
@@ -837,12 +983,16 @@ impl LibraryBrowser {
     }
 
     pub(super) fn refresh_filter(&mut self) {
-        if self.buffer.missing != self.missing_only.then_some(true) {
-            self.projection.cancel();
-        }
+        let changed = self.buffer.missing != self.missing_only.then_some(true);
+        self.projection.cancel();
         self.invalidate_projection();
         self.buffer.missing = self.missing_only.then_some(true);
-        self.tree.invalidate();
+        if changed {
+            self.reset_search_counts();
+            self.tree.invalidate();
+        } else {
+            self.tree.refresh(Instant::now());
+        }
         self.scroll_filter_to_top();
     }
 
@@ -864,8 +1014,7 @@ impl LibraryBrowser {
             || self.buffer.missing != self.missing_only.then_some(true)
         {
             self.projection.cancel();
-        }
-        if self.buffer.query != query {
+            self.reset_search_counts();
             self.tree.invalidate();
         }
         self.buffer.query = query;
@@ -877,6 +1026,88 @@ impl LibraryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_counts_expire_without_authorizing_new_count_reads() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let mut library = LibraryBrowser::default();
+        let mut revisions = QueryRevisions::default();
+        load_root_totals(&mut library, &roots, revisions);
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let old = request.clone();
+        assert!(library.accept_search_counts(
+            request,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (2, 3)))
+        ));
+        revisions.library += 1;
+        revisions.structure += 1;
+        library.sync_search_counts(&roots, revisions, start);
+        assert_eq!(library.root_count(&roots[0]), None);
+        assert_eq!(
+            library.root_count_display_at(&roots[0], start + Duration::from_millis(199)),
+            Some(3)
+        );
+        assert!(
+            library.prepare_search_counts(&roots, revisions).1.is_none(),
+            "retained totals must not seed a fresh filtered read"
+        );
+        let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        assert_eq!(offsets, vec![0]);
+        let ticket = library.root_count_ticket();
+        revisions.library += 1;
+        library.sync_search_counts(&roots, revisions, start + Duration::from_millis(150));
+        assert!(!library.publish_search_counts(
+            &old,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (99, 99)))
+        ));
+        assert!(!library.expire_refresh(start + Duration::from_millis(199)));
+        assert!(library.expire_refresh(start + Duration::from_millis(200)));
+        assert_eq!(
+            library.root_count_display_at(&roots[0], start + Duration::from_millis(200)),
+            None
+        );
+        assert_eq!(library.search_counts(), None);
+        assert!(library.counts_current(generation, &roots, revisions.structure));
+        assert!(ticket.is_current());
+        assert!(library.counts.pending.contains(&0));
+    }
+
+    #[test]
+    fn equal_refreshed_counts_restore_authority_and_reuse_the_payload() {
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let mut library = LibraryBrowser::default();
+        let mut revisions = QueryRevisions::default();
+        load_root_totals(&mut library, &roots, revisions);
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(library.accept_search_counts(
+            request,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (2, 3)))
+        ));
+        revisions.library += 1;
+        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let pointer = library.search_counts.root_counts.get(&roots[0]).unwrap() as *const _;
+        assert_eq!(library.search_counts(), Some((2, 3)));
+        assert!(library.accept_search_counts(
+            request,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (2, 3)))
+        ));
+        assert_eq!(
+            library.search_counts.root_counts.get(&roots[0]).unwrap() as *const _,
+            pointer
+        );
+        assert!(library.refresh_deadline().is_none());
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+    }
+
     fn load_root_totals(
         library: &mut LibraryBrowser,
         roots: &[std::path::PathBuf],
@@ -1019,7 +1250,7 @@ mod tests {
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
         assert!(library.counts.totals.is_empty());
         assert_eq!(library.search_counts.other_total, None);
-        assert_eq!(library.search_counts(), None);
+        assert_eq!(library.search_counts(), Some((1, 4)));
     }
 
     #[test]

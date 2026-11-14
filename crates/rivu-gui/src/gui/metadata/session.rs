@@ -6,7 +6,8 @@ use super::source::{SourceAction, SourceTags, SourceToken, database_tags};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
 use rivu_protocol::model::{Command, Track};
-use std::{collections::HashMap, sync::Arc};
+use rivu_ui::refresh::RefreshDeadline;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Field {
@@ -134,6 +135,9 @@ pub(in crate::gui) struct MetadataSession {
     identity: Option<i64>,
     availability: MetadataAvailability,
     read_state: MetadataReadState,
+    retention: RefreshDeadline,
+    // The same-identity source remains owned after its details stop being displayed.
+    details_expired: bool,
     epoch: u64,
     request_serial: u64,
     database_serial: u64,
@@ -155,10 +159,27 @@ impl MetadataSession {
         })
     }
     pub(in crate::gui) fn track(&self) -> Option<&Track> {
+        self.display_track_at(Instant::now())
+    }
+    pub(super) fn display_track_at(&self, now: Instant) -> Option<&Track> {
+        if self.details_expired || self.retention.expired(now) {
+            return None;
+        }
+        self.source_track()
+    }
+
+    pub(super) fn source_track(&self) -> Option<&Track> {
         match &self.availability {
             MetadataAvailability::Present(track) => Some(track),
             _ => None,
         }
+    }
+    pub(super) fn authoritative_track(&self) -> Option<&Track> {
+        self.retention
+            .deadline()
+            .is_none()
+            .then(|| self.track())
+            .flatten()
     }
     pub(in crate::gui) fn track_snapshot(&self) -> Option<Arc<Track>> {
         match &self.availability {
@@ -167,13 +188,17 @@ impl MetadataSession {
         }
     }
     pub(in crate::gui) fn availability(&self) -> &MetadataAvailability {
-        &self.availability
+        if matches!(self.availability, MetadataAvailability::Present(_)) && self.track().is_none() {
+            &MetadataAvailability::Unknown
+        } else {
+            &self.availability
+        }
     }
     pub(in crate::gui) fn read_state(&self) -> &MetadataReadState {
         &self.read_state
     }
     pub(in crate::gui) fn editable(&self) -> bool {
-        self.track().is_some()
+        self.authoritative_track().is_some()
     }
     pub(super) fn saving(&self, field: Field) -> bool {
         self.saves.contains_key(&field)
@@ -183,8 +208,29 @@ impl MetadataSession {
         !self.saves.is_empty()
     }
 
+    pub(super) fn invalidate_at(&mut self, now: Instant) {
+        if !self.details_expired && matches!(self.availability, MetadataAvailability::Present(_)) {
+            self.retention.begin(now);
+        }
+    }
+
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.retention.deadline()
+    }
+
+    pub(super) fn expire(&mut self, now: Instant) -> bool {
+        if !self.retention.expired(now) {
+            return false;
+        }
+        let changed =
+            !self.details_expired && matches!(self.availability, MetadataAvailability::Present(_));
+        self.details_expired = true;
+        self.retention.clear();
+        changed
+    }
+
     fn advance_database_serial(&mut self, next: Option<&Track>) {
-        let unchanged = match (self.track(), next) {
+        let unchanged = match (self.source_track(), next) {
             (Some(previous), Some(next)) => {
                 previous.title == next.title
                     && previous.artist == next.artist
@@ -202,7 +248,7 @@ impl MetadataSession {
     }
 
     pub(super) fn begin_source(&mut self, action: SourceAction) -> Option<(SourceToken, Command)> {
-        if self.any_saving() {
+        if !self.editable() || self.any_saving() {
             return None;
         }
         let identity = self.editor_identity()?;
@@ -262,6 +308,8 @@ impl MetadataSession {
         self.identity = id;
         self.epoch = self.epoch.wrapping_add(1);
         self.availability = MetadataAvailability::Unknown;
+        self.retention.clear();
+        self.details_expired = false;
         self.saves.clear();
         self.source = SourceTags::default();
         self.read_state = MetadataReadState::Idle;
@@ -327,10 +375,16 @@ impl MetadataSession {
             return false;
         }
         self.read_state = MetadataReadState::Idle;
+        self.retention.clear();
+        self.details_expired = false;
         self.advance_database_serial(track.as_ref());
-        self.availability = track.map_or(MetadataAvailability::Unavailable, |track| {
-            MetadataAvailability::Present(Arc::new(track))
-        });
+        if !matches!((&self.availability, &track),
+            (MetadataAvailability::Present(previous), Some(next)) if previous.as_ref() == next)
+        {
+            self.availability = track.map_or(MetadataAvailability::Unavailable, |track| {
+                MetadataAvailability::Present(Arc::new(track))
+            });
+        }
         true
     }
 
@@ -342,11 +396,13 @@ impl MetadataSession {
         if self.identity != id {
             self.change_identity(id);
         } else if matches!(self.availability, MetadataAvailability::Unavailable)
-            || self.track() == track
+            || self.source_track() == track
         {
             return false;
         }
         self.advance_database_serial(track);
+        self.retention.clear();
+        self.details_expired = false;
         self.availability = track.map_or(MetadataAvailability::Unknown, |track| {
             MetadataAvailability::Present(Arc::new(track.clone()))
         });
@@ -355,7 +411,7 @@ impl MetadataSession {
 
     pub(super) fn begin_save(&mut self, value: &SavedValue) -> Option<(SaveToken, Command)> {
         let field = value.field();
-        let track = self.track()?;
+        let track = self.authoritative_track()?;
         if self.source.busy() || self.saving(field) || !value.changed(track) {
             return None;
         }
@@ -485,5 +541,59 @@ mod tests {
         assert!(!session.sync_playback(Some(&track(1, "stale"))));
         assert!(session.complete_save(save));
         assert!(session.track().is_none());
+    }
+    #[test]
+    fn stale_details_expire_once_without_authorizing_writes_or_losing_source_drafts() {
+        use std::time::Duration;
+
+        let mut session = loaded();
+        let start = Instant::now();
+        let (save, _) = session.begin_save(&SavedValue::PlayCount(7)).unwrap();
+        let staged = database_tags(session.track().unwrap());
+        session.source.stage(staged.clone());
+        session.invalidate_at(start);
+        let deadline = session.deadline();
+        assert!(!session.editable());
+        assert!(
+            session
+                .begin_save(&SavedValue::Title("stale".into()))
+                .is_none()
+        );
+        assert!(session.begin_source(SourceAction::Sync).is_none());
+        session.invalidate_at(start + Duration::from_millis(150));
+        assert_eq!(session.deadline(), deadline);
+        assert!(
+            session
+                .display_track_at(start + Duration::from_millis(199))
+                .is_some()
+        );
+        assert!(
+            session
+                .display_track_at(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .is_none()
+        );
+        assert!(session.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(!session.expire(start + Duration::from_secs(1)));
+        assert!(session.complete_save(save));
+        let read = session.begin_load(1);
+        assert!(session.accept_load(read, Some(track(1, "fresh"))));
+        assert!(session.editable());
+        assert_eq!(session.source.values(session.track().unwrap()), staged);
+        session.invalidate_at(start + Duration::from_secs(1));
+        session.select(2);
+        assert!(session.track().is_none());
+        assert!(session.deadline().is_none());
+    }
+
+    #[test]
+    fn equal_fresh_details_keep_the_display_allocation_and_restore_authority() {
+        let mut session = loaded();
+        let previous = session.track_snapshot().unwrap();
+        session.invalidate_at(Instant::now());
+        let read = session.begin_load(1);
+        assert!(session.accept_load(read, Some(track(1, "original"))));
+        assert!(session.editable());
+        assert!(session.deadline().is_none());
+        assert!(Arc::ptr_eq(&previous, &session.track_snapshot().unwrap()));
     }
 }

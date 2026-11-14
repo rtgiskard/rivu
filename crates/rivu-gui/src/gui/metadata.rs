@@ -30,7 +30,9 @@ use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,
     IconButtonStyle, caption, column, disabled_control,
     input::{Input, InputEvent},
-    panel_surface, row, section_group,
+    panel_surface,
+    refresh::RefreshWake,
+    row, section_group,
 };
 use session::{Field, MetadataAvailability, MetadataReadState, MetadataSession, SavedValue};
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
@@ -56,6 +58,7 @@ pub(in crate::gui) struct Metadata {
     state: Rc<GuiSnapshot>,
     metadata: MetadataSession,
     metadata_read: MetadataReadCoordinator,
+    refresh_wake: RefreshWake,
     edit: Option<InlineEdit>,
     edit_serial: u64,
     edit_blur: Option<Subscription>,
@@ -90,6 +93,7 @@ impl Metadata {
             state,
             metadata: MetadataSession::default(),
             metadata_read: MetadataReadCoordinator::default(),
+            refresh_wake: RefreshWake::default(),
             edit: None,
             edit_serial: 0,
             edit_blur: None,
@@ -140,6 +144,7 @@ impl Metadata {
         if query_changed {
             self.demand_metadata(cx);
         }
+        self.schedule_metadata_expiry(cx);
         if display_changed {
             cx.notify();
         }
@@ -230,7 +235,7 @@ impl Metadata {
     }
 
     pub(in crate::gui) fn track(&self) -> Option<&Track> {
-        self.metadata.track()
+        self.metadata.source_track()
     }
 
     pub(in crate::gui) fn track_snapshot(&self) -> Option<Arc<Track>> {
@@ -241,7 +246,7 @@ impl Metadata {
         if field == Field::DecoderHint {
             return;
         }
-        let Some(track) = self.metadata.track() else {
+        let Some(track) = self.metadata.authoritative_track() else {
             return;
         };
         if self.metadata.saving(field) {
@@ -311,7 +316,7 @@ impl Metadata {
         let Some(edit) = self.edit.as_ref().filter(|edit| edit.field == field) else {
             return;
         };
-        if self.metadata.saving(field) || self.metadata.source.busy() {
+        if !self.metadata.editable() || self.metadata.saving(field) || self.metadata.source.busy() {
             return;
         }
         let text = edit.input.read(cx).text();
@@ -374,11 +379,13 @@ impl Metadata {
 
     fn demand_metadata(&mut self, cx: &mut Context<Self>) {
         self.sync_metadata_query();
-        let Some(task) = self.metadata_read.prepare(
+        let task = self.metadata_read.prepare(
             &mut self.metadata,
             self.visible || self.preview_demand,
             Instant::now(),
-        ) else {
+        );
+        self.schedule_metadata_expiry(cx);
+        let Some(task) = task else {
             return;
         };
         cx.emit(MetadataEvent::TrackChanged);
@@ -454,13 +461,29 @@ impl Metadata {
                             this.cancel_edit(cx);
                         }
                         cx.emit(MetadataEvent::TrackChanged);
+                        this.schedule_metadata_expiry(cx);
+                        cx.notify();
                     }
-                    ReadCompletion::Failed => {}
+                    ReadCompletion::Failed => {
+                        this.schedule_metadata_expiry(cx);
+                        cx.notify();
+                    }
                 }
-                cx.notify();
             });
         })
         .detach();
+    }
+
+    fn schedule_metadata_expiry(&mut self, cx: &mut Context<Self>) {
+        if self.metadata.expire(Instant::now()) {
+            cx.notify();
+        }
+        self.refresh_wake
+            .schedule(self.metadata.deadline(), cx, |this, now, cx| {
+                let changed = this.metadata.expire(now);
+                this.schedule_metadata_expiry(cx);
+                changed
+            });
     }
 
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -471,6 +494,7 @@ impl Metadata {
         self.error = None;
         self.sync_metadata_default(cx);
         self.sync_metadata_query();
+        self.schedule_metadata_expiry(cx);
         cx.emit(MetadataEvent::TrackChanged);
         cx.notify();
     }
@@ -492,7 +516,10 @@ impl Metadata {
         serial: Option<u64>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.metadata.source.busy() || self.metadata.saving(value.field()) {
+        if !self.metadata.editable()
+            || self.metadata.source.busy()
+            || self.metadata.saving(value.field())
+        {
             return false;
         }
         let Some((token, command)) = self.metadata.begin_save(&value) else {
@@ -1008,6 +1035,7 @@ impl Metadata {
         };
         let status: SharedString = match self.metadata.read_state() {
             MetadataReadState::Idle => presence_status.to_owned().into(),
+            MetadataReadState::Pending(_) if track.is_some() => presence_status.to_owned().into(),
             MetadataReadState::Pending(_) => self
                 .context
                 .i18n
@@ -1313,8 +1341,10 @@ impl Metadata {
                                         if this.metadata.editor_identity() != editor_identity {
                                             return;
                                         }
-                                        let Some(track_id) =
-                                            this.metadata.track().map(|track| track.id)
+                                        let Some(track_id) = this
+                                            .metadata
+                                            .authoritative_track()
+                                            .map(|track| track.id)
                                         else {
                                             return;
                                         };

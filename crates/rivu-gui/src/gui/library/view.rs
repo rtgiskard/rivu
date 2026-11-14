@@ -233,7 +233,7 @@ impl Library {
                 let render_scope = std::rc::Rc::new(this.library_row_scope());
                 range
                     .filter_map(|index| {
-                        let item = this.library.tree().item(index)?;
+                        let item = this.library.tree().display_item(index)?;
                         let visible = match item {
                             TreeItem::Entry(visible) => visible,
                             TreeItem::Placeholder {
@@ -497,7 +497,7 @@ impl Library {
                             })
                             .when(located, |view| view.bg(rivu_ui::row_background(theme, false, true, crate::gui::appearance::material::surface(cx))))
                             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                if !this.library_row_scope_valid(&menu_scope) { cx.stop_propagation(); return; }
+                                if !this.library_row_current(&menu_scope, index, &menu_node) { cx.stop_propagation(); return; }
                                 cx.emit(LibraryEvent::Focus);
                                 if this.library_range_pending() { cx.stop_propagation(); return; }
                                 let selected = match &menu_node {
@@ -567,6 +567,7 @@ impl Library {
                             let drag_owner = cx.weak_entity();
                             let drag_i18n = Arc::clone(&this.i18n);
                             let drag_source = id.clone();
+                            let drag_scope = row_scope.clone();
                             view.on_drag(
                                 LibraryDrag {
                                     nodes: std::cell::OnceCell::new(),
@@ -575,7 +576,13 @@ impl Library {
                                     rivu_ui::begin_list_drag(window, cx);
                                     let nodes = drag.nodes.get_or_init(|| {
                                         drag_owner
-                                            .update(cx, |this, _| this.library.drag_nodes(&drag_source))
+                                            .update(cx, |this, _| {
+                                                if this.library_row_current(&drag_scope, index, &drag_source) {
+                                                    this.library.drag_nodes(&drag_source)
+                                                } else {
+                                                    Vec::new()
+                                                }
+                                            })
                                             .unwrap_or_default()
                                     });
                                     cx.new(|_| {
@@ -586,7 +593,7 @@ impl Library {
                         })
                         .on_click(cx.listener(
                             move |this, event: &gpui::ClickEvent, _, cx| {
-                                if !this.library_row_scope_valid(&row_scope) { return; }
+                                if !this.library_row_current(&row_scope, index, &id) { return; }
                                 this.library.cancel_navigation();
                                 cx.emit(LibraryEvent::Focus);
                                 match id.clone() {
@@ -659,7 +666,7 @@ impl Library {
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         self.finish_library_locate_render(window, cx);
-        let total = self.library.tree().root_total();
+        let total = self.library.tree().display_root_total();
         let range_pending = self.library_range_pending();
         let selected_directories = self
             .library

@@ -151,6 +151,11 @@ fn bitrate_revision_retains_inline_text_and_queues_hidden_reload(cx: &mut TestAp
             state.library.bitrate_revision += 1;
             this.reconcile(Rc::new(state), cx);
             assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+            assert!(!this.metadata.editable());
+            assert!(Arc::ptr_eq(
+                &this.metadata.track_snapshot().unwrap(),
+                &original
+            ));
             assert_eq!(
                 this.edit.as_ref().unwrap().input.read(cx).text(),
                 "local edit"
@@ -1100,5 +1105,139 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
         );
         assert!(this.artwork_view.image(cx).is_some());
         assert_eq!(this.metadata.identity(), Some(8));
+    });
+}
+
+#[gpui::test]
+fn stale_inline_submission_preserves_the_dirty_draft(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            this.begin_edit(Field::Title, window, cx);
+            let input = this.edit.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_text("draft title", cx));
+            this.metadata.invalidate_at(Instant::now());
+            this.submit_field(Field::Title, cx);
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "draft title"
+            );
+            assert!(!this.metadata.saving(Field::Title));
+            let deadline = this.metadata.deadline().unwrap();
+            assert!(this.metadata.expire(deadline));
+            this.submit_field(Field::Title, cx);
+            assert_eq!(
+                this.edit.as_ref().unwrap().input.read(cx).text(),
+                "draft title"
+            );
+            assert!(!this.metadata.saving(Field::Title));
+        });
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn metadata_retention_wake_expires_without_another_read_or_frame(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let now = Instant::now() + Duration::from_secs(60);
+        let query = Query::Track { track_id: 1 };
+        this.metadata_read
+            .request(1, this.state.query_revisions_for(&query), now);
+        let _quiet_reader = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, now)
+            .unwrap();
+        assert!(this.metadata.track().is_some());
+        assert!(!this.metadata.editable());
+        this.schedule_metadata_expiry(cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(61));
+    cx.run_until_parked();
+    metadata.update(cx, |this, _| {
+        assert!(this.metadata.track().is_none());
+        assert!(
+            this.track().is_some(),
+            "details expiry must not retire the selected source"
+        );
+        assert!(this.track_snapshot().is_some());
+        assert!(!this.metadata.editable());
+        assert!(this.metadata.deadline().is_none());
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_none()
+        );
+    });
+}
+
+#[gpui::test]
+fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
+    cx: &mut TestAppContext,
+) {
+    use std::time::Duration;
+
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let original = this.track_snapshot().unwrap();
+        let start = Instant::now();
+        let query = Query::Track {
+            track_id: original.id,
+        };
+        this.metadata_read
+            .request(original.id, this.state.query_revisions_for(&query), start);
+        let _quiet_reader = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, start)
+            .unwrap();
+        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+        assert!(
+            this.metadata
+                .display_track_at(start + Duration::from_millis(199))
+                .is_some()
+        );
+        assert!(
+            this.metadata
+                .expire(start + rivu_ui::refresh::REFRESH_RETENTION)
+        );
+        assert!(this.metadata.track().is_none());
+        assert_eq!(this.track(), Some(original.as_ref()));
+        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+        assert!(!this.metadata.editable());
+        assert!(
+            this.metadata
+                .begin_save(&SavedValue::Title("stale write".into()))
+                .is_none()
+        );
+        assert!(
+            this.metadata
+                .begin_source(source::SourceAction::Sync)
+                .is_none()
+        );
+        this.metadata.invalidate_at(start + Duration::from_secs(1));
+        assert!(
+            this.metadata.track().is_none(),
+            "a retry cannot restart expired detail retention"
+        );
+        assert!(this.metadata.deadline().is_none());
+        let replacement = this.metadata.begin_load(original.id);
+        assert!(
+            this.metadata
+                .accept_load(replacement, Some(track(original.id, "fresh details")))
+        );
+        assert_eq!(this.metadata.track().unwrap().title, "fresh details");
+        assert_eq!(this.track().unwrap().title, "fresh details");
+        assert!(this.metadata.editable());
+        assert!(!Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
+        this.metadata.select(2);
+        this.schedule_metadata_expiry(cx);
+        assert!(this.track().is_none());
+        assert!(this.track_snapshot().is_none());
     });
 }

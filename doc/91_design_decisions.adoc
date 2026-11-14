@@ -594,6 +594,26 @@ boundaries: report physical success even if database synchronization fails, and
 retry database synchronization without rewriting the file. Offline edits do not
 open the library database. See link:02_library.adoc#source-file-tags[operation and limits].
 
+[[DEC-025]]
+=== DEC-025: Separate refresh authority from bounded stale presentation
+
+Status: accepted, 2026-11-14.
+
+Invalidate query authority immediately, but retain compatible existing display
+payloads for at most 200 ms while current data is read. Clearing first creates an
+avoidable empty frame during ordinary fast refreshes; waiting indefinitely for a
+successful reply can conceal stalled or failed reads. Further invalidation must
+not renew an old payload's deadline.
+
+Share the deadline and cancellable wake mechanism, not a second whole-window or
+collection snapshot cache. Existing bounded data owners retain their request,
+version, action-admission, comparison, and resource-release responsibilities.
+Reuse buffers and unchanged artwork where possible; equality does not suppress
+notifications needed to restore current interactions. The tradeoff is brief stale
+display, retained payload residency, and bounded result comparison, not delayed
+playback controls or relaxed data validity. Current behavior and exclusions are
+defined in link:22_cache.adoc#window-local-query-retention[window-local retention].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

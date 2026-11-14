@@ -853,17 +853,18 @@ impl WindowView {
                                     move |this, range: std::ops::Range<usize>, _window, cx| {
                                         range
                                             .map(|index| {
-                                                let Some((id, name)) =
-                                                    this.playlists.read(cx).catalog_row(index).map(
-                                                        |playlist| {
-                                                            (
-                                                                playlist.id,
-                                                                SharedString::from(
-                                                                    playlist.name.clone(),
-                                                                ),
-                                                            )
-                                                        },
-                                                    )
+                                                let Some((id, name)) = this
+                                                    .playlists
+                                                    .read(cx)
+                                                    .catalog_display_row(index)
+                                                    .map(|playlist| {
+                                                        (
+                                                            playlist.id,
+                                                            SharedString::from(
+                                                                playlist.name.clone(),
+                                                            ),
+                                                        )
+                                                    })
                                                 else {
                                                     return this.playlists.update(
                                                         cx,
@@ -874,6 +875,26 @@ impl WindowView {
                                                         },
                                                     );
                                                 };
+                                                let row = rivu_ui::menu_item_style(
+                                                    rivu_ui::theme::palette(cx),
+                                                    ("content-playlist-target", id as u64),
+                                                    name.clone(),
+                                                    div().min_w_0().truncate().child(name),
+                                                    cx,
+                                                );
+                                                if this
+                                                    .playlists
+                                                    .read(cx)
+                                                    .catalog_row(index)
+                                                    .is_none()
+                                                {
+                                                    return rivu_ui::disabled_control(
+                                                        rivu_ui::theme::palette(cx),
+                                                        row,
+                                                        true,
+                                                    )
+                                                    .h(row_height);
+                                                }
                                                 let selected = this
                                                     .content_menu
                                                     .as_ref()
@@ -889,13 +910,7 @@ impl WindowView {
                                                     });
                                                 let focus = render_focus.clone();
                                                 rivu_ui::activate_control(
-                                                    rivu_ui::menu_item_style(
-                                                        rivu_ui::theme::palette(cx),
-                                                        ("content-playlist-target", id as u64),
-                                                        name.clone(),
-                                                        div().min_w_0().truncate().child(name),
-                                                        cx,
-                                                    ),
+                                                    row,
                                                     cx,
                                                     move |this, _, cx| {
                                                         this.choose_content_playlist(

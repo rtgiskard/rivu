@@ -239,24 +239,45 @@ when live contents shrink substantially, retaining reuse slack instead of
 reallocating on every deselection. This limits stale capacity, not live selection
 size: selecting all still retains every selected identity.
 
-A content revision forgets counts and drops obsolete pages, failures, and positional
-pins, but retains nonempty scroll geometry until a current result supplies its
-total. Previously empty results gain a loading position so additions remain
-discoverable. Flat-list/album query changes discard old geometry; tree filter
-changes preserve expansion choices while invalidating facts. Retained geometry
-cannot authorize counts, ranges, or navigation; tree ranges also need current
-ancestor counts. Unfiltered Queue state can supply a current total immediately;
-filtered Queue needs its own result.
+A content revision immediately retires authoritative payloads, counts, failures,
+and positional pins while retaining nonempty scroll geometry until a current
+result supplies its total. Previously empty results gain a loading position so
+additions remain discoverable. Retained geometry cannot authorize counts, ranges,
+or navigation; tree ranges also need current ancestor counts. Unfiltered Queue
+state can supply a current total immediately; filtered Queue needs its own result.
 
-The album grid additionally retains the current viewport's card payload and cover
-leases while the same query refreshes. Retained cards are display-only: playback,
-opening, menus, and dragging require a current page. Fresh pages replace that
-presentation without releasing unchanged artwork; source changes still replace
-the cover. Scrolling sheds retained offscreen pages, and query changes, page
-failures, or rejected authority discard the affected presentation rather than
-masking loading or errors with stale results. Page deadlines and both page and
-count completions reconcile cover demand, including failed or rejected results,
-so cards removed from presentation also release their image leases.
+Same-query asynchronous refreshes retain existing display-only payloads for at
+most *200 ms*. The deadline starts when that payload first loses authority;
+replacement requests and further revisions do not extend it. One cancellable
+feature-local wake follows the earliest retained deadline, removing expired
+presentation even if no query completes or other frame is requested. This is not
+polling and does not delay an available fresh result. Request deadlines and
+physical worker retirement remain independent.
+
+Current replies compare the affected pages or snapshots, including row identity,
+order, fields, and total, before replacing presentation. Unchanged album pages
+keep existing cover demand; notifications needed to restore current input,
+loading status, or selection still occur. Changed payloads replace old content
+directly, without an empty intermediate frame. Expiry exposes the normal loading
+or failure surface; an identical reply after expiry must restore that surface.
+Failures or rejected authority may discard the affected old presentation sooner.
+Retained rows never authorize positional actions or commands requiring current
+facts. Inline edit drafts have their own lifetime, not this display deadline.
+
+The policy covers Library tree rows, Album cards and member rows, Queue and
+Playlist pages, and same-object query-backed details, duplicate review and library
+statistics. Search/filter, source, collection and page-boundary changes discard
+incompatible presentation immediately. Flat-list/album query changes discard old
+geometry; tree filter changes preserve expansion choices while invalidating facts.
+Playback controls, synchronous state projections, and realtime visualization
+frames are not delayed by this policy. Shared deadline and wake ownership lives in
+link:../crates/rivu-ui/src/refresh.rs[the refresh presentation mechanism].
+
+The album grid retains cover leases only while their cards remain displayable.
+Fresh pages preserve unchanged artwork; changed sources replace their covers.
+Scrolling sheds retained offscreen pages, and query changes, page failures,
+rejected authority, and the 200 ms deadline release obsolete presentation and
+image leases. Page and count completions also reconcile cover demand.
 
 Page-size changes clear boundary-dependent pages, failures, and reservations, not
 totals, geometry, or identity selections. Hiding and logical cancellation preserve

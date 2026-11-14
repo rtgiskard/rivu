@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, time::Instant};
 
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
@@ -57,6 +57,7 @@ pub(super) enum Published {
 pub(super) struct Completion {
     pub data: DataChange,
     pub published: Published,
+    pub changed: bool,
     pub counts: Option<(usize, usize)>,
 }
 
@@ -133,6 +134,23 @@ impl AlbumModel {
     }
     pub fn generation(&self) -> u64 {
         self.active_projection().generation()
+    }
+
+    pub fn refresh_deadline(&self) -> Option<Instant> {
+        [
+            self.albums.refresh_deadline(),
+            self.tracks.refresh_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    pub fn expire_refresh(&mut self, now: Instant) -> DataChange {
+        DataChange {
+            albums: self.albums.expire(now),
+            tracks: self.tracks.expire(now),
+        }
     }
 
     /// Lets the view preserve its anchor before a revision invalidates rows.
@@ -348,6 +366,7 @@ impl AlbumModel {
         let mut completion = Completion {
             data,
             published: Published::None,
+            changed: false,
             counts: None,
         };
         if self.page_timed_out {
@@ -372,6 +391,7 @@ impl AlbumModel {
             .accepts(query, generation, response.revisions))
         {
             self.retire_page();
+            completion.changed = true;
             return completion;
         }
         match response.result {
@@ -384,7 +404,7 @@ impl AlbumModel {
                     .albums_total
                     .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
-                self.albums.accept(page);
+                completion.changed = self.albums.accept(page);
                 completion.published = Published::Albums;
             }
             Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
@@ -396,11 +416,17 @@ impl AlbumModel {
                     .tracks_total
                     .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
-                self.tracks.accept(page);
+                completion.changed = self.tracks.accept(page);
                 completion.published = Published::Tracks;
             }
-            Err(error) => self.fail_page(error.to_string()),
-            _ => self.fail_page(unexpected_response.to_owned()),
+            Err(error) => {
+                self.fail_page(error.to_string());
+                completion.changed = true;
+            }
+            _ => {
+                self.fail_page(unexpected_response.to_owned());
+                completion.changed = true;
+            }
         }
         completion
     }
@@ -511,6 +537,7 @@ impl AlbumModel {
         let mut completion = Completion {
             data,
             published: Published::None,
+            changed: false,
             counts: None,
         };
         if !self.visible
@@ -533,8 +560,10 @@ impl AlbumModel {
                 self.albums_count_retired = true;
             }
             self.retire_page();
+            completion.changed = true;
             return completion;
         }
+        let previous_total = self.total();
         let (total, matched, published) = match (&request.query, response.result) {
             (Query::Albums { .. }, Ok(ViewResponse::Albums(page))) => {
                 self.albums_total = Some((response.revisions.album, page.total));
@@ -552,10 +581,12 @@ impl AlbumModel {
                 } else {
                     self.albums_count_retired = true;
                 }
+                completion.changed = true;
                 return completion;
             }
         };
         completion.published = published;
+        completion.changed = self.total() != previous_total;
         completion.counts = matched.map(|matched| (matched, total));
         completion
     }
@@ -642,13 +673,11 @@ fn sync_pages<T>(
     }
     if identity_changed {
         pages.clear();
-    } else if !content_changed {
-        pages.invalidate_payload();
-    } else if matches!(query, Query::Albums { .. }) {
-        pages.refresh();
-    } else {
-        // Keep viewport geometry until the refreshed page supplies its real total.
+    } else if content_changed {
+        // Same-query rows remain display-only until replacement or the owner wake.
         pages.invalidate();
+    } else {
+        pages.invalidate_payload();
     }
     true
 }
@@ -665,7 +694,154 @@ mod tests {
     use rivu_protocol::model::Page;
 
     #[test]
-    fn only_album_cards_retain_read_only_presentation_across_data_revisions() {
+    fn refresh_wake_expires_each_listing_at_its_original_deadline() {
+        let mut model = AlbumModel::default();
+        model.sync(true, QueryRevisions::default(), 2);
+        model.select(Some(key("A")));
+        model.albums.begin(0, ALBUM_PAGE);
+        model.albums.accept(Page {
+            total: 1,
+            rows: vec![summary(1)],
+        });
+        model.tracks.begin(0, 2);
+        model.tracks.accept(Page {
+            total: 1,
+            rows: vec![row(1)],
+        });
+        let start = Instant::now() + std::time::Duration::from_secs(10);
+        model.albums.refresh_at(start);
+        model
+            .tracks
+            .refresh_at(start + std::time::Duration::from_millis(10));
+        let first = model.albums.refresh_deadline().unwrap();
+        let second = model.tracks.refresh_deadline().unwrap();
+        assert_eq!(model.refresh_deadline(), Some(first));
+        assert!(
+            !model
+                .expire_refresh(first - std::time::Duration::from_nanos(1))
+                .any()
+        );
+        model.sync(
+            true,
+            QueryRevisions {
+                album: 1,
+                ..model.revisions
+            },
+            2,
+        );
+        assert_eq!(
+            model.refresh_deadline(),
+            Some(first),
+            "revisions cannot extend retention"
+        );
+        let expired = model.expire_refresh(first);
+        assert!(expired.albums);
+        assert!(!expired.tracks);
+        assert!(model.albums.display(0).is_none());
+        assert!(model.tracks.display(0).is_some());
+        assert!(model.tracks.get(0).is_none());
+        assert_eq!(model.refresh_deadline(), Some(second));
+        let expired = model.expire_refresh(second);
+        assert!(!expired.albums);
+        assert!(expired.tracks);
+        assert!(model.tracks.display(0).is_none());
+        assert_eq!(model.refresh_deadline(), None);
+        assert!(!model.expire_refresh(second).any());
+    }
+
+    #[test]
+    fn equal_refresh_restores_authority_without_republishing_visual_changes() {
+        for tracks in [false, true] {
+            for payload_only in [false, true] {
+                for changed in [false, true] {
+                    let mut model = AlbumModel::default();
+                    model.sync(true, QueryRevisions::default(), 2);
+                    if tracks {
+                        model.select(Some(key("A")));
+                    }
+                    let reply = |revisions, id| QueryResponse {
+                        revisions,
+                        result: Ok(if tracks {
+                            ViewResponse::AlbumTracks(Page {
+                                total: 1,
+                                rows: vec![row(id)],
+                            })
+                        } else {
+                            ViewResponse::Albums(Page {
+                                total: 1,
+                                rows: vec![summary(id)],
+                            })
+                        }),
+                    };
+                    let first = model.prepare().unwrap();
+                    let completion = model.complete_page(
+                        &first.query,
+                        first.generation,
+                        reply(model.revisions, 1),
+                        model.revisions,
+                        "wrong response",
+                    );
+                    assert!(completion.changed);
+                    model.retire_worker();
+                    let start = Instant::now() + std::time::Duration::from_secs(10);
+                    if tracks {
+                        model.tracks.refresh_at(start);
+                    } else {
+                        model.albums.refresh_at(start);
+                    }
+                    let revisions = if payload_only {
+                        QueryRevisions {
+                            bitrate: 1,
+                            ..model.revisions
+                        }
+                    } else {
+                        QueryRevisions {
+                            album: 1,
+                            ..model.revisions
+                        }
+                    };
+                    model.sync(true, revisions, 2);
+                    if tracks {
+                        assert!(model.tracks.display(0).is_some());
+                        assert!(model.tracks.get(0).is_none());
+                        assert!(model.tracks.iter().next().is_none());
+                        assert!(model.tracks.position(|track| track.id == 1).is_none());
+                    } else {
+                        assert!(model.albums.display(0).is_some());
+                        assert!(model.albums.get(0).is_none());
+                    }
+                    let refresh = model.prepare().unwrap();
+                    let completion = model.complete_page(
+                        &refresh.query,
+                        refresh.generation,
+                        reply(revisions, if changed { 2 } else { 1 }),
+                        revisions,
+                        "wrong response",
+                    );
+                    assert_eq!(completion.changed, changed);
+                    assert_eq!(
+                        completion.published,
+                        if tracks {
+                            Published::Tracks
+                        } else {
+                            Published::Albums
+                        }
+                    );
+                    assert_eq!(completion.counts, Some((1, 1)));
+                    if tracks {
+                        assert!(model.tracks.get(0).is_some());
+                        assert_eq!(model.tracks.refresh_deadline(), None);
+                    } else {
+                        assert!(model.albums.get(0).is_some());
+                        assert_eq!(model.albums.refresh_deadline(), None);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_listings_retain_read_only_presentation_across_data_revisions() {
         for query in queries() {
             let mut projection = QueryTracker::default();
             let mut pages = paged::PagedRows::default();
@@ -673,9 +849,16 @@ mod tests {
             sync_pages(&mut projection, &mut pages, &query, revisions);
             pages.begin(0, 2);
             pages.accept(Page {
-                total: 2,
+                total: 4,
                 rows: vec![7, 9],
             });
+            pages.begin(2, 2);
+            pages.accept(Page {
+                total: 4,
+                rows: vec![11, 13],
+            });
+            pages.demand(0..4, 2);
+            pages.refresh_at(Instant::now() + std::time::Duration::from_secs(10));
             sync_pages(
                 &mut projection,
                 &mut pages,
@@ -686,11 +869,12 @@ mod tests {
                 },
             );
             assert_eq!(pages.get(0), None);
-            assert_eq!(
-                pages.display(0),
-                matches!(query, Query::Albums { .. }).then_some(&7),
-            );
-            assert_eq!(pages.demand(0..2, 2), Some(0));
+            assert_eq!(pages.display(0), Some(&7));
+            assert_eq!(pages.display(2), Some(&11));
+            assert_eq!(pages.get(2), None);
+            assert!(pages.iter().next().is_none());
+            assert_eq!(pages.position(|row| *row == 11), None);
+            assert_eq!(pages.demand(0..4, 2), Some(0));
             let changed = Query::Albums {
                 query: Some("another album".into()),
                 sort: AlbumSort::default(),
@@ -699,6 +883,8 @@ mod tests {
             };
             sync_pages(&mut projection, &mut pages, &changed, revisions);
             assert_eq!(pages.display(0), None);
+            assert_eq!(pages.display(2), None);
+            assert_eq!(pages.refresh_deadline(), None);
         }
     }
 

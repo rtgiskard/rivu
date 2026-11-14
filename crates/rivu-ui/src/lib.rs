@@ -7,6 +7,7 @@ pub mod list;
 pub mod loading;
 mod menu;
 mod overlay;
+pub mod refresh;
 mod row;
 mod scrollbar;
 pub mod search;

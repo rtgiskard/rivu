@@ -73,6 +73,7 @@ impl Playlists {
     }
 
     fn request_view(&mut self, prepared: ViewRequest, cx: &mut Context<Self>) {
+        self.schedule_refresh_wake(cx);
         let kind = prepared.kind();
         if kind != ViewRequestKind::Selection
             && self.panel_demand("playlists")
@@ -100,6 +101,7 @@ impl Playlists {
                         this.finish_loading_text(&kind, generation, cx);
                         this.browser.abandon_playlist_read(&read);
                         this.dispatch_queued_view(kind, cx);
+                        this.schedule_refresh_wake(cx);
                         cx.notify();
                     }
                     current
@@ -118,13 +120,14 @@ impl Playlists {
                         let revisions = this
                             .state
                             .query_revisions(this.browser.playlists().entries().playlist_id);
-                        if let Some(error) = this
+                        let (_, error) = this
                             .browser
-                            .timeout_playlist_read(&read, revisions, response)
-                        {
-                            this.finish_loading_text(&kind, generation, cx);
+                            .timeout_playlist_read(&read, revisions, response);
+                        this.finish_loading_text(&kind, generation, cx);
+                        if let Some(error) = error {
                             this.report_error(error, cx);
                         }
+                        this.schedule_refresh_wake(cx);
                         cx.notify();
                     });
                 },
@@ -136,13 +139,14 @@ impl Playlists {
                 let revisions = this
                     .state
                     .query_revisions(this.browser.playlists().entries().playlist_id);
-                if let Some(error) = this
+                let (_, error) = this
                     .browser
-                    .complete_playlist_read(&read, revisions, response)
-                {
+                    .complete_playlist_read(&read, revisions, response);
+                if let Some(error) = error {
                     this.report_error(error, cx);
                 }
                 this.dispatch_queued_view(kind, cx);
+                this.schedule_refresh_wake(cx);
                 cx.notify();
             });
         })

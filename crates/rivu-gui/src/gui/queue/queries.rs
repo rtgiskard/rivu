@@ -211,6 +211,7 @@ impl Queue {
         if !self.model.sync(revisions, self.state.queue.total) {
             return false;
         }
+        self.schedule_refresh_wake(cx);
         if let Some(intent) = intent {
             cx.emit(QueueEvent::SelectionFailed(intent));
         }
@@ -385,6 +386,7 @@ impl Queue {
                         });
                         this.loading.finish(&(), generation);
                         this.loading.schedule(cx, |this| &mut this.loading);
+                        this.schedule_refresh_wake(cx);
                         cx.notify();
                     });
                 },
@@ -402,6 +404,7 @@ impl Queue {
                     });
                 }
                 this.demand_visible_page(cx);
+                this.schedule_refresh_wake(cx);
                 cx.notify();
             });
         })

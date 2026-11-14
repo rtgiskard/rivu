@@ -566,7 +566,7 @@ pub struct AlbumKey {
     pub title: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     pub key: AlbumKey,
     pub artist: String,

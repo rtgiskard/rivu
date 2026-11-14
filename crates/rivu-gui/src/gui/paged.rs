@@ -1,5 +1,6 @@
 use rivu_protocol::model::Page;
-use std::{collections::BTreeMap, ops::Range};
+use rivu_ui::refresh::RefreshDeadline;
+use std::{collections::BTreeMap, ops::Range, time::Instant};
 
 const MAX_PAGES: usize = 8;
 
@@ -7,8 +8,9 @@ const MAX_PAGES: usize = 8;
 /// Payload is bounded independently of the result total; evicted rows are fetched again.
 pub(super) struct PagedRows<T> {
     pages: BTreeMap<usize, Vec<T>>,
-    // Opt-in, display-only rows while the same query is being refreshed.
+    // Same-query display only; never authorizes positions or actions.
     retained: BTreeMap<usize, Vec<T>>,
+    retention: RefreshDeadline,
     total: Option<usize>,
     // Retained geometry is not an authoritative count after a data revision.
     layout_len: usize,
@@ -25,6 +27,7 @@ impl<T> Default for PagedRows<T> {
         Self {
             pages: BTreeMap::new(),
             retained: BTreeMap::new(),
+            retention: RefreshDeadline::default(),
             total: None,
             layout_len: 1,
             page_size: 1,
@@ -59,10 +62,22 @@ impl<T> PagedRows<T> {
         if index >= self.len() {
             return None;
         }
-        self.get(index).or_else(|| {
-            let offset = index / self.page_size * self.page_size;
-            self.retained.get(&offset)?.get(index - offset)
-        })
+        self.get(index)
+            .or_else(|| self.retained_at(index, Instant::now()))
+    }
+    #[cfg(test)]
+    fn display_at(&self, index: usize, now: Instant) -> Option<&T> {
+        if index >= self.len() {
+            return None;
+        }
+        self.get(index).or_else(|| self.retained_at(index, now))
+    }
+    fn retained_at(&self, index: usize, now: Instant) -> Option<&T> {
+        if !self.retention.visible(now) {
+            return None;
+        }
+        let offset = index / self.page_size * self.page_size;
+        self.retained.get(&offset)?.get(index - offset)
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
         self.pages.values().flatten()
@@ -83,7 +98,14 @@ impl<T> PagedRows<T> {
     pub(super) fn clear(&mut self) {
         *self = Self::default();
     }
+    /// Keep only viewport presentation; get/iter/position remain authoritative.
     pub(super) fn invalidate(&mut self) {
+        self.refresh_at(Instant::now());
+    }
+    pub(super) fn refresh_at(&mut self, now: Instant) {
+        self.expire(now);
+        self.retention.begin(now);
+        self.retained.append(&mut self.pages);
         self.retired = false;
         self.total = None;
         self.layout_len = self.layout_len.max(1);
@@ -92,26 +114,36 @@ impl<T> PagedRows<T> {
         }
         // A data revision can reorder IDs; a positional pin is no longer authoritative.
         self.pinned = None;
-        self.clear_pages();
-    }
-    /// Keep only viewport presentation; get/iter/position remain authoritative.
-    pub(super) fn refresh(&mut self) {
-        let mut retained = std::mem::take(&mut self.retained);
-        retained.append(&mut self.pages);
-        self.invalidate();
-        self.retained = retained;
+        self.pending = None;
+        self.failures.clear();
         self.trim_retained();
+    }
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        self.retention.deadline()
+    }
+    pub(super) fn expire(&mut self, now: Instant) -> bool {
+        if !self.retention.expired(now) {
+            return false;
+        }
+        self.retention.clear();
+        let changed = !self.retained.is_empty();
+        self.retained.clear();
+        changed
     }
     fn clear_pages(&mut self) {
         self.pages.clear();
         self.retained.clear();
+        self.retention.clear();
         self.pending = None;
         self.failures.clear();
     }
-    /// Discard stale technical fields without changing list identity or geometry.
+    /// Retain stale technical fields briefly without changing list identity or geometry.
     pub(super) fn invalidate_payload(&mut self) {
-        self.retired = false;
-        self.clear_pages();
+        let (total, layout_len, pinned) = (self.total, self.layout_len, self.pinned);
+        self.invalidate();
+        self.total = total;
+        self.layout_len = layout_len;
+        self.pinned = pinned;
     }
     /// Change batch boundaries without invalidating current counts or selection position.
     pub(super) fn configure_page_size(&mut self, page_size: usize) {
@@ -135,10 +167,26 @@ impl<T> PagedRows<T> {
         self.retired = true;
         self.retained.clear();
     }
-    pub(super) fn accept(&mut self, page: Page<T>) {
+    pub(super) fn accept(&mut self, page: Page<T>) -> bool
+    where
+        T: PartialEq,
+    {
+        self.accept_at(page, Instant::now())
+    }
+    fn accept_at(&mut self, page: Page<T>, now: Instant) -> bool
+    where
+        T: PartialEq,
+    {
         let Some(offset) = self.pending.take() else {
-            return;
+            return false;
         };
+        let previous = self.pages.get(&offset).or_else(|| {
+            self.retention
+                .visible(now)
+                .then(|| self.retained.get(&offset))
+                .flatten()
+        });
+        let changed = self.layout_len != page.total || previous != Some(&page.rows);
         self.set_total(page.total);
         self.failures.remove(&offset);
         self.pages.retain(|start, _| *start < page.total);
@@ -152,6 +200,10 @@ impl<T> PagedRows<T> {
             self.visible = start..page.total;
         }
         self.trim();
+        if self.retained.is_empty() {
+            self.retention.clear();
+        }
+        changed
     }
     pub(super) fn fail(&mut self, error: String) {
         if let Some(offset) = self.pending.take() {
@@ -244,6 +296,83 @@ impl<T> PagedRows<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_retention_boundary_and_equal_replacement() {
+        let mut rows = super::PagedRows::default();
+        fill(&mut rows, 0, 20);
+        let now = std::time::Instant::now();
+        rows.refresh_at(now);
+        let deadline = now + rivu_ui::refresh::REFRESH_RETENTION;
+        rows.refresh_at(deadline - std::time::Duration::from_millis(1));
+        rows.retry();
+        assert_eq!(rows.refresh_deadline(), Some(deadline));
+        assert_eq!(
+            rows.display_at(0, deadline - std::time::Duration::from_nanos(1)),
+            Some(&0)
+        );
+        assert_eq!(rows.get(0), None);
+        assert_eq!(rows.position(|row| *row == 0), None);
+        assert_eq!(rows.iter().next(), None);
+        assert_eq!(rows.display_at(0, deadline), None);
+        rows.begin(0, 20);
+        assert!(!rows.accept_at(
+            rivu_protocol::model::Page {
+                total: 20,
+                rows: (0..20).collect()
+            },
+            now
+        ));
+        rows.refresh_at(now);
+        rows.begin(0, 20);
+        assert!(rows.accept_at(
+            rivu_protocol::model::Page {
+                total: 20,
+                rows: (0..20).rev().collect()
+            },
+            now
+        ));
+        assert_eq!(rows.display_at(0, now), Some(&19));
+        rows.refresh_at(now);
+        assert!(rows.expire(deadline));
+        assert!(!rows.expire(deadline));
+    }
+
+    #[test]
+    fn failure_and_shrink_remove_retained_display_immediately() {
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 20);
+        let now = Instant::now();
+        rows.refresh_at(now);
+        rows.begin(0, 20);
+        rows.fail("offline".into());
+        assert_eq!(rows.display_at(0, now), None);
+        assert_eq!(rows.error(0), Some("offline"));
+        rows.retry();
+        assert_eq!(
+            rows.refresh_deadline(),
+            Some(now + rivu_ui::refresh::REFRESH_RETENTION)
+        );
+        rows.begin(0, 20);
+        rows.accept_at(
+            Page {
+                total: 20,
+                rows: (0..20).collect(),
+            },
+            now,
+        );
+        rows.refresh_at(now);
+        rows.begin(0, 20);
+        assert!(rows.accept_at(
+            Page {
+                total: 1,
+                rows: vec![0]
+            },
+            now
+        ));
+        assert_eq!(rows.display_at(0, now), Some(&0));
+        assert_eq!(rows.display_at(1, now), None);
+    }
+
     use super::*;
     fn fill(rows: &mut PagedRows<usize>, offset: usize, total: usize) {
         rows.begin(offset, 20);
@@ -259,7 +388,7 @@ mod tests {
         fill(&mut rows, 0, 100);
         fill(&mut rows, 20, 100);
         rows.demand(0..30, 20);
-        rows.refresh();
+        rows.invalidate();
         assert_eq!(rows.display(3), Some(&3));
         assert_eq!(rows.display(23), Some(&23));
         assert_eq!(rows.get(3), None);
@@ -274,7 +403,7 @@ mod tests {
         });
         assert_eq!(rows.display(3), Some(&103));
         assert_eq!(rows.display(23), Some(&23));
-        rows.refresh();
+        rows.invalidate();
         assert_eq!(rows.display(3), Some(&103));
         assert_eq!(rows.display(23), Some(&23));
         assert_eq!(rows.demand(60..70, 20), Some(60));
@@ -287,7 +416,7 @@ mod tests {
         for failure in [false, true] {
             let mut rows = PagedRows::default();
             fill(&mut rows, 0, 100);
-            rows.refresh();
+            rows.invalidate();
             rows.begin(0, 20);
             if failure {
                 rows.fail("unavailable".into());
@@ -303,11 +432,11 @@ mod tests {
         }
         let mut rows = PagedRows::default();
         fill(&mut rows, 0, 100);
-        rows.refresh();
+        rows.invalidate();
         rows.clear();
         assert_eq!(rows.display(3), None);
         fill(&mut rows, 0, 100);
-        rows.refresh();
+        rows.invalidate();
         rows.begin(0, 20);
         rows.retire_pending();
         assert_eq!(rows.display(3), None);

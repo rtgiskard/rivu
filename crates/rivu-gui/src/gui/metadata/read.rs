@@ -109,6 +109,9 @@ impl MetadataReadCoordinator {
         visible: bool,
         now: Instant,
     ) -> Option<MetadataReadTask> {
+        if self.needs_refresh {
+            session.invalidate_at(now);
+        }
         if !visible || !self.needs_refresh || self.worker.is_some() {
             return None;
         }
@@ -762,5 +765,71 @@ mod tests {
         assert!(owner.prepare(&mut session, true, now).is_none());
         request(&mut owner, &mut session, 1, now);
         assert!(owner.prepare(&mut session, true, now).is_some());
+    }
+    #[test]
+    fn refreshing_details_expire_while_the_original_reader_keeps_its_slot() {
+        use super::super::tests::track;
+
+        let start = Instant::now();
+        let mut owner = MetadataReadCoordinator::default();
+        let mut session = MetadataSession::default();
+        session.select(1);
+        let loaded = session.begin_load(1);
+        assert!(session.accept_load(loaded, Some(track(1, "loaded"))));
+        owner.request(1, QueryRevisions::default(), start);
+        let first = owner.prepare(&mut session, true, start).unwrap();
+        assert!(owner.submit(first.read, &session, environment(true)));
+        let deadline = session.deadline();
+        let revisions = QueryRevisions {
+            bitrate: 1,
+            ..Default::default()
+        };
+        owner.sync(Some(1), revisions, start + Duration::from_millis(150));
+        assert!(
+            owner
+                .prepare(&mut session, true, start + Duration::from_millis(150))
+                .is_none()
+        );
+        assert_eq!(session.deadline(), deadline);
+        assert!(!session.editable());
+        assert!(
+            session
+                .display_track_at(start + Duration::from_millis(199))
+                .is_some()
+        );
+        assert!(session.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(owner.worker == Some(ReadWorker::Reading(first.read)));
+        assert!(
+            owner
+                .prepare(
+                    &mut session,
+                    true,
+                    start + rivu_ui::refresh::REFRESH_RETENTION
+                )
+                .is_none()
+        );
+        assert!(matches!(
+            owner.finish(
+                first.read,
+                &mut session,
+                ReadEnvironment {
+                    visible: true,
+                    revisions,
+                },
+                response(),
+                || "unexpected".into()
+            ),
+            ReadCompletion::Retired
+        ));
+        assert!(session.track().is_none());
+        assert!(
+            owner
+                .prepare(
+                    &mut session,
+                    true,
+                    start + rivu_ui::refresh::REFRESH_RETENTION
+                )
+                .is_some()
+        );
     }
 }

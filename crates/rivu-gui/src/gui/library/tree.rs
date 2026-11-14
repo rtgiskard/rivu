@@ -1,9 +1,11 @@
 use gpui::UniformListScrollHandle;
 use rivu_protocol::model::{DirectoryRow, Page};
+use rivu_ui::refresh::RefreshDeadline;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 // Payloads and failed-page markers share one LRU bound: sixteen pages or
@@ -167,7 +169,10 @@ struct CachedPage {
     failed: bool,
     // Directory identities remain usable while gap-retired tracks reload.
     stale_tracks: bool,
+    stale: bool,
+    retained: bool,
     touched: u64,
+    total: usize,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -220,10 +225,23 @@ pub(in crate::gui) struct DirectoryTree {
     selected_locations: HashMap<(super::LibraryNode, TreeBranch), usize>,
     focused: Option<(super::LibraryNode, TreeBranch)>,
     projection_revision: u64,
+    retention: RefreshDeadline,
     pub(in crate::gui) scroll: UniformListScrollHandle,
     grouped: bool,
     saved_expansions: [HashSet<TreeBranch>; 2],
     grouped_roots: HashSet<TreeBranch>,
+}
+
+impl CachedPage {
+    fn visible(&self, retained: bool) -> bool {
+        !self.failed && ((!self.stale && !self.stale_tracks) || (self.retained && retained))
+    }
+
+    fn authoritative(&self, rows: &[DirectoryRow]) -> bool {
+        !self.failed
+            && !self.stale
+            && (!self.stale_tracks || !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_))))
+    }
 }
 
 impl Default for DirectoryTree {
@@ -240,6 +258,7 @@ impl Default for DirectoryTree {
             selected_locations: HashMap::new(),
             focused: None,
             projection_revision: 0,
+            retention: RefreshDeadline::default(),
             scroll: UniformListScrollHandle::new(),
             grouped: false,
             saved_expansions: Default::default(),
@@ -292,6 +311,7 @@ impl DirectoryTree {
         }
         self.page_size = size;
         self.pages.clear();
+        self.retention.clear();
         self.demanded.clear();
         self.cancel_pending();
         true
@@ -350,6 +370,16 @@ impl DirectoryTree {
         generation: u64,
         page: Page<DirectoryRow>,
     ) -> bool {
+        self.accept_at(key, generation, page, Instant::now())
+    }
+
+    fn accept_at(
+        &mut self,
+        key: &TreeBranch,
+        generation: u64,
+        page: Page<DirectoryRow>,
+        now: Instant,
+    ) -> bool {
         let Some(branch) = self.branches.get_mut(key) else {
             return false;
         };
@@ -359,6 +389,11 @@ impl DirectoryTree {
         if token != generation {
             return false;
         }
+        let display_changed = self.pages.get(&(key.clone(), offset)).is_none_or(|cached| {
+            !cached.visible(self.retention.visible(now))
+                || cached.total != page.total
+                || cached.rows != page.rows
+        });
         branch.pending = None;
         branch.total = Some(page.total);
         branch.layout_len = page.total;
@@ -415,15 +450,25 @@ impl DirectoryTree {
         self.pages
             .retain(|(candidate, start), _| candidate != key || *start < page.total);
         self.clock += 1;
-        self.pages.insert(
-            (key.clone(), offset),
-            CachedPage {
-                rows: page.rows,
-                failed: false,
-                stale_tracks: false,
-                touched: self.clock,
-            },
-        );
+        if display_changed {
+            self.pages.insert(
+                (key.clone(), offset),
+                CachedPage {
+                    rows: page.rows,
+                    failed: false,
+                    stale_tracks: false,
+                    stale: false,
+                    retained: false,
+                    total: page.total,
+                    touched: self.clock,
+                },
+            );
+        } else if let Some(cached) = self.pages.get_mut(&(key.clone(), offset)) {
+            cached.stale = false;
+            cached.stale_tracks = false;
+            cached.retained = false;
+            cached.touched = self.clock;
+        }
         self.evict();
         self.refresh_visible();
         true
@@ -445,12 +490,17 @@ impl DirectoryTree {
             .entry((key.clone(), offset))
             .and_modify(|page| {
                 page.failed = true;
+                page.rows.clear();
+                page.retained = false;
                 page.touched = self.clock;
             })
             .or_insert(CachedPage {
                 rows: Vec::new(),
                 failed: true,
                 stale_tracks: false,
+                stale: false,
+                retained: false,
+                total: 0,
                 touched: self.clock,
             });
         self.evict();
@@ -474,6 +524,7 @@ impl DirectoryTree {
         if removed {
             self.reclaim_branches();
         }
+        self.settle_refresh();
     }
 
     /// Bookkeeping follows live state and the bounded page cache, not visit history.
@@ -544,6 +595,24 @@ impl DirectoryTree {
             .and_then(|branch| branch.total)
     }
 
+    /// Display-only: retained root geometry while refreshed forest rows remain visible.
+    pub(super) fn display_root_total(&self) -> Option<usize> {
+        self.display_root_total_at(Instant::now())
+    }
+
+    fn display_root_total_at(&self, now: Instant) -> Option<usize> {
+        let forest = TreeBranch::default();
+        let branch = self.branches.get(&forest)?;
+        branch.total.or_else(|| {
+            (self.retention.visible(now)
+                && self
+                    .pages
+                    .iter()
+                    .any(|((key, _), page)| key == &forest && page.retained && page.stale))
+            .then_some(branch.layout_len)
+        })
+    }
+
     /// Only the optional tail changes; keep physical-root pages and expansions.
     pub(super) fn sync_forest(&mut self, roots: &[PathBuf], other_tracks: bool) -> bool {
         let total = roots.len() + usize::from(other_tracks);
@@ -597,11 +666,13 @@ impl DirectoryTree {
         self.invalidate();
     }
 
-    /// Retire track payloads, never counts, ancestry or selection.
-    pub(super) fn invalidate_payloads(&mut self) -> bool {
+    /// Retire track authority immediately, preserving display until its fixed deadline.
+    pub(super) fn invalidate_payloads_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
+        self.pages.retain(|_, page| !page.failed);
         for branch in self.branches.values_mut() {
             branch.retired = false;
+            branch.pending = None;
         }
         for page in self.pages.values_mut() {
             if !page.stale_tracks
@@ -613,8 +684,64 @@ impl DirectoryTree {
                 page.stale_tracks = true;
                 page.failed = false;
                 changed = true;
+                if !page.stale {
+                    page.retained = true;
+                    self.retention.begin(now);
+                }
             }
         }
+        changed
+    }
+
+    /// Same-query revisions retire all positional authority without blanking rows.
+    pub(super) fn refresh(&mut self, now: Instant) {
+        self.projection_revision = self.projection_revision.wrapping_add(1);
+        self.pages.retain(|_, page| !page.failed);
+        for page in self.pages.values_mut() {
+            if !page.stale && !page.stale_tracks && !page.rows.is_empty() {
+                page.retained = true;
+                self.retention.begin(now);
+            }
+            page.stale = true;
+        }
+        self.retire_geometry();
+    }
+
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        self.pages
+            .values()
+            .any(|page| page.retained)
+            .then(|| self.retention.deadline())
+            .flatten()
+    }
+
+    fn settle_refresh(&mut self) {
+        if !self.pages.values().any(|page| page.retained) {
+            self.retention.clear();
+        }
+    }
+
+    pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
+        if !self.retention.expired(now) {
+            return false;
+        }
+        let mut changed = false;
+        for page in self.pages.values_mut() {
+            if page.retained {
+                if page.stale {
+                    changed |= !page.rows.is_empty();
+                    page.rows.clear();
+                } else if page.stale_tracks {
+                    // Keep mixed-page directory slots at their original offsets.
+                    changed |= page
+                        .rows
+                        .iter()
+                        .any(|row| matches!(row, DirectoryRow::Track(_)));
+                }
+                page.retained = false;
+            }
+        }
+        self.retention.clear();
         changed
     }
 
@@ -622,6 +749,11 @@ impl DirectoryTree {
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.pages.clear();
+        self.retention.clear();
+        self.retire_geometry();
+    }
+
+    fn retire_geometry(&mut self) {
         self.demanded = HashSet::new();
         self.navigation_target = None;
         self.focused = None;
@@ -671,6 +803,9 @@ impl DirectoryTree {
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.branches.entry(key.clone()).or_default().expanded = true;
         let location = self.pages.iter().find_map(|((parent, offset), page)| {
+            if page.stale {
+                return None;
+            }
             page.rows.iter().enumerate().find_map(|(index, row)| {
                 (parent.child_row(offset + index, row).as_ref() == Some(key))
                     .then(|| (parent.clone(), offset + index))
@@ -879,9 +1014,7 @@ impl DirectoryTree {
         self.pages.iter().find_map(|((candidate, start), page)| {
             if candidate == branch && range.start >= *start {
                 let rows = page.rows.get(range.start - start..range.end - start)?;
-                (!page.stale_tracks
-                    || !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_))))
-                .then_some(rows)
+                page.authoritative(rows).then_some(rows)
             } else {
                 None
             }
@@ -889,6 +1022,18 @@ impl DirectoryTree {
     }
 
     pub(in crate::gui) fn item(&self, index: usize) -> Option<TreeItem> {
+        self.item_at(index, None)
+    }
+
+    pub(super) fn display_item(&self, index: usize) -> Option<TreeItem> {
+        self.display_item_at(index, Instant::now())
+    }
+
+    fn display_item_at(&self, index: usize, now: Instant) -> Option<TreeItem> {
+        self.item_at(index, Some(now))
+    }
+
+    fn item_at(&self, index: usize, display: Option<Instant>) -> Option<TreeItem> {
         let segment = self.segment(index)?;
         let child_index = segment.offset + index - segment.start;
         let offset = child_index / self.page_size * self.page_size;
@@ -897,7 +1042,14 @@ impl DirectoryTree {
             .and_then(|page| {
                 page.rows
                     .get(child_index - offset)
-                    .filter(|row| !page.stale_tracks || !matches!(row, DirectoryRow::Track(_)))
+                    .filter(|row| match display {
+                        Some(now) => {
+                            !page.failed
+                                && (page.authoritative(std::slice::from_ref(*row))
+                                    || (page.retained && self.retention.visible(now)))
+                        }
+                        None => page.authoritative(std::slice::from_ref(*row)),
+                    })
             })
             .cloned()
             .or_else(|| {
@@ -963,6 +1115,11 @@ impl DirectoryTree {
                 status,
             })
         }
+    }
+
+    pub(super) fn row_matches(&self, index: usize, node: &super::LibraryNode) -> bool {
+        matches!(self.item(index), Some(TreeItem::Entry(entry))
+            if RowIdentity::from(&entry.row) == RowIdentity::from(node))
     }
 
     /// Compact query intervals, independent of the bounded payload cache.
@@ -1068,7 +1225,7 @@ impl DirectoryTree {
             .filter(|(key, offset)| {
                 if let Some(page) = self.pages.get_mut(&(key.clone(), *offset)) {
                     page.touched = self.clock;
-                    if !page.stale_tracks || page.failed {
+                    if (!page.stale && !page.stale_tracks) || page.failed {
                         return false;
                     }
                 }
@@ -1121,7 +1278,13 @@ impl DirectoryTree {
             self.focused = None;
         }
         for ((key, offset), page) in &self.pages {
+            if page.stale {
+                continue;
+            }
             for (index, row) in page.rows.iter().enumerate() {
+                if !page.authoritative(std::slice::from_ref(row)) {
+                    continue;
+                }
                 let node = match row {
                     DirectoryRow::OtherTracks => super::LibraryNode::OtherTracks,
                     DirectoryRow::Directory { path } => {
@@ -1137,6 +1300,9 @@ impl DirectoryTree {
         }
         for (parent, branch) in &self.branches {
             for (index, key) in &branch.children {
+                if branch.stale_children.contains(index) {
+                    continue;
+                }
                 let node = key.node();
                 if selected(&node) {
                     self.selected_locations
@@ -1285,6 +1451,141 @@ impl DirectoryTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refresh_retains_display_for_199ms_but_not_authority_or_late_results() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let mut tree = DirectoryTree::default();
+        let forest = branch("");
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
+        tree.refresh(start);
+        tree.refresh(start + Duration::from_millis(150));
+        assert_eq!(
+            tree.refresh_deadline(),
+            Some(start + Duration::from_millis(200))
+        );
+        assert!(matches!(
+            tree.display_item_at(0, start + Duration::from_millis(199)),
+            Some(TreeItem::Entry(_))
+        ));
+        assert!(matches!(tree.item(0), Some(TreeItem::Placeholder { .. })));
+        assert_eq!(tree.root_total(), None);
+        assert_eq!(
+            tree.display_root_total_at(start + Duration::from_millis(199)),
+            Some(2),
+            "the header keeps the retained count instead of flashing Loading"
+        );
+        assert_eq!(
+            tree.display_root_total_at(start + Duration::from_millis(200)),
+            None
+        );
+        assert!(!tree.row_matches(
+            0,
+            &super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a")))
+        ));
+        assert!(tree.cached_rows(&forest, 0..1).is_none());
+        assert!(tree.range_spans(0..1).is_none());
+        tree.defer_selection(0);
+        assert!(tree.ready_selection().is_none());
+        assert_eq!(tree.requests_for_range(0..2), vec![(forest.clone(), 0)]);
+        assert!(!tree.accept_at(&forest, 1, page(&["/late"], 1), start));
+        tree.begin(forest.clone(), 0, 2);
+        assert!(!tree.expire_refresh(start + Duration::from_millis(199)));
+        assert!(matches!(
+            tree.display_item_at(0, start + Duration::from_millis(200)),
+            Some(TreeItem::Placeholder { .. })
+        ));
+        assert!(tree.expire_refresh(start + Duration::from_millis(200)));
+        assert!(
+            tree.request_pending(&forest, 2),
+            "expiry must not cancel the fresh query"
+        );
+        assert_eq!(tree.row_count(), 2);
+        assert!(tree.refresh_deadline().is_none());
+        assert!(tree.accept_at(
+            &forest,
+            2,
+            page(&["/new"], 1),
+            start + Duration::from_millis(250)
+        ));
+        assert_eq!(tree.row_count(), 1);
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+    }
+
+    #[test]
+    fn refresh_compares_content_order_and_count_and_moves_the_new_page() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let forest = branch("");
+        let mut tree = DirectoryTree::default();
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
+        for (index, (paths, total, changed)) in [
+            (vec!["/a", "/b"], 2, false),
+            (vec!["/a", "/new"], 2, true),
+            (vec!["/new", "/a"], 2, true),
+            (vec!["/new"], 1, true),
+            (vec![], 0, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = start + Duration::from_secs(index as u64);
+            tree.refresh(now);
+            let previous = tree.pages[&(forest.clone(), 0)].rows.as_ptr();
+            let page = page(&paths, total);
+            let pointer = page.rows.as_ptr();
+            tree.begin(forest.clone(), 0, index as u64 + 2);
+            assert!(tree.accept_at(
+                &forest,
+                index as u64 + 2,
+                page,
+                now + Duration::from_millis(100)
+            ));
+            assert_eq!(
+                tree.pages[&(forest.clone(), 0)].rows.as_ptr(),
+                if changed { pointer } else { previous }
+            );
+            assert!(tree.refresh_deadline().is_none());
+            assert_eq!(tree.row_count(), total);
+        }
+    }
+
+    #[test]
+    fn fresh_pages_join_the_original_episode_without_extending_it() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let forest = branch("");
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(1);
+        accept(&mut tree, &forest, 0, 1, &["/a"], 2);
+        accept(&mut tree, &forest, 1, 2, &["/b"], 2);
+        tree.refresh(start);
+        tree.begin(forest.clone(), 0, 3);
+        assert!(tree.accept_at(
+            &forest,
+            3,
+            page(&["/a"], 2),
+            start + Duration::from_millis(100)
+        ));
+        tree.refresh(start + Duration::from_millis(150));
+        assert_eq!(
+            tree.refresh_deadline(),
+            Some(start + Duration::from_millis(200))
+        );
+        assert!(tree.expire_refresh(start + Duration::from_millis(200)));
+        for index in 0..2 {
+            assert!(matches!(
+                tree.display_item_at(index, start + Duration::from_millis(200)),
+                Some(TreeItem::Placeholder { .. })
+            ));
+        }
+        tree.refresh(start + Duration::from_secs(1));
+        assert!(
+            tree.refresh_deadline().is_none(),
+            "expired pages must not revive"
+        );
+    }
+
     fn bitrate_track(id: i64) -> DirectoryRow {
         DirectoryRow::Track(rivu_protocol::model::LibraryRow {
             id,
@@ -1331,8 +1632,17 @@ mod tests {
         let selected = super::super::LibraryNode::Track(7);
         tree.focus_selection(&selected, 2);
         let projection = tree.projection_revision();
-        assert!(tree.invalidate_payloads());
-        assert!(!tree.invalidate_payloads());
+        let start = Instant::now();
+        assert!(tree.invalidate_payloads_at(start));
+        assert!(!tree.invalidate_payloads_at(start + std::time::Duration::from_millis(150)));
+        assert!(matches!(
+            tree.display_item_at(2, start + std::time::Duration::from_millis(199)),
+            Some(TreeItem::Entry(_))
+        ));
+        assert!(matches!(
+            tree.display_item_at(2, start + std::time::Duration::from_millis(200)),
+            Some(TreeItem::Placeholder { .. })
+        ));
         assert_eq!(tree.root_total(), Some(1));
         assert_eq!(tree.branches[&root].total, Some(2));
         assert_eq!(tree.row_count(), 3);
@@ -1345,6 +1655,8 @@ mod tests {
         assert!(tree.cached_row(&root, 0).is_some());
         assert!(tree.cached_row(&root, 1).is_none());
         assert_eq!(tree.requests_for_range(0..3), vec![(root.clone(), 0)]);
+        assert!(tree.expire_refresh(start + std::time::Duration::from_millis(200)));
+        assert!(matches!(tree.item(1), Some(TreeItem::Entry(_))));
         tree.begin(root.clone(), 0, 3);
         assert!(tree.requests_for_range(0..3).is_empty());
         assert!(tree.accept(

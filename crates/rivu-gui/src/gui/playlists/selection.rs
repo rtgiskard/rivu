@@ -1076,6 +1076,10 @@ impl Playlists {
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.refresh(cx);
+        if self.catalog_row(index).is_none_or(|row| row.id != id) {
+            return;
+        }
         self.cancel_selection(cx);
         cx.emit(PlaylistEvent::InvalidateManualIntent);
         if self.browser.select_playlist(id, name, index) {
@@ -1084,6 +1088,7 @@ impl Playlists {
             self.request_playlist_entries(id, 0, cx);
             self.sync_entry_projection(cx);
         }
+        self.schedule_refresh_wake(cx);
     }
 
     pub(in crate::gui) fn entry_commit_valid(&self, commit: &EntryCommit) -> bool {

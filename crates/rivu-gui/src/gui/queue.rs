@@ -78,6 +78,7 @@ pub(in crate::gui) struct Queue {
     model: QueueBrowser,
     queue_search: Entity<SearchField>,
     loading: LoadingText<()>,
+    refresh_wake: rivu_ui::refresh::RefreshWake,
     visible: bool,
     focused: bool,
     library_selection_pending: bool,
@@ -102,6 +103,7 @@ impl Queue {
             model,
             queue_search,
             loading: LoadingText::new(std::time::Duration::from_millis(150)),
+            refresh_wake: Default::default(),
             visible: false,
             focused: false,
             library_selection_pending: false,
@@ -146,6 +148,15 @@ impl Queue {
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reconcile(self.context.snapshot(), cx);
+    }
+
+    fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
+        self.refresh_wake
+            .schedule(self.model.rows.refresh_deadline(), cx, |this, now, cx| {
+                let changed = this.model.rows.expire(now);
+                this.schedule_refresh_wake(cx);
+                changed
+            });
     }
 
     fn retain_loading(&mut self, cx: &mut Context<Self>) {

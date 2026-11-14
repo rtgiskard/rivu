@@ -28,7 +28,9 @@ use super::{
 };
 use rivu_ui::{
     ButtonTooltip, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, VirtualList,
-    caption, column, panel_surface, row,
+    caption, column, panel_surface,
+    refresh::RefreshWake,
+    row,
     search::{SearchEvent, SearchField},
 };
 
@@ -233,6 +235,7 @@ pub(super) struct AlbumBrowser {
     images: ArtworkImageRegistry,
     default_artwork: Entity<DefaultArtwork>,
     model: AlbumModel,
+    refresh_wake: RefreshWake,
     loading_text: rivu_ui::loading::LoadingText<()>,
     error: Option<String>,
     dismissed_actions: Option<AlbumKey>,
@@ -298,6 +301,7 @@ impl AlbumBrowser {
             images,
             default_artwork,
             model: AlbumModel::default(),
+            refresh_wake: RefreshWake::default(),
             loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
             error: None,
             dismissed_actions: None,
@@ -371,6 +375,7 @@ impl AlbumBrowser {
         let change = self.model.sync(visible, revisions, page_size);
         let data_changed = change.data.any();
         self.apply_data_change(change.data, cx);
+        self.schedule_refresh(cx);
         if change.visibility && !visible {
             self.loading_text.clear();
             self.clear_covers(cx);
@@ -413,10 +418,23 @@ impl AlbumBrowser {
         }
     }
 
+    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_wake
+            .schedule(self.model.refresh_deadline(), cx, |this, now, cx| {
+                let expired = this.model.expire_refresh(now);
+                if expired.albums {
+                    this.sync_covers(cx);
+                }
+                this.schedule_refresh(cx);
+                expired.any()
+            });
+    }
+
     fn reload(&mut self, change: DataChange, cx: &mut Context<Self>) {
         self.loading_text.clear();
         self.clear_covers(cx);
         self.apply_data_change(change, cx);
+        self.schedule_refresh(cx);
         if !self.model.visible() {
             return;
         }
@@ -425,6 +443,7 @@ impl AlbumBrowser {
         }
         self.error = None;
         self.request_next(cx);
+        cx.notify();
     }
 
     fn request_next(&mut self, cx: &mut Context<Self>) {
@@ -466,6 +485,7 @@ impl AlbumBrowser {
                         }
                         let data = this.model.timeout(&query, generation, response, revisions);
                         this.apply_data_change(data, cx);
+                        this.schedule_refresh(cx);
                         this.sync_covers(cx);
                         cx.notify();
                     });
@@ -489,14 +509,11 @@ impl AlbumBrowser {
                     );
                     let published = completion.published;
                     this.apply_completion(completion, cx);
-                    this.sync_covers(cx);
-                    let count = if published != Published::None {
+                    if published != Published::None {
                         this.model.prepare_count(&query, generation)
                     } else {
                         None
-                    };
-                    cx.notify();
-                    count
+                    }
                 })
                 .ok()
                 .flatten()
@@ -516,21 +533,22 @@ impl AlbumBrowser {
                     }
                     let completion = this.model.complete_count(&count, response, revisions);
                     this.apply_completion(completion, cx);
-                    this.sync_covers(cx);
-                    cx.notify();
                 });
             }
             let _ = this.update(cx, |this, cx| {
                 this.model.retire_worker();
                 this.request_next(cx);
-                cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn apply_completion(&mut self, completion: model::Completion, cx: &mut Context<Self>) {
+        // Equal payloads still restore row controls that were disabled while stale.
+        let changed =
+            completion.changed || completion.data.any() || completion.published != Published::None;
+        let albums_changed = completion.data.albums
+            || (completion.published == Published::Albums && completion.changed);
         self.apply_data_change(completion.data, cx);
         if let Some((matches, total)) = completion.counts {
             let search = match completion.published {
@@ -542,10 +560,20 @@ impl AlbumBrowser {
                 set_search_counts(search, matches, total, &self.i18n, cx)
             });
         }
+        self.schedule_refresh(cx);
+        if albums_changed {
+            self.sync_covers(cx);
+        } else if completion.published == Published::Albums {
+            self.load_next_cover(cx);
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
         self.model.retry();
+        self.schedule_refresh(cx);
         self.request_next(cx);
         cx.notify();
     }
@@ -1194,7 +1222,8 @@ impl Render for AlbumBrowser {
                         let row_height = rivu_ui::list_row_height(window, cx);
                         range
                             .map(|index| {
-                                let Some(track) = this.model.tracks().get(index) else {
+                                let current = this.model.tracks().get(index).is_some();
+                                let Some(track) = this.model.tracks().display(index) else {
                                     return this
                                         .track_loading_row(index, row_height, cx)
                                         .into_any_element();
@@ -1227,86 +1256,96 @@ impl Render for AlbumBrowser {
                                 .group("album-track-row")
                                 .relative()
                                 .gap_0()
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if event.click_count() == 2 {
-                                        this.send(Command::Play { track_id: id }, cx);
-                                    }
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |_, event: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.emit(ContentMenuRequest {
-                                            source: TrackSource::Tracks(vec![id]),
-                                            position: event.position,
-                                            play: Some(Command::Play { track_id: id }),
-                                        });
-                                    }),
-                                )
-                                .on_drag(
-                                    ContentDrag::new(TrackSource::Tracks(vec![id])),
-                                    move |_, _, window, cx| {
-                                        rivu_ui::begin_list_drag(window, cx);
-                                        cx.new(|_| rivu_ui::ListDragPreview {
-                                            label: drag_label.clone(),
-                                        })
-                                    },
-                                )
+                                .when(current, |row| {
+                                    row.on_click(cx.listener(
+                                        move |this, event: &ClickEvent, _, cx| {
+                                            if event.click_count() == 2 {
+                                                this.send(Command::Play { track_id: id }, cx);
+                                            }
+                                        },
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(ContentMenuRequest {
+                                                source: TrackSource::Tracks(vec![id]),
+                                                position: event.position,
+                                                play: Some(Command::Play { track_id: id }),
+                                            });
+                                        }),
+                                    )
+                                    .on_drag(
+                                        ContentDrag::new(TrackSource::Tracks(vec![id])),
+                                        move |_, _, window, cx| {
+                                            rivu_ui::begin_list_drag(window, cx);
+                                            cx.new(|_| rivu_ui::ListDragPreview {
+                                                label: drag_label.clone(),
+                                            })
+                                        },
+                                    )
+                                })
                                 .when(track.missing, |row| {
                                     row.child(caption(theme, this.tr("gl-missing")))
                                 })
                                 .when_some(marker, |row, marker| {
                                     row.child(caption(theme, this.tr(marker)))
                                 })
-                                .child(
-                                    rivu_ui::hover_actions(
-                                        theme,
-                                        ("album-track-actions", id as u64),
-                                        "album-track-row",
-                                        false,
-                                    )
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(|_, _, cx| cx.stop_propagation())
-                                    .child(
-                                        IconButtonGroup::new(
-                                            IconButtonStyle::Quiet,
-                                            IconButtonDensity::Compact,
+                                .when(current, |row| {
+                                    row.child(
+                                        rivu_ui::hover_actions(
+                                            theme,
+                                            ("album-track-actions", id as u64),
+                                            "album-track-row",
+                                            false,
                                         )
-                                        .surface(crate::gui::appearance::material::surface(cx))
-                                        .button(
-                                            IconButton::new(
-                                                ("album-track-play", id as u64),
-                                                "",
-                                                this.tr("gl-play-track"),
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            IconButtonGroup::new(
+                                                IconButtonStyle::Quiet,
+                                                IconButtonDensity::Compact,
                                             )
-                                            .surface(crate::gui::appearance::material::surface(cx)),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(Command::Play { track_id: id }, cx)
-                                            },
-                                        )
-                                        .button(
-                                            IconButton::new(
-                                                ("album-track-add", id as u64),
-                                                "󰐕",
-                                                this.tr("gl-enqueue-track"),
-                                            )
-                                            .surface(crate::gui::appearance::material::surface(cx)),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(
-                                                    Command::Enqueue {
-                                                        track_ids: vec![id],
-                                                    },
-                                                    cx,
+                                            .surface(crate::gui::appearance::material::surface(cx))
+                                            .button(
+                                                IconButton::new(
+                                                    ("album-track-play", id as u64),
+                                                    "",
+                                                    this.tr("gl-play-track"),
                                                 )
-                                            },
-                                        )
-                                        .into_div(),
-                                    ),
-                                )
+                                                .surface(
+                                                    crate::gui::appearance::material::surface(cx),
+                                                ),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(Command::Play { track_id: id }, cx)
+                                                },
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("album-track-add", id as u64),
+                                                    "󰐕",
+                                                    this.tr("gl-enqueue-track"),
+                                                )
+                                                .surface(
+                                                    crate::gui::appearance::material::surface(cx),
+                                                ),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    this.send(
+                                                        Command::Enqueue {
+                                                            track_ids: vec![id],
+                                                        },
+                                                        cx,
+                                                    )
+                                                },
+                                            )
+                                            .into_div(),
+                                        ),
+                                    )
+                                })
                                 .into_any_element()
                             })
                             .collect::<Vec<_>>()
