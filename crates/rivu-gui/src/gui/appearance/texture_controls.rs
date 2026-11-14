@@ -218,12 +218,8 @@ impl MaterialParameterEdit for MaterialParameter {
 }
 
 fn preset_label(material: MaterialPreset, tr: &impl Fn(&str) -> SharedString) -> SharedString {
-    format!(
-        "{} · {}",
-        tr(material.group().label()),
-        tr(material.label())
-    )
-    .into()
+    let label = tr(material.label());
+    format!("{} {}", tr(material.group().label()), label).into()
 }
 
 /// Attach after the workspace; the dialog exists only in the window that opened it.

@@ -49,8 +49,8 @@ panel_kinds! {
     History => ("history", "shell-panel-history"),
     Metadata => ("metadata", "track-details"),
     Artwork => ("artwork", "shell-panel-artwork"),
-    AudioProcessing => ("audio_processing", "shell-panel-audio-processing"),
     AudioVisualizer => ("audio_visualizer", "shell-panel-audio-visualizer"),
+    AudioProcessing => ("audio_processing", "shell-panel-audio-processing"),
 }
 
 enum Owner {
