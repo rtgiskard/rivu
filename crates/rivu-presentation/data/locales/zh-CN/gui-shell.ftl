@@ -362,6 +362,7 @@ processing-result-empty = 尚无处理任务。切换到结果页不会运行处
 
 material-menu = 纹理
 material-enabled = 启用纹理效果
+material-default-artwork-fallback = 无可用封面时，使用默认封面背景
 material-satin = 克制磨砂
 material-atmosphere = 封面氛围
 material-glass = 强玻璃

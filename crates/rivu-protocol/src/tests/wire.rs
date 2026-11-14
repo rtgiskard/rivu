@@ -2240,6 +2240,12 @@ fn quick_config_mutations_round_trip_without_full_config_payloads() {
             rivu_format::config::MaterialPreset::StillWater,
         )),
         ConfigMutation::Material(rivu_format::config::MaterialChange::SetEnabled(false)),
+        ConfigMutation::Material(
+            rivu_format::config::MaterialChange::SetDefaultArtworkFallback(false),
+        ),
+        ConfigMutation::Material(
+            rivu_format::config::MaterialChange::SetDefaultArtworkFallback(true),
+        ),
         ConfigMutation::Material(rivu_format::config::MaterialChange::Reset(
             rivu_format::config::MaterialPreset::Dissolve,
         )),

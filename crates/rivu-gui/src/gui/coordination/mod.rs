@@ -24,6 +24,10 @@ impl WindowView {
         );
         let preview = appearance::material::MaterialSession::current(cx);
         assert_eq!(persisted.enabled, preview.enabled);
+        assert_eq!(
+            persisted.default_artwork_fallback,
+            preview.default_artwork_fallback
+        );
         assert_eq!(persisted.material, preview.material);
         assert_eq!(persisted.settings, preview.settings);
     }

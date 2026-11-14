@@ -1003,6 +1003,11 @@ mod tests {
             Rc::make_mut(&mut app.state).current_track = Some(Arc::new(tracks[1].clone()));
             app.reconcile_feature_demand(cx);
             assert!(app.atmosphere.read(cx).previous.source().is_some());
+            for fallback in [false, true, false, true] {
+                app.material_intent_fenced(MaterialIntent::SetDefaultArtworkFallback(fallback), cx);
+                assert!(app.atmosphere.read(cx).previous.source().is_some());
+                assert_eq!(MaterialSession::current(cx).settings, adjusted);
+            }
             for enabled in [false, true, false, true] {
                 app.material_intent_fenced(MaterialIntent::SetEnabled(enabled), cx);
                 let session = MaterialSession::current(cx);

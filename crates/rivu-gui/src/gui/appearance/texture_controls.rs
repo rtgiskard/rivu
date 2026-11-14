@@ -343,6 +343,30 @@ pub(in crate::gui) fn render(
             .flex_shrink_0(),
         )
         .child(
+            IconButton::new(
+                "material-default-artwork-fallback",
+                "",
+                tr("material-default-artwork-fallback"),
+            )
+            .switch(session.default_artwork_fallback)
+            .enabled(session.enabled)
+            .build(
+                IconButtonStyle::Quiet,
+                IconButtonDensity::Compact,
+                cx,
+                move |this, _, cx| {
+                    this.material_intent(
+                        MaterialIntent::SetDefaultArtworkFallback(
+                            !session.default_artwork_fallback,
+                        ),
+                        cx,
+                    );
+                },
+            )
+            .w(rems(2.))
+            .flex_shrink_0(),
+        )
+        .child(
             IconButton::new("texture-reset", "󰑐", tr("texture-reset"))
                 .enabled(
                     session.enabled && (session.modified() || view.shell.material_edit.is_some()),

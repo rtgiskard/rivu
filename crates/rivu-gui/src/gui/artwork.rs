@@ -482,37 +482,48 @@ impl ArtworkSource {
         active
     }
 
-    pub(super) fn ambient_image(&self) -> Img {
-        let source = self.clone();
-        img(move |window: &mut Window, cx: &mut App| {
-            if !source.active() {
+    fn load_ambient(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        if !self.active() {
+            return None;
+        }
+        self.sizing.image.update(cx, |image, cx| {
+            if image.released {
                 return None;
             }
-            source.sizing.image.update(cx, |image, cx| {
-                if image.released {
-                    return None;
-                }
-                image.views.insert(
-                    source.sizing.token,
-                    (window.current_view(), image.generation),
-                );
-                image.flush_replaced();
-                image.load_ambient(source.sizing.token, window, cx)
-            })
+            image
+                .views
+                .insert(self.sizing.token, (window.current_view(), image.generation));
+            image.flush_replaced();
+            image.load_ambient(self.sizing.token, window, cx)
+        })
+    }
+
+    pub(super) fn ambient_image(&self) -> Img {
+        let source = self.clone();
+        img(move |window: &mut Window, cx: &mut App| source.load_ambient(window, cx))
+    }
+
+    fn load_static(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        if !self.request_cover(window, cx) {
+            return None;
+        }
+        self.sizing.image.update(cx, |image, cx| {
+            let path = image.artwork.as_ref()?.path();
+            image.load(&Resource::from(path), window, cx)
         })
     }
 
     pub(super) fn static_image(&self) -> Img {
         let source = self.clone();
-        img(move |window: &mut Window, cx: &mut App| {
-            if !source.request_cover(window, cx) {
-                return None;
-            }
-            source.sizing.image.update(cx, |image, cx| {
-                let path = image.artwork.as_ref()?.path();
-                image.load(&Resource::from(path), window, cx)
-            })
-        })
+        img(move |window: &mut Window, cx: &mut App| source.load_static(window, cx))
     }
 }
 
@@ -1202,39 +1213,54 @@ fn default_artwork_side(side: Pixels, scale: f32) -> u32 {
         .clamp(1., DEFAULT_ARTWORK_MAX_SIDE as f32) as u32
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DefaultArtworkKey {
+    Cover(u32),
+    Atmosphere,
+}
+
+impl DefaultArtworkKey {
+    fn side(self) -> u32 {
+        match self {
+            Self::Cover(side) => side,
+            Self::Atmosphere => ambient::SIDE,
+        }
+    }
+}
+
 #[derive(Default)]
 struct DefaultArtworkSizes {
-    recent: VecDeque<u32>,
+    recent: VecDeque<DefaultArtworkKey>,
     bytes: u64,
 }
 
 impl DefaultArtworkSizes {
-    fn touch(&mut self, side: u32) -> bool {
-        if self.recent.back() == Some(&side) {
+    fn touch(&mut self, key: DefaultArtworkKey) -> bool {
+        if self.recent.back() == Some(&key) {
             return true;
         }
-        let Some(index) = self.recent.iter().position(|&cached| cached == side) else {
+        let Some(index) = self.recent.iter().position(|&cached| cached == key) else {
             return false;
         };
         self.recent.remove(index);
-        self.recent.push_back(side);
+        self.recent.push_back(key);
         true
     }
 
-    fn evict_for(&mut self, side: u32) -> Option<u32> {
+    fn evict_for(&mut self, key: DefaultArtworkKey) -> Option<DefaultArtworkKey> {
         if self.recent.len() < DEFAULT_ARTWORK_MAX_ENTRIES
-            && self.bytes + u64::from(side).pow(2) * 4 <= DEFAULT_ARTWORK_MAX_BYTES
+            && self.bytes + u64::from(key.side()).pow(2) * 4 <= DEFAULT_ARTWORK_MAX_BYTES
         {
             return None;
         }
         let evicted = self.recent.pop_front()?;
-        self.bytes -= u64::from(evicted).pow(2) * 4;
+        self.bytes -= u64::from(evicted.side()).pow(2) * 4;
         Some(evicted)
     }
 
-    fn insert(&mut self, side: u32) {
-        self.bytes += u64::from(side).pow(2) * 4;
-        self.recent.push_back(side);
+    fn insert(&mut self, key: DefaultArtworkKey) {
+        self.bytes += u64::from(key.side()).pow(2) * 4;
+        self.recent.push_back(key);
     }
 }
 
@@ -1247,13 +1273,13 @@ struct DefaultArtworkRasterizer {
 
 #[derive(Clone)]
 struct DefaultArtworkSource {
-    side: u32,
+    key: DefaultArtworkKey,
     rasterizer: Arc<DefaultArtworkRasterizer>,
 }
 
 impl Hash for DefaultArtworkSource {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.side.hash(state);
+        self.key.hash(state);
         Arc::as_ptr(&self.rasterizer).hash(state);
     }
 }
@@ -1284,22 +1310,22 @@ impl DefaultArtworkBitmap {
                         .parse_svg(rivu_presentation::DEFAULT_ARTWORK_SVG)?,
                 );
             }
-            let side = source.side as i32;
-            source
-                .rasterizer
-                .renderer
-                .render_parsed(
-                    parsed.as_ref().expect("parsed default artwork"),
-                    SvgSize::ExactSize(gpui::size(
-                        gpui::DevicePixels(side),
-                        gpui::DevicePixels(side),
-                    )),
-                )
-                .map_err(Into::into)
+            let side = source.key.side() as i32;
+            let image = source.rasterizer.renderer.render_parsed(
+                parsed.as_ref().expect("parsed default artwork"),
+                SvgSize::ExactSize(gpui::size(
+                    gpui::DevicePixels(side),
+                    gpui::DevicePixels(side),
+                )),
+            )?;
+            Ok(match source.key {
+                DefaultArtworkKey::Cover(_) => image,
+                DefaultArtworkKey::Atmosphere => ambient::filtered(&image),
+            })
         }
         .await;
         if let Err(error) = &result {
-            tracing::error!(?error, side = source.side, "default_artwork_raster_failed");
+            tracing::error!(?error, key = ?source.key, "default_artwork_raster_failed");
         }
         result
     }
@@ -1321,8 +1347,8 @@ impl DefaultArtworkCache {
             }),
         });
         cx.observe_release(&cache, |cache, cx| {
-            for &side in &cache.sizes.recent {
-                let source = cache.source(side);
+            for &key in &cache.sizes.recent {
+                let source = cache.source(key);
                 let result = cx.fetch_asset::<DefaultArtworkBitmap>(&source);
                 cx.remove_asset::<DefaultArtworkBitmap>(&source);
                 if let Some(Ok(image)) = result {
@@ -1334,21 +1360,21 @@ impl DefaultArtworkCache {
         cache
     }
 
-    fn source(&self, side: u32) -> DefaultArtworkSource {
+    fn source(&self, key: DefaultArtworkKey) -> DefaultArtworkSource {
         DefaultArtworkSource {
-            side,
+            key,
             rasterizer: Arc::clone(&self.rasterizer),
         }
     }
 
     fn load(
         &mut self,
-        side: u32,
+        key: DefaultArtworkKey,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        if !self.sizes.touch(side) {
-            while let Some(evicted) = self.sizes.evict_for(side) {
+        if !self.sizes.touch(key) {
+            while let Some(evicted) = self.sizes.evict_for(key) {
                 let source = self.source(evicted);
                 let result = cx.fetch_asset::<DefaultArtworkBitmap>(&source);
                 // Removing the Asset cancels a pending load, including waiters
@@ -1361,13 +1387,14 @@ impl DefaultArtworkCache {
                     });
                 }
             }
-            self.sizes.insert(side);
+            self.sizes.insert(key);
         }
-        window.use_asset::<DefaultArtworkBitmap>(&self.source(side), cx)
+        window.use_asset::<DefaultArtworkBitmap>(&self.source(key), cx)
     }
 }
 
 /// Square/circular consumers share size-keyed immutable background assets.
+#[derive(Clone)]
 pub(super) struct DefaultArtwork {
     fallback: gpui::SharedString,
     cache: Entity<DefaultArtworkCache>,
@@ -1391,6 +1418,44 @@ impl DefaultArtwork {
         }
     }
 
+    pub(super) fn ready(
+        &self,
+        side: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let side = default_artwork_side(side, window.scale_factor());
+        self.cache.update(cx, |cache, cx| {
+            cache.load(DefaultArtworkKey::Cover(side), window, cx)
+        })
+    }
+
+    /// A real source owns the surface while loading. Missing or terminally
+    /// failed sources use the shared SVG with the same atmosphere processing.
+    pub(super) fn background_image(&self, source: Option<ArtworkSource>, ambient: bool) -> Img {
+        let fallback = self.clone();
+        img(move |window: &mut Window, cx: &mut App| {
+            if let Some(source) = &source {
+                let result = if ambient {
+                    source.load_ambient(window, cx)
+                } else {
+                    source.load_static(window, cx)
+                };
+                if !matches!(result, Some(Err(_))) {
+                    return result;
+                }
+            }
+            if ambient {
+                fallback.cache.update(cx, |cache, cx| {
+                    cache.load(DefaultArtworkKey::Atmosphere, window, cx)
+                })
+            } else {
+                let viewport = window.viewport_size();
+                fallback.ready(viewport.width.max(viewport.height), window, cx)
+            }
+        })
+    }
+
     pub(super) fn image(
         &self,
         theme: &'static rivu_format::palette::Palette,
@@ -1401,7 +1466,9 @@ impl DefaultArtwork {
         let cache = self.cache.clone();
         let fallback = self.fallback.clone();
         img(move |window: &mut Window, cx: &mut App| {
-            cache.update(cx, |cache, cx| cache.load(side, window, cx))
+            cache.update(cx, |cache, cx| {
+                cache.load(DefaultArtworkKey::Cover(side), window, cx)
+            })
         })
         .with_fallback(move || rivu_ui::caption(theme, fallback.clone()).into_any_element())
     }
@@ -4247,9 +4314,96 @@ mod tests {
     }
 
     fn request_size(sizes: &mut DefaultArtworkSizes, side: u32) {
+        let side = DefaultArtworkKey::Cover(side);
         if !sizes.touch(side) {
             while sizes.evict_for(side).is_some() {}
             sizes.insert(side);
+        }
+    }
+
+    #[gpui::test]
+    fn material_backgrounds_reuse_default_cache_only_for_missing_or_failed_covers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for ambient in [false, true] {
+            for cover in ["missing", "real", "corrupt"] {
+                let (_directory, loaded) = loaded_cover(&static_cover(64, 200));
+                if cover == "corrupt" {
+                    std::fs::write(loaded.path(), b"not an image").unwrap();
+                }
+                let view = ArtworkView::new(ArtworkImageRegistry::default());
+                let window = cx.add_empty_window();
+                let fallback = window.update(|_, cx| {
+                    if cover != "missing" {
+                        view.replace(Some(loaded), cx);
+                    }
+                    DefaultArtwork::new(&rivu_presentation::i18n::Localizer::new("en"), cx)
+                });
+                for _ in 0..3 {
+                    draw_source(window, fallback.background_image(view.source(), ambient));
+                    window.run_until_parked();
+                }
+                if ambient && cover != "real" {
+                    let theme = rivu_presentation::theme::palette(
+                        rivu_presentation::theme::Theme::RivuDark,
+                    );
+                    let cover = window.update(|window, _| {
+                        let side = gpui::px(ambient::SIDE as f32) / window.scale_factor();
+                        fallback.image(theme, side, window)
+                    });
+                    draw_source(window, cover);
+                    window.run_until_parked();
+                }
+                window.update(|_, cx| {
+                    let cache = fallback.cache.read(cx);
+                    if cover == "real" {
+                        // Neither a pending decode nor real artwork gets a logo layer.
+                        assert!(cache.sizes.recent.is_empty());
+                    } else {
+                        assert_eq!(cache.sizes.recent.len(), if ambient { 2 } else { 1 });
+                        let side = if ambient {
+                            DefaultArtworkKey::Atmosphere
+                        } else {
+                            cache.sizes.recent[0]
+                        };
+                        let source = cache.source(side);
+                        let cover_source = cache.source(DefaultArtworkKey::Cover(ambient::SIDE));
+                        let image = cx
+                            .fetch_asset::<DefaultArtworkBitmap>(&source)
+                            .unwrap()
+                            .unwrap();
+                        if ambient {
+                            let parsed = source
+                                .rasterizer
+                                .renderer
+                                .parse_svg(rivu_presentation::DEFAULT_ARTWORK_SVG)
+                                .unwrap();
+                            let side = gpui::DevicePixels(ambient::SIDE as i32);
+                            let raw = source
+                                .rasterizer
+                                .renderer
+                                .render_parsed(&parsed, SvgSize::ExactSize(gpui::size(side, side)))
+                                .unwrap();
+                            let expected = ambient::filtered(&raw);
+                            assert_eq!(image.size(0), expected.size(0));
+                            assert_eq!(image.as_bytes(0), expected.as_bytes(0));
+                            assert_ne!(image.as_bytes(0), raw.as_bytes(0));
+                            let cover = cx
+                                .fetch_asset::<DefaultArtworkBitmap>(&cover_source)
+                                .unwrap()
+                                .unwrap();
+                            assert_eq!(cover.as_bytes(0), raw.as_bytes(0));
+                        }
+                    }
+                    if cover == "corrupt" {
+                        let image = view.source().unwrap().sizing.image;
+                        assert!(matches!(
+                            image.read(cx).item.as_ref().unwrap().get(),
+                            Some(Err(_)),
+                        ));
+                    }
+                });
+            }
         }
     }
 
@@ -4262,22 +4416,22 @@ mod tests {
             request_size(&mut sizes, side);
             assert!(sizes.recent.len() <= DEFAULT_ARTWORK_MAX_ENTRIES);
             assert!(sizes.bytes <= DEFAULT_ARTWORK_MAX_BYTES);
-            assert!(sizes.recent.contains(&180));
-            assert!(sizes.recent.contains(&512));
+            assert!(sizes.recent.contains(&DefaultArtworkKey::Cover(180)));
+            assert!(sizes.recent.contains(&DefaultArtworkKey::Cover(512)));
             assert_eq!(
                 sizes.bytes,
                 sizes
                     .recent
                     .iter()
-                    .map(|&side| u64::from(side).pow(2) * 4)
+                    .map(|key| u64::from(key.side()).pow(2) * 4)
                     .sum::<u64>()
             );
         }
         let bytes = sizes.bytes;
         let count = sizes.recent.len();
         for _ in 0..100 {
-            assert!(sizes.touch(180));
-            assert!(sizes.touch(512));
+            assert!(sizes.touch(DefaultArtworkKey::Cover(180)));
+            assert!(sizes.touch(DefaultArtworkKey::Cover(512)));
         }
         assert_eq!(sizes.bytes, bytes);
         assert_eq!(sizes.recent.len(), count);
@@ -4289,9 +4443,9 @@ mod tests {
         request_size(&mut sizes, 2048);
         request_size(&mut sizes, 2047);
         request_size(&mut sizes, 180);
-        assert!(!sizes.recent.contains(&2048));
-        assert!(sizes.recent.contains(&2047));
-        assert!(sizes.recent.contains(&180));
+        assert!(!sizes.recent.contains(&DefaultArtworkKey::Cover(2048)));
+        assert!(sizes.recent.contains(&DefaultArtworkKey::Cover(2047)));
+        assert!(sizes.recent.contains(&DefaultArtworkKey::Cover(180)));
         assert!(sizes.bytes <= DEFAULT_ARTWORK_MAX_BYTES);
     }
 

@@ -625,6 +625,7 @@ impl MaterialSpec {
 #[derive(Clone, Copy, Debug)]
 pub(in crate::gui) enum MaterialIntent {
     SetEnabled(bool),
+    SetDefaultArtworkFallback(bool),
     Select(MaterialPreset),
     Reset(MaterialPreset),
     Set {
@@ -636,6 +637,7 @@ pub(in crate::gui) enum MaterialIntent {
 
 pub(in crate::gui) struct MaterialSession {
     pub enabled: bool,
+    pub default_artwork_fallback: bool,
     pub material: MaterialPreset,
     pub settings: MaterialParameters,
     saved: [Option<MaterialParameters>; MATERIALS.len()],
@@ -645,6 +647,7 @@ impl Default for MaterialSession {
     fn default() -> Self {
         Self {
             enabled: false,
+            default_artwork_fallback: true,
             material: MaterialPreset::Satin,
             settings: MaterialParameters::preset(MaterialPreset::Satin),
             saved: [None; MATERIALS.len()],
@@ -656,6 +659,7 @@ impl Global for MaterialSession {}
 impl MaterialSession {
     pub(in crate::gui) fn restore(&mut self, previous: MaterialSnapshot) {
         self.enabled = previous.enabled;
+        self.default_artwork_fallback = previous.default_artwork_fallback;
         self.material = previous.material;
         self.settings = previous.settings;
     }
@@ -668,6 +672,7 @@ impl MaterialSession {
 
     fn load_preferences(&mut self, preferences: &MaterialPreferences) {
         self.enabled = preferences.enabled;
+        self.default_artwork_fallback = preferences.default_artwork_fallback;
         self.material = preferences.selected;
         self.saved.fill(None);
         for (&preset, &parameters) in &preferences.presets {
@@ -696,6 +701,9 @@ impl MaterialSession {
     pub(in crate::gui) fn change(&self, intent: MaterialIntent) -> MaterialChange {
         match intent {
             MaterialIntent::SetEnabled(enabled) => MaterialChange::SetEnabled(enabled),
+            MaterialIntent::SetDefaultArtworkFallback(enabled) => {
+                MaterialChange::SetDefaultArtworkFallback(enabled)
+            }
             MaterialIntent::Select(material) => MaterialChange::Select(material),
             MaterialIntent::Reset(material) => MaterialChange::Reset(material),
             MaterialIntent::Set {
@@ -719,6 +727,7 @@ impl MaterialSession {
     fn snapshot(&self) -> MaterialSnapshot {
         MaterialSnapshot {
             enabled: self.enabled,
+            default_artwork_fallback: self.default_artwork_fallback,
             material: self.material,
             settings: self.settings,
         }
@@ -736,6 +745,13 @@ impl MaterialSession {
                     return false;
                 }
                 self.enabled = enabled;
+                true
+            }
+            MaterialIntent::SetDefaultArtworkFallback(enabled) => {
+                if self.default_artwork_fallback == enabled {
+                    return false;
+                }
+                self.default_artwork_fallback = enabled;
                 true
             }
             MaterialIntent::Select(material) => {
@@ -777,6 +793,7 @@ impl MaterialSession {
 /// Frame sampling copies only active values, never the per-preset preferences.
 pub(in crate::gui) struct MaterialSnapshot {
     pub enabled: bool,
+    pub default_artwork_fallback: bool,
     pub material: MaterialPreset,
     pub settings: MaterialParameters,
 }
@@ -801,11 +818,13 @@ pub(in crate::gui) struct MaterialFrame {
     current: Option<std::sync::Arc<RenderImage>>,
     weight: f32,
     surface: Option<crate::gui::artwork::ArtworkSource>,
+    fallback: Option<crate::gui::artwork::DefaultArtwork>,
 }
 
 impl MaterialFrame {
     pub(in crate::gui) fn sample(
         atmosphere: &Entity<super::ambient::Atmosphere>,
+        default_artwork: &Entity<crate::gui::artwork::DefaultArtwork>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -820,6 +839,7 @@ impl MaterialFrame {
                 current: None,
                 weight: 1.,
                 surface: None,
+                fallback: None,
             };
         };
         let motion = material.motion(settings.speed, window, cx);
@@ -844,6 +864,9 @@ impl MaterialFrame {
             current,
             weight,
             surface,
+            fallback: (session.default_artwork_fallback
+                && (material.spec().artwork_root || material.spec().artwork_playback))
+                .then(|| default_artwork.read(cx).clone()),
         }
     }
 
@@ -852,9 +875,22 @@ impl MaterialFrame {
             previous: enabled
                 .then(|| self.previous.as_ref().map(|source| img(source.clone())))
                 .flatten(),
-            current: enabled
-                .then(|| self.current.as_ref().map(|source| img(source.clone())))
-                .flatten(),
+            current: if enabled {
+                self.current
+                    .as_ref()
+                    .map(|source| img(source.clone()))
+                    .or_else(|| {
+                        if self.previous.is_none() {
+                            self.fallback
+                                .as_ref()
+                                .map(|fallback| fallback.background_image(None, false))
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            },
             weight: self.weight,
         }
     }
@@ -870,17 +906,41 @@ impl MaterialFrame {
                 self.motion,
             ));
         }
-        let image = (material != MaterialPreset::Mirror)
-            .then(|| self.surface.as_ref().map(|source| source.ambient_image()))
+        let image = (material.spec().artwork_root && material != MaterialPreset::Mirror)
+            .then(|| self.surface_image(true))
             .flatten();
         let reflections = (material == MaterialPreset::Mirror)
             .then(|| {
-                self.surface
+                self.fallback
                     .as_ref()
-                    .map(|source| std::array::from_fn(|_| source.static_image()))
+                    .map(|fallback| {
+                        std::array::from_fn(|_| {
+                            fallback.background_image(self.surface.clone(), false)
+                        })
+                    })
+                    .or_else(|| {
+                        self.surface
+                            .as_ref()
+                            .map(|source| std::array::from_fn(|_| source.static_image()))
+                    })
             })
             .flatten();
         Some(material.backdrop(theme, image, reflections, self.motion))
+    }
+
+    fn surface_image(&self, ambient: bool) -> Option<Img> {
+        self.fallback
+            .as_ref()
+            .map(|fallback| fallback.background_image(self.surface.clone(), ambient))
+            .or_else(|| {
+                self.surface.as_ref().map(|source| {
+                    if ambient {
+                        source.ambient_image()
+                    } else {
+                        source.static_image()
+                    }
+                })
+            })
     }
 
     pub(in crate::gui) fn panel(
@@ -915,7 +975,7 @@ impl MaterialFrame {
             );
         }
         let image = (playback && material.spec().artwork_playback)
-            .then(|| self.surface.as_ref().map(|source| source.ambient_image()))
+            .then(|| self.surface_image(true))
             .flatten();
         material.panel(panel, kind, theme, image, self.motion)
     }
@@ -970,19 +1030,25 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
+        let default_artwork = cx.new(|cx| {
+            crate::gui::artwork::DefaultArtwork::new(
+                &rivu_presentation::i18n::Localizer::new("en"),
+                cx,
+            )
+        });
         let window = cx.add_empty_window();
         window.update(|window, cx| {
             let theme =
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
             assert_eq!(MaterialPreset::current(cx), None);
-            let frame = MaterialFrame::sample(&atmosphere, window, cx);
+            let frame = MaterialFrame::sample(&atmosphere, &default_artwork, window, cx);
             assert!(frame.backdrop(theme).is_none());
             cx.default_global::<MaterialSession>();
             assert_eq!(MaterialPreset::current(cx), None);
             for material in MaterialPreset::ALL {
                 cx.default_global::<MaterialSession>()
                     .apply(MaterialIntent::Select(material));
-                let frame = MaterialFrame::sample(&atmosphere, window, cx);
+                let frame = MaterialFrame::sample(&atmosphere, &default_artwork, window, cx);
                 assert_eq!(frame.material, None);
                 assert!(!frame.motion);
                 assert!(frame.previous.is_none());
@@ -1080,6 +1146,7 @@ mod tests {
             current: None,
             weight: 1.,
             surface: None,
+            fallback: None,
         };
         let panel = |kind: PanelKind| frame.panel(div().id(kind.key()), kind.key(), theme, 1.);
         let mut artwork = panel(PanelKind::Artwork);
@@ -1337,7 +1404,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sampled_frame_keeps_accepted_sources_and_weight_after_owner_advances(
+    fn sampled_frames_preserve_real_transitions_and_default_unusable_covers(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::gui::{appearance::ambient::Atmosphere, artwork::ArtworkImageRegistry};
@@ -1345,6 +1412,7 @@ mod tests {
         use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
         struct Scene {
             atmosphere: Entity<Atmosphere>,
+            default_artwork: Entity<crate::gui::artwork::DefaultArtwork>,
             observed: Rc<RefCell<Option<MaterialFrame>>>,
         }
         fn composition(frame: &MaterialFrame) -> Div {
@@ -1368,10 +1436,29 @@ mod tests {
         }
         impl Render for Scene {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let frame = MaterialFrame::sample(&self.atmosphere, window, cx);
+                let frame =
+                    MaterialFrame::sample(&self.atmosphere, &self.default_artwork, window, cx);
                 let composition = composition(&frame);
                 *self.observed.borrow_mut() = Some(frame);
                 composition
+            }
+        }
+        struct FallbackProbe(crate::gui::artwork::DefaultArtwork);
+        impl Render for FallbackProbe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let fallback = self.0.clone();
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        // A prior material draw must have made the shared SVG ready.
+                        let viewport = window.viewport_size();
+                        fallback
+                            .ready(viewport.width.max(viewport.height), window, cx)
+                            .unwrap()
+                            .unwrap();
+                    },
+                )
+                .size_full()
             }
         }
         std::fs::create_dir_all(".cache").unwrap();
@@ -1386,7 +1473,43 @@ mod tests {
             manager.load(crate::artwork_source(&track)).unwrap();
             track
         });
+        let mut missing = crate::test_support::artwork_track(directory.path().join("missing.wav"));
+        missing.id = 3;
+        assert!(manager.load(crate::artwork_source(&missing)).is_none());
+        let mut rejected =
+            crate::test_support::artwork_track(directory.path().join("rejected.wav"));
+        rejected.id = 4;
+        rivu_metadata::artwork::test_support::pictures_wav(
+            &rejected.path,
+            3,
+            &[(b"not an image", 12, 3)],
+        );
+        assert!(manager.load(crate::artwork_source(&rejected)).is_none());
+        let mut corrupt = crate::test_support::artwork_track(directory.path().join("corrupt.wav"));
+        corrupt.id = 5;
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([240, 10, 20, 255]),
+        ))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+        let bytes = bytes.into_inner();
+        rivu_metadata::artwork::test_support::pictures_wav(
+            &corrupt.path,
+            3,
+            &[(&bytes, bytes.len(), 3)],
+        );
+        let loaded = manager.load(crate::artwork_source(&corrupt)).unwrap();
+        std::fs::write(loaded.path(), b"not an image").unwrap();
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
+        let default_artwork = cx.new(|cx| {
+            crate::gui::artwork::DefaultArtwork::new(
+                &rivu_presentation::i18n::Localizer::new("en"),
+                cx,
+            )
+        });
         let window = cx.add_empty_window();
         window.update(|window, cx| {
             window.activate_window();
@@ -1411,6 +1534,7 @@ mod tests {
             window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
                 cx.new(|_| Scene {
                     atmosphere: atmosphere.clone(),
+                    default_artwork: default_artwork.clone(),
                     observed: observed.clone(),
                 })
                 .into_any_element()
@@ -1487,5 +1611,26 @@ mod tests {
         window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, _| {
             composition(&accepted).into_any_element()
         });
+
+        for target in [Some(&missing), Some(&rejected), Some(&corrupt), None] {
+            window.update(|_, cx| {
+                atmosphere.update(cx, |owner, cx| {
+                    owner.sync(target, MaterialPreset::Storybook, 0., true, true, cx)
+                });
+            });
+            for _ in 0..3 {
+                draw(window);
+                window.run_until_parked();
+            }
+            window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
+                cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone()))
+                    .into_any_element()
+            });
+            let observed = observed.borrow();
+            let frame = observed.as_ref().unwrap();
+            assert!(frame.previous.is_none());
+            assert!(frame.current.is_none());
+            assert_eq!(frame.weight, 1.);
+        }
     }
 }

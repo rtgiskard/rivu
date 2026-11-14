@@ -362,6 +362,7 @@ processing-result-empty = No processing task yet. Opening Results never runs or 
 
 material-menu = Textures
 material-enabled = Enable texture effects
+material-default-artwork-fallback = Use default artwork for missing-cover backgrounds
 material-satin = Satin glass
 material-atmosphere = Artwork atmosphere
 material-glass = Deep glass

@@ -35,8 +35,12 @@ impl Render for WindowView {
         let docking_view = cx.entity().downgrade();
         let paint_presentation = self.presentation.clone();
         let paint_artwork_images = self.artwork_images.clone();
-        let material_frame =
-            appearance::material::MaterialFrame::sample(&self.atmosphere, window, cx);
+        let material_frame = appearance::material::MaterialFrame::sample(
+            &self.atmosphere,
+            &self.default_artwork,
+            window,
+            cx,
+        );
         let layouts = self.workspace.layouts.clone();
         let layout_view = layouts
             .current()

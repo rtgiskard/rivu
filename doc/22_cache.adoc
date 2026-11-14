@@ -861,12 +861,14 @@ them at a frame boundary; hide/close flushes immediately. Cancelled synchronous
 work may finish but cannot publish, and old scenes cannot restart it. Reopening
 reuses only owners that have not retired.
 
-Default SVG covers and the About logo use
-one window-local memory cache keyed by physical size. Background rasterization
-is serialized; consumers share immutable images, and obsolete sizes cannot
-replace newer demand.
+Default SVG covers, the About logo and artwork-dependent material fallbacks use
+one window-local memory cache keyed by physical size and image treatment.
+Atmosphere backgrounds use the same 64×64 low-frequency filter for default SVGs
+and real covers; cover panels and About keep the unfiltered SVG. Background
+rasterization is serialized; consumers share immutable images, and obsolete
+sizes cannot replace newer demand.
 
-This memory-only cache admits at most 16 pending/completed size keys and 32 MiB
+This memory-only cache admits at most 16 pending/completed image keys and 32 MiB
 of final BGRA pixels. Least-recently-used eviction cancels pending assets and
 retires GPU images at the next window-frame boundary; temporary retired images
 are outside the resident budget. Raster sides are capped at 2048 physical pixels

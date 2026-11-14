@@ -92,6 +92,7 @@ impl MaterialParameters {
 #[serde(default, deny_unknown_fields)]
 pub struct MaterialPreferences {
     pub enabled: bool,
+    pub default_artwork_fallback: bool,
     pub selected: MaterialPreset,
     pub presets: BTreeMap<MaterialPreset, MaterialParameters>,
 }
@@ -100,6 +101,7 @@ impl Default for MaterialPreferences {
     fn default() -> Self {
         Self {
             enabled: false,
+            default_artwork_fallback: true,
             selected: MaterialPreset::Satin,
             presets: BTreeMap::new(),
         }
@@ -217,6 +219,7 @@ impl MaterialParameter {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MaterialChange {
     SetEnabled(bool),
+    SetDefaultArtworkFallback(bool),
     Select(MaterialPreset),
     Reset(MaterialPreset),
     SetParameter {
@@ -230,6 +233,9 @@ impl MaterialChange {
     pub fn apply_to(self, preferences: &mut MaterialPreferences) {
         match self {
             Self::SetEnabled(enabled) => preferences.enabled = enabled,
+            Self::SetDefaultArtworkFallback(enabled) => {
+                preferences.default_artwork_fallback = enabled;
+            }
             Self::Select(preset) => preferences.selected = preset,
             Self::Reset(preset) => {
                 preferences.presets.remove(&preset);

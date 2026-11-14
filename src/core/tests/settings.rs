@@ -13,6 +13,7 @@ fn material_edits_persist_immediately_and_merge_with_owner_time_settings() {
     for change in [
         MaterialChange::Select(MaterialPreset::StillWater),
         MaterialChange::SetEnabled(false),
+        MaterialChange::SetDefaultArtworkFallback(false),
         MaterialChange::SetParameter {
             preset: MaterialPreset::StillWater,
             parameter: MaterialParameter::Alpha,
@@ -42,6 +43,7 @@ fn material_edits_persist_immediately_and_merge_with_owner_time_settings() {
     assert_eq!(restored.ui_font_size_pt, 14);
     assert_eq!(restored.material.selected, MaterialPreset::StillWater);
     assert!(!restored.material.enabled);
+    assert!(!restored.material.default_artwork_fallback);
     assert_eq!(
         restored.material.presets[&MaterialPreset::StillWater].panel_alpha,
         0.3
@@ -59,6 +61,7 @@ fn material_edits_persist_immediately_and_merge_with_owner_time_settings() {
     )))
     .unwrap();
     let restored = Config::load(&core.state.configuration.config_path).unwrap();
+    assert!(!restored.material.default_artwork_fallback);
     assert!(
         !restored
             .material

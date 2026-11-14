@@ -417,6 +417,7 @@ treated as saved.
 ----
 [interface.material]
 enabled = true
+default_artwork_fallback = true
 selected = "still_water"
 ----
 
@@ -426,6 +427,13 @@ effects are off, preset selection, adjustments, Experimental expansion and Reset
 are read-only; enable effects before editing. Preset identities are stable
 snake_case names, independent of translated labels; `still_water` is displayed as
 Rain ripples. No-effect rendering is controlled solely by `enabled = false`.
+
+`default_artwork_fallback` defaults to `true`. The image icon button to the right
+of Experimental controls whether missing, rejected or failed covers use the
+bundled SVG in artwork-dependent material backgrounds. Turning it off preserves
+real-cover backgrounds and all other material effects. It does not affect cover
+panels, About or MPRIS artwork. Reset and preset changes preserve this shared switch.
+
 Edited parameters are stored under
 `[interface.material.presets.<preset>]`; Reset restores only the selected preset.
 These preferences are independent of theme colors and GPU resource limits.

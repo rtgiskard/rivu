@@ -3,7 +3,7 @@ use gpui::RenderImage;
 use image::{ImageBuffer, Rgba};
 use std::sync::Arc;
 
-const SIDE: u32 = 64;
+pub(super) const SIDE: u32 = 64;
 
 pub(super) fn filtered(source: &RenderImage) -> Arc<RenderImage> {
     let size = source.size(0);

@@ -535,9 +535,12 @@ The effect uses ordinary GPUI image and gradient composition, not live backdrop
 blur or desktop/compositor transparency, and adds no animation timer.
 
 Track changes invalidate the old atmosphere immediately; obsolete completions
-cannot publish for a newer track. Missing, corrupt or budget-rejected images leave
-the semantic gradient in place rather than retaining the previous cover. Leaving
-an artwork-dependent material or hiding the window releases its atmosphere
+cannot publish for a newer track. With
+link:01_config.adoc[default artwork fallback] enabled, artwork-dependent backgrounds
+use the shared bundled SVG when no real cover is available or decoding rejects it.
+Otherwise only the unavailable image layer is omitted; neither case retains the
+previous track's cover.
+Leaving an artwork-dependent material or hiding the window releases its atmosphere
 consumer's image references; other artwork consumers retain their own ownership.
 Turning material effects off also stops material animation and releases the
 material consumer's current and previous artwork references. Ordinary artwork
@@ -637,10 +640,12 @@ the new source decode is ready; hiding, disabling motion, zero duration or chang
 material identity retires the predecessor. Same-material duration edits retain the
 active clock. A predecessor can observe pending/ready work but never initiate a
 cold decode. Material owners consume real-cover lookups directly: a missing or
-failed target clears obsolete imagery rather than substituting generated default
-artwork. Opaque-cover dissolves compensate source-over alpha to retain
-constant backdrop contribution. Combined feathered masks use ordinary source-over
-coverage rather than exact dual-texture alpha interpolation. Celtic storybook is an original
+failed target clears obsolete imagery. The shared
+link:01_config.adoc[default artwork fallback] preference controls replacement with
+the same generated default artwork used by cover panels. Opaque-cover dissolves
+compensate source-over alpha to retain constant backdrop contribution. Combined
+feathered masks use ordinary source-over coverage rather than exact dual-texture
+alpha interpolation. Celtic storybook is an original
 storybook-style experiment, not an imported film asset or character reproduction.
 
 Procedural water presets paint one independent root canvas through

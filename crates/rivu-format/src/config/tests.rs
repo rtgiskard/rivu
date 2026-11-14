@@ -51,6 +51,7 @@ fn material_preferences_round_trip_defaults_and_independent_presets() {
     let mut config = baseline.clone();
     config.material.enabled = false;
     config.material.selected = MaterialPreset::StillWater;
+    config.material.default_artwork_fallback = false;
     for preset in [MaterialPreset::Dissolve, MaterialPreset::StillWater] {
         let mut parameters = MaterialParameters::preset(preset);
         parameters.panel_alpha = 0.25;
@@ -89,10 +90,12 @@ fn material_effects_toggle_preserves_selection_and_parameters() {
         .presets
         .insert(MaterialPreset::StillWater, parameters);
     for enabled in [true, false, true] {
+        MaterialChange::SetDefaultArtworkFallback(!enabled).apply_to(&mut config.material);
         MaterialChange::SetEnabled(enabled).apply_to(&mut config.material);
         let saved = to_toml(&config).unwrap();
         let loaded = from_toml(&saved).unwrap();
         assert_eq!(loaded.material.enabled, enabled);
+        assert_eq!(loaded.material.default_artwork_fallback, !enabled);
         assert_eq!(loaded.material.selected, MaterialPreset::StillWater);
         assert_eq!(loaded.material.presets, config.material.presets);
         assert_eq!(loaded, config);
