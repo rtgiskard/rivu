@@ -102,8 +102,8 @@ pub(in crate::gui) fn backdrop(
     } else {
         root.child(art)
     };
-    if matches!(material, MaterialPreset::Frost | MaterialPreset::Storybook) {
-        root = root.child(scene(material, settings, theme, motion, false));
+    if material == MaterialPreset::Storybook {
+        root = root.child(scene(settings, theme, motion, false));
     }
     if settings.grain > 0. {
         root = root.child(paper(theme, settings.grain, false));
@@ -162,7 +162,7 @@ pub(in crate::gui) fn panel(
         linear_color_stop(rgb(theme.panel).alpha(alpha), 1.),
     )));
     if material == MaterialPreset::Storybook {
-        panel = panel.child(scene(material, settings, theme, motion && playback, true));
+        panel = panel.child(scene(settings, theme, motion && playback, true));
     }
     if settings.grain > 0. {
         panel = panel.child(paper(theme, settings.grain, true));
@@ -422,13 +422,7 @@ const fn hash(index: u32) -> f32 {
     ((value >> 22) ^ value) as f32 / u32::MAX as f32
 }
 
-fn scene(
-    material: MaterialPreset,
-    settings: MaterialParameters,
-    theme: &'static Palette,
-    motion: bool,
-    panel: bool,
-) -> Div {
+fn scene(settings: MaterialParameters, theme: &'static Palette, motion: bool, panel: bool) -> Div {
     if motion && settings.speed > 0. {
         layer().child(layer().with_animation(
             if panel {
@@ -437,27 +431,18 @@ fn scene(
                 "texture-root-scene"
             },
             Animation::new(cycle(26., settings.speed)).repeat_synced(),
-            move |pane, phase| pane.child(scene_canvas(material, theme, phase, panel)),
+            move |pane, phase| pane.child(scene_canvas(theme, phase, panel)),
         ))
     } else {
-        layer().child(scene_canvas(material, theme, 0., panel))
+        layer().child(scene_canvas(theme, 0., panel))
     }
 }
 
-fn scene_canvas(
-    material: MaterialPreset,
-    theme: &'static Palette,
-    phase: f32,
-    panel: bool,
-) -> impl IntoElement {
+fn scene_canvas(theme: &'static Palette, phase: f32, panel: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            if material == MaterialPreset::Frost {
-                frost_scene(bounds, window, theme, phase);
-            } else {
-                storybook_scene(bounds, window, theme, phase, panel);
-            }
+            storybook_scene(bounds, window, theme, phase, panel);
         },
     )
     .absolute()
@@ -476,45 +461,6 @@ fn at(bounds: Bounds<Pixels>, x: f32, y: f32) -> Point<Pixels> {
 fn paint(window: &mut Window, path: PathBuilder, color: Rgba) {
     if let Ok(path) = path.build() {
         window.paint_path(path, color);
-    }
-}
-
-/// Deliberately non-image detail behind R: crossing ribbons and nested contour lines
-/// make actual backdrop sampling visible over arbitrary previously painted geometry.
-fn frost_scene(bounds: Bounds<Pixels>, window: &mut Window, theme: &'static Palette, phase: f32) {
-    let drift = (phase * TAU).sin() * 0.035;
-    for i in 0..5 {
-        let x = i as f32 * 0.27 - 0.13;
-        let mut ribbon = PathBuilder::fill();
-        ribbon.move_to(at(bounds, x, -0.05));
-        ribbon.cubic_bezier_to(
-            at(bounds, x + 0.25, 1.05),
-            at(bounds, x + 0.48 + drift, 0.22),
-            at(bounds, x - 0.30, 0.70),
-        );
-        ribbon.line_to(at(bounds, x + 0.34, 1.05));
-        ribbon.cubic_bezier_to(
-            at(bounds, x + 0.09, -0.05),
-            at(bounds, x - 0.21, 0.70),
-            at(bounds, x + 0.57 + drift, 0.22),
-        );
-        ribbon.close();
-        paint(
-            window,
-            ribbon,
-            rgb(if i % 2 == 0 { theme.accent } else { theme.text }).alpha(0.27),
-        );
-    }
-    for i in 0..12 {
-        let y = 0.10 + i as f32 * 0.065;
-        let mut contour = PathBuilder::stroke(px(if i % 3 == 0 { 3. } else { 1. }));
-        contour.move_to(at(bounds, 0., y));
-        contour.cubic_bezier_to(
-            at(bounds, 1., y + 0.05),
-            at(bounds, 0.28, y - 0.17),
-            at(bounds, 0.64, y + 0.22),
-        );
-        paint(window, contour, rgb(theme.text).alpha(0.23));
     }
 }
 
