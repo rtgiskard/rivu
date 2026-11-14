@@ -855,7 +855,7 @@ impl MaterialFrame {
                     window,
                     cx,
                 );
-                (previous, current, weight, None)
+                (previous, current, weight, atmosphere.source())
             } else {
                 (None, None, 1., atmosphere.source())
             }
@@ -885,9 +885,9 @@ impl MaterialFrame {
                     .map(|source| img(source.clone()))
                     .or_else(|| {
                         if self.previous.is_none() {
-                            self.fallback
-                                .as_ref()
-                                .map(|fallback| fallback.background_image(None, false))
+                            self.fallback.as_ref().map(|fallback| {
+                                fallback.background_image(self.surface.clone(), false)
+                            })
                         } else {
                             None
                         }
@@ -1455,19 +1455,22 @@ mod tests {
                 composition
             }
         }
-        struct FallbackProbe(crate::gui::artwork::DefaultArtwork);
+        struct FallbackProbe(crate::gui::artwork::DefaultArtwork, bool);
         impl Render for FallbackProbe {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let fallback = self.0.clone();
+                let expected_ready = self.1;
                 canvas(
                     |_, _, _| (),
                     move |_, _, window, cx| {
-                        // A prior material draw must have made the shared SVG ready.
                         let viewport = window.viewport_size();
-                        fallback
-                            .ready(viewport.width.max(viewport.height), window, cx)
-                            .unwrap()
-                            .unwrap();
+                        let result =
+                            fallback.ready(viewport.width.max(viewport.height), window, cx);
+                        if expected_ready {
+                            result.unwrap().unwrap();
+                        } else {
+                            assert!(result.is_none(), "pending cover requested fallback");
+                        }
                     },
                 )
                 .size_full()
@@ -1554,6 +1557,10 @@ mod tests {
         };
         draw(window);
         window.run_until_parked();
+        window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
+            cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone(), false))
+                .into_any_element()
+        });
         draw(window);
         window.update(|_, cx| {
             atmosphere.update(cx, |owner, cx| {
@@ -1635,7 +1642,7 @@ mod tests {
                 window.run_until_parked();
             }
             window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
-                cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone()))
+                cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone(), true))
                     .into_any_element()
             });
             let observed = observed.borrow();
