@@ -152,6 +152,7 @@ pub(super) struct Details {
     pub(super) error_max_scroll: usize,
     pub(super) layout: Option<super::render::DetailsLayout>,
     pub(super) failed_request: Option<Arc<ReadSpec>>,
+    pub(super) retained: Option<(DetailState, Instant)>,
 }
 
 impl Details {
@@ -185,16 +186,47 @@ impl Details {
         .then_some(demand)
     }
 
-    fn sync_snapshot(&mut self, state: &TuiSnapshot) -> bool {
+    fn sync_snapshot(&mut self, state: &TuiSnapshot, now: Instant) -> bool {
         if self.stamp.is_some() && self.stamp != self.current_stamp(state) {
-            self.stamp = None;
-            self.state = DetailState::Loading;
+            self.begin_query(now);
+            return true;
+        }
+        false
+    }
+
+    fn begin_query(&mut self, now: Instant) {
+        self.stamp = None;
+        let previous = std::mem::take(&mut self.state);
+        if matches!(&previous, DetailState::Ready(track) if Some(track.id) == self.target)
+            && self.retained.is_none()
+        {
+            self.retained = Some((previous, now + Duration::from_millis(200)));
+        }
+    }
+
+    pub(super) fn display_state(&self) -> &DetailState {
+        self.retained
+            .as_ref()
+            .map_or(&self.state, |(state, _)| state)
+    }
+
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        self.retained.as_ref().map(|(_, deadline)| *deadline)
+    }
+
+    pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
+        if self
+            .refresh_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.retained = None;
             return true;
         }
         false
     }
 
     fn accept(&mut self, stamp: rivu_protocol::model::QueryStamp, view: ViewResponse) -> bool {
+        self.retained = None;
         let state = match view {
             ViewResponse::Track(Some(track)) if Some(track.id) == self.target => {
                 DetailState::Ready(Arc::new(track))
@@ -333,7 +365,7 @@ impl QueuePage {
             return;
         }
         if !changes.coordinates_changed {
-            self.rows.clear_pages();
+            self.rows.invalidate_pages();
             return;
         }
         self.anchor = self
@@ -342,7 +374,7 @@ impl QueuePage {
             .or(self.selected_id);
         let selected = self.rows.selection.selected().unwrap_or(0);
         let filtered_total = self.rows.total;
-        self.rows.clear();
+        self.rows.invalidate();
         if filter.is_empty() {
             self.rows.total = next.queue.total;
             self.rows.loaded = true;
@@ -355,6 +387,7 @@ impl QueuePage {
             self.rows.loaded = filtered_total != 0;
         }
         if next.queue.total == 0 {
+            self.rows.discard_refresh();
             self.rows.total = 0;
             self.rows.loaded = true;
             self.rows.selection.select(None);
@@ -447,11 +480,12 @@ impl LibraryPage {
         if coordinates_changed {
             self.anchor = self.anchor.or_else(|| self.selected_identity());
         }
-        self.rows.clear();
+        self.rows.invalidate();
     }
 
     fn refilter(&mut self) {
         self.invalidate(true);
+        self.rows.discard_refresh();
         self.rows.selection.select(Some(0));
     }
 
@@ -617,10 +651,16 @@ impl View {
         if rows_changed && !coordinates_changed && !page_size_changed {
             self.invalidate_payload();
         } else if coordinates_changed && matches!(self, Self::Tree(_) | Self::Playlists(_)) {
-            self.retain_container_identity();
+            self.retain_container_identity(!page_size_changed);
         } else if rows_changed || page_size_changed {
             match self {
-                Self::LibraryResults(results) => results.invalidate(coordinates_changed),
+                Self::LibraryResults(results) => {
+                    if page_size_changed {
+                        results.clear();
+                    } else {
+                        results.invalidate(coordinates_changed);
+                    }
+                }
                 Self::Tree(tree) => {
                     if tree.entries.identity_lookup.is_none()
                         && (tree.other_tracks || !tree.directory.as_os_str().is_empty())
@@ -638,7 +678,13 @@ impl View {
                     tree.entries.clear();
                 }
                 Self::Playlists(playlists) => playlists.clear(),
-                Self::PlaylistDetail { detail, .. } => detail.entries.clear(),
+                Self::PlaylistDetail { detail, .. } => {
+                    if page_size_changed {
+                        detail.entries.clear();
+                    } else {
+                        detail.entries.invalidate();
+                    }
+                }
                 Self::Queue | Self::Recent(_) => {}
             }
         }
@@ -657,15 +703,41 @@ impl View {
     // Payload-only changes keep membership, counts and navigation coordinates.
     fn invalidate_payload(&mut self) {
         match self {
-            Self::LibraryResults(results) => results.clear_pages(),
-            Self::Tree(tree) => {
-                tree.entries.retain_pages(|_, rows| {
-                    !rows.iter().any(|row| matches!(row, DirectoryRow::Track(_)))
-                });
-            }
-            Self::PlaylistDetail { detail, .. } => detail.entries.clear_pages(),
+            Self::LibraryResults(results) => results.invalidate_pages(),
+            Self::Tree(tree) => tree.entries.invalidate_pages(),
+            Self::PlaylistDetail { detail, .. } => detail.entries.invalidate_pages(),
             Self::Queue | Self::Recent(_) => {}
             Self::Playlists(_) => {}
+        }
+    }
+
+    fn refresh_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::LibraryResults(rows) => rows.refresh_deadline(),
+            Self::Tree(tree) => tree.entries.refresh_deadline(),
+            Self::Playlists(rows) => rows.refresh_deadline(),
+            Self::PlaylistDetail { detail, .. } => detail.entries.refresh_deadline(),
+            Self::Queue | Self::Recent(_) => None,
+        }
+    }
+
+    fn expire_refresh(&mut self, now: Instant) -> bool {
+        match self {
+            Self::LibraryResults(rows) => rows.expire_refresh(now),
+            Self::Tree(tree) => tree.entries.expire_refresh(now),
+            Self::Playlists(rows) => rows.expire_refresh(now),
+            Self::PlaylistDetail { detail, .. } => detail.entries.expire_refresh(now),
+            Self::Queue | Self::Recent(_) => false,
+        }
+    }
+
+    fn discard_refresh(&mut self) {
+        match self {
+            Self::LibraryResults(rows) => rows.discard_refresh(),
+            Self::Tree(tree) => tree.entries.discard_refresh(),
+            Self::Playlists(rows) => rows.discard_refresh(),
+            Self::PlaylistDetail { detail, .. } => detail.entries.discard_refresh(),
+            Self::Queue | Self::Recent(_) => {}
         }
     }
 }
@@ -924,7 +996,7 @@ impl View {
 }
 
 impl View {
-    fn retain_container_identity(&mut self) {
+    fn retain_container_identity(&mut self, retain_display: bool) {
         match self {
             View::Tree(tree) => {
                 let container = tree
@@ -947,7 +1019,11 @@ impl View {
                         })
                         .or(tree.selected_track_id);
                 }
-                tree.entries.retain_identity(container);
+                if retain_display {
+                    tree.entries.invalidate_identity(container);
+                } else {
+                    tree.entries.retain_identity(container);
+                }
                 if tree.anchor.is_some() {
                     tree.entries.identity_lookup = None;
                     tree.entries.selection.select(Some(0));
@@ -962,7 +1038,11 @@ impl View {
                         rows.selected()
                             .map(|row| ContainerIdentity::Playlist(row.id))
                     });
-                rows.retain_identity(identity);
+                if retain_display {
+                    rows.invalidate_identity(identity);
+                } else {
+                    rows.retain_identity(identity);
+                }
             }
             _ => unreachable!("only container views retain container identities"),
         }
@@ -972,7 +1052,7 @@ impl View {
         match self {
             View::Queue => queue.refilter(state),
             View::LibraryResults(results) => results.refilter(),
-            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(),
+            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(false),
             View::PlaylistDetail { detail, .. } => {
                 detail.entry_anchor = detail
                     .entry_anchor
@@ -1150,7 +1230,7 @@ impl UiState {
         let demand = demand.own(state);
         let request = self.reads.submit(demand, state);
         if self.details_active {
-            self.details.state = DetailState::Loading;
+            self.details.begin_query(Instant::now());
         }
         Some(request)
     }
@@ -1175,7 +1255,10 @@ impl UiState {
     fn fail_query(&mut self, request: &QueryRequest, error: QueryError) -> bool {
         self.reads.requested = None;
         match request.demand.kind() {
-            ReadKind::Track(_) => self.details.failed_request = Some(request.demand.clone()),
+            ReadKind::Track(_) => {
+                self.details.retained = None;
+                self.details.failed_request = Some(request.demand.clone());
+            }
             ReadKind::PlaylistSummary(_) => {
                 if let View::PlaylistDetail { detail, .. } = &mut self.view {
                     detail.failed_summary = Some(request.demand.clone());
@@ -1183,6 +1266,18 @@ impl UiState {
             }
             _ => {
                 *self.view.page_failure_slot(&mut self.queue) = Some(request.demand.clone());
+                let retained = if matches!(self.view, View::Queue) {
+                    self.queue.refresh_deadline()
+                } else {
+                    self.view.refresh_deadline()
+                };
+                self.view.discard_refresh();
+                if matches!(self.view, View::Queue) {
+                    self.queue.discard_refresh();
+                }
+                if retained.is_some() {
+                    self.mark_local_change();
+                }
             }
         }
         // An obsolete demand is parked quietly until its identity or freshness changes.
@@ -1228,6 +1323,12 @@ impl UiState {
         {
             if self.reads.requested.as_ref() == Some(request) {
                 self.reads.requested = None;
+            }
+            if self.details_active
+                && matches!(request.demand.kind(), ReadKind::Track(id) if Some(id) == self.details.target)
+                && self.details.retained.take().is_some()
+            {
+                self.mark_local_change();
             }
             return false;
         }
@@ -1343,6 +1444,48 @@ impl UiState {
         self.mark_local_change();
     }
 
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        if self.details_active {
+            self.details.refresh_deadline()
+        } else if self.show_help {
+            None
+        } else if matches!(self.view, View::Queue) {
+            self.queue.refresh_deadline()
+        } else {
+            self.view.refresh_deadline()
+        }
+    }
+
+    pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
+        for view in [
+            &mut self.cached_library,
+            &mut self.cached_playlists,
+            &mut self.cached_recent,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            view.discard_refresh();
+        }
+        if !self.details_active {
+            self.details.retained = None;
+        }
+        let changed = if self.details_active || self.show_help {
+            self.view.discard_refresh();
+            self.queue.discard_refresh();
+            self.details.expire_refresh(now)
+        } else if matches!(self.view, View::Queue) {
+            self.queue.expire_refresh(now)
+        } else {
+            self.queue.discard_refresh();
+            self.view.expire_refresh(now)
+        };
+        if changed {
+            self.mark_local_change();
+        }
+        changed
+    }
+
     pub(super) fn expire_message(&mut self) -> bool {
         if self
             .message
@@ -1367,7 +1510,7 @@ impl UiState {
     }
 
     fn sync_details(&mut self, next: &TuiSnapshot) {
-        if self.details.sync_snapshot(next) {
+        if self.details.sync_snapshot(next, Instant::now()) {
             self.mark_local_change();
         }
     }
@@ -1616,7 +1759,7 @@ impl UiState {
                 self.cancel_query();
             } else {
                 let details = &mut self.details;
-                let (scroll, max_scroll) = match details.state {
+                let (scroll, max_scroll) = match details.display_state() {
                     DetailState::Loading => return KeyAction::Ignored,
                     DetailState::Error(_) => (&mut details.error_scroll, details.error_max_scroll),
                     _ => (&mut details.scroll, details.max_scroll),

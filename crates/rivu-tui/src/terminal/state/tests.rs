@@ -795,6 +795,155 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     assert!(ui.query_request(&state).is_none());
 }
 
+#[test]
+fn details_refresh_has_one_display_only_deadline() {
+    let mut state = query_snapshot();
+    let track = Arc::new(full_track(2));
+    let mut details = Details {
+        target: Some(2),
+        state: DetailState::Ready(Arc::clone(&track)),
+        scroll: 4,
+        max_scroll: 12,
+        ..Details::default()
+    };
+    details.stamp = details.current_stamp(&state);
+    let now = Instant::now();
+    state.library.bitrate_revision += 1;
+    assert!(details.sync_snapshot(&state, now));
+    assert!(details.stamp.is_none());
+    assert!(details.demand(&state).is_some());
+    assert!(matches!(details.state, DetailState::Loading));
+    assert!(matches!(details.display_state(), DetailState::Ready(old) if Arc::ptr_eq(old, &track)));
+    assert_eq!(
+        details.refresh_deadline(),
+        Some(now + Duration::from_millis(200))
+    );
+    state.library.bitrate_revision += 1;
+    assert!(!details.sync_snapshot(&state, now + Duration::from_millis(150)));
+    details.begin_query(now + Duration::from_millis(150));
+    assert_eq!(
+        details.refresh_deadline(),
+        Some(now + Duration::from_millis(200))
+    );
+    assert!(!details.expire_refresh(now + Duration::from_millis(199)));
+    assert!(details.expire_refresh(now + Duration::from_millis(200)));
+    assert!(matches!(details.display_state(), DetailState::Loading));
+    assert!(details.refresh_deadline().is_none());
+    assert!(!details.expire_refresh(now + Duration::from_secs(1)));
+    assert_eq!((details.scroll, details.max_scroll), (4, 12));
+
+    for previous in [
+        DetailState::Loading,
+        DetailState::Retired,
+        DetailState::Removed,
+        DetailState::Error("failed".into()),
+        DetailState::Container("directory".into()),
+    ] {
+        details.state = previous;
+        details.stamp = details.current_stamp(&state);
+        state.library.bitrate_revision += 1;
+        assert!(details.sync_snapshot(&state, now));
+        assert!(details.refresh_deadline().is_none());
+    }
+}
+
+#[test]
+fn details_refresh_completion_replaces_or_discards_old_display() {
+    for outcome in 0..8 {
+        let state = query_snapshot();
+        let mut ui = UiState {
+            details_active: true,
+            details: Details {
+                target: Some(2),
+                state: DetailState::Ready(Arc::new(full_track(2))),
+                scroll: 4,
+                max_scroll: 12,
+                ..Details::default()
+            },
+            ..UiState::default()
+        };
+        let request = ui.query_request(&state).unwrap();
+        assert!(matches!(ui.details.state, DetailState::Loading));
+        assert!(matches!(ui.details.display_state(), DetailState::Ready(_)));
+        assert!(ui.details.stamp.is_none());
+        assert!(ui.details.refresh_deadline().is_some());
+        for key in [
+            KeyCode::Enter,
+            KeyCode::Delete,
+            KeyCode::Char('m'),
+            KeyCode::Char(' '),
+        ] {
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(key), &state),
+                KeyAction::Ignored
+            ));
+        }
+        let mut replacement = full_track(2);
+        replacement.title = "replacement".into();
+        let mut result = QueryResult {
+            revisions: request.demand.stamp.revisions(),
+            view: ViewResponse::Track(Some(replacement)),
+        };
+        match outcome {
+            1 => result.view = ViewResponse::Track(None),
+            5 => result.view = ViewResponse::Track(Some(full_track(9))),
+            6 => result.revisions.bitrate += 1,
+            7 => ui.reads.tracker.cancel(),
+            _ => {}
+        }
+        let result = match outcome {
+            2 => Err(QueryError::Message("failed".into())),
+            3 => Err(QueryError::Cancelled),
+            4 => Err(QueryError::RevisionChanged),
+            _ => Ok(result),
+        };
+        assert_eq!(
+            ui.apply_query(&state, &request, result),
+            matches!(outcome, 0 | 1 | 2 | 5)
+        );
+        assert!(ui.details.refresh_deadline().is_none());
+        match outcome {
+            0 => assert!(
+                matches!(ui.details.display_state(), DetailState::Ready(track) if track.title == "replacement")
+            ),
+            1 => assert!(matches!(ui.details.display_state(), DetailState::Removed)),
+            2 | 5 => assert!(matches!(ui.details.display_state(), DetailState::Error(_))),
+            7 => assert!(matches!(ui.details.display_state(), DetailState::Loading)),
+            _ => assert!(matches!(ui.details.display_state(), DetailState::Retired)),
+        }
+        assert_eq!((ui.details.scroll, ui.details.max_scroll), (4, 12));
+    }
+}
+
+#[test]
+fn opening_details_resets_retention_for_new_target_or_source() {
+    for (target, old_source) in [(3, "terminal-search"), (2, "shell-panel-queue")] {
+        let mut ui = UiState {
+            details: Details {
+                target: Some(2),
+                source_label: old_source,
+                state: DetailState::Ready(Arc::new(full_track(2))),
+                scroll: 4,
+                max_scroll: 12,
+                ..Details::default()
+            },
+            ..UiState::default()
+        };
+        ui.details.begin_query(Instant::now());
+        let mut rows = PagedList::default();
+        rows.set_viewport(1);
+        rows.insert(0, 1, 1, vec![track(target)]);
+        ui.view = View::LibraryResults(rows.into());
+        ui.open_details();
+        assert_eq!(ui.details.target, Some(target as i64));
+        assert_eq!(ui.details.source_label, "terminal-search");
+        assert!(matches!(ui.details.display_state(), DetailState::Loading));
+        assert!(ui.details.stamp.is_none());
+        assert!(ui.details.refresh_deadline().is_none());
+        assert_eq!((ui.details.scroll, ui.details.max_scroll), (0, 0));
+    }
+}
+
 pub(in crate::terminal) fn full_track(id: i64) -> rivu_protocol::model::Track {
     rivu_protocol::model::Track {
         id,
@@ -2949,6 +3098,8 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     assert_eq!(tui.ui.details.target, Some(7));
     assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), (4, 12));
     assert!(tui.ui.details.stamp.is_none());
+    assert!(matches!(tui.ui.details.display_state(), DetailState::Ready(track) if track.id == 7));
+    assert!(tui.ui.details.refresh_deadline().is_some());
     assert!(
         !tui.ui
             .apply_query(&next, &pending, Ok(response(&pending, 12)))
@@ -3073,8 +3224,14 @@ fn bitrate_details_reject_late_reads_and_preserve_scroll_during_retry() {
     next.library.bitrate_revision += 1;
     tui.apply_snapshot(next.clone());
     assert!(matches!(tui.ui.details.state, DetailState::Loading));
+    assert!(matches!(tui.ui.details.display_state(), DetailState::Ready(track) if track.id == 7));
     assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), (4, 12));
     assert!(!tui.ui.apply_query(&next, &old, Ok(delayed)));
+    assert!(matches!(
+        tui.ui.details.display_state(),
+        DetailState::Loading
+    ));
+    assert!(tui.ui.details.refresh_deadline().is_none());
     let current = tui.ui.query_request(&next).unwrap();
     assert_ne!(current.demand.stamp, old.demand.stamp);
     let mut fresh_track = full_track(7);
@@ -3899,4 +4056,94 @@ fn returning_to_the_same_page_offset_rejects_its_earlier_submission() {
         tui.ui
             .apply_query(&state, &current, Ok(response(&current, 12)))
     );
+}
+
+#[test]
+fn list_refresh_retains_display_but_not_actions_and_expires_without_reply() {
+    for view in [
+        View::Queue,
+        View::LibraryResults(PagedList::default().into()),
+        View::Tree(LibraryTree {
+            directory: "/music".into(),
+            ..Default::default()
+        }),
+        View::Playlists(PagedList::default()),
+        playlist_view(1),
+    ] {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = view;
+        render_view(&mut tui.ui);
+        load_visible(&mut tui.ui, &state);
+        let before = render_view(&mut tui.ui);
+        assert!(before.contains("row-"), "{before}");
+        let mut next = state;
+        if matches!(tui.ui.view, View::Playlists(_)) {
+            next.library.playlist_revision += 1;
+        } else {
+            next.library.bitrate_revision += 1;
+        }
+        tui.apply_snapshot(next.clone());
+        let deadline = tui.ui.refresh_deadline().expect("visible refresh deadline");
+        assert_eq!(render_view(&mut tui.ui), before);
+        assert!(matches!(
+            tui.ui.key_action(KeyCode::Enter.into(), &next),
+            KeyAction::Ignored
+        ));
+        assert!(!tui.ui.expire_refresh(deadline - Duration::from_nanos(1)));
+        assert!(tui.ui.expire_refresh(deadline));
+        let expired = render_view(&mut tui.ui);
+        assert!(!expired.contains("row-"), "{expired}");
+        assert!(tui.ui.refresh_deadline().is_none());
+    }
+}
+
+#[test]
+fn list_refresh_replacement_failure_and_navigation_remove_old_display() {
+    for outcome in 0..3 {
+        let mut tui = bitrate_tui();
+        render_view(&mut tui.ui);
+        let mut next = tui.snapshot.clone();
+        next.library.bitrate_revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert!(tui.ui.refresh_deadline().is_some());
+        tui.ui.expire_refresh(Instant::now());
+        assert!(
+            tui.ui
+                .cached_library
+                .as_ref()
+                .unwrap()
+                .refresh_deadline()
+                .is_none()
+        );
+        assert!(
+            tui.ui
+                .cached_playlists
+                .as_ref()
+                .unwrap()
+                .refresh_deadline()
+                .is_none()
+        );
+        assert!(tui.ui.queue.refresh_deadline().is_none());
+        assert!(tui.ui.details.refresh_deadline().is_none());
+        if outcome == 2 {
+            tui.ui.key_action(KeyCode::Down.into(), &next);
+        } else {
+            let request = tui.ui.query_request(&next).unwrap();
+            if outcome == 0 {
+                let mut fresh = response(&request, 12);
+                fresh.revisions.bitrate = next.library.bitrate_revision;
+                assert!(tui.ui.apply_query(&next, &request, Ok(fresh)));
+                load_visible(&mut tui.ui, &next);
+            } else {
+                tui.ui
+                    .apply_query(&next, &request, Err(QueryError::RevisionChanged));
+            }
+        }
+        let View::LibraryResults(rows) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert!(rows.refresh_deadline().is_none());
+        assert_eq!(rows.selected().is_some(), outcome == 0);
+    }
 }

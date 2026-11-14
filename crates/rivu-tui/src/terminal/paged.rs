@@ -2,6 +2,21 @@ use ratatui::widgets::ListState;
 use rivu_presentation::keyboard::Action;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+const REFRESH_RETENTION: Duration = Duration::from_millis(200);
+
+pub(super) struct RetainedPages<T> {
+    pages: HashMap<usize, Vec<T>>,
+    total: usize,
+    fetch_size: usize,
+    start: usize,
+    selected: Option<usize>,
+    identity_scan: bool,
+    rows: usize,
+    deadline: Instant,
+    expired: bool,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum ContainerIdentity {
@@ -21,6 +36,7 @@ pub(super) struct PagedList<T> {
     pub(super) identity_lookup: Option<(ContainerIdentity, usize, usize)>,
     pub(super) columns: Option<super::render::IntrinsicColumns>,
     pub(super) failed_request: Option<std::sync::Arc<super::worker::ReadSpec>>,
+    pub(super) retained: Option<RetainedPages<T>>,
 }
 
 impl<T> Default for PagedList<T> {
@@ -35,6 +51,7 @@ impl<T> Default for PagedList<T> {
             identity_lookup: None,
             columns: None,
             failed_request: None,
+            retained: None,
         }
     }
 }
@@ -52,7 +69,155 @@ impl<T> PagedList<T> {
 
     pub(super) fn clear_pages(&mut self) {
         self.pages.clear();
+        self.discard_refresh();
         self.columns = None;
+    }
+
+    pub(super) fn invalidate(&mut self) {
+        self.invalidate_pages();
+        self.total = 0;
+        self.loaded = false;
+        self.fetch_size = 0;
+        if let Some((_, offset, _)) = &mut self.identity_lookup {
+            *offset = 0;
+        }
+    }
+
+    pub(super) fn invalidate_pages(&mut self) {
+        self.expire_refresh(Instant::now());
+        if self.retained.as_ref().is_some_and(|retained| {
+            (!retained.identity_scan && retained.start != self.selection.offset())
+                || retained.rows != self.viewport_rows
+        }) {
+            self.discard_refresh();
+        }
+        let start = self.display_offset();
+        if self.retained.is_none() && self.loaded {
+            let mut pages = HashMap::new();
+            std::mem::swap(&mut pages, &mut self.pages);
+            self.retained = Some(RetainedPages {
+                pages,
+                total: self.total,
+                fetch_size: self.fetch_size.max(1),
+                start,
+                rows: self.viewport_rows,
+                selected: self.selection.selected(),
+                identity_scan: false,
+                deadline: Instant::now() + REFRESH_RETENTION,
+                expired: false,
+            });
+        } else if let Some(retained) = &mut self.retained
+            && !retained.expired
+        {
+            if self.loaded && !retained.identity_scan {
+                retained.total = self.total;
+            }
+            retained.pages.extend(self.pages.drain());
+        }
+        self.pages.clear();
+        if let Some(retained) = &mut self.retained {
+            let end = start.saturating_add(retained.rows).min(retained.total);
+            retained.pages.retain(|&offset, items| {
+                offset < end && offset.saturating_add(items.len()) > start
+            });
+        }
+        self.columns = None;
+    }
+
+    pub(super) fn refresh_deadline(&self) -> Option<Instant> {
+        self.retained
+            .as_ref()
+            .filter(|retained| !retained.expired)
+            .map(|retained| retained.deadline)
+    }
+
+    pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
+        let Some(retained) = &mut self.retained else {
+            return false;
+        };
+        if retained.expired || now < retained.deadline {
+            return false;
+        }
+        retained.pages.clear();
+        // Keep the expired interval until fresh visible rows restore authority.
+        // Repeated invalidation must not start another stale display interval.
+        retained.expired = true;
+        self.columns = None;
+        true
+    }
+
+    pub(super) fn discard_refresh(&mut self) {
+        if self.retained.take().is_some() {
+            self.columns = None;
+        }
+    }
+
+    fn retained_display(&self) -> Option<&RetainedPages<T>> {
+        self.retained.as_ref().filter(|retained| {
+            !retained.expired
+                && retained.rows == self.viewport_rows
+                && (retained.identity_scan || retained.start == self.selection.offset())
+        })
+    }
+
+    pub(super) fn display_offset(&self) -> usize {
+        self.retained_display()
+            .filter(|retained| retained.identity_scan)
+            .map_or(self.selection.offset(), |retained| retained.start)
+    }
+
+    pub(super) fn display_selected(&self) -> Option<usize> {
+        self.retained_display()
+            .filter(|retained| retained.identity_scan)
+            .map_or(self.selection.selected(), |retained| retained.selected)
+    }
+
+    pub(super) fn display_total(&self) -> usize {
+        self.retained_display()
+            .filter(|retained| !self.loaded || retained.identity_scan)
+            .map_or(self.total, |retained| retained.total)
+    }
+
+    pub(super) fn display_loaded(&self) -> bool {
+        self.loaded || self.retained_display().is_some()
+    }
+
+    pub(super) fn display_visible_end(&self) -> usize {
+        self.display_offset()
+            .saturating_add(self.viewport_rows)
+            .min(self.display_total())
+    }
+
+    pub(super) fn display(&self, index: usize) -> Option<&T> {
+        if index >= self.display_total() {
+            return None;
+        }
+        if let Some(item) = self.get(index) {
+            return Some(item);
+        }
+        let retained = self.retained_display()?;
+        if index < retained.start || index >= retained.start.saturating_add(retained.rows) {
+            return None;
+        }
+        let offset = index / retained.fetch_size * retained.fetch_size;
+        retained.pages.get(&offset)?.get(index - offset)
+    }
+
+    pub(super) fn display_iter(&self) -> impl Iterator<Item = &T> {
+        let start = self.display_offset();
+        let end = self.display_visible_end();
+        self.pages.values().flatten().chain(
+            self.retained_display()
+                .into_iter()
+                .flat_map(|retained| retained.pages.iter())
+                .filter(move |&(offset, _)| !self.pages.contains_key(offset))
+                .flat_map(move |(&offset, items)| {
+                    items.iter().enumerate().filter_map(move |(index, item)| {
+                        let index = offset.saturating_add(index);
+                        (index >= start && index < end).then_some(item)
+                    })
+                }),
+        )
     }
 
     pub(super) fn retain_pages(&mut self, mut keep: impl FnMut(usize, &[T]) -> bool) {
@@ -116,6 +281,12 @@ impl<T> PagedList<T> {
             start = start.min(self.total.saturating_sub(self.viewport_rows));
         }
         *self.selection.offset_mut() = start;
+        if self.retained.as_ref().is_some_and(|retained| {
+            (!retained.identity_scan && retained.start != start)
+                || retained.rows != self.viewport_rows
+        }) {
+            self.discard_refresh();
+        }
         self.trim_pages();
     }
 
@@ -129,8 +300,21 @@ impl<T> PagedList<T> {
     }
 
     pub(super) fn navigate_action(&mut self, action: Action, page_size: usize) -> bool {
+        let mut discarded = false;
+        if matches!(
+            action,
+            Action::Up
+                | Action::Down
+                | Action::PageUp
+                | Action::PageDown
+                | Action::First
+                | Action::Last
+        ) {
+            discarded = self.retained_display().is_some();
+            self.discard_refresh();
+        }
         if !self.loaded {
-            return false;
+            return discarded;
         }
         let changed = match action {
             Action::Up | Action::Down => {
@@ -155,12 +339,19 @@ impl<T> PagedList<T> {
             _ => false,
         };
         self.set_viewport(self.viewport_rows);
-        changed
+        changed || discarded
     }
 
     pub(super) fn insert(&mut self, offset: usize, fetch_size: usize, total: usize, items: Vec<T>) {
         if self.fetch_size != fetch_size {
-            self.clear_pages();
+            self.pages.clear();
+            if self
+                .retained
+                .as_ref()
+                .is_some_and(|retained| retained.fetch_size != fetch_size.max(1))
+            {
+                self.discard_refresh();
+            }
         }
         self.fetch_size = fetch_size;
         self.pages.insert(offset, items);
@@ -170,7 +361,37 @@ impl<T> PagedList<T> {
         let selected = self.selection.selected().unwrap_or(0);
         self.selection
             .select((total != 0).then(|| selected.min(total - 1)));
+        if self.identity_lookup.is_none()
+            && let Some(retained) = &mut self.retained
+        {
+            retained.identity_scan = false;
+        }
         self.set_viewport(self.viewport_rows);
+        if let Some(retained) = &mut self.retained {
+            retained.pages.remove(&offset);
+        }
+        if self
+            .retained
+            .as_ref()
+            .is_some_and(|retained| !retained.identity_scan)
+            && (self.selection.offset()..self.visible_end()).all(|index| self.get(index).is_some())
+        {
+            self.discard_refresh();
+        }
+    }
+
+    pub(super) fn invalidate_identity(&mut self, identity: Option<ContainerIdentity>) {
+        let scroll = self
+            .identity_lookup
+            .as_ref()
+            .map_or(self.selection.offset(), |(_, _, scroll)| *scroll);
+        self.invalidate();
+        if let Some(retained) = &mut self.retained {
+            retained.identity_scan = true;
+        }
+        self.identity_lookup = identity.map(|identity| (identity, 0, scroll));
+        self.selection.select(Some(0));
+        *self.selection.offset_mut() = 0;
     }
 
     pub(super) fn retain_identity(&mut self, identity: Option<ContainerIdentity>) {
@@ -207,6 +428,7 @@ impl<T> PagedList<T> {
         }
         self.identity_lookup = None;
         self.selection.select((total != 0).then_some(0));
+        self.discard_refresh();
         offset == 0
     }
 
@@ -217,6 +439,11 @@ impl<T> PagedList<T> {
     }
 
     pub(super) fn selected(&self) -> Option<&T> {
+        if self.display_offset() != self.selection.offset()
+            || self.display_selected() != self.selection.selected()
+        {
+            return None;
+        }
         self.get(self.selection.selected()?)
     }
 }

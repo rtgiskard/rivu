@@ -248,13 +248,13 @@ state can supply a current total immediately; filtered Queue needs its own resul
 
 Same-query asynchronous refreshes retain existing display-only payloads for at
 most *200 ms*. The deadline starts when that payload first loses authority;
-replacement requests and further revisions do not extend it. One cancellable
-feature-local wake follows the earliest retained deadline, removing expired
-presentation even if no query completes or other frame is requested. This is not
-polling and does not delay an available fresh result. Request deadlines and
-physical worker retirement remain independent.
+replacement requests and further revisions do not extend it. In the GUI, one
+cancellable feature-local wake follows the earliest retained deadline, removing
+expired presentation even if no query completes or other frame is requested.
+This is not polling and does not delay an available fresh result. Request
+deadlines and physical worker retirement remain independent.
 
-Current replies compare the affected pages or snapshots, including row identity,
+GUI replies compare the affected pages or snapshots, including row identity,
 order, fields, and total, before replacing presentation. Unchanged album pages
 keep existing cover demand; notifications needed to restore current input,
 loading status, or selection still occur. Changed payloads replace old content
@@ -271,8 +271,17 @@ statistics. Search/filter, source, collection and page-boundary changes discard
 incompatible presentation immediately. Flat-list/album query changes discard old
 geometry; tree filter changes preserve expansion choices while invalidating facts.
 Playback controls, synchronous state projections, and realtime visualization
-frames are not delayed by this policy. Shared deadline and wake ownership lives in
+frames are not delayed by this policy. GUI deadline and wake ownership lives in
 link:../crates/rivu-ui/src/refresh.rs[the refresh presentation mechanism].
+
+The TUI applies the same display-only lifetime to query-backed Queue, Library,
+Playlist catalog/member pages and same-track details. It moves bounded visible
+page payloads rather than cloning rows; fresh query state remains separate.
+The terminal event loop includes the retained deadline in its existing input wait
+and redraws on expiry without another worker or timer. Navigation, query or
+page-boundary changes discard incompatible retained content; hidden pages do not
+keep stale presentation. Recent uses synchronous history and playback projections,
+so its rows need no asynchronous retention.
 
 The album grid retains cover leases only while their cards remain displayable.
 Fresh pages preserve unchanged artwork; changed sources replace their covers.

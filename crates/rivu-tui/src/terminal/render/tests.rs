@@ -474,6 +474,89 @@ fn details_refresh_after_metadata_changes_without_reopening() {
 }
 
 #[test]
+fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
+    for expire in [false, true] {
+        let state = query_snapshot();
+        let query = Query::Track { track_id: 2 };
+        let revisions = state.query_revisions(None).for_query(
+            &query,
+            &state.library.playlist_entry_revisions,
+            &state.library.metadata_revisions,
+        );
+        let mut track = full_track(2);
+        track.title = "Original title".into();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.details_active = true;
+        tui.ui.details = Details {
+            target: Some(2),
+            source_label: "shell-panel-queue",
+            state: DetailState::Ready(Arc::new(track)),
+            stamp: Some(query.stamp(revisions)),
+            scroll: 4,
+            ..Details::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .unwrap();
+        let ready_text = terminal_text(&terminal);
+        let position = (tui.ui.details.scroll, tui.ui.details.max_scroll);
+        let cached_lines = tui.ui.details.layout.as_ref().unwrap().lines.as_ptr();
+        let mut next = state;
+        next.library.bitrate_revision += 1;
+        tui.apply_snapshot(next);
+        let deadline = tui.ui.details.refresh_deadline().unwrap();
+        let request = tui.ui.query_request(&tui.snapshot).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .unwrap();
+        assert_eq!(terminal_text(&terminal), ready_text);
+        assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), position);
+        assert_eq!(
+            tui.ui.details.layout.as_ref().unwrap().lines.as_ptr(),
+            cached_lines
+        );
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Home), &tui.snapshot);
+        assert_eq!(tui.ui.details.scroll, 0);
+        terminal
+            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .unwrap();
+        assert!(terminal_text(&terminal).contains("Original title"));
+        if expire {
+            assert!(tui.ui.details.expire_refresh(deadline));
+        } else {
+            let mut track = full_track(2);
+            track.title = "Replacement title".into();
+            assert!(tui.ui.apply_query(
+                &tui.snapshot,
+                &request,
+                Ok(QueryResult {
+                    revisions: request.demand.stamp.revisions(),
+                    view: ViewResponse::Track(Some(track)),
+                }),
+            ));
+        }
+        terminal
+            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .unwrap();
+        assert!(!terminal_text(&terminal).contains("Original title"));
+        assert_ne!(
+            tui.ui.details.layout.as_ref().unwrap().lines.as_ptr(),
+            cached_lines
+        );
+        assert!(tui.ui.details.refresh_deadline().is_none());
+        if expire {
+            assert!(
+                terminal_text(&terminal).contains(tui.ui.i18n.text("terminal-details-loading"))
+            );
+        } else {
+            assert!(terminal_text(&terminal).contains("Replacement title"));
+        }
+    }
+}
+
+#[test]
 fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
     let query = "春风e\u{301}夜航";
     for language in ["en-US", "zh-CN"] {

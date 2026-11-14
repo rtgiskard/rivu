@@ -335,7 +335,10 @@ where
             redraw = true;
             immediate_redraw = true;
         }
-        if tui.ui.expire_message() | tui.ui.expire_startup_hint(Instant::now()) {
+        if tui.ui.expire_message()
+            | tui.ui.expire_startup_hint(Instant::now())
+            | tui.ui.expire_refresh(Instant::now())
+        {
             redraw = true;
             immediate_redraw = true;
         }
@@ -351,7 +354,15 @@ where
             redraw = false;
             immediate_redraw = false;
         }
-        if let Some(event) = next_event(Duration::from_millis(50))? {
+        let wait = tui
+            .ui
+            .refresh_deadline()
+            .map_or(Duration::from_millis(50), |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(50))
+            });
+        if let Some(event) = next_event(wait)? {
             match event {
                 Event::Resize(width, height) => {
                     size.width = width;

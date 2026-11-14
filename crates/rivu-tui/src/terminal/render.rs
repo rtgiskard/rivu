@@ -265,7 +265,7 @@ impl DetailsLayout {
             && Arc::ptr_eq(&self.i18n, i18n)
             && self.width == width
             && self.colors == colors
-            && match (&self.state, &details.state) {
+            && match (&self.state, details.display_state()) {
                 (DetailState::Ready(a), DetailState::Ready(b)) => Arc::ptr_eq(a, b),
                 (DetailState::Loading, DetailState::Loading)
                 | (DetailState::Retired, DetailState::Retired)
@@ -285,7 +285,7 @@ fn details_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(id) = details.target {
-        if let DetailState::Ready(track) = &details.state {
+        if let DetailState::Ready(track) = details.display_state() {
             let title = track_title(
                 &track.title,
                 &track.path,
@@ -305,7 +305,7 @@ fn details_lines(
             Style::default().fg(colors.secondary),
         )));
     }
-    match &details.state {
+    match details.display_state() {
         DetailState::Container(text) => {
             lines.extend(wrap_details(text, width).into_iter().map(|line| {
                 Line::from(Span::styled(
@@ -581,7 +581,7 @@ fn draw_details(
         details.layout = Some(DetailsLayout {
             target: details.target,
             source_label: details.source_label,
-            state: details.state.clone(),
+            state: details.display_state().clone(),
             i18n: Arc::clone(i18n),
             width,
             colors,
@@ -590,7 +590,7 @@ fn draw_details(
     }
     let lines = &details.layout.as_ref().expect("details layout").lines;
     // Error navigation is independent of the retained track reading position.
-    let scroll = match details.state {
+    let scroll = match details.display_state() {
         DetailState::Loading | DetailState::Retired => 0,
         DetailState::Error(_) => {
             details.error_max_scroll = lines.len().saturating_sub(area.height as usize);
@@ -839,16 +839,16 @@ fn page_heading_rows(view: &View) -> u16 {
 }
 
 fn page_counter<T>(page: &PagedList<T>) -> String {
-    if !page.loaded {
+    if !page.display_loaded() {
         return " … ".into();
     }
-    let loading =
-        (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
+    let loading = (page.display_offset()..page.display_visible_end())
+        .any(|index| page.display(index).is_none());
     format!(
         " {}{}/{} ",
         if loading { "… " } else { "" },
-        page.selection.selected().map_or(0, |index| index + 1),
-        page.total,
+        page.display_selected().map_or(0, |index| index + 1),
+        page.display_total(),
     )
 }
 
@@ -1690,14 +1690,14 @@ fn draw_paged_list<T>(
         area.height,
     );
     let loading = !title.is_empty()
-        && (!page.loaded
-            || (page.selection.offset()..page.visible_end())
-                .any(|index| page.get(index).is_none()));
+        && (!page.display_loaded()
+            || (page.display_offset()..page.display_visible_end())
+                .any(|index| page.display(index).is_none()));
     let title = if title.is_empty() {
         title
     } else if loading {
         i18n.format("terminal-page-loading", &[("title", title.as_str().into())])
-    } else if page.total == 0 {
+    } else if page.display_total() == 0 {
         i18n.format("terminal-page-empty", &[("title", title.as_str().into())])
     } else {
         title
@@ -1719,7 +1719,7 @@ fn draw_paged_list<T>(
     {
         page.columns = Some(IntrinsicColumns::measure(
             mode,
-            page.pages.values().flatten().map(&row),
+            page.display_iter().map(&row),
         ));
     }
     let columns = BrowserColumns::fit(
@@ -1733,16 +1733,15 @@ fn draw_paged_list<T>(
             rows[0],
         );
     }
-    let items = (page.selection.offset()..page.visible_end()).map(|index| {
-        ListItem::new(page.get(index).map_or_else(
+    let items = (page.display_offset()..page.display_visible_end()).map(|index| {
+        ListItem::new(page.display(index).map_or_else(
             || Line::from(cell_text("…", items_area.width as usize, false)),
             |item| columns.line(row(item), colors),
         ))
     });
     let mut selection = ListState::default().with_selected(
-        page.selection
-            .selected()
-            .map(|index| index - page.selection.offset()),
+        page.display_selected()
+            .map(|index| index - page.display_offset()),
     );
     frame.render_stateful_widget(
         List::new(items).highlight_style(list_selection_style(colors)),
@@ -1943,8 +1942,8 @@ fn draw_tree(
         },
     );
     if other_tracks
-        && tree.entries.loaded
-        && tree.entries.total == 0
+        && tree.entries.display_loaded()
+        && tree.entries.display_total() == 0
         && applied_query.is_empty()
         && tree.favorite.is_none()
         && tree.missing.is_none()
