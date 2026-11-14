@@ -11,55 +11,13 @@ use rivu_ui::{
 };
 use std::cell::RefCell;
 
-// Static content is independent of playback. At most one row's time label is
-// replaced, so two maxima preserve the exact width without retaining every row.
+// Column widths follow headers and history data, independently of playback labels.
 pub(super) struct HistoryColumnWidths {
     source: std::sync::Arc<Vec<rivu_protocol::model::HistoryEntry>>,
     font: gpui::Font,
     rem_size: gpui::Pixels,
     font_size_scale: f32,
-    times: TimeWidths,
-    playback: Option<(i64, PlaybackStatus)>,
-    playback_text: Option<SharedString>,
     widths: [gpui::Pixels; 3],
-}
-
-struct TimeWidths {
-    header: gpui::Pixels,
-    widest: [(Option<i64>, gpui::Pixels); 2],
-}
-
-impl TimeWidths {
-    fn new(header: gpui::Pixels) -> Self {
-        Self {
-            header,
-            widest: [(None, px(0.)); 2],
-        }
-    }
-
-    // Each track occurs once in the history source; ties must retain both rows.
-    fn include(&mut self, track_id: i64, width: gpui::Pixels) {
-        if width >= self.widest[0].1 {
-            self.widest[1] = self.widest[0];
-            self.widest[0] = (Some(track_id), width);
-        } else if width > self.widest[1].1 {
-            self.widest[1] = (Some(track_id), width);
-        }
-    }
-
-    fn width(&self, replaced: Option<i64>, replacement: gpui::Pixels) -> gpui::Pixels {
-        let index = usize::from(replaced.is_some() && self.widest[0].0 == replaced);
-        self.header.max(self.widest[index].1).max(replacement)
-    }
-}
-
-fn playback_label(playback: Option<(i64, PlaybackStatus)>, track_id: i64) -> Option<&'static str> {
-    let (current_id, status) = playback?;
-    (current_id == track_id).then_some(match status {
-        PlaybackStatus::Playing => "gl-playing",
-        PlaybackStatus::Paused => "gl-paused",
-        PlaybackStatus::Stopped => "gl-stopped",
-    })
 }
 
 impl History {
@@ -190,40 +148,19 @@ impl History {
                 text_width(self.tr("gl-play-count")) + arrow,
                 text_width(self.tr("gl-last-played")) + arrow,
             ];
-            let mut times = TimeWidths::new(widths[2]);
             for (index, item) in source.iter().enumerate() {
                 widths[0] = widths[0].max(numeric_width((index + 1).to_string().into()));
                 widths[1] = widths[1].max(numeric_width(item.play_count.to_string().into()));
                 let last_played = self.format_played_at(Some(item.played_at));
-                times.include(item.track_id, text_width(last_played.into()));
+                widths[2] = widths[2].max(text_width(last_played.into()));
             }
-            widths[2] = times.width(None, px(0.));
             self.column_widths = Some(HistoryColumnWidths {
                 source: std::sync::Arc::clone(source),
                 font: self.ui_font.clone(),
                 rem_size,
                 font_size_scale,
-                times,
-                playback: None,
-                playback_text: None,
                 widths,
             });
-        }
-        if self.column_widths.as_ref().unwrap().playback != playback {
-            let label = playback
-                .filter(|(id, _)| source.iter().any(|item| item.track_id == *id))
-                .map(|(id, _)| {
-                    let text = self.tr(playback_label(playback, id).unwrap());
-                    let width = text_width(text.clone());
-                    (text, width)
-                });
-            let cache = self.column_widths.as_mut().unwrap();
-            cache.widths[2] = cache.times.width(
-                playback.map(|(id, _)| id),
-                label.as_ref().map_or(px(0.), |(_, width)| *width),
-            );
-            cache.playback = playback;
-            cache.playback_text = label.map(|(text, _)| text);
         }
         // Header control borders fit inside the same cell inset as row text.
         let widths = self
@@ -317,13 +254,15 @@ impl History {
                                     } else {
                                         item.title.clone()
                                     };
-                                    let last_played = this
-                                        .column_widths
-                                        .as_ref()
-                                        .filter(|cache| {
-                                            cache.playback.is_some_and(|(track, _)| track == id)
+                                    let last_played = playback
+                                        .filter(|(track, _)| *track == id)
+                                        .map(|(_, status)| {
+                                            this.tr(match status {
+                                                PlaybackStatus::Playing => "gl-playing",
+                                                PlaybackStatus::Paused => "gl-paused",
+                                                PlaybackStatus::Stopped => "gl-stopped",
+                                            })
                                         })
-                                        .and_then(|cache| cache.playback_text.clone())
                                         .unwrap_or_else(|| {
                                             this.format_played_at(Some(item.played_at)).into()
                                         });

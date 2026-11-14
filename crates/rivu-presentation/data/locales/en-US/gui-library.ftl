@@ -307,8 +307,6 @@ gl-track-count = { $count } { $count ->
        *[other] tracks
     }
 
-gl-current = Current
-
 gl-move-playlist-entries = Move { $count } { $count ->
         [one] playlist entry
        *[other] playlist entries

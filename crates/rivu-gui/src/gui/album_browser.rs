@@ -1040,14 +1040,6 @@ fn anchored_index(previous: Option<usize>, row: usize, columns: usize, count: us
         .min(count.saturating_sub(1))
 }
 
-fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option<&'static str> {
-    (current == Some(id)).then_some(match status {
-        PlaybackStatus::Playing => "gl-playing",
-        PlaybackStatus::Paused => "gl-paused",
-        PlaybackStatus::Stopped => "gl-current",
-    })
-}
-
 impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
@@ -1233,8 +1225,8 @@ impl Render for AlbumBrowser {
                                     track_title(&track.title, &track.path, track.cue_number)
                                         .into_owned()
                                         .into();
-                                let marker =
-                                    track_marker(this.current_track, this.playback_status, id);
+                                let playing = this.current_track == Some(id)
+                                    && this.playback_status == PlaybackStatus::Playing;
                                 track_list_row(
                                     theme,
                                     rivu_ui::list_row(
@@ -1249,8 +1241,7 @@ impl Render for AlbumBrowser {
                                         ..TrackText::from(track)
                                     },
                                     index,
-                                    marker.is_some()
-                                        && this.playback_status == PlaybackStatus::Playing,
+                                    playing,
                                     &this.i18n,
                                 )
                                 .group("album-track-row")
@@ -1287,9 +1278,6 @@ impl Render for AlbumBrowser {
                                 })
                                 .when(track.missing, |row| {
                                     row.child(caption(theme, this.tr("gl-missing")))
-                                })
-                                .when_some(marker, |row, marker| {
-                                    row.child(caption(theme, this.tr(marker)))
                                 })
                                 .when(current, |row| {
                                     row.child(

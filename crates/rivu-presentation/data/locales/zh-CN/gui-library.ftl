@@ -304,8 +304,6 @@ gl-albums-empty = 音乐库中暂无专辑
 
 gl-track-count = { $count } 首曲目
 
-gl-current = 当前
-
 gl-move-playlist-entries = 移动 { $count } 个播放列表项
 
 gl-move-queue-entries = 移动 { $count } 个队列项
