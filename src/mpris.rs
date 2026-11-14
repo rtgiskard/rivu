@@ -25,11 +25,8 @@ use std::{
     time::Duration,
 };
 use zbus::{
-    Connection,
-    connection::Builder,
-    fdo,
+    Connection, ObjectPath, OwnedVariant, Str, Variant, connection::Builder, fdo,
     object_server::SignalEmitter,
-    zvariant::{ObjectPath, OwnedValue, Str, Value},
 };
 
 const BUS_NAME: &str = "org.mpris.MediaPlayer2.rivu";
@@ -37,7 +34,7 @@ const OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
-type Metadata = HashMap<String, OwnedValue>;
+type Metadata = HashMap<String, OwnedVariant>;
 
 pub(crate) struct MprisController {
     stop: Option<oneshot::Sender<()>>,
@@ -223,15 +220,17 @@ async fn register(
     app: AppHandle,
     artwork: Arc<ArtworkManager>,
 ) -> Result<Connection> {
-    // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
-    // the name or replace the running player's controls.
+    // zbus's default-rt shares its native runtime and helper across work polled
+    // by other executors; async-io drives our tasks/deadlines, not its reactor.
+    // The builder uses DO_NOT_QUEUE: another Rivu must fail, not silently wait
+    // for the name or replace the running player's controls. Setter errors are
+    // deferred to build(), including session-address discovery failures.
     Builder::session()
-        .context("Connecting MPRIS to the session bus")?
-        .name(BUS_NAME)?
+        .name(BUS_NAME)
         .allow_name_replacements(false)
         .replace_existing_names(false)
         .method_timeout(Duration::from_secs(5))
-        .serve_at(OBJECT_PATH, Root { app })?
+        .serve_at(OBJECT_PATH, Root { app })
         .serve_at(
             OBJECT_PATH,
             Player {
@@ -239,7 +238,7 @@ async fn register(
                 artwork,
                 artwork_result: parking_lot::Mutex::new(None),
             },
-        )?
+        )
         .build()
         .await
         .context("Registering org.mpris.MediaPlayer2.rivu")
@@ -427,7 +426,7 @@ async fn publish_until_cancelled(
 }
 
 async fn retire_connection(connection: Connection) {
-    // zbus and the deadlines use runtime-independent async-io driving.
+    // zbus's native helper keeps bus I/O running while async-io drives deadlines.
     // Removing entry points and taking exclusive guards drains accepted Quit
     // acknowledgements: zbus holds read guards through sending method replies.
     if rivu_protocol::transport::timeout(Duration::from_secs(1), drain_interfaces(&connection))
@@ -840,7 +839,7 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
         metadata.insert("xesam:title".into(), Str::from(track.title.as_str()).into());
         metadata.insert(
             "xesam:artist".into(),
-            Value::from(vec![track.artist.as_str()])
+            Variant::from(vec![track.artist.as_str()])
                 .try_to_owned()
                 .expect("string arrays contain no file descriptors"),
         );
@@ -966,8 +965,8 @@ async fn publish_artwork(
         next.art_url = result;
     }
     if *metadata != next {
-        let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
-        changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
+        let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
+        changed.insert("Metadata", Variant::from(metadata_map(next.as_ref())));
         connection
             .emit_signal(
                 None::<&str>,
@@ -991,7 +990,7 @@ async fn publish_changes(
     previous_can_raise: bool,
     current_can_raise: bool,
 ) -> zbus::Result<()> {
-    let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
+    let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
     if previous.playback.status != current.playback.status {
         changed.insert(
             "PlaybackStatus",
@@ -1008,7 +1007,7 @@ async fn publish_changes(
         changed.insert("Volume", f64::from(current.playback.volume).into());
     }
     if refresh_metadata(previous, current, metadata, artwork) {
-        changed.insert("Metadata", Value::from(metadata_map(metadata.as_ref())));
+        changed.insert("Metadata", Variant::from(metadata_map(metadata.as_ref())));
     }
     // Queue navigation depends on ordering, selection and repeat/shuffle,
     // not the audio clock; do not walk the queue on each position update.
@@ -1061,7 +1060,7 @@ async fn publish_changes(
             .await?;
     }
     if previous_can_raise != current_can_raise {
-        let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
+        let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
         changed.insert("CanRaise", current_can_raise.into());
         connection
             .emit_signal(
@@ -1438,7 +1437,7 @@ mod tests {
         fn connect(&self) -> Connection {
             async_io::block_on(rivu_protocol::transport::timeout(
                 Duration::from_secs(5),
-                Builder::address(self.address.as_str()).unwrap().build(),
+                Builder::address(self.address.as_str()).build(),
             ))
             .expect("isolated D-Bus connection timed out")
             .unwrap()
@@ -1448,13 +1447,10 @@ mod tests {
             async_io::block_on(rivu_protocol::transport::timeout(
                 Duration::from_secs(5),
                 Builder::address(self.address.as_str())
-                    .unwrap()
                     .name(BUS_NAME)
-                    .unwrap()
                     .allow_name_replacements(false)
                     .replace_existing_names(false)
                     .serve_at(OBJECT_PATH, Root { app })
-                    .unwrap()
                     .build(),
             ))
             .expect("isolated D-Bus root registration timed out")
@@ -1813,7 +1809,7 @@ mod tests {
         async fn next_property(
             signals: &mut (impl futures::Stream<Item = zbus::Message> + Unpin),
             property: &str,
-        ) -> OwnedValue {
+        ) -> OwnedVariant {
             rivu_protocol::transport::timeout(Duration::from_secs(5), async {
                 loop {
                     let signal = signals.next().await.expect("properties signal stream");

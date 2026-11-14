@@ -17,10 +17,8 @@ use std::{
     time::Duration,
 };
 use zbus::{
-    AsyncDrop, Connection, Proxy,
-    connection::Builder,
-    fdo,
-    zvariant::{ObjectPath, OwnedValue, StructureBuilder, Type, Value},
+    AsyncDrop, Connection, ObjectPath, OwnedVariant, Proxy, Type, Variant, connection::Builder,
+    fdo, wire::StructureBuilder,
 };
 
 const WATCHER_SERVICE: &str = "org.kde.StatusNotifierWatcher";
@@ -125,13 +123,15 @@ async fn run_bus(
         app,
         data: Arc::clone(&data),
     };
+    // default-rt's shared native helper drives bus I/O independently of this
+    // application's async-io executor, including registration and shutdown.
     let setup = async {
-        Builder::session()?
-            .name(service_name.as_str())?
+        Builder::session()
+            .name(service_name.as_str())
             .allow_name_replacements(false)
             .replace_existing_names(false)
-            .serve_at(SNI_PATH, item)?
-            .serve_at(MENU_PATH, menu)?
+            .serve_at(SNI_PATH, item)
+            .serve_at(MENU_PATH, menu)
             .build()
             .await
     };
@@ -434,11 +434,11 @@ impl StatusNotifierItem {
 }
 
 #[derive(Debug, Serialize, Type)]
-#[zvariant(signature = "(ia{sv}av)")]
+#[zbus(signature = "(ia{sv}av)")]
 struct MenuLayout {
     id: i32,
-    properties: HashMap<String, OwnedValue>,
-    children: Vec<Value<'static>>,
+    properties: HashMap<String, OwnedVariant>,
+    children: Vec<Variant<'static>>,
 }
 
 impl MenuLayout {
@@ -448,7 +448,7 @@ impl MenuLayout {
         } else {
             menu_items(snapshot, i18n)
                 .into_iter()
-                .map(Value::from)
+                .map(Variant::from)
                 .collect()
         };
         Self {
@@ -459,7 +459,7 @@ impl MenuLayout {
     }
 }
 
-impl From<MenuLayout> for Value<'static> {
+impl From<MenuLayout> for Variant<'static> {
     fn from(layout: MenuLayout) -> Self {
         let structure = StructureBuilder::new()
             .add_field(layout.id)
@@ -467,12 +467,12 @@ impl From<MenuLayout> for Value<'static> {
             .add_field(layout.children)
             .build()
             .expect("menu layout structure is non-empty");
-        Value::from(structure)
+        Variant::from(structure)
     }
 }
 
-fn owned_value(value: String) -> OwnedValue {
-    Value::from(value)
+fn owned_variant(value: String) -> OwnedVariant {
+    Variant::from(value)
         .try_to_owned()
         .expect("menu property should be ownable")
 }
@@ -506,7 +506,7 @@ impl DbusMenu {
         &self,
         ids: Vec<i32>,
         property_names: Vec<String>,
-    ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedValue>)>> {
+    ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedVariant>)>> {
         let snapshot = self.data.read().snapshot.clone();
         let ids = if ids.is_empty() {
             (2..=9).collect()
@@ -522,7 +522,7 @@ impl DbusMenu {
             .collect())
     }
 
-    fn get_property(&self, id: i32, name: String) -> fdo::Result<OwnedValue> {
+    fn get_property(&self, id: i32, name: String) -> fdo::Result<OwnedVariant> {
         let snapshot = self.data.read().snapshot.clone();
         menu_properties(&snapshot, id, &[name], &self.data.read().i18n)
             .and_then(|mut properties| properties.drain().next().map(|(_, value)| value))
@@ -533,7 +533,7 @@ impl DbusMenu {
         &self,
         id: i32,
         event_id: String,
-        _data: OwnedValue,
+        _data: OwnedVariant,
         _timestamp: u32,
     ) -> fdo::Result<()> {
         if event_id == "clicked" {
@@ -542,7 +542,7 @@ impl DbusMenu {
         Ok(())
     }
 
-    fn event_group(&self, events: Vec<(i32, String, OwnedValue, u32)>) -> Vec<i32> {
+    fn event_group(&self, events: Vec<(i32, String, OwnedVariant, u32)>) -> Vec<i32> {
         let mut invalid = Vec::new();
         for (id, event, _, _) in events {
             if !(2..=9).contains(&id) && id != 0 {
@@ -660,7 +660,7 @@ fn menu_properties(
     id: i32,
     requested: &[String],
     i18n: &Localizer,
-) -> Option<HashMap<String, OwnedValue>> {
+) -> Option<HashMap<String, OwnedVariant>> {
     let item_type = match id {
         5 | 8 => "separator",
         2..=9 => "standard",
@@ -675,16 +675,16 @@ fn menu_properties(
         } else {
             label.to_owned()
         };
-        properties.insert("label".to_owned(), owned_value(label));
+        properties.insert("label".to_owned(), owned_variant(label));
     }
     if all || requested.iter().any(|name| name == "type") {
-        properties.insert("type".to_owned(), owned_value(item_type.to_owned()));
+        properties.insert("type".to_owned(), owned_variant(item_type.to_owned()));
     }
     if all || requested.iter().any(|name| name == "enabled") {
-        properties.insert("enabled".to_owned(), OwnedValue::from(true));
+        properties.insert("enabled".to_owned(), OwnedVariant::from(true));
     }
     if all || requested.iter().any(|name| name == "visible") {
-        properties.insert("visible".to_owned(), OwnedValue::from(true));
+        properties.insert("visible".to_owned(), OwnedVariant::from(true));
     }
     Some(properties)
 }
@@ -725,9 +725,9 @@ mod tests {
         );
         assert_eq!(
             menu.event_group(vec![
-                (1, "clicked".into(), OwnedValue::from(0_i32), 0),
-                (99, "clicked".into(), OwnedValue::from(0_i32), 0),
-                (9, "clicked".into(), OwnedValue::from(0_i32), 0),
+                (1, "clicked".into(), OwnedVariant::from(0_i32), 0),
+                (99, "clicked".into(), OwnedVariant::from(0_i32), 0),
+                (9, "clicked".into(), OwnedVariant::from(0_i32), 0),
             ]),
             vec![1, 99],
         );

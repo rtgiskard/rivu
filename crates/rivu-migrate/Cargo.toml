@@ -11,7 +11,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
 rivu-format = { path = "../rivu-format", default-features = false, features = ["database"] }
 rivu-utils = { path = "../rivu-utils", default-features = false, features = ["logging", "terminal"] }
-rusqlite = { version = "0.41.0", features = ["bundled", "backup"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "backup"] }
 tempfile = "3.27"
 tracing = "0.1"
 

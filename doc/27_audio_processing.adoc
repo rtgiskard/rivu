@@ -408,6 +408,12 @@ is bounded to 256 KiB and bundle artifacts to 16 MiB in total, independently of
 the retained-PCM budget.
 Dry runs still validate the bundle but do not load ONNX Runtime.
 
+A successful native initialization retains one shared ONNX environment for the
+process. Each run owns its session and per-channel recurrent caches; finishing
+a run releases them without invalidating other sessions. Later runs reuse the
+environment. Restart Rivu to change a successfully loaded runtime; initialization
+failures are reported and remain retryable rather than being cached as success.
+
 For Python models, install `uv` first (Arch Linux:
 `sudo pacman -S --needed python uv`). Setup installs a CPU environment beneath
 `BUNDLE.environment`: `.venv` for MossFormer2/Kim or `df3-venv` for DeepFilterNet3.
@@ -927,6 +933,7 @@ floor without allocating a recovery copy.
 Bypassed graph nodes construct no adapter and incur none of these processor/staging
 charges.
 
+[[timeline-and-source-identity]]
 === Timeline and source identity
 
 Graph intermediates preserve causal context, including FIR ringing, denoiser

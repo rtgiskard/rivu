@@ -13,7 +13,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5"
 crossterm = "0.29"
-parking_lot = "0.12"
+parking_lot = "0.13"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29", "std"] }
 signal-hook = "0.4.5"
 unicode-segmentation = "1.13.3"

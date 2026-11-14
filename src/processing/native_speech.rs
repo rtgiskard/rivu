@@ -14,11 +14,9 @@ use super::render::{ProgressReporter, check_cancel};
 use super::{AudioOutputs, ModelProvenance};
 use anyhow::{Context, Result, bail, ensure};
 use ort::session::{
-    Session,
-    builder::GraphOptimizationLevel,
-    run_options::{HasSelectedOutputs, OutputSelector, RunOptions},
+    HasSelectedOutputs, OutputSelector, RunOptions, Session, builder::GraphOptimizationLevel,
 };
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorElementType};
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex, num_complex::Complex32};
 use rivu_audio as audio;
 use rivu_format::config::{NeuralConfig, NeuralDevice};
@@ -135,6 +133,16 @@ fn read_bounded(path: &Path, bound: u64, cancel: &AtomicBool) -> Result<Vec<u8>>
     Ok(bytes)
 }
 
+fn sha256_hex(digest: sha2::digest::Output<Sha256>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(64);
+    for &byte in digest.iter() {
+        text.push(char::from(HEX[usize::from(byte >> 4)]));
+        text.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
 pub(super) fn prepare(
     path: &Path,
     manifest_bytes: &[u8],
@@ -205,7 +213,7 @@ pub(super) fn prepare(
             check_cancel(cancel)?;
             digest.update(block);
         }
-        let actual = format!("{:x}", digest.finalize());
+        let actual = sha256_hex(digest.finalize());
         ensure!(
             actual == *expected,
             "Native model bundle SHA256 mismatch: {name}"
@@ -215,7 +223,7 @@ pub(super) fn prepare(
         }
     }
     check_cancel(cancel)?;
-    provenance.sha256 = Some(format!("{:x}", Sha256::digest(manifest_bytes)));
+    provenance.sha256 = Some(sha256_hex(Sha256::digest(manifest_bytes)));
     Ok(PreparedModel {
         kind,
         model: model.context("Missing native ONNX model")?,
@@ -224,13 +232,13 @@ pub(super) fn prepare(
     })
 }
 
-// Borrowing tensor views avoids copying recurrent state into each request.
-// Runtime-owned outputs become the next frame's inputs, instead of copying the
-// large convolution cache back to Rust-owned storage every 16 ms.
+// Two preallocated output banks alternate, so no cache is read and overwritten
+// by the same inference. Returned owned handles retain the previous output bank
+// without copying recurrent state every 16 ms.
 struct State {
     input: Tensor<f32>,
     caches: [Tensor<f32>; 3],
-    outputs: [RunOptions<HasSelectedOutputs>; 2],
+    outputs: [Option<RunOptions<HasSelectedOutputs>>; 2],
     next: usize,
 }
 impl State {
@@ -240,19 +248,48 @@ impl State {
             Kind::UlUnas => ["conv_cache_out", "tfa_cache_out", "inter_cache_out"],
         }
     }
+    fn validate_session(session: &Session, kind: Kind) -> Result<()> {
+        let temporal = match kind {
+            Kind::Gtcrn => "tra_cache",
+            Kind::UlUnas => "tfa_cache",
+        };
+        let [a, b, c] = kind.state_shapes();
+        let shapes: [&[usize]; 4] = [&[1, BINS, 1, 2], a, b, c];
+        let [out_a, out_b, out_c] = Self::names(kind);
+        for (direction, outlets, names) in [
+            (
+                "input",
+                session.inputs(),
+                ["mix", "conv_cache", temporal, "inter_cache"],
+            ),
+            ("output", session.outputs(), ["enh", out_a, out_b, out_c]),
+        ] {
+            ensure!(
+                outlets.len() == 4,
+                "Native speech graph must have four {direction}s"
+            );
+            for ((outlet, name), expected) in outlets.iter().zip(names).zip(shapes) {
+                ensure!(
+                    outlet.name() == name,
+                    "Native speech ONNX {direction} name/order mismatch: expected {name}"
+                );
+                ensure!(
+                    outlet.dtype().tensor_type() == Some(TensorElementType::Float32)
+                        && outlet.dtype().tensor_shape().is_some_and(|shape| {
+                            shape.iter().copied().eq(expected.iter().map(|&x| x as i64))
+                        }),
+                    "Native speech ONNX {direction} {name} type/shape mismatch"
+                );
+            }
+        }
+        Ok(())
+    }
     fn new(kind: Kind) -> Result<Self> {
         let [a, b, c] = kind.state_shapes();
         let zero =
             |shape: &[usize]| Tensor::from_array((shape, vec![0.0f32; shape.iter().product()]));
         let first = [zero(a)?, zero(b)?, zero(c)?];
-        let second = [zero(a)?, zero(b)?, zero(c)?];
-        let alias = |tensor: &Tensor<f32>| {
-            tensor
-                .view()
-                .try_upgrade()
-                .map_err(|_| anyhow::anyhow!("Native tensor cannot retain owned state"))
-        };
-        let caches = [alias(&second[0])?, alias(&second[1])?, alias(&second[2])?];
+        let caches = [zero(a)?, zero(b)?, zero(c)?];
         let options = |bank: [Tensor<f32>; 3]| -> Result<RunOptions<HasSelectedOutputs>> {
             let mut selector =
                 OutputSelector::default().preallocate("enh", zero(&[1, BINS, 1, 2])?);
@@ -264,7 +301,10 @@ impl State {
         Ok(Self {
             input: zero(&[1, BINS, 1, 2])?,
             caches,
-            outputs: [options(first)?, options(second)?],
+            // rc.15 cannot upgrade a shared ValueRef to an owned value. After
+            // the first run, move the initial cache bank into the second output
+            // selector and retain the returned owned handles as next inputs.
+            outputs: [Some(options(first)?), None],
             next: 0,
         })
     }
@@ -273,8 +313,13 @@ impl State {
         session: &mut Session,
         spectrum: &mut [f32; BINS * 2],
         kind: Kind,
+        cancel: &AtomicBool,
     ) -> Result<()> {
-        self.input.extract_tensor_mut().1.copy_from_slice(spectrum);
+        check_cancel(cancel)?;
+        self.input
+            .try_extract_tensor_mut()?
+            .1
+            .copy_from_slice(spectrum);
         let mut outputs = session.run_with_options(
             ort::inputs![
                 &self.input,
@@ -282,13 +327,19 @@ impl State {
                 &self.caches[1],
                 &self.caches[2]
             ],
-            &self.outputs[self.next],
+            self.outputs[self.next]
+                .as_ref()
+                .context("Missing native ONNX output bank")?,
         )?;
+        check_cancel(cancel)?;
         ensure!(
             outputs.len() == 4,
             "Native speech ONNX output count mismatch"
         );
-        let (shape, enhanced) = outputs[0].try_extract_tensor::<f32>()?;
+        let (shape, enhanced) = outputs
+            .get("enh")
+            .context("Missing native ONNX output enh")?
+            .try_extract_tensor::<f32>()?;
         ensure!(
             shape.as_ref() == [1, BINS as i64, 1, 2] && enhanced.len() == BINS * 2,
             "Native speech enhanced spectrum shape mismatch"
@@ -298,6 +349,20 @@ impl State {
             "Native speech produced non-finite spectrum"
         );
         spectrum.copy_from_slice(enhanced);
+        // The enhanced spectrum is never an input, so both selectors can reuse
+        // the same allocation. Cache outputs must remain in distinct banks.
+        let mut second = if self.outputs[1].is_none() {
+            Some(
+                OutputSelector::default().preallocate(
+                    "enh",
+                    outputs
+                        .remove("enh")
+                        .context("Missing native ONNX output enh")?,
+                ),
+            )
+        } else {
+            None
+        };
         // Removing by name is independent of the shifting output indices.
         let names = Self::names(kind);
         for ((cache, name), expected) in self.caches.iter_mut().zip(names).zip(kind.state_shapes())
@@ -307,14 +372,21 @@ impl State {
                 .with_context(|| format!("Missing native ONNX output {name}"))?;
             let (shape, data) = value.try_extract_tensor::<f32>()?;
             ensure!(
-                shape.iter().copied().eq(expected.iter().map(|&x| x as i64)),
+                shape.iter().copied().eq(expected.iter().map(|&x| x as i64))
+                    && data.len() == expected.iter().product::<usize>(),
                 "Native speech recurrent cache shape mismatch"
             );
             ensure!(
                 data.iter().all(|x| x.is_finite()),
                 "Native speech produced non-finite cache"
             );
-            *cache = value.downcast::<ort::value::TensorValueType<f32>>()?;
+            let previous =
+                std::mem::replace(cache, value.downcast::<ort::value::TensorValueType<f32>>()?);
+            second = second.map(|selector| selector.preallocate(name, previous));
+        }
+        drop(outputs);
+        if let Some(selector) = second {
+            self.outputs[1] = Some(RunOptions::new()?.with_outputs(selector));
         }
         self.next ^= 1;
         Ok(())
@@ -730,6 +802,30 @@ fn wet_weight(wet: f32, attenuation: f32) -> Result<f32> {
     Ok(wet * (1.0 - 10.0f32.powf(-attenuation / 20.0)))
 }
 
+fn environment() -> Result<ort::environment::Environment> {
+    // rc.15 permits building only one environment for the lifetime of a process,
+    // even after its last handle is dropped. Retain it across jobs and serialize
+    // first initialization; a failed load remains retryable.
+    static ENVIRONMENT: parking_lot::Mutex<Option<ort::environment::Environment>> =
+        parking_lot::Mutex::new(None);
+    let mut current = ENVIRONMENT.lock();
+    if let Some(environment) = current.as_ref() {
+        return Ok(environment.clone());
+    }
+    // This fallible call must precede every other ort API. The implicit loader
+    // panics on a missing library; explicit initialization reports an error.
+    let runtime = std::env::var_os("ORT_DYLIB_PATH")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "libonnxruntime.so".into());
+    let environment = ort::init_from(&runtime)
+        .context("Loading native ONNX Runtime; install ONNX Runtime >=1.23 or set ORT_DYLIB_PATH (no Python/network fallback)")?
+        .with_telemetry(false)
+        .build()
+        .context("Initializing native ONNX Runtime environment")?;
+    *current = Some(environment.clone());
+    Ok(environment)
+}
+
 pub(super) fn run(
     input: &audio::PcmAudio,
     prepared: PreparedModel,
@@ -758,22 +854,19 @@ pub(super) fn run(
             ..Default::default()
         });
     }
-    // This fallible call must precede *every* ort API. ort's implicit loader
-    // panics on a missing library; explicit initialization reports an error.
-    let runtime = std::env::var_os("ORT_DYLIB_PATH")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "libonnxruntime.so".into());
-    ort::init_from(&runtime).context("Loading native ONNX Runtime; install ONNX Runtime >=1.23 or set ORT_DYLIB_PATH (no Python/network fallback)")?.with_telemetry(false).commit();
-    let mut session = Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(usize::from(threads))?
-        .with_inter_threads(1)?
+    let environment = environment()?;
+    check_cancel(cancel)?;
+    let mut session = Session::builder(&environment)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(ort::Error::<()>::from)?
+        .with_intra_threads(usize::from(threads))
+        .map_err(ort::Error::<()>::from)?
+        .with_inter_threads(1)
+        .map_err(ort::Error::<()>::from)?
         .commit_from_memory(&model)
         .context("Loading pinned native speech ONNX graph")?;
-    ensure!(
-        session.inputs().len() == 4 && session.outputs().len() == 4,
-        "Native speech graph must have four inputs and outputs"
-    );
+    check_cancel(cancel)?;
+    State::validate_session(&session, kind)?;
     let channels = usize::from(input.channels());
     let mut source = Resampler::new(input, RATE, cancel)?;
     let mut states: Vec<_> = (0..channels)
@@ -805,7 +898,7 @@ pub(super) fn run(
                 }
             }
             stfts[ch].analyze(&analysis[ch], &mut spectrum)?;
-            states[ch].process(&mut session, &mut spectrum, kind)?;
+            states[ch].process(&mut session, &mut spectrum, kind, cancel)?;
             check_cancel(cancel)?;
             stfts[ch].synthesize(&spectrum)?;
             for i in 0..emitted {
@@ -846,6 +939,18 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_encoding_preserves_exact_lowercase_digest() {
+        assert_eq!(
+            sha256_hex(Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(Sha256::digest(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     #[test]
     fn rate_expansion_checks_cancellation_between_bounded_output_batches() {
@@ -1147,7 +1252,7 @@ mod tests {
                 "version":1, "operation":"speech", "id":"GTCRN", "backend":"onnx",
                 "model":"model.onnx", "license_evidence":"weight-license.txt",
                 "files":{"model.onnx":Kind::Gtcrn.model_hash(),
-                         "weight-license.txt":format!("{:x}",Sha256::digest(b"notice"))}
+                         "weight-license.txt":sha256_hex(Sha256::digest(b"notice"))}
             }))
             .unwrap(),
         )
@@ -1199,7 +1304,7 @@ mod tests {
             "version":1, "operation":"speech", "id":"GTCRN", "backend":"onnx",
             "model":"model.onnx", "license_evidence":"a-license",
             "files":{"model.onnx":Kind::Gtcrn.model_hash(),
-                     "a-license":format!("{:x}", Sha256::digest(b"x")),
+                     "a-license":sha256_hex(Sha256::digest(b"x")),
                      "b-extra":"0".repeat(64)}
         }))
         .unwrap();

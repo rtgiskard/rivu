@@ -8,6 +8,33 @@ maintained in link:91_design_decisions.adoc[Engineering conclusions and design d
 
 == Open and deferred
 
+=== Unmaintained transitive dependencies
+
+Status: identified, unresolved, 2026-11-14. Replacing these dependency chains is
+not part of the implemented direct-dependency upgrade.
+
+The locked graph retains the following RustSec maintenance advisories:
+
+* `paste` 1.0.15, through Lofty and platform-specific Metal:
+  https://rustsec.org/advisories/RUSTSEC-2024-0436[RUSTSEC-2024-0436]
+* `rustybuzz` 0.20.1, through GPUI's SVG stack:
+  https://rustsec.org/advisories/RUSTSEC-2026-0206[RUSTSEC-2026-0206]
+* `ttf-parser` 0.25.1, through GPUI's font and SVG stacks:
+  https://rustsec.org/advisories/RUSTSEC-2026-0192[RUSTSEC-2026-0192]
+* `zbus_names` 4.3.5, `zvariant` 5.15.1 and `zvariant_derive` 5.15.1, through
+  GPUI's accessibility, portal and secret-service dependencies:
+  https://rustsec.org/advisories/RUSTSEC-2026-0371[RUSTSEC-2026-0371],
+  https://rustsec.org/advisories/RUSTSEC-2026-0370[RUSTSEC-2026-0370] and
+  https://rustsec.org/advisories/RUSTSEC-2026-0372[RUSTSEC-2026-0372]
+
+These are unmaintained-package notices, not evidence of an exploitable defect.
+Rivu's direct D-Bus consumers use zbus 6; the old standalone crates remain in
+upstream consumers. Removing them requires compatible upstream migrations rather
+than forcing a semver-incompatible lockfile substitution. The findings use a
+cached advisory database; they do not establish a current, exhaustive security
+assessment or imply that every platform-specific chain is built on Linux.
+
+
 [[pipewire-context-retention]]
 === Native PipeWire context retirement retains libdbus allocations
 
@@ -52,30 +79,6 @@ The separate <<pipewire-context-retention,native retention>> remains unresolved.
 PCM transport and summary ownership are retained in
 link:91_design_decisions.adoc#DEC-006[DEC-006].
 
-=== Portal file chooser cache warning
-
-Status: deferred, 2026-10-12. Keep the published `ashpd` 0.13.13 dependency;
-no vendor backport, upstream Git replacement, or log filtering.
-
-Clicking the Library `+` button prints the following warning on each invocation:
-
-[source,text]
-----
-zbus::proxy: Failed to populate properties cache via GetAll: org.freedesktop.DBus.Error.UnknownMethod: Object does not exist at path “/org/freedesktop/portal/desktop/request/…”. Property change streams will not produce values.
-----
-
-The user confirmed successful folder selection and library-root addition. ashpd
-creates a property-cached Request proxy before `OpenFile` creates the transient
-object, so `GetAll` fails; results arrive through an independent `Response`
-signal. Playlist import/export share this mechanism.
-
-Upstream fix:
-https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
-The fix is on upstream mainline, not in the 0.13.13 release branch inspected
-at the time of investigation. Revisit when a compatible published release
-includes it; verify successful selection, cancellation, and absence of this
-warning without suppressing other logs.
-
 === Queue feedback while waiting for a query worker
 
 Status: deferred, 2026-10-18. The open policy question is whether loading
@@ -107,6 +110,28 @@ its transformation under this data-directory exclusion. Database-file alias
 protection remains unresolved.
 
 == Resolved investigations
+
+=== Portal file chooser cache warning
+
+Status: resolved, 2026-11-14. The direct chooser dependency is published `ashpd`
+0.14.0, which includes the upstream Request/Session property-cache fix; no vendor
+backport, Git replacement or log filtering is used.
+
+With 0.13.13, opening a chooser emitted a `Failed to populate properties cache
+via GetAll` warning: the property-cached Request proxy preceded creation of its
+transient portal object. Selection still arrived through the independent
+`Response` signal. Request and Session proxies now disable property caching;
+this does not mean that all transient-object property reads are removed.
+
+Folder selection and cancellation through the GTK portal on isolated Wayland
+confirmed that the selected root is admitted, cancellation leaves roots unchanged,
+and the old cache warning is absent. This resolution covers Rivu's direct chooser
+calls; older `ashpd` versions retained by unrelated transitive dependencies are
+not evidence that these calls still use the old implementation.
+
+Upstream fix:
+https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
+
 
 [[artwork-cold-source-identity]]
 === Cold embedded artwork can acquire a stale requested source identity

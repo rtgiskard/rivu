@@ -8,7 +8,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139
 
 [package]
 name = "rivu"
-version = "0.2.8"
+version = "0.2.20"
 edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
@@ -50,17 +50,17 @@ blocking = "1"
 futures = "0.3"
 tracing = "0.1"
 libc = "0.2"
-parking_lot = "0.12"
+parking_lot = "0.13"
 rand = "0.10.3"
-rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 realfft = { version = "3.5", optional = true }
 # Load an explicitly installed runtime; never download/link a runtime at build time.
-ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "load-dynamic", "api-23"] }
 tempfile = "3.27"
-zbus = "5.19"
+zbus = "6.3"
 url = "2"
 
 
@@ -69,7 +69,7 @@ crossbeam-channel = "0.5"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
 rivu-metadata = { path = "crates/rivu-metadata", features = ["test-support"] }
-ringbuf = "0.5"
+ringbuf = "0.6"
 toml = "1.1.8"
 
 [build-dependencies]

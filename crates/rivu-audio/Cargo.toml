@@ -25,8 +25,8 @@ futures = "0.3"
 libc = "0.2"
 libloading = { version = "0.9", optional = true }
 opus = "0.4"
-parking_lot = "0.12"
-ringbuf = "0.5"
+parking_lot = "0.13"
+ringbuf = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.6.1", features = ["all"] }
@@ -42,6 +42,5 @@ tempfile = "3.27"
 rivu-analysis = { path = "../rivu-analysis" }
 
 [build-dependencies]
-# Share libspa-sys's generator version instead of compiling two bindgen families.
-bindgen = { version = "0.72.1", default-features = false, features = ["runtime"], optional = true }
+bindgen = { version = "0.73.2", default-features = false, features = ["runtime"], optional = true }
 pkg-config = "0.3"
