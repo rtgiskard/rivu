@@ -280,6 +280,16 @@ async fn apply_update(
     current.shutting_down
 }
 
+fn tooltip_changed(previous: &TraySnapshot, current: &TraySnapshot) -> bool {
+    match (previous.current_track(), current.current_track()) {
+        (Some(previous), Some(current)) => {
+            previous.title != current.title || previous.artist != current.artist
+        }
+        (None, None) => previous.status != current.status,
+        _ => true,
+    }
+}
+
 async fn emit_update(
     connection: &Connection,
     previous: &TraySnapshot,
@@ -287,12 +297,7 @@ async fn emit_update(
     menu_revision: u32,
     menu_changed: bool,
 ) {
-    let track_changed = match (&previous.current_track, &current.current_track) {
-        (None, None) => false,
-        (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
-        _ => true,
-    };
-    if previous.current_track_id != current.current_track_id || track_changed {
+    if tooltip_changed(previous, current) {
         let _ = connection
             .emit_signal(None::<&str>, SNI_PATH, SNI_INTERFACE, "NewToolTip", &())
             .await;
@@ -733,6 +738,44 @@ mod tests {
         );
         runtime.join().unwrap();
         assert!(handle.is_shutting_down());
+    }
+
+    #[test]
+    fn tooltip_updates_follow_visible_text_not_playback_statistics() {
+        let mut state = crate::core::CoreState {
+            current_track: Some(Arc::new(crate::test_support::artwork_track(
+                "track.wav".into(),
+            ))),
+            ..Default::default()
+        };
+        let baseline = TraySnapshot::from_core(&state);
+        let track = Arc::make_mut(state.current_track.as_mut().unwrap());
+        track.play_count += 1;
+        track.last_played = Some(42);
+        assert!(!tooltip_changed(
+            &baseline,
+            &TraySnapshot::from_core(&state)
+        ));
+        state.playback.status = PlaybackStatus::Playing;
+        assert!(!tooltip_changed(
+            &baseline,
+            &TraySnapshot::from_core(&state)
+        ));
+        Arc::make_mut(state.current_track.as_mut().unwrap())
+            .title
+            .push_str(" renamed");
+        assert!(tooltip_changed(&baseline, &TraySnapshot::from_core(&state)));
+        let renamed = TraySnapshot::from_core(&state);
+        Arc::make_mut(state.current_track.as_mut().unwrap())
+            .artist
+            .push_str(" artist");
+        assert!(tooltip_changed(&renamed, &TraySnapshot::from_core(&state)));
+        state.current_track = None;
+        let empty = TraySnapshot::from_core(&state);
+        assert!(tooltip_changed(&baseline, &empty));
+        assert!(tooltip_changed(&empty, &baseline));
+        state.playback.status = PlaybackStatus::Paused;
+        assert!(tooltip_changed(&empty, &TraySnapshot::from_core(&state)));
     }
 
     #[test]
