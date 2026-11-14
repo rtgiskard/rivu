@@ -90,6 +90,8 @@ pub(super) struct ScalarCounts {
     external_revision: i64,
     playlist_metadata: Option<(std::sync::Arc<rivu_protocol::model::MetadataRevisions>, u64)>,
     entries: Vec<ScalarCount>,
+    #[cfg(test)]
+    reads: usize,
 }
 
 enum ScalarScope<'a> {
@@ -185,6 +187,11 @@ struct ScalarCount {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn scalar_count_reads(&self) -> usize {
+        self.scalar_counts.borrow().reads
+    }
+
     pub(crate) fn invalidate_scalar_counts(&self) {
         self.scalar_counts.borrow_mut().entries.clear();
     }
@@ -311,6 +318,10 @@ impl Store {
                 cache.entries.push(entry);
                 return Ok(total);
             }
+        }
+        #[cfg(test)]
+        {
+            self.scalar_counts.borrow_mut().reads += 1;
         }
         let total = read()?;
         let mut cache = self.scalar_counts.borrow_mut();

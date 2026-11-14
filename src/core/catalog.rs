@@ -362,6 +362,9 @@ impl Core {
         if dependencies.library_revision {
             self.state.library.change_metadata(tracks, playlists);
         }
+        if dependencies.count_revision {
+            self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
+        }
         if dependencies.structure_revision {
             self.state.library.structure_revision =
                 self.state.library.structure_revision.wrapping_add(1);
@@ -1202,6 +1205,7 @@ mod tests {
                     library: CatalogCommit::Confirmed(crate::store::CatalogChanges {
                         changed: edit.changed,
                         library: edit.library,
+                        counts: edit.counts,
                         queue: edit.queue,
                         albums: edit.albums,
                         ..Default::default()

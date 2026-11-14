@@ -354,6 +354,7 @@ fn inserts_report_identity_and_only_applicable_duplicate_impacts() {
             CatalogChanges {
                 changed: true,
                 library: true,
+                counts: true,
                 albums: true,
                 structure: true,
                 duplicate_groups: !cue && fingerprint,
@@ -549,6 +550,7 @@ fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
         CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             queue: true,
             albums: true,
             ..CatalogChanges::default()
@@ -703,6 +705,7 @@ fn rescans_replace_edited_tags_and_invalidate_display_without_changing_queue_ide
         CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             queue: true,
             albums: true,
             ..CatalogChanges::default()
@@ -803,6 +806,7 @@ fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
     let expected = CatalogChanges {
         changed: true,
         library: true,
+        counts: true,
         queue: true,
         albums: true,
         duplicate_groups: true,
@@ -977,6 +981,7 @@ fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_curr
         CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             queue: true,
             albums: true,
             structure: true,
@@ -1206,6 +1211,7 @@ fn tiny_scan_relocates_global_identity_without_touching_unrelated_missing_rows()
         CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             albums: true,
             structure: true,
             ..CatalogChanges::default()

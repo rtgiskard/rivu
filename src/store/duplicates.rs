@@ -327,6 +327,7 @@ impl Store {
         Ok(super::CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             structure: true,
             duplicate_groups: true,
             queue,

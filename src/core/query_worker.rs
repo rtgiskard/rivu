@@ -455,8 +455,8 @@ struct ReadConnection {
     store: Store,
     library_revision: u64,
     duplicate_groups_revision: u64,
-    // Structure, album, queue; library already owns the filtered count above.
-    scalar_revisions: (u64, u64, u64),
+    // Count membership and queue row revisions.
+    scalar_revisions: (u64, u64),
     scalar_playlist_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
 }
 
@@ -561,11 +561,7 @@ impl ReadQueries {
                         store: Store::open_reader(path)?,
                         library_revision: demand.revisions.library,
                         duplicate_groups_revision: demand.revisions.duplicate_groups,
-                        scalar_revisions: (
-                            demand.revisions.structure,
-                            demand.revisions.album,
-                            demand.revisions.queue,
-                        ),
+                        scalar_revisions: (demand.revisions.counts, demand.revisions.queue),
                         scalar_playlist_revisions: Arc::clone(
                             &shared.read().library.playlist_entry_revisions,
                         ),
@@ -647,8 +643,7 @@ impl ReadQueries {
                         library_revision: request.state.revisions.library,
                         duplicate_groups_revision: request.state.revisions.duplicate_groups,
                         scalar_revisions: (
-                            request.state.revisions.structure,
-                            request.state.revisions.album,
+                            request.state.revisions.counts,
                             request.state.revisions.queue,
                         ),
                         scalar_playlist_revisions: Arc::clone(
@@ -723,13 +718,12 @@ impl ReadQueries {
                     }
                     // Only accepted snapshots can change cache ownership. A rejected
                     // version cannot tag old cached totals as belonging to a newer one.
-                    let scalar_revisions = (revisions.structure, revisions.album, revisions.queue);
+                    let scalar_revisions = (revisions.counts, revisions.queue);
                     snapshot.invalidate_catalog_caches(
                         crate::store::CatalogChanges {
                             library: connection.library_revision != revisions.library,
-                            structure: connection.scalar_revisions.0 != scalar_revisions.0,
-                            albums: connection.scalar_revisions.1 != scalar_revisions.1,
-                            queue: connection.scalar_revisions.2 != scalar_revisions.2,
+                            counts: connection.scalar_revisions.0 != scalar_revisions.0,
+                            queue: connection.scalar_revisions.1 != scalar_revisions.1,
                             duplicate_groups: connection.duplicate_groups_revision
                                 != revisions.duplicate_groups,
                             ..Default::default()
@@ -834,6 +828,160 @@ mod tests {
     }
 
     #[test]
+    fn playback_rows_refresh_without_recounting_catalog_membership() {
+        use rivu_protocol::model::{AlbumKey, AlbumSort, LibrarySort};
+
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        core.edit_track(
+            1,
+            None,
+            Some("Needle".into()),
+            Some("Album".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut config = core.preferences.checkpoint();
+        config.library_roots.clear();
+        core.preferences.accept(Arc::new(config));
+        core.publish();
+        let path = directory.path().join("library.db");
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = None;
+        let queries = [
+            Query::LibraryPage {
+                query: Some("Needle".into()),
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 0,
+            },
+            Query::OtherTracksPage {
+                query: Some("Needle".into()),
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 0,
+            },
+            Query::DirectoryPage {
+                path: directory.path().to_path_buf(),
+                query: Some("Needle".into()),
+                favorite: None,
+                missing: None,
+                offset: 0,
+                limit: 0,
+            },
+            Query::Albums {
+                query: Some("Needle".into()),
+                sort: AlbumSort::Title,
+                offset: 0,
+                limit: 0,
+            },
+            Query::AlbumTracks {
+                key: AlbumKey {
+                    directory: directory.path().to_path_buf(),
+                    title: "Album".into(),
+                },
+                query: Some("Needle".into()),
+                offset: 0,
+                limit: 0,
+            },
+        ];
+        let total = |response: QueryResponse| match response.result.unwrap() {
+            ViewResponse::LibraryPage(page) | ViewResponse::AlbumTracks(page) => page.total,
+            ViewResponse::DirectoryPage(page) => page.total,
+            ViewResponse::Albums(page) => page.total,
+            other => panic!("unexpected count response: {other:?}"),
+        };
+        for query in &queries {
+            assert_eq!(
+                total(execute_read(
+                    &core,
+                    &path,
+                    &mut reader,
+                    &fence,
+                    query.clone()
+                )),
+                1,
+                "{query:?}"
+            );
+        }
+        let reads = reader.as_ref().unwrap().store.scalar_count_reads();
+        assert_eq!(reads, 5);
+        let before = core.state.library.clone();
+        for play_count in [false, true] {
+            let stats = if play_count {
+                core.store.increment_play_count(1).unwrap()
+            } else {
+                core.store.mark_played(1, 42).unwrap()
+            };
+            core.update_track_stats(1, stats).unwrap();
+            core.publish();
+            assert_ne!(core.state.library.revision, before.revision);
+            assert_ne!(core.state.library.album_revision, before.album_revision);
+            assert_eq!(core.state.library.count_revision, before.count_revision);
+            for query in &queries {
+                assert_eq!(
+                    total(execute_read(
+                        &core,
+                        &path,
+                        &mut reader,
+                        &fence,
+                        query.clone()
+                    )),
+                    1
+                );
+            }
+            assert_eq!(reader.as_ref().unwrap().store.scalar_count_reads(), reads);
+            let detail = execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                Query::Track { track_id: 1 },
+            );
+            assert!(matches!(detail.result, Ok(ViewResponse::Track(Some(track)))
+                if track.last_played == Some(42) && track.play_count == u64::from(play_count)));
+            let albums = execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                Query::Albums {
+                    query: Some("Needle".into()),
+                    sort: AlbumSort::Title,
+                    offset: 0,
+                    limit: 1,
+                },
+            );
+            assert!(matches!(albums.result, Ok(ViewResponse::Albums(page))
+                if page.rows[0].representative.last_played == Some(42)
+                    && page.rows[0].representative.play_count == u64::from(play_count)));
+        }
+        core.edit_track(1, None, Some("Changed".into()), None, None, None)
+            .unwrap();
+        core.publish();
+        for query in &queries {
+            assert_eq!(
+                total(execute_read(
+                    &core,
+                    &path,
+                    &mut reader,
+                    &fence,
+                    query.clone()
+                )),
+                0
+            );
+        }
+        assert_eq!(
+            reader.as_ref().unwrap().store.scalar_count_reads(),
+            reads + 5
+        );
+    }
+
+    #[test]
     fn unchanged_tags_publish_written_source_fingerprint_and_size_to_readers() {
         let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
         core.edit_track(1, None, None, Some("First album".into()), None, None)
@@ -885,6 +1033,7 @@ mod tests {
         };
         let changes = core.store.update_written_source(2, &source).unwrap();
         assert!(changes.library);
+        assert!(!changes.counts);
         assert!(!core.store.sync_track_tags(2, &tags).unwrap().changed);
         core.accept_catalog_facts(changes, Some(&[2]), None);
         core.publish();
@@ -946,11 +1095,7 @@ mod tests {
             store,
             library_revision: before.library.revision,
             duplicate_groups_revision: before.library.duplicate_groups_revision,
-            scalar_revisions: (
-                before.library.structure_revision,
-                before.library.album_revision,
-                before.queue.revision,
-            ),
+            scalar_revisions: (before.library.count_revision, before.queue.revision),
             scalar_playlist_revisions: Arc::clone(&before.library.playlist_entry_revisions),
         });
         let fence = Arc::new(ReadFence::default());
@@ -1324,11 +1469,7 @@ mod tests {
             store: Store::open_reader(&path).unwrap(),
             library_revision: before.library.revision,
             duplicate_groups_revision: before.library.duplicate_groups_revision,
-            scalar_revisions: (
-                before.library.structure_revision,
-                before.library.album_revision,
-                before.queue.revision,
-            ),
+            scalar_revisions: (before.library.count_revision, before.queue.revision),
             scalar_playlist_revisions: Arc::clone(&before.library.playlist_entry_revisions),
         };
         let snapshot = connection.store.read_snapshot().unwrap();
@@ -1627,11 +1768,7 @@ mod tests {
             store: reader,
             library_revision: core.state.library.revision,
             duplicate_groups_revision: core.state.library.duplicate_groups_revision,
-            scalar_revisions: (
-                core.state.library.structure_revision,
-                core.state.library.album_revision,
-                core.state.queue.revision,
-            ),
+            scalar_revisions: (core.state.library.count_revision, core.state.queue.revision),
             scalar_playlist_revisions: Arc::clone(&core.state.library.playlist_entry_revisions),
         });
         let rejected = ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &request);

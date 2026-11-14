@@ -295,6 +295,8 @@ pub struct LibrarySnapshot {
     pub playlist_total: usize,
     /// Changes whenever non-bitrate Track metadata changes.
     pub revision: u64,
+    /// Count membership/search facts; excludes playback statistics and row-only edits.
+    pub count_revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     pub structure_revision: u64,
     /// Core-owned album membership/order/query token, shared with transfers.
@@ -526,6 +528,7 @@ impl Default for LibrarySnapshot {
             track_total: 0,
             playlist_total: 0,
             revision: 0,
+            count_revision: 0,
             structure_revision: 0,
             album_revision: 0,
             playlist_revision: 0,
@@ -602,6 +605,7 @@ impl LibrarySnapshot {
             self.duplicate_members_revision,
         )
         .with_album_revision(self.album_revision)
+        .with_count_revision(self.count_revision)
         .with_bitrate_revision(self.bitrate_revision)
         .with_playlist_scope(
             playlist_id,

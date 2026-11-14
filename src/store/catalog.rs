@@ -6,6 +6,8 @@ pub struct CatalogChanges {
     pub changed: bool,
     /// Effective full Track values, including library ordering fields.
     pub library: bool,
+    /// Count membership/search facts, independent of row values and ordering.
+    pub counts: bool,
     /// Effective queue-row values changed for an already queued identity.
     pub queue: bool,
     /// History membership or effective entry values changed.
@@ -30,6 +32,7 @@ pub struct CatalogChanges {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CatalogDependencies {
     pub library_revision: bool,
+    pub count_revision: bool,
     pub structure_revision: bool,
     pub queue_revision: bool,
     pub album_revision: bool,
@@ -38,11 +41,9 @@ pub(crate) struct CatalogDependencies {
     pub refresh_history: bool,
     pub refresh_track_total: bool,
     pub clear_track_cache: bool,
-    pub clear_filtered_track_count: bool,
     pub clear_catalog_counts: bool,
     pub clear_queue_count: bool,
     pub clear_playlist_count: bool,
-    pub clear_album_counts: bool,
     pub clear_duplicate_group_count: bool,
 }
 
@@ -50,6 +51,7 @@ impl CatalogChanges {
     pub(crate) fn dependencies(self, playlist_created: bool) -> CatalogDependencies {
         CatalogDependencies {
             library_revision: self.library,
+            count_revision: self.counts || self.structure,
             structure_revision: self.structure,
             queue_revision: self.queue,
             album_revision: self.albums,
@@ -58,11 +60,9 @@ impl CatalogChanges {
             refresh_history: self.history,
             refresh_track_total: self.structure,
             clear_track_cache: self.library,
-            clear_filtered_track_count: self.library,
-            clear_catalog_counts: self.library || self.structure,
+            clear_catalog_counts: self.counts || self.structure,
             clear_queue_count: self.queue,
             clear_playlist_count: self.library || playlist_created,
-            clear_album_counts: self.albums,
             clear_duplicate_group_count: self.duplicate_groups,
         }
     }

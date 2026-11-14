@@ -97,9 +97,10 @@ impl Store {
                 AND (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint OR t.missing IS NOT 0)),0),
             COALESCE(MAX((t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL)
                 AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
+            {},
             {}
-            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_library_column(false), super::scan::staged_projection_columns(false)), [], |row| {
-            Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, history: row.get(6)?, ..CatalogChanges::default() })
+            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_library_column(false), super::scan::staged_projection_columns(false), super::scan::staged_count_column()), [], |row| {
+            Ok(CatalogChanges { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, history: row.get(6)?, counts: row.get(7)?, ..CatalogChanges::default() })
         })?;
         let changed = tx.execute(&staged_update_sql("external_sources", false), [])?;
         let added = tx.execute(

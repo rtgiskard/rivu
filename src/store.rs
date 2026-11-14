@@ -243,20 +243,20 @@ impl Store {
         if dependencies.clear_track_cache {
             self.track_cache.borrow_mut().entries.clear();
         }
-        if dependencies.clear_filtered_track_count {
-            self.invalidate_scalar_count_domains(&[CountDomain::FilteredLibrary]);
-        }
         if dependencies.clear_catalog_counts {
-            self.invalidate_scalar_count_domains(&[CountDomain::Other, CountDomain::Directory]);
+            self.invalidate_scalar_count_domains(&[
+                CountDomain::FilteredLibrary,
+                CountDomain::Other,
+                CountDomain::Directory,
+                CountDomain::Albums,
+                CountDomain::AlbumTracks,
+            ]);
         }
         if dependencies.clear_queue_count {
             self.invalidate_scalar_count_domains(&[CountDomain::Queue]);
         }
         if dependencies.clear_playlist_count && !self.revision_owned_counts {
             self.invalidate_scalar_count_domains(&[CountDomain::PlaylistEntries]);
-        }
-        if dependencies.clear_album_counts {
-            self.invalidate_scalar_count_domains(&[CountDomain::Albums, CountDomain::AlbumTracks]);
         }
         if dependencies.clear_duplicate_group_count {
             self.invalidate_duplicate_group_count();

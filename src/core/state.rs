@@ -73,6 +73,7 @@ impl CoreState {
                 || self.processing_selection != previous.processing_selection,
             queue: self.queue != previous.queue,
             library: self.library.revision != previous.library.revision
+                || self.library.count_revision != previous.library.count_revision
                 || self.library.structure_revision != previous.library.structure_revision
                 || self.library.playlist_revision != previous.library.playlist_revision
                 || self.library.album_revision != previous.library.album_revision

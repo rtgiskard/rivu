@@ -128,6 +128,8 @@ impl QueryRevisionScope {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRevisions {
     pub library: u64,
+    /// Count membership/search freshness, independent of payload/order revisions.
+    pub counts: u64,
     pub structure: u64,
     /// Payload freshness token, selected only by bitrate-bearing queries.
     pub bitrate: u64,
@@ -143,6 +145,11 @@ pub struct QueryRevisions {
 }
 
 impl QueryRevisions {
+    pub fn with_count_revision(mut self, revision: u64) -> Self {
+        self.counts = revision;
+        self
+    }
+
     pub fn with_album_revision(mut self, revision: u64) -> Self {
         self.album = revision;
         self

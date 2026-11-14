@@ -200,6 +200,7 @@ impl Core {
         let changes = crate::store::CatalogChanges {
             changed: impact.changed,
             library: impact.library,
+            counts: impact.counts,
             queue: impact.queue,
             albums: impact.albums,
             duplicate_members: impact.member_facts,

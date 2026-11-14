@@ -134,6 +134,12 @@ pub(super) fn staged_library_column(cue: bool) -> String {
         OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date {cue}),0)")
 }
 
+pub(super) fn staged_count_column() -> &'static str {
+    "COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
+        OR t.title IS NOT s.title OR t.artist IS NOT s.artist
+        OR t.album IS NOT s.album OR t.missing IS NOT 0),0)"
+}
+
 /// Compare staged source values before updating tracks.
 pub(super) fn staged_projection_columns(cue: bool) -> String {
     let visible = "t.path IS NOT s.path
@@ -1082,10 +1088,12 @@ impl Store {
                         OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
                     AND (t.id IS NULL OR t.file_size IS NOT s.file_size
                         OR t.modified_ns IS NOT s.modified_ns)),0),
+                {},
                 {}
              FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
                 staged_library_column(true),
-                staged_projection_columns(true)
+                staged_projection_columns(true),
+                staged_count_column()
             ),
             [],
             |row| {
@@ -1097,6 +1105,7 @@ impl Store {
                     queue: row.get(4)?,
                     albums: row.get(5)?,
                     history: row.get(6)?,
+                    counts: row.get(7)?,
                     skipped_short_tracks,
                     ..CatalogChanges::default()
                 })
@@ -1152,6 +1161,7 @@ impl Store {
                 let id = row.get::<_, i64>(0)?;
                 changed_tracks += 1;
                 impacts.library = true;
+                impacts.counts = true;
                 impacts.queue |= row.get::<_, bool>(1)?;
                 impacts.albums |= row.get::<_, bool>(2)?;
                 impacts.duplicate_groups |= duplicate_missing.contains(&id);

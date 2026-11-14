@@ -94,6 +94,7 @@ pub struct TrackRemovalImpact {
 pub struct TrackEditImpact {
     pub changed: bool,
     pub library: bool,
+    pub counts: bool,
     pub queue: bool,
     pub albums: bool,
     pub history: bool,
@@ -1089,6 +1090,7 @@ impl Store {
                     Ok((
                         TrackEditImpact {
                             library: display || details || numbers,
+                            counts: display,
                             member_facts: row.get(2)?,
                             history: row.get(3)?,
                             ..Default::default()

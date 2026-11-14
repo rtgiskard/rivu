@@ -196,6 +196,7 @@ impl Core {
         let impacts = crate::store::CatalogChanges {
             changed: impact.changed,
             library: impact.library,
+            counts: impact.counts,
             queue: impact.queue,
             albums: impact.albums,
             duplicate_members: impact.member_facts,
@@ -296,6 +297,7 @@ impl Core {
         let impact = self.store.set_favorite(track_ids, favorite)?;
         self.invalidate_collection_impacts(impact.queue, impact.albums);
         if impact.changed {
+            self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
             self.state
                 .library
                 .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
@@ -310,6 +312,7 @@ impl Core {
         let impact = self.store.toggle_favorite(track_ids)?;
         self.invalidate_collection_impacts(impact.queue, impact.albums);
         if impact.changed {
+            self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
             self.state
                 .library
                 .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
@@ -376,6 +379,7 @@ impl Core {
         let impacts = crate::store::CatalogChanges {
             changed: true,
             library: true,
+            counts: true,
             structure: true,
             history: impact.history,
             duplicate_groups: impact.duplicate_groups,

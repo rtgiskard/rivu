@@ -825,6 +825,13 @@ Track payloads, and ID/location-only queries do not depend on this revision.
 Bitrate-only publication does not advance structure, collection membership, or
 count revisions, and does not query Queue, album, or playlist membership.
 
+`LibrarySnapshot.count_revision` / `QueryRevisions.counts` track catalog matching
+and membership facts independently of row freshness. Read-side scalar caches retain
+library, directory and album counts across playback-statistic and bitrate-only
+changes; text, path, favorite, missing-state and membership changes invalidate
+the affected count domains. Core and clients must use the same wire schema and
+be upgraded together.
+
 Consumers discard old-stamp payloads and reload on demand; hidden views wait for
 reveal. Hover uses retained rows, not another Track request. Range anchors ignore
 bitrate-only changes, while range responses still require their full stamp.

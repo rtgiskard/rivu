@@ -267,6 +267,8 @@ Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
 Library matching counts depend on filters and data revisions, not row sort order.
+The catalog count revision is independent of row-content revisions: play counts,
+last-played timestamps and bitrate-only changes do not discard these scalar totals.
 The batched root-count owner supplies unfiltered root totals; matching-count reads
 wait for its complete current snapshot rather than querying those totals again.
 Unfiltered root and Other totals follow roots/structure freshness independently;
