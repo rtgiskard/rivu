@@ -799,12 +799,13 @@ impl Playback {
                         .gap_0()
                         .flex_shrink_0()
                         .child(caption(theme, label).text_xs())
-                        .child(div().text_sm().child(value)),
+                        .child(div().min_w_0().text_sm().whitespace_normal().child(value)),
                 );
             }
             details = details.child(
                 caption(theme, self.context.tr("audio-output-note"))
                     .text_xs()
+                    .whitespace_normal()
                     .flex_shrink_0(),
             );
         } else {

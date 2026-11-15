@@ -11,6 +11,7 @@ ffmpeg = ["dep:bindgen", "dep:libloading"]
 test-support = []
 
 [dependencies]
+rivu-analysis = { path = "../rivu-analysis" }
 rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-metadata = { path = "../rivu-metadata" }
@@ -39,7 +40,6 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 [dev-dependencies]
 hound = "3.5"
 tempfile = "3.27"
-rivu-analysis = { path = "../rivu-analysis" }
 
 [build-dependencies]
 bindgen = { version = "0.73.2", default-features = false, features = ["runtime"], optional = true }

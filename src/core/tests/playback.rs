@@ -22,6 +22,7 @@ fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
         graph_processing: false,
         monitor_eq: false,
         master_gain_db: Some(0.0),
+        source_loudness_lufs: None,
         replaygain: ReplayGainStatus {
             enabled: false,
             peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,

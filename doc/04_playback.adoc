@@ -76,6 +76,12 @@ Negative sample headroom indicates downstream clipping risk, not proven clipping
 sample headroom is not true-peak headroom. Dynamic snapshots are rate-limited and
 paused playback does not create a diagnostics polling timer.
 
+Accumulated source loudness uses BS.1770 on decoded PCM before application DSP and
+gain. It covers the current playback segment, including bounded prefetch, not a
+whole-track scan; seek/source changes reset it and pause retains it. Reference gain
+targets −18 LUFS without peak limiting and never changes tags or playback gain.
+Insufficient data and sources without original PCM show `-`.
+
 
 === Playback navigation
 

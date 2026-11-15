@@ -13,6 +13,9 @@ pub struct AudioOutputState {
     pub monitor_eq: bool,
     pub master_gain_db: Option<f64>,
     pub replaygain: ReplayGainStatus,
+    /// Segment-integrated decoded source loudness before application DSP and gain.
+    /// Includes bounded decoder prefetch; not a whole-track measurement.
+    pub source_loudness_lufs: Option<f64>,
     pub stream: Arc<AudioStreamFormat>,
     pub sink: Option<Arc<str>>,
     pub remix_allowed: bool,

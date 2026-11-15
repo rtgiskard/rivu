@@ -1,6 +1,71 @@
-use super::Playback;
+use super::{Playback, Source};
+use rivu_analysis::loudness::LoudnessAnalyzer;
 use rivu_protocol::model::{AudioOutputState, AudioSourceFormat, AudioStreamFormat, OutputMetrics};
 use std::sync::Arc;
+
+/// Worker-owned source measurement; failures disable only this playback segment.
+#[derive(Default)]
+pub(super) struct SourceLoudness {
+    analyzer: Option<LoudnessAnalyzer>,
+    cached: Option<f64>,
+    dirty: bool,
+}
+
+impl SourceLoudness {
+    pub(super) fn new(source: &Source, original_source: bool) -> Self {
+        if !original_source || source.pcm().is_some() {
+            return Self::default();
+        }
+        let mut layout = [0; rivu_protocol::pcm::MAX_PCM_CHANNELS];
+        if source.layout().len() > layout.len() {
+            return Self::default();
+        }
+        for (id, channel) in layout.iter_mut().zip(source.layout()) {
+            *id = channel.standard_index();
+        }
+        Self {
+            analyzer: LoudnessAnalyzer::new(
+                source.info().sample_rate,
+                &layout[..source.layout().len()],
+            )
+            .ok(),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn push(&mut self, samples: &[f32]) {
+        if samples.is_empty() {
+            return;
+        }
+        if let Some(analyzer) = &mut self.analyzer {
+            if analyzer.push(samples).is_err() {
+                self.analyzer = None;
+                self.cached = None;
+                self.dirty = false;
+            } else {
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub(super) fn integrated_lufs(&mut self) -> Option<f64> {
+        if self.dirty {
+            self.dirty = false;
+            match self
+                .analyzer
+                .as_ref()
+                .map(LoudnessAnalyzer::integrated_lufs)
+            {
+                Some(Ok(lufs)) => self.cached = lufs,
+                _ => {
+                    self.analyzer = None;
+                    self.cached = None;
+                }
+            }
+        }
+        self.cached
+    }
+}
 
 /// Immutable format facts are reused between low-frequency snapshots.
 #[derive(Default)]
@@ -79,6 +144,7 @@ impl Playback {
             monitor_eq: self.equalizer.config().enabled,
             master_gain_db: (master > 0.0).then(|| 20.0 * f64::from(master).log10()),
             replaygain,
+            source_loudness_lufs: self.source_loudness.integrated_lufs(),
             stream: Arc::clone(stream),
             sink: output.sink_name,
             remix_allowed: output.remix_allowed,
@@ -116,5 +182,58 @@ impl Playback {
                     output.missing_frames as f64 / f64::from(output.stream_rate.max(1))
                 },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_pcm_disables_measurement_not_playback_and_seek_recovers() {
+        let file = crate::playback::tests::pcm();
+        let (mut playback, _) = crate::playback::tests::test_playback_selected(file.path(), None);
+        let samples = [0.1, -0.1].repeat(4_000);
+        playback.source_loudness.push(&samples);
+        let measured = playback.source_loudness.integrated_lufs();
+        assert!(measured.is_some());
+        assert!(!playback.source_loudness.dirty);
+        assert_eq!(playback.source_loudness.integrated_lufs(), measured);
+        assert!(!playback.source_loudness.dirty);
+        playback.source_loudness.push(&[f32::NAN]);
+        assert!(playback.source_loudness.analyzer.is_none());
+        assert_eq!(playback.source_loudness.integrated_lufs(), None);
+        playback.fill().unwrap();
+        assert!(playback.output.submitted() > 0);
+        assert_eq!(playback.output_diagnostics(1.0).source_loudness_lufs, None);
+        let (output, _) = crate::output::test_backend(8_000, false, playback.source.layout());
+        playback
+            .restart_output_with(Some(0.0), |_, _| Ok(output))
+            .unwrap();
+        assert!(playback.source_loudness.analyzer.is_some());
+        assert_eq!(playback.source_loudness.integrated_lufs(), None);
+        playback.source_loudness.push(&samples);
+        assert_eq!(playback.source_loudness.integrated_lufs(), measured);
+    }
+
+    #[test]
+    fn processed_audition_does_not_claim_original_source_loudness() {
+        let file = crate::playback::tests::pcm();
+        let (playback, _) = crate::playback::tests::test_playback_selected(file.path(), None);
+        let mut unavailable = SourceLoudness::new(&playback.source, false);
+        unavailable.push(&[0.1; 4_000]);
+        assert!(unavailable.analyzer.is_none());
+        assert_eq!(unavailable.integrated_lufs(), None);
+        let mut builder = crate::PcmBuilder::new(
+            8_000,
+            Arc::from(playback.source.layout()),
+            crate::PcmBudget::new(64 * 1024),
+        )
+        .unwrap();
+        builder.push(&[0.1; 4_000]).unwrap();
+        let source = Source::from_pcm(builder.finish().unwrap(), 0.0).unwrap();
+        let mut unavailable = SourceLoudness::new(&source, true);
+        assert!(unavailable.analyzer.is_none());
+        assert_eq!(unavailable.integrated_lufs(), None);
     }
 }

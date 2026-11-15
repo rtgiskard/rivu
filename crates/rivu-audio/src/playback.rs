@@ -85,6 +85,7 @@ pub(super) struct Playback {
     visualization: VisualizationCapture,
     render_source: super::AudioRenderSnapshot,
     diagnostics: diagnostics::OutputHistory,
+    source_loudness: diagnostics::SourceLoudness,
 }
 
 struct VisualizationCapture {
@@ -294,6 +295,8 @@ impl Playback {
         render_source.pcm = source.pcm().cloned();
         render_source.graph = graph.as_ref().map(GraphRunner::snapshot);
         let before_skip_frames = graph.as_ref().map_or(0, GraphRunner::source_lead_frames);
+        let source_loudness =
+            diagnostics::SourceLoudness::new(&source, source_info.is_none() || graph.is_some());
         Ok(Self {
             source,
             output,
@@ -335,6 +338,7 @@ impl Playback {
             },
             render_source,
             diagnostics: diagnostics::OutputHistory::default(),
+            source_loudness,
         })
     }
     // Explicit input rejection leaves the source and current output/analysis epoch intact.
@@ -383,6 +387,10 @@ impl Playback {
             (position, output_heard)
         };
         self.archive_output_diagnostics();
+        self.source_loudness = diagnostics::SourceLoudness::new(
+            &self.source,
+            self.source_info.is_none() || self.graph.is_some(),
+        );
         let heard = self.prior_heard + output_heard;
         self.equalizer.reset();
         if let Some(graph) = &mut self.graph {
@@ -647,6 +655,7 @@ impl Playback {
                             &mut remaining,
                         );
                         let samples = &frames[range.start * channels..range.end * channels];
+                        self.source_loudness.push(samples);
                         if self.visualization.signal == VisualizationSignal::Before {
                             let limit = frames.len() / channels
                                 + graph
@@ -660,14 +669,19 @@ impl Playback {
                             )?;
                         }
                         self.before_output_frames += (samples.len() / channels) as u64;
-                    } else if self.visualization.signal == VisualizationSignal::Before && !borrowed
-                    {
-                        self.visualization.stage_before(
-                            position,
-                            frames,
-                            channels,
-                            frames.len() / channels,
-                        )?;
+                    } else {
+                        // next_frames transfers the whole packet to this
+                        // pipeline, including the unsubmitted pending suffix.
+                        // Measure it once here, never again in submit_pending.
+                        self.source_loudness.push(frames);
+                        if self.visualization.signal == VisualizationSignal::Before && !borrowed {
+                            self.visualization.stage_before(
+                                position,
+                                frames,
+                                channels,
+                                frames.len() / channels,
+                            )?;
+                        }
                     }
                     if borrowed {
                         // Settled disabled EQ keeps the original borrowed fast path.
@@ -874,6 +888,192 @@ pub(super) mod tests {
         playback.visualization.producer = Some(producer);
         playback.set_signal(signal);
         (worker, captured)
+    }
+
+    fn loudness_pcm() -> (tempfile::NamedTempFile, Vec<f32>) {
+        let mut file = pcm_samples(16_000);
+        file.seek(SeekFrom::Start(44)).unwrap();
+        let samples = (0..16_000)
+            .map(|index| {
+                let amplitude = if index < 6_000 { 0.05 } else { 0.3 };
+                let phase = std::f64::consts::TAU * 997.0 * index as f64 / 8_000.0;
+                let sample = (amplitude * phase.sin() * 32768.0) as i16;
+                file.write_all(&sample.to_le_bytes()).unwrap();
+                f32::from(sample) / 32768.0
+            })
+            .collect();
+        (file, samples)
+    }
+
+    fn expected_source_loudness(samples: &[f32]) -> Option<f64> {
+        let mut analyzer = rivu_analysis::loudness::LoudnessAnalyzer::new(8_000, &[2]).unwrap();
+        analyzer.push(samples).unwrap();
+        analyzer.integrated_lufs().unwrap()
+    }
+
+    fn drain_loudness(playback: &mut Playback, mut render: impl FnMut(&mut [f32], u64)) {
+        for step in 0..64 {
+            playback.fill().unwrap();
+            render(&mut [0.0; 1024], step * 128);
+            if playback.eof {
+                return;
+            }
+        }
+        panic!("playback did not reach EOF");
+    }
+
+    #[test]
+    fn source_loudness_ignores_gain_eq_graph_and_pending_resubmission() {
+        use rivu_format::config::processing_graph::{GraphNodeKind, GraphPort};
+
+        let (file, samples) = loudness_pcm();
+        let expected = expected_source_loudness(&samples);
+        assert!(expected.is_some());
+        for processing in 0..3 {
+            for capacity in [17, 1024, 20_000] {
+                let (mut playback, _) = test_playback_selected(file.path(), None);
+                playback.set_visualization_enabled(false);
+                if processing != 0 {
+                    playback
+                        .set_equalizer(&EqualizerConfig {
+                            enabled: true,
+                            preamp_db: 6.0,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                }
+                if processing == 2 {
+                    let mut graph = unity_fir_graph();
+                    for node in &mut graph.nodes {
+                        if let GraphNodeKind::Equalizer { config, .. } = &mut node.kind {
+                            config.preamp_db = 12.0;
+                        }
+                    }
+                    let runner =
+                        GraphRunner::compile(&graph, GraphPort { node: 2, port: 0 }, 8_000, 1)
+                            .unwrap();
+                    playback.graph_skip_frames = runner.latency_frames();
+                    playback.graph = Some(runner);
+                }
+                let (output, mut render) = crate::output::test_backend_with_capacity(
+                    8_000,
+                    false,
+                    playback.source.layout(),
+                    capacity,
+                );
+                playback.output = output;
+                playback
+                    .set_metadata(
+                        Arc::new(PlaybackMetadata {
+                            replaygain_track_gain: Some(12.0),
+                            ..Default::default()
+                        }),
+                        0.3,
+                    )
+                    .unwrap();
+                playback.set_replaygain(true, ReplayGainPeakPolicy::Off, 0.3);
+                let mut audible = vec![0.0; capacity];
+                for step in 0..2_000 {
+                    playback.fill().unwrap();
+                    let before = playback.output_diagnostics(0.3).source_loudness_lufs;
+                    // A full queue retries the pending suffix without accepting
+                    // a new source packet. Neither retry nor snapshot re-counts it.
+                    if playback.output.vacant_frames() == 0 {
+                        playback.fill().unwrap();
+                    }
+                    assert_eq!(
+                        playback.output_diagnostics(0.3).source_loudness_lufs,
+                        before
+                    );
+                    if step == 10 {
+                        playback.set_volume(0.0);
+                        playback.set_replaygain(false, ReplayGainPeakPolicy::Off, 0.0);
+                        playback.set_equalizer(&EqualizerConfig::default()).unwrap();
+                    }
+                    render(&mut audible, step * capacity as u64 / 8);
+                    if playback.eof {
+                        break;
+                    }
+                }
+                assert!(playback.eof);
+                assert_eq!(
+                    playback.output_diagnostics(0.0).source_loudness_lufs,
+                    expected,
+                    "processing={processing}, capacity={capacity}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_loudness_survives_pause_but_resets_on_seek_and_new_source() {
+        let (file, samples) = loudness_pcm();
+        let (mut playback, render) = test_playback_selected(file.path(), None);
+        drain_loudness(&mut playback, render);
+        let measured = playback.output_diagnostics(1.0).source_loudness_lufs;
+        assert_eq!(measured, expected_source_loudness(&samples));
+        playback.pause(true);
+        playback.fill().unwrap();
+        assert_eq!(
+            playback.output_diagnostics(1.0).source_loudness_lufs,
+            measured
+        );
+        assert!(
+            playback
+                .restart_output_with(Some(-1.0), |_, _| unreachable!("invalid seek"))
+                .is_err()
+        );
+        assert_eq!(
+            playback.output_diagnostics(1.0).source_loudness_lufs,
+            measured
+        );
+        let (output, render) = crate::output::test_backend(8_000, true, playback.source.layout());
+        playback
+            .restart_output_with(Some(0.75), |_, _| Ok(output))
+            .unwrap();
+        assert_eq!(playback.output_diagnostics(1.0).source_loudness_lufs, None);
+        playback.pause(false);
+        drain_loudness(&mut playback, render);
+        assert_eq!(
+            playback.output_diagnostics(1.0).source_loudness_lufs,
+            expected_source_loudness(&samples[6_000..])
+        );
+        let (mut next, _) = test_playback_selected(file.path(), None);
+        assert_eq!(next.output_diagnostics(1.0).source_loudness_lufs, None);
+    }
+
+    #[test]
+    fn source_loudness_excludes_graph_preroll_tail_and_eof_flush() {
+        use rivu_format::config::processing_graph::GraphPort;
+
+        let (file, samples) = loudness_pcm();
+        for published in [3_000, 8_000] {
+            let (mut playback, render) = test_playback_selected(file.path(), None);
+            let mut graph =
+                GraphRunner::compile(&unity_fir_graph(), GraphPort { node: 2, port: 0 }, 8_000, 1)
+                    .unwrap();
+            graph.set_source_context(-32, published).unwrap();
+            playback.graph_skip_frames = graph.latency_frames();
+            playback.before_skip_frames = graph.source_lead_frames();
+            playback.graph_output_remaining = Some(published);
+            playback.graph = Some(graph);
+            drain_loudness(&mut playback, render);
+            assert_eq!(
+                playback.output_diagnostics(1.0).source_loudness_lufs,
+                expected_source_loudness(&samples[32..32 + published as usize])
+            );
+        }
+        // Real input shorter than the first gate must remain unavailable even
+        // though draining the FIR creates additional output/latency frames.
+        let file = pcm_samples(3_000);
+        let (mut playback, render) = test_playback_selected(file.path(), None);
+        let graph =
+            GraphRunner::compile(&unity_fir_graph(), GraphPort { node: 2, port: 0 }, 8_000, 1)
+                .unwrap();
+        playback.graph_skip_frames = graph.latency_frames();
+        playback.graph = Some(graph);
+        drain_loudness(&mut playback, render);
+        assert_eq!(playback.output_diagnostics(1.0).source_loudness_lufs, None);
     }
 
     #[test]
@@ -1349,6 +1549,7 @@ pub(super) mod tests {
             source.replaygain_track_peak(),
             false,
         );
+        let source_loudness = diagnostics::SourceLoudness::new(&source, true);
         let playback = Playback {
             source,
             output,
@@ -1396,6 +1597,7 @@ pub(super) mod tests {
                 Arc::new(EqualizerConfig::default()),
             ),
             diagnostics: diagnostics::OutputHistory::default(),
+            source_loudness,
         };
         (playback, render)
     }

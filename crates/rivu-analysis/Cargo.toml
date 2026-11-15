@@ -2,12 +2,14 @@
 name = "rivu-analysis"
 version = "0.2.8"
 edition = "2024"
-description = "Synchronous bounded realtime display analysis for Rivu clients"
+description = "Bounded PCM display and cumulative loudness analysis for Rivu clients"
 
 [features]
 test-support = []
 
 [dependencies]
+anyhow = "1"
+ebur128 = "0.1.11"
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }
 rustfft = "6"
