@@ -76,6 +76,9 @@ impl Core {
         self.state.playback.last_heard_at = None;
         self.state.playback.status = status;
         self.state.playback.stopped_source_generation = None;
+        self.state.playback.audio_output = None;
+        self.transport.output_prior_underruns = 0;
+        self.transport.output_prior_missing_seconds = 0.0;
         // Admitting audio does not resolve a pending History projection failure.
         if !self.transport.history_pending {
             self.state.system.last_error = None;
@@ -92,6 +95,9 @@ impl Core {
         self.state.queue.current_position = None;
         self.state.current_track = None;
         self.state.playback.stopped_source_generation = None;
+        self.state.playback.audio_output = None;
+        self.transport.output_prior_underruns = 0;
+        self.transport.output_prior_missing_seconds = 0.0;
         if changed {
             self.queue_mutation_committed(QueueRefresh::Reload)
         } else {

@@ -625,6 +625,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         output_device: Some("USB DAC".to_owned()),
         volume: 0.25,
         replaygain_enabled: true,
+        replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy::PreventClipping,
         shuffle: true,
         repeat: RepeatMode::All,
         play_count_threshold_percent: 35.5,

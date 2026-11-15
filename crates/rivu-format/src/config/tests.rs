@@ -20,6 +20,32 @@ fn replaygain_defaults_false_and_persists_both_toggle_states() {
 }
 
 #[test]
+fn replaygain_peak_policy_defaults_off_and_roundtrips_strictly() {
+    assert_eq!(
+        Config::default().replaygain_peak_policy,
+        ReplayGainPeakPolicy::Off
+    );
+    let mut baseline = from_toml("# keep\n[playback]\nvolume_percent = 45\n").unwrap();
+    assert_eq!(baseline.replaygain_peak_policy, ReplayGainPeakPolicy::Off);
+    let mut saved = "# keep\n[playback]\nvolume_percent = 45\n".to_owned();
+    for policy in [
+        ReplayGainPeakPolicy::PreventClipping,
+        ReplayGainPeakPolicy::Off,
+    ] {
+        let mut config = baseline.clone();
+        config.replaygain_peak_policy = policy;
+        saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+        assert!(saved.contains("# keep"));
+        assert_eq!(from_toml(&saved).unwrap().replaygain_peak_policy, policy);
+        assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+        baseline = config;
+    }
+    for value in ["true", "1", "\"limit\"", "\"PreventClipping\""] {
+        assert!(from_toml(&format!("[playback]\nreplaygain_peak_policy = {value}")).is_err());
+    }
+}
+
+#[test]
 fn preset_overrides_and_deletions_survive_configuration_reload() {
     let original = "[equalizer]\nenabled = true\npreamp_db = -8.0\n";
     let baseline = from_toml(original).unwrap();

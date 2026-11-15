@@ -2147,6 +2147,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     draft.spectrum_bar_layout = SpectrumBarLayout::Fixed { count: 48 };
     draft.scan_max_depth = 7;
     draft.replaygain_enabled = true;
+    draft.replaygain_peak_policy = rivu_format::config::ReplayGainPeakPolicy::PreventClipping;
     draft.material.enabled = false;
     draft.material.selected = rivu_format::config::MaterialPreset::Dissolve;
     let patch = ConfigPatch::between(&baseline, &draft);
@@ -2178,6 +2179,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     assert_eq!(owner.volume, 0.2);
     assert!(owner.shuffle);
     assert!(owner.replaygain_enabled);
+    assert_eq!(owner.replaygain_peak_policy, draft.replaygain_peak_policy);
     assert_eq!(owner.material, draft.material);
 }
 

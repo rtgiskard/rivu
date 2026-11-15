@@ -475,6 +475,7 @@ fn visual_switch(
     let label = label.into();
     let hint = match id {
         "settings-tray" => i18n.text("settings-tray-restart-hint"),
+        "settings-replaygain-prevent-clipping" => i18n.text("settings-replaygain-peak-help"),
         "settings-visualization-disabled" => i18n.text("settings-visualization-disabled-hint"),
         "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
         "default-visualizer-reference-lines" => i18n.text("settings-visualizer-guides-hint"),

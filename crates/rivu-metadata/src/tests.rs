@@ -117,6 +117,38 @@ fn replaygain_missing_track_gain_is_none() {
 }
 
 #[test]
+fn runtime_track_peak_is_positive_finite_and_never_uses_album_peak() {
+    for (peak, expected) in [
+        ("0.8", Some(0.8)),
+        (" 1.5 ", Some(1.5)),
+        ("0", None),
+        ("-1", None),
+        ("NaN", None),
+        ("inf", None),
+        ("1 dB", None),
+    ] {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&flac(
+            &[
+                "REPLAYGAIN_TRACK_GAIN=6 dB",
+                &format!("REPLAYGAIN_TRACK_PEAK={peak}"),
+                "REPLAYGAIN_ALBUM_PEAK=0.5",
+            ],
+            None,
+        ))
+        .unwrap();
+        let (tags, actual) = read_playback_tags(&mut file).unwrap().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(tags.replaygain_track_gain, Some(6.0));
+        assert_eq!(read_tags(&mut file).unwrap().unwrap(), tags);
+    }
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&flac(&["REPLAYGAIN_ALBUM_PEAK=0.5"], None))
+        .unwrap();
+    assert_eq!(read_playback_tags(&mut file).unwrap().unwrap().1, None);
+}
+
+#[test]
 fn descriptive_edits_preserve_existing_replaygain_tags() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gain.flac");

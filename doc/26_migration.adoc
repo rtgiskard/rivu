@@ -42,6 +42,11 @@ Protocol 41 adds the ReplayGain setting, track gain, and single-field edits. Upg
 Core and frontends together. Source-tag operations include track gain; database
 format 7 is required, while configuration remains compatible.
 
+Protocol 42 adds runtime audio-output diagnostics and the global ReplayGain peak
+policy. Upgrade Core and frontends together and restart Core. Configuration defaults
+preserve existing gain behavior; peak tags and diagnostics are not stored in the
+database, so this change requires no database migration.
+
 To inspect or upgrade a supported database before application startup, stop Rivu
 and run the tool with the intended data directory and configuration:
 

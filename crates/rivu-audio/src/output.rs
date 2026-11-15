@@ -19,7 +19,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -121,6 +121,349 @@ impl std::fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
+/// One native-output lifetime. Times are PipeWire monotonic nanoseconds, not UTC.
+/// Peaks are measured after Rivu's final gain/mapping, before PipeWire conversion.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct OutputDiagnosticsSnapshot {
+    pub(super) segment_id: u64,
+    pub(super) closed: bool,
+    pub(super) paused: bool,
+    pub(super) input_finished: bool,
+    pub(super) source_rate: u32,
+    pub(super) source_channels: usize,
+    pub(super) stream_rate: u32,
+    pub(super) stream_channels: usize,
+    pub(super) stream_format: &'static str,
+    pub(super) stream_layout: Arc<str>,
+    pub(super) sink_name: Option<Arc<str>>,
+    pub(super) remix_allowed: bool,
+    pub(super) graph_rate: Option<u32>,
+    pub(super) graph_quantum: Option<u64>,
+    pub(super) hardware_rate: Option<u32>,
+    pub(super) hardware_format: Option<&'static str>,
+    pub(super) callback_count: u64,
+    pub(super) started: bool,
+    pub(super) startup_wait_callbacks: u64,
+    pub(super) startup_wait_frames: u64,
+    pub(super) underrun_events: u64,
+    pub(super) underrun_callbacks: u64,
+    pub(super) missing_frames: u64,
+    pub(super) last_underrun_at_ns: Option<u64>,
+    // An empty prefix cannot distinguish a stalled producer from its final tail.
+    // Keep it visible but unconfirmed until more PCM or finish_input resolves it.
+    pub(super) pending_callbacks: u64,
+    pub(super) pending_missing_frames: u64,
+    pub(super) pending_since_ns: Option<u64>,
+    pub(super) ring_frames: usize,
+    pub(super) ring_capacity_frames: usize,
+    pub(super) ring_low_watermark: Option<usize>,
+    // Non-overlapping 250ms windows; hold/counters last for the entire segment.
+    pub(super) sample_peak: Option<f32>,
+    pub(super) peak_hold: Option<f32>,
+    pub(super) overrange_frames: u64,
+    pub(super) peak_window_start_ns: Option<u64>,
+    pub(super) last_callback_at_ns: Option<u64>,
+    pub(super) observed_at_ns: Option<u64>,
+}
+
+struct StreamFormat {
+    rate: u32,
+    channels: usize,
+    layout: Arc<str>,
+    sink_name: Option<Arc<str>>,
+    remix_allowed: bool,
+}
+
+const INPUT_OPEN: u64 = u64::MAX;
+const NO_OBSERVATION: u64 = u64::MAX;
+const PEAK_WINDOW_NS: u64 = 250_000_000;
+static NEXT_OUTPUT_SEGMENT: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+struct CallbackDiagnostics {
+    callback_count: u64,
+    started: bool,
+    startup_wait_callbacks: u64,
+    startup_wait_frames: u64,
+    underrun_events: u64,
+    underrun_active: bool,
+    underrun_callbacks: u64,
+    missing_frames: u64,
+    last_underrun_at_ns: u64,
+    pending_callbacks: u64,
+    pending_missing_frames: u64,
+    pending_since_ns: u64,
+    pending_last_at_ns: u64,
+    consumed_frames: u64,
+    ring_low_watermark: u64,
+    // An empty ring may be the final frame, even when this callback was full.
+    // Only a later nonempty prefix proves that this zero was not a terminal tail.
+    pending_empty_ring: bool,
+    sample_peak: f32,
+    peak_hold: f32,
+    overrange_frames: u64,
+    peak_window_start_ns: u64,
+    peak_window_has_audio: bool,
+    last_callback_at_ns: u64,
+    graph_rate: u32,
+    graph_quantum: u64,
+}
+
+impl Default for CallbackDiagnostics {
+    fn default() -> Self {
+        Self {
+            callback_count: 0,
+            started: false,
+            startup_wait_callbacks: 0,
+            startup_wait_frames: 0,
+            underrun_events: 0,
+            underrun_active: false,
+            underrun_callbacks: 0,
+            missing_frames: 0,
+            last_underrun_at_ns: NO_OBSERVATION,
+            pending_callbacks: 0,
+            pending_missing_frames: 0,
+            pending_since_ns: NO_OBSERVATION,
+            pending_last_at_ns: NO_OBSERVATION,
+            consumed_frames: 0,
+            ring_low_watermark: NO_OBSERVATION,
+            pending_empty_ring: false,
+            sample_peak: 0.0,
+            peak_hold: 0.0,
+            overrange_frames: 0,
+            peak_window_start_ns: NO_OBSERVATION,
+            peak_window_has_audio: false,
+            last_callback_at_ns: NO_OBSERVATION,
+            graph_rate: 0,
+            graph_quantum: 0,
+        }
+    }
+}
+
+impl CallbackDiagnostics {
+    fn begin(&mut self, now: u64) {
+        self.callback_count += 1;
+        self.last_callback_at_ns = now;
+        let window = now / PEAK_WINDOW_NS * PEAK_WINDOW_NS;
+        if self.peak_window_start_ns != window {
+            self.peak_window_start_ns = window;
+            self.sample_peak = 0.0;
+            self.peak_window_has_audio = false;
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_callbacks = 0;
+        self.pending_missing_frames = 0;
+        self.pending_since_ns = NO_OBSERVATION;
+        self.pending_last_at_ns = NO_OBSERVATION;
+    }
+
+    fn confirm_pending(&mut self) {
+        if self.pending_callbacks != 0 {
+            if !self.underrun_active {
+                self.underrun_events += 1;
+                self.underrun_active = true;
+            }
+            self.underrun_callbacks += self.pending_callbacks;
+            self.missing_frames += self.pending_missing_frames;
+            self.last_underrun_at_ns = self.pending_last_at_ns;
+            self.clear_pending();
+        }
+        if self.pending_empty_ring {
+            self.ring_low_watermark = 0;
+            self.pending_empty_ring = false;
+        }
+    }
+
+    fn resolve_end(&mut self, end: u64) {
+        if end == INPUT_OPEN {
+            return;
+        }
+        if end > self.consumed_frames {
+            // The final watermark proves there is more PCM beyond this gap.
+            self.confirm_pending();
+        } else {
+            self.clear_pending();
+            self.pending_empty_ring = false;
+            self.underrun_active = false;
+        }
+    }
+
+    fn record_supply(&mut self, requested: usize, count: usize, remaining: usize, end: u64) {
+        if count != 0 {
+            self.confirm_pending();
+            self.started = true;
+            self.consumed_frames += count as u64;
+        }
+        self.resolve_end(end);
+        if requested != 0 && count == requested {
+            self.underrun_active = false;
+        }
+        if requested == 0 || end == self.consumed_frames {
+            return;
+        }
+        if !self.started {
+            self.startup_wait_callbacks += 1;
+            self.startup_wait_frames += requested as u64;
+            return;
+        }
+        if remaining == 0 {
+            self.pending_empty_ring = true;
+        } else {
+            self.ring_low_watermark = self.ring_low_watermark.min(remaining as u64);
+        }
+        let missing = requested - count;
+        if missing != 0 {
+            if self.pending_callbacks == 0 {
+                self.pending_since_ns = self.last_callback_at_ns;
+            }
+            self.pending_callbacks += 1;
+            self.pending_missing_frames += missing as u64;
+            self.pending_last_at_ns = self.last_callback_at_ns;
+        }
+        self.resolve_end(end);
+    }
+
+    fn record_peak(&mut self, peak: f32, overrange_frames: u64) {
+        self.peak_window_has_audio = true;
+        self.sample_peak = self.sample_peak.max(peak);
+        self.peak_hold = self.peak_hold.max(peak);
+        self.overrange_frames += overrange_frames;
+    }
+}
+
+// Single callback writer; readers retry off the realtime path. Atomic payloads
+// make even an interrupted read race-free. No allocation, mutex or logging is
+// needed to publish a coherent callback snapshot.
+#[derive(Default)]
+struct DiagnosticStorage {
+    sequence: AtomicU64,
+    callback_count: AtomicU64,
+    started: AtomicBool,
+    startup_wait_callbacks: AtomicU64,
+    startup_wait_frames: AtomicU64,
+    underrun_events: AtomicU64,
+    underrun_active: AtomicBool,
+    underrun_callbacks: AtomicU64,
+    missing_frames: AtomicU64,
+    last_underrun_at_ns: AtomicU64,
+    pending_callbacks: AtomicU64,
+    pending_missing_frames: AtomicU64,
+    pending_since_ns: AtomicU64,
+    pending_last_at_ns: AtomicU64,
+    consumed_frames: AtomicU64,
+    ring_low_watermark: AtomicU64,
+    pending_empty_ring: AtomicBool,
+    sample_peak: AtomicU32,
+    peak_hold: AtomicU32,
+    overrange_frames: AtomicU64,
+    peak_window_start_ns: AtomicU64,
+    peak_window_has_audio: AtomicBool,
+    last_callback_at_ns: AtomicU64,
+    graph_rate: AtomicU32,
+    graph_quantum: AtomicU64,
+}
+
+impl DiagnosticStorage {
+    fn new() -> Self {
+        let shared = Self::default();
+        shared.publish(&CallbackDiagnostics::default());
+        shared
+    }
+
+    fn publish(&self, state: &CallbackDiagnostics) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.callback_count
+            .store(state.callback_count, Ordering::Relaxed);
+        self.started.store(state.started, Ordering::Relaxed);
+        self.startup_wait_callbacks
+            .store(state.startup_wait_callbacks, Ordering::Relaxed);
+        self.startup_wait_frames
+            .store(state.startup_wait_frames, Ordering::Relaxed);
+        self.underrun_events
+            .store(state.underrun_events, Ordering::Relaxed);
+        self.underrun_active
+            .store(state.underrun_active, Ordering::Relaxed);
+        self.underrun_callbacks
+            .store(state.underrun_callbacks, Ordering::Relaxed);
+        self.missing_frames
+            .store(state.missing_frames, Ordering::Relaxed);
+        self.last_underrun_at_ns
+            .store(state.last_underrun_at_ns, Ordering::Relaxed);
+        self.pending_callbacks
+            .store(state.pending_callbacks, Ordering::Relaxed);
+        self.pending_missing_frames
+            .store(state.pending_missing_frames, Ordering::Relaxed);
+        self.pending_since_ns
+            .store(state.pending_since_ns, Ordering::Relaxed);
+        self.pending_last_at_ns
+            .store(state.pending_last_at_ns, Ordering::Relaxed);
+        self.consumed_frames
+            .store(state.consumed_frames, Ordering::Relaxed);
+        self.ring_low_watermark
+            .store(state.ring_low_watermark, Ordering::Relaxed);
+        self.pending_empty_ring
+            .store(state.pending_empty_ring, Ordering::Relaxed);
+        self.sample_peak
+            .store(state.sample_peak.to_bits(), Ordering::Relaxed);
+        self.peak_hold
+            .store(state.peak_hold.to_bits(), Ordering::Relaxed);
+        self.overrange_frames
+            .store(state.overrange_frames, Ordering::Relaxed);
+        self.peak_window_start_ns
+            .store(state.peak_window_start_ns, Ordering::Relaxed);
+        self.peak_window_has_audio
+            .store(state.peak_window_has_audio, Ordering::Relaxed);
+        self.last_callback_at_ns
+            .store(state.last_callback_at_ns, Ordering::Relaxed);
+        self.graph_rate.store(state.graph_rate, Ordering::Relaxed);
+        self.graph_quantum
+            .store(state.graph_quantum, Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> CallbackDiagnostics {
+        loop {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            if sequence & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let state = CallbackDiagnostics {
+                callback_count: self.callback_count.load(Ordering::Relaxed),
+                started: self.started.load(Ordering::Relaxed),
+                startup_wait_callbacks: self.startup_wait_callbacks.load(Ordering::Relaxed),
+                startup_wait_frames: self.startup_wait_frames.load(Ordering::Relaxed),
+                underrun_events: self.underrun_events.load(Ordering::Relaxed),
+                underrun_active: self.underrun_active.load(Ordering::Relaxed),
+                underrun_callbacks: self.underrun_callbacks.load(Ordering::Relaxed),
+                missing_frames: self.missing_frames.load(Ordering::Relaxed),
+                last_underrun_at_ns: self.last_underrun_at_ns.load(Ordering::Relaxed),
+                pending_callbacks: self.pending_callbacks.load(Ordering::Relaxed),
+                pending_missing_frames: self.pending_missing_frames.load(Ordering::Relaxed),
+                pending_since_ns: self.pending_since_ns.load(Ordering::Relaxed),
+                pending_last_at_ns: self.pending_last_at_ns.load(Ordering::Relaxed),
+                consumed_frames: self.consumed_frames.load(Ordering::Relaxed),
+                ring_low_watermark: self.ring_low_watermark.load(Ordering::Relaxed),
+                pending_empty_ring: self.pending_empty_ring.load(Ordering::Relaxed),
+                sample_peak: f32::from_bits(self.sample_peak.load(Ordering::Relaxed)),
+                peak_hold: f32::from_bits(self.peak_hold.load(Ordering::Relaxed)),
+                overrange_frames: self.overrange_frames.load(Ordering::Relaxed),
+                peak_window_start_ns: self.peak_window_start_ns.load(Ordering::Relaxed),
+                peak_window_has_audio: self.peak_window_has_audio.load(Ordering::Relaxed),
+                last_callback_at_ns: self.last_callback_at_ns.load(Ordering::Relaxed),
+                graph_rate: self.graph_rate.load(Ordering::Relaxed),
+                graph_quantum: self.graph_quantum.load(Ordering::Relaxed),
+            };
+            fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == sequence {
+                return state;
+            }
+        }
+    }
+}
+
 struct OutputShared {
     paused: AtomicBool,
     pause_settled: AtomicBool,
@@ -132,6 +475,8 @@ struct OutputShared {
     timing_error: AtomicU32,
     // Combined master/source amplitude gain, prepared outside the realtime callback.
     gain: AtomicU32,
+    input_end: AtomicU64,
+    diagnostics: DiagnosticStorage,
 }
 impl OutputShared {
     fn new(gain: f32, paused: bool, pcm: &Arc<PcmControl>) -> Self {
@@ -145,6 +490,8 @@ impl OutputShared {
             pcm: Arc::clone(pcm),
             timing_error: AtomicU32::new(0),
             gain: AtomicU32::new(gain.to_bits()),
+            input_end: AtomicU64::new(INPUT_OPEN),
+            diagnostics: DiagnosticStorage::new(),
         }
     }
 
@@ -252,6 +599,9 @@ pub(super) struct Output {
     // The shared PCM cursor belongs to the next epoch once output is rebuilt.
     // Retain this epoch's final count after its callback owner has joined.
     final_heard_frames: Option<u64>,
+    segment_id: u64,
+    format: StreamFormat,
+    final_diagnostics: Option<OutputDiagnosticsSnapshot>,
     #[cfg(test)]
     on_close: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -295,8 +645,10 @@ impl Output {
             source_channels,
             rate,
             clock: PlaybackClock::new(),
+            diagnostics: CallbackDiagnostics::default(),
+            graph_position: None,
         };
-        let stream = NativeStream::open(
+        let (stream, format) = NativeStream::open(
             target,
             source_layout,
             options.auto_mix,
@@ -313,6 +665,9 @@ impl Output {
             errors,
             submitted: 0,
             final_heard_frames: None,
+            segment_id: NEXT_OUTPUT_SEGMENT.fetch_add(1, Ordering::Relaxed),
+            format,
+            final_diagnostics: None,
             #[cfg(test)]
             on_close: None,
         })
@@ -353,6 +708,11 @@ impl Output {
 
     // Return complete frames consumed; never publish a partial interleaved frame.
     pub(super) fn push(&mut self, samples: &[f32]) -> usize {
+        assert_eq!(
+            self.shared.input_end.load(Ordering::Acquire),
+            INPUT_OPEN,
+            "PCM submitted after finish_input"
+        );
         let frames = (samples.len() / self.source_channels)
             .min(self.producer.vacant_len() / self.source_channels);
         let count = self
@@ -364,6 +724,75 @@ impl Output {
             self.shared.refill_armed.store(true, Ordering::Release);
         }
         frames
+    }
+
+    /// Publish only after every decoder/processing tail frame has been admitted.
+    /// This watermark is permanent for this output; seeks/rebuilds use a new one.
+    pub(super) fn finish_input(&mut self) {
+        self.shared
+            .input_end
+            .store(self.submitted, Ordering::Release);
+    }
+
+    pub(super) fn diagnostics(&self) -> OutputDiagnosticsSnapshot {
+        if let Some(snapshot) = &self.final_diagnostics {
+            return snapshot.clone();
+        }
+        self.diagnostics_at(monotonic_now())
+    }
+
+    fn diagnostics_at(&self, observed_at_ns: Option<u64>) -> OutputDiagnosticsSnapshot {
+        if let Some(snapshot) = &self.final_diagnostics {
+            return snapshot.clone();
+        }
+        let mut state = self.shared.diagnostics.snapshot();
+        let end = self.shared.input_end.load(Ordering::Acquire);
+        // finish_input may follow the last callback, including while paused.
+        // Resolve its published prefix here too without mutating callback state.
+        state.resolve_end(end);
+        let observed = |value| (value != NO_OBSERVATION).then_some(value);
+        OutputDiagnosticsSnapshot {
+            segment_id: self.segment_id,
+            closed: self.final_heard_frames.is_some(),
+            paused: self.shared.paused.load(Ordering::Acquire),
+            input_finished: end != INPUT_OPEN,
+            source_rate: self.rate,
+            source_channels: self.source_channels,
+            stream_rate: self.format.rate,
+            stream_channels: self.format.channels,
+            stream_format: "F32LE",
+            stream_layout: Arc::clone(&self.format.layout),
+            sink_name: self.format.sink_name.clone(),
+            remix_allowed: self.format.remix_allowed,
+            graph_rate: (state.graph_rate != 0).then_some(state.graph_rate),
+            graph_quantum: (state.graph_quantum != 0).then_some(state.graph_quantum),
+            hardware_rate: None,
+            hardware_format: None,
+            callback_count: state.callback_count,
+            started: state.started,
+            startup_wait_callbacks: state.startup_wait_callbacks,
+            startup_wait_frames: state.startup_wait_frames,
+            underrun_events: state.underrun_events,
+            underrun_callbacks: state.underrun_callbacks,
+            missing_frames: state.missing_frames,
+            last_underrun_at_ns: observed(state.last_underrun_at_ns),
+            pending_callbacks: state.pending_callbacks,
+            pending_missing_frames: state.pending_missing_frames,
+            pending_since_ns: observed(state.pending_since_ns),
+            ring_frames: self.producer.occupied_len() / self.source_channels,
+            ring_capacity_frames: self.producer.capacity().get() / self.source_channels,
+            ring_low_watermark: observed(state.ring_low_watermark).map(|frames| frames as usize),
+            sample_peak: (state.peak_window_has_audio
+                && observed_at_ns.is_none_or(|now| {
+                    now.saturating_sub(state.peak_window_start_ns) < PEAK_WINDOW_NS
+                }))
+            .then_some(state.sample_peak),
+            peak_hold: state.started.then_some(state.peak_hold),
+            overrange_frames: state.overrange_frames,
+            peak_window_start_ns: observed(state.peak_window_start_ns),
+            last_callback_at_ns: observed(state.last_callback_at_ns),
+            observed_at_ns,
+        }
     }
 
     pub(super) fn drained(&self) -> bool {
@@ -419,6 +848,7 @@ impl Output {
                 on_close();
             }
             self.final_heard_frames = Some(self.shared.pcm.heard_frame.load(Ordering::Acquire));
+            self.final_diagnostics = Some(self.diagnostics());
         }
         self.heard()
     }
@@ -447,10 +877,29 @@ struct OutputCallback {
     source_channels: usize,
     rate: u32,
     clock: PlaybackClock,
+    diagnostics: CallbackDiagnostics,
+    // PipeWire owns this mapping and invalidates it through io_changed before
+    // release. Only its owner loop reads it, and only inside process callbacks.
+    graph_position: Option<usize>,
 }
 impl OutputCallback {
     // Fixed storage bounds callback memory independently of device buffer size.
     const BLOCK_FRAMES: usize = 256;
+
+    fn observe_graph_clock(&mut self) {
+        let (rate, quantum) = match self.graph_position {
+            Some(position) => {
+                // SAFETY: io_changed validates the mapped area and clears it
+                // before release. PipeWire updates the driver clock before
+                // process; this stream has no separate RT_PROCESS thread.
+                let clock = unsafe { &(*(position as *const spa::sys::spa_io_position)).clock };
+                graph_clock(clock)
+            }
+            None => (0, 0),
+        };
+        self.diagnostics.graph_rate = rate;
+        self.diagnostics.graph_quantum = quantum;
+    }
 
     fn render_native(&mut self, data: &mut [f32], timestamp: OutputTimestamp, routed: bool) {
         if routed {
@@ -458,10 +907,21 @@ impl OutputCallback {
         } else {
             // Keep unconfirmed PipeWire routes silent without consuming PCM.
             data.fill(0.0);
+            self.diagnostics.begin(timestamp.callback.0);
+            if !self.shared.paused.load(Ordering::Acquire) && !self.diagnostics.started {
+                self.diagnostics.record_supply(
+                    data.len() / self.channels,
+                    0,
+                    self.consumer.occupied_len() / self.source_channels,
+                    self.shared.input_end.load(Ordering::Acquire),
+                );
+            }
+            self.shared.diagnostics.publish(&self.diagnostics);
         }
     }
 
     fn render(&mut self, data: &mut [f32], timestamp: OutputTimestamp) {
+        self.diagnostics.begin(timestamp.callback.0);
         self.clock.advance(timestamp, self.rate, &self.shared);
         let paused = self.shared.paused.load(Ordering::Acquire);
         if paused
@@ -472,6 +932,10 @@ impl OutputCallback {
         }
         let gain = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
         let source_channels = self.source_channels;
+        // Acquire the final watermark before ring availability: observing EOF
+        // must also observe every preceding producer publication. Re-read it
+        // below to catch finish_input racing this callback's short prefix.
+        let _end = self.shared.input_end.load(Ordering::Acquire);
         // Snapshot availability: valid frames form one prefix, even if the
         // producer refills concurrently after an underflow.
         let mut count = if paused || self.shared.timing_error.load(Ordering::Acquire) != 0 {
@@ -497,6 +961,8 @@ impl OutputCallback {
         };
         // Valid mapped samples are written once; only the silent tail is cleared.
         data[count * self.channels..].fill(0.0);
+        let mut peak = 0.0_f32;
+        let mut overrange_frames = 0;
         for block in data[..count * self.channels].chunks_mut(Self::BLOCK_FRAMES * self.channels) {
             // Publish ring consumption once per block, including wrapped rings.
             // Scratch is fixed before stream start; every chunk contains whole frames.
@@ -510,12 +976,16 @@ impl OutputCallback {
                 .chunks_exact_mut(self.channels)
                 .zip(scratch.chunks_exact(source_channels))
             {
+                let mut frame_peak = 0.0_f32;
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
                         Some(source) => (frame[*source] * gain).clamp(-f32::MAX, f32::MAX),
                         None => 0.0,
                     };
+                    frame_peak = frame_peak.max(sample.abs());
                 }
+                peak = peak.max(frame_peak);
+                overrange_frames += u64::from(frame_peak > 1.0);
             }
         }
         if count > 0
@@ -531,6 +1001,18 @@ impl OutputCallback {
                 heard: 0,
             });
         }
+        if count != 0 {
+            self.diagnostics.record_peak(peak, overrange_frames);
+        }
+        if !paused && self.shared.timing_error.load(Ordering::Acquire) == 0 {
+            self.diagnostics.record_supply(
+                data.len() / self.channels,
+                count,
+                self.consumer.occupied_len() / source_channels,
+                self.shared.input_end.load(Ordering::Acquire),
+            );
+        }
+        self.shared.diagnostics.publish(&self.diagnostics);
     }
 }
 
@@ -849,7 +1331,7 @@ impl NativeStream {
         metadata: Arc<PlaybackMetadata>,
         callback: OutputCallback,
         errors: crossbeam_channel::Sender<OutputError>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, StreamFormat)> {
         let name = name.map(str::to_owned);
         let source_layout = source_layout.to_vec();
         let control = Arc::new(NativeControl {
@@ -881,11 +1363,11 @@ impl NativeStream {
             wake,
             thread: Some(thread),
         };
-        receive
+        let format = receive
             .recv_timeout(TIMEOUT * 4)
             .context("Timed out opening PipeWire output")?
             .map_err(anyhow::Error::msg)?;
-        Ok(stream)
+        Ok((stream, format))
     }
 }
 
@@ -895,7 +1377,7 @@ fn run(
     auto_mix: bool,
     mut callback: OutputCallback,
     control: &Arc<NativeControl>,
-    ready: &crossbeam_channel::Sender<std::result::Result<(), String>>,
+    ready: &crossbeam_channel::Sender<std::result::Result<StreamFormat, String>>,
     wake: pw::channel::Receiver<()>,
 ) -> Result<()> {
     let connection = Connection::new()?;
@@ -934,15 +1416,9 @@ fn run(
     let shared = callback.shared.clone();
     let names: Vec<_> = stream_layout
         .iter()
-        .map(|channel| {
-            if mono {
-                "MONO"
-            } else {
-                position_name(*channel)
-            }
-        })
+        .map(|channel| if mono { "MONO" } else { channel.short_name() })
         .collect();
-    let positions = names.join(" ");
+    let positions: Arc<str> = Arc::from(names.join(" "));
     let mut properties = properties! {
         "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Music",
         "application.name" => "Rivu", "application.id" => "rivu",
@@ -968,14 +1444,14 @@ fn run(
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(rate);
     info.set_channels(stream_layout.len() as u32);
-    let mut positions = [0; spa::param::audio::MAX_CHANNELS];
-    for (position, speaker) in positions.iter_mut().zip(stream_layout) {
+    let mut spa_positions = [0; spa::param::audio::MAX_CHANNELS];
+    for (position, speaker) in spa_positions.iter_mut().zip(stream_layout) {
         *position = spa_position(*speaker);
     }
     if mono {
-        positions[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO;
+        spa_positions[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO;
     }
-    info.set_position(positions);
+    info.set_position(spa_positions);
     let expected = info;
     let format_ok = Rc::new(Cell::new(false));
     let checked = format_ok.clone();
@@ -986,6 +1462,19 @@ fn run(
     let routed = route_ok.clone();
     let _listener = stream
         .add_local_listener_with_user_data(callback)
+        .io_changed(|_, callback, id, area, size| {
+            if id == spa::sys::SPA_IO_Position {
+                callback.graph_position = (!area.is_null()
+                    && size as usize >= size_of::<spa::sys::spa_io_position>()
+                    && (area as usize).is_multiple_of(align_of::<spa::sys::spa_io_position>()))
+                .then_some(area as usize);
+                // A replaced/removed mapping cannot certify the current graph
+                // clock. Publish unknown until the next process observes it.
+                callback.diagnostics.graph_rate = 0;
+                callback.diagnostics.graph_quantum = 0;
+                callback.shared.diagnostics.publish(&callback.diagnostics);
+            }
+        })
         .param_changed(move |_, _, id, pod| {
             if id != spa::sys::SPA_PARAM_Format {
                 return;
@@ -1104,7 +1593,13 @@ fn run(
                             .context("Flushing paused PipeWire output")?;
                         active = false;
                     }
-                    let _ = ready.send(Ok(()));
+                    let _ = ready.send(Ok(StreamFormat {
+                        rate,
+                        channels: stream_layout.len(),
+                        layout: Arc::clone(&positions),
+                        sink_name: Some(Arc::from(target.name.as_str())),
+                        remix_allowed: auto_mix,
+                    }));
                     started = true;
                 }
             }
@@ -1252,12 +1747,42 @@ unsafe fn render_buffer(
         let Some(timestamp) = output_timestamp(time.as_raw(), callback.rate, now) else {
             return false;
         };
+        callback.observe_graph_clock();
         callback.render_native(samples, timestamp, routed);
         (*data.chunk).stride = stride as i32;
         (*data.chunk).size = (frames * stride) as u32;
         (*buffer).size = frames as u64;
         true
     }
+}
+
+fn monotonic_now() -> Option<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC writes exactly one initialized timespec. This
+    // non-callback query shares PipeWire's clock domain for event age reporting.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        return None;
+    }
+    u64::try_from(time.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()?)
+}
+
+fn graph_clock(clock: &spa::sys::spa_io_clock) -> (u32, u64) {
+    if clock.flags & spa::sys::SPA_IO_CLOCK_FLAG_NO_RATE != 0
+        || clock.rate.num == 0
+        || clock.rate.denom == 0
+        || !clock.rate.denom.is_multiple_of(clock.rate.num)
+    {
+        return (0, 0);
+    }
+    // The driver's cycle duration is graph ticks, not stream.requested (which
+    // the resampler expresses at the source rate), and never a hardware format.
+    (clock.rate.denom / clock.rate.num, clock.duration)
 }
 
 fn output_timestamp(time: &pw::sys::pw_time, rate: u32, now: u64) -> Option<OutputTimestamp> {
@@ -1331,7 +1856,7 @@ fn parse_positions(text: &str) -> Result<Vec<Channel>> {
             all_channels()
                 .iter()
                 .copied()
-                .find(|channel| position_name(*channel) == name)
+                .find(|channel| channel.short_name() == name)
                 .with_context(|| format!("Unsupported or unspecified PipeWire speaker {name:?}"))
         })
         .collect::<Result<_>>()?;
@@ -1361,30 +1886,6 @@ fn all_channels() -> &'static [Channel] {
         TopRearCenter,
         TopRearRight,
     ]
-}
-
-fn position_name(channel: Channel) -> &'static str {
-    use Channel::*;
-    match channel {
-        FrontLeft => "FL",
-        FrontRight => "FR",
-        FrontCenter => "FC",
-        Lfe => "LFE",
-        RearLeft => "RL",
-        RearRight => "RR",
-        RearCenter => "RC",
-        SideLeft => "SL",
-        SideRight => "SR",
-        FrontLeftCenter => "FLC",
-        FrontRightCenter => "FRC",
-        TopCenter => "TC",
-        TopFrontLeft => "TFL",
-        TopFrontCenter => "TFC",
-        TopFrontRight => "TFR",
-        TopRearLeft => "TRL",
-        TopRearCenter => "TRC",
-        TopRearRight => "TRR",
-    }
 }
 
 fn spa_position(channel: Channel) -> u32 {
@@ -1445,6 +1946,292 @@ pub(super) fn test_backend_with_capacity(
 #[cfg(test)]
 mod pcm_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_startup_and_pause_are_not_underruns() {
+        let (mut output, mut callback, _pcm) = test_output(1000, true);
+        let mut data = [9.0; 8];
+        callback.render(&mut data, timestamp(0, 20));
+        let initial = output.diagnostics_at(Some(0));
+        assert_eq!(initial.callback_count, 1);
+        assert_eq!(initial.startup_wait_frames, 0);
+        assert_eq!(initial.sample_peak, None);
+        assert_eq!(initial.peak_hold, None);
+        output.pause(false);
+        callback.render(&mut data, timestamp(10, 30));
+        callback.render(&mut data, timestamp(10_000, 10_020));
+        let waiting = output.diagnostics_at(Some(10_000_000_000));
+        assert!(!waiting.started);
+        assert_eq!(waiting.startup_wait_callbacks, 2);
+        assert_eq!(waiting.startup_wait_frames, 8);
+        assert_eq!(waiting.underrun_events, 0);
+        assert_eq!(waiting.pending_missing_frames, 0);
+        assert_eq!(waiting.ring_low_watermark, None);
+
+        output.push(&[0.25; 8]);
+        callback.render(&mut data, timestamp(10_001, 10_021));
+        // Once PCM starts, even the very next short callback is diagnosed.
+        callback.render(&mut data, timestamp(10_002, 10_022));
+        let pending = output.diagnostics_at(Some(10_002_000_000));
+        assert!(pending.started);
+        assert_eq!(pending.pending_callbacks, 1);
+        assert_eq!(pending.pending_missing_frames, 4);
+        output.pause(true);
+        callback.render(&mut data, timestamp(20_000, 20_020));
+        let paused = output.diagnostics_at(Some(20_000_000_000));
+        assert_eq!(paused.pending_callbacks, pending.pending_callbacks);
+        assert_eq!(
+            paused.pending_missing_frames,
+            pending.pending_missing_frames
+        );
+        assert_eq!(paused.pending_since_ns, pending.pending_since_ns);
+        assert_eq!(paused.startup_wait_frames, 8);
+        assert_eq!(paused.sample_peak, None);
+        output.pause(false);
+        output.push(&[0.5; 8]);
+        callback.render(&mut data, timestamp(20_001, 20_021));
+        let resumed = output.diagnostics_at(Some(20_001_000_000));
+        assert_eq!(resumed.underrun_events, 1);
+        assert_eq!(resumed.underrun_callbacks, 1);
+        assert_eq!(resumed.missing_frames, 4);
+        assert_eq!(resumed.last_underrun_at_ns, Some(10_002_000_000));
+        assert_eq!(resumed.pending_missing_frames, 0);
+    }
+
+    #[test]
+    fn consecutive_short_callbacks_form_one_event_until_a_full_callback() {
+        let (mut output, mut callback, _pcm) = test_output(1000, false);
+        let mut data = [0.0; 8];
+        output.push(&[0.25; 2]);
+        callback.render(&mut data, timestamp(0, 20));
+        callback.render(&mut data, timestamp(4, 24));
+        output.push(&[0.25; 2]);
+        callback.render(&mut data, timestamp(8, 28));
+        let ongoing = output.diagnostics_at(Some(8_000_000));
+        assert_eq!(ongoing.underrun_events, 1);
+        assert_eq!(ongoing.underrun_callbacks, 2);
+        assert_eq!(ongoing.missing_frames, 7);
+        assert_eq!(ongoing.pending_callbacks, 1);
+        assert_eq!(ongoing.pending_missing_frames, 3);
+        output.push(&[0.25; 8]);
+        callback.render(&mut data, timestamp(12, 32));
+        let recovered = output.diagnostics_at(Some(12_000_000));
+        assert_eq!(recovered.underrun_events, 1);
+        assert_eq!(recovered.underrun_callbacks, 3);
+        assert_eq!(recovered.missing_frames, 10);
+        assert_eq!(recovered.pending_callbacks, 0);
+        assert_eq!(recovered.last_underrun_at_ns, Some(8_000_000));
+        callback.render(&mut data, timestamp(16, 36));
+        output.push(&[0.25; 8]);
+        callback.render(&mut data, timestamp(20, 40));
+        let second = output.diagnostics_at(Some(20_000_000));
+        assert_eq!(second.underrun_events, 2);
+        assert_eq!(second.underrun_callbacks, 4);
+        assert_eq!(second.missing_frames, 14);
+    }
+
+    #[test]
+    fn final_watermark_excludes_short_and_empty_eof_tails_in_both_orderings() {
+        for finish_before_callback in [false, true] {
+            for frames in [0, 2, 4] {
+                let (mut output, mut callback, _pcm) = test_output(1000, false);
+                output.push(&vec![0.5; frames * 2]);
+                if finish_before_callback {
+                    output.finish_input();
+                }
+                callback.render(&mut [0.0; 8], timestamp(0, 20));
+                callback.render(&mut [0.0; 8], timestamp(4, 24));
+                if !finish_before_callback {
+                    output.pause(true);
+                    // No callback is needed to reconcile the just-published
+                    // watermark, including a final push consumed before EOF.
+                    output.finish_input();
+                }
+                output.finish_input();
+                let final_state = output.diagnostics_at(Some(4_000_000));
+                assert!(final_state.input_finished);
+                assert_eq!(final_state.underrun_events, 0);
+                assert_eq!(final_state.underrun_callbacks, 0);
+                assert_eq!(final_state.missing_frames, 0);
+                assert_eq!(final_state.pending_missing_frames, 0);
+                assert_eq!(final_state.pending_callbacks, 0);
+                assert_eq!(final_state.pending_since_ns, None);
+                assert_eq!(final_state.ring_low_watermark, None);
+                output.pause(false);
+                callback.render(&mut [0.0; 8], timestamp(24, 44));
+                assert!(output.drained());
+                assert_eq!(output.diagnostics().missing_frames, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn watermark_after_stale_availability_preserves_real_starvation() {
+        let mut state = CallbackDiagnostics::default();
+        state.begin(0);
+        state.record_supply(4, 4, 0, INPUT_OPEN);
+        state.begin(4_000_000);
+        // Availability was sampled empty; the producer then published two
+        // final frames and EOF before this callback classified its zero prefix.
+        // EOF at frame six cannot excuse silence inserted at frame four.
+        state.record_supply(4, 0, 2, 6);
+        assert_eq!(state.underrun_events, 1);
+        assert_eq!(state.underrun_callbacks, 1);
+        assert_eq!(state.missing_frames, 4);
+        assert_eq!(state.pending_missing_frames, 0);
+        state.begin(8_000_000);
+        state.record_supply(4, 2, 0, 6);
+        assert_eq!(state.underrun_events, 1);
+        assert_eq!(state.missing_frames, 4);
+        assert_eq!(state.pending_missing_frames, 0);
+        assert_eq!(state.consumed_frames, 6);
+    }
+
+    #[test]
+    fn final_publication_after_a_pending_gap_confirms_only_the_nonterminal_gap() {
+        let (mut output, mut callback, _pcm) = test_output(1000, false);
+        output.push(&[0.5; 8]);
+        callback.render(&mut [0.0; 8], timestamp(0, 20));
+        callback.render(&mut [0.0; 8], timestamp(4, 24));
+        output.push(&[0.5; 4]);
+        output.finish_input();
+        let published = output.diagnostics_at(Some(4_000_000));
+        assert_eq!(published.underrun_events, 1);
+        assert_eq!(published.missing_frames, 4);
+        assert_eq!(published.pending_missing_frames, 0);
+        callback.render(&mut [0.0; 8], timestamp(8, 28));
+        let consumed = output.diagnostics_at(Some(8_000_000));
+        assert_eq!(consumed.underrun_events, 1);
+        assert_eq!(consumed.missing_frames, 4);
+        assert_eq!(consumed.pending_missing_frames, 0);
+    }
+
+    #[test]
+    fn diagnostic_ring_watermark_excludes_startup_pause_and_terminal_zero() {
+        let (mut output, mut callback, _pcm) = test_output(1000, false);
+        callback.render(&mut [0.0; 8], timestamp(0, 20));
+        output.push(&[0.25; 16]);
+        callback.render(&mut [0.0; 8], timestamp(4, 24));
+        let first = output.diagnostics_at(Some(4_000_000));
+        assert_eq!(first.ring_frames, 4);
+        assert_eq!(first.ring_capacity_frames, 64);
+        assert_eq!(first.ring_low_watermark, Some(4));
+        output.pause(true);
+        callback.render(&mut [0.0; 8], timestamp(8, 28));
+        assert_eq!(output.diagnostics().ring_low_watermark, Some(4));
+        output.pause(false);
+        callback.render(&mut [0.0; 8], timestamp(12, 32));
+        output.finish_input();
+        let final_state = output.diagnostics_at(Some(12_000_000));
+        assert_eq!(final_state.ring_frames, 0);
+        assert_eq!(final_state.ring_low_watermark, Some(4));
+    }
+
+    #[test]
+    fn diagnostic_peak_is_post_gain_per_frame_and_windowed_without_resetting_hold() {
+        let source = [Channel::FrontLeft, Channel::FrontRight];
+        let device = [
+            Channel::FrontRight,
+            Channel::FrontLeft,
+            Channel::FrontCenter,
+        ];
+        let (mut output, mut callback, _pcm) =
+            test_output_layout(1000, false, &source, &device, 128);
+        output.set_gain(2.0);
+        output.push(&[0.75, -0.75, 0.25, -0.25, 0.5, -0.5]);
+        callback.render(&mut [0.0; 12], timestamp(0, 20));
+        let boosted = output.diagnostics_at(Some(0));
+        assert_eq!(boosted.sample_peak, Some(1.5));
+        assert_eq!(boosted.peak_hold, Some(1.5));
+        assert_eq!(boosted.overrange_frames, 1);
+        assert_eq!(boosted.peak_window_start_ns, Some(0));
+        assert_eq!(boosted.stream_format, "F32LE");
+        assert_eq!(boosted.source_channels, 2);
+        assert_eq!(boosted.stream_channels, 3);
+        assert_eq!(boosted.stream_layout.as_ref(), "FR FL FC");
+
+        callback.render(&mut [0.0; 12], timestamp(250, 270));
+        let empty = output.diagnostics_at(Some(250_000_000));
+        assert_eq!(empty.sample_peak, None);
+        assert_eq!(empty.peak_hold, Some(1.5));
+        output.set_gain(0.0);
+        output.push(&[f32::MAX, -f32::MAX]);
+        callback.render(&mut [0.0; 3], timestamp(251, 271));
+        let muted = output.diagnostics_at(Some(251_000_000));
+        assert_eq!(muted.sample_peak, Some(0.0));
+        assert_eq!(muted.peak_hold, Some(1.5));
+        assert_eq!(muted.overrange_frames, 1);
+        assert_eq!(output.diagnostics_at(Some(500_000_000)).sample_peak, None);
+        output.set_gain(2.0);
+        output.push(&[f32::MAX, -f32::MAX]);
+        callback.render(&mut [0.0; 3], timestamp(501, 521));
+        let overflow = output.diagnostics_at(Some(501_000_000));
+        assert_eq!(overflow.sample_peak, Some(f32::MAX));
+        assert_eq!(overflow.peak_hold, Some(f32::MAX));
+        assert_eq!(overflow.overrange_frames, 2);
+    }
+
+    #[test]
+    fn closed_segment_keeps_unconfirmed_waits_and_never_follows_the_next_pcm_epoch() {
+        let (mut output, mut callback, pcm) = test_output(1000, false);
+        output.push(&[0.5; 4]);
+        callback.render(&mut [0.0; 8], timestamp(0, 20));
+        output.close();
+        let retired = output.diagnostics();
+        assert!(retired.closed);
+        assert!(!retired.input_finished);
+        assert_eq!(retired.pending_missing_frames, 2);
+        assert_eq!(retired.underrun_events, 0);
+        assert_eq!(retired.peak_hold, Some(0.5));
+        pcm.reset(48_000, &[Channel::FrontCenter]);
+        callback.render(&mut [0.0; 8], timestamp(50, 70));
+        assert_eq!(output.diagnostics(), retired);
+        let (next, _, _) = test_output(1000, false);
+        assert_ne!(next.diagnostics().segment_id, retired.segment_id);
+        assert_eq!(next.diagnostics().callback_count, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "PCM submitted after finish_input")]
+    fn finished_input_cannot_accept_more_pcm() {
+        let (mut output, _callback, _pcm) = test_output(1000, false);
+        output.finish_input();
+        output.push(&[0.25; 2]);
+    }
+
+    #[test]
+    fn graph_diagnostics_use_driver_clock_and_leave_hardware_unknown() {
+        let (output, mut callback, _pcm) = test_output(44_100, false);
+        let mut position: spa::sys::spa_io_position = unsafe { std::mem::zeroed() };
+        position.clock.rate.num = 1;
+        position.clock.rate.denom = 48_000;
+        position.clock.duration = 256;
+        callback.graph_position = Some((&raw mut position) as usize);
+        callback.observe_graph_clock();
+        callback.render(&mut [0.0; 8], timestamp(0, 20));
+        let known = output.diagnostics_at(Some(0));
+        assert_eq!(known.stream_rate, 44_100);
+        assert_eq!(known.graph_rate, Some(48_000));
+        assert_eq!(known.graph_quantum, Some(256));
+        assert_eq!(known.hardware_rate, None);
+        assert_eq!(known.hardware_format, None);
+        position.clock.duration = 128;
+        callback.observe_graph_clock();
+        callback.render(&mut [0.0; 8], timestamp(4, 24));
+        assert_eq!(output.diagnostics().graph_quantum, Some(128));
+        position.clock.flags = spa::sys::SPA_IO_CLOCK_FLAG_NO_RATE;
+        callback.observe_graph_clock();
+        callback.render(&mut [0.0; 8], timestamp(8, 28));
+        assert_eq!(output.diagnostics().graph_rate, None);
+        assert_eq!(output.diagnostics().graph_quantum, None);
+        position.clock.flags = 0;
+        position.clock.rate.num = 7;
+        assert_eq!(graph_clock(&position.clock), (0, 0));
+        callback.graph_position = None;
+        callback.observe_graph_clock();
+        callback.render(&mut [0.0; 8], timestamp(12, 32));
+        assert_eq!(output.diagnostics().graph_rate, None);
+    }
 
     #[test]
     fn normal_prefetch_retains_fragmented_native_pcm_until_audible_at_high_rates() {
@@ -1722,6 +2509,21 @@ mod pcm_tests {
             errors,
             submitted: 0,
             final_heard_frames: None,
+            segment_id: NEXT_OUTPUT_SEGMENT.fetch_add(1, Ordering::Relaxed),
+            format: StreamFormat {
+                rate,
+                channels: device.len(),
+                layout: Arc::from(
+                    device
+                        .iter()
+                        .map(|channel| channel.short_name())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                sink_name: None,
+                remix_allowed: false,
+            },
+            final_diagnostics: None,
             on_close: None,
         };
         let callback = OutputCallback {
@@ -1733,6 +2535,8 @@ mod pcm_tests {
             source_channels: source.len(),
             rate,
             clock: PlaybackClock::new(),
+            diagnostics: CallbackDiagnostics::default(),
+            graph_position: None,
         };
         (output, callback, analyzer)
     }
@@ -2334,10 +3138,7 @@ mod routing_tests {
             assert!(parse_positions(invalid).is_err(), "{invalid}");
         }
         for channel in all_channels() {
-            assert_eq!(
-                parse_positions(position_name(*channel)).unwrap(),
-                [*channel]
-            );
+            assert_eq!(parse_positions(channel.short_name()).unwrap(), [*channel]);
         }
     }
 

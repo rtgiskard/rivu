@@ -10,7 +10,9 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
-use rivu_metadata::{Tags, read_tags};
+#[cfg(test)]
+use rivu_metadata::read_tags;
+use rivu_metadata::{Tags, read_playback_tags};
 use rivu_protocol::audio::SourceIdentity;
 use rivu_utils::regular_file::open_regular_file;
 use std::{
@@ -489,6 +491,7 @@ pub(super) struct Source {
     vorbis_timing: Option<VorbisTiming>,
     layout: Arc<[Channel]>,
     info: MediaInfo,
+    replaygain_track_peak: Option<f64>,
     probe_backend: AudioBackend,
     range_start: f64,
     range_end: Option<f64>,
@@ -547,6 +550,7 @@ impl Source {
             vorbis_timing: None,
             layout,
             info,
+            replaygain_track_peak: None,
             probe_backend: AudioBackend::Native,
             range_start: 0.0,
             range_end: None,
@@ -667,19 +671,17 @@ impl Source {
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
         crate::source_identity(&file)?;
-        // Playback already receives authoritative library/CUE metadata. Only
-        // probing needs an additional descriptive-tag pass over this object.
-        let tags = if descriptive {
-            match read_tags(&mut file) {
-                Ok(tags) => tags.unwrap_or_default(),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
-                    Tags::default()
-                }
+        // Runtime peak belongs to this admitted file, never library/CUE metadata.
+        // Read both in one pass; playback discards descriptive values in favor of
+        // the authoritative metadata supplied by Core.
+        let (tags, peak) = match read_playback_tags(&mut file) {
+            Ok(tags) => tags.unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
+                (Tags::default(), None)
             }
-        } else {
-            Tags::default()
         };
+        let tags = if descriptive { tags } else { Tags::default() };
         file.rewind()
             .map_err(source_io_error)
             .context("Rewinding audio source after metadata")?;
@@ -689,6 +691,7 @@ impl Source {
             DecoderHint::Native => {
                 let mut source = Self::open_native(path, buffer_len, file, cancelled)?;
                 source.info.apply_tags(tags, path);
+                source.replaygain_track_peak = peak;
                 return Ok(source);
             }
             DecoderHint::Ffmpeg => {
@@ -698,9 +701,10 @@ impl Source {
                     )
                     .context(SourceFailure));
                 }
-                return Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
-                    path, file, tags, cancelled,
-                )?);
+                return Self::from_ffmpeg(
+                    super::ffmpeg::Decoder::from_file(path, file, tags, cancelled)?,
+                    peak,
+                );
             }
         }
         let input = if ffmpeg_enabled {
@@ -710,11 +714,10 @@ impl Source {
         };
         if input.as_ref().is_some_and(|input| !input.is_pcm()) {
             drop(file);
-            return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(
-                input.unwrap(),
-                tags,
-                cancelled,
-            )?);
+            return Self::from_ffmpeg(
+                super::ffmpeg::Decoder::from_input(input.unwrap(), tags, cancelled)?,
+                peak,
+            );
         }
         // Native probing consumes its descriptor even when it rejects the codec.
         // Retain this exact object for Auto fallback, not its mutable pathname.
@@ -737,6 +740,7 @@ impl Source {
                 source.opening_fallback =
                     fallback.map(|file| (path.to_owned(), file, SourceSelection::default()));
                 source.info.apply_tags(tags, path);
+                source.replaygain_track_peak = peak;
                 Ok(source)
             }
             Err(native_error)
@@ -748,13 +752,13 @@ impl Source {
                         super::ffmpeg::Decoder::from_file(path, fallback.unwrap(), tags, cancelled)
                     }
                 };
-                decoded.and_then(Self::from_ffmpeg).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
+                decoded.and_then(|decode| Self::from_ffmpeg(decode, peak)).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
             Err(error) => Err(error),
         }
     }
 
-    fn from_ffmpeg(decode: super::ffmpeg::Decoder) -> Result<Self> {
+    fn from_ffmpeg(decode: super::ffmpeg::Decoder, peak: Option<f64>) -> Result<Self> {
         let info = decode.info().clone();
         let layout = Arc::from(decode.layout());
         let time_base = decode.time_base()?;
@@ -782,6 +786,7 @@ impl Source {
             vorbis_timing,
             layout,
             info,
+            replaygain_track_peak: peak,
             probe_backend: AudioBackend::Ffmpeg,
             range_start: 0.0,
             range_end: None,
@@ -988,6 +993,7 @@ impl Source {
             vorbis_timing,
             layout: Arc::from([]),
             info,
+            replaygain_track_peak: None,
             probe_backend: AudioBackend::Native,
             range_start: 0.0,
             range_end: None,
@@ -1003,6 +1009,10 @@ impl Source {
             opening_fallback: None,
         })
     }
+    pub(super) fn replaygain_track_peak(&self) -> Option<f64> {
+        self.replaygain_track_peak
+    }
+
     fn select(&mut self, selection: SourceSelection, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
         super::validate_seek_position(selection.start)?;
@@ -1322,9 +1332,10 @@ impl Source {
                     release_date: self.info.release_date.clone(),
                     replaygain_track_gain: self.info.replaygain_track_gain,
                 };
-                let mut source = Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
-                    &path, file, tags, cancelled,
-                )?)
+                let mut source = Self::from_ffmpeg(
+                    super::ffmpeg::Decoder::from_file(&path, file, tags, cancelled)?,
+                    self.replaygain_track_peak,
+                )
                 .with_context(|| {
                     format!(
                         "Native decoder rejected the audio ({error:#}); FFmpeg extension failed"
@@ -2226,6 +2237,7 @@ pub(super) mod tests {
         builder.push(&[0.25; 64]).unwrap();
         let pcm = builder.finish().unwrap();
         let mut source = Source::from_pcm(pcm, 0.0).unwrap();
+        assert_eq!(source.replaygain_track_peak(), None);
         let mut work = DECODE_WORK_BUDGET;
         assert!(matches!(
             source.next_frames_with_cancel(None, &mut work).unwrap(),
@@ -2933,7 +2945,7 @@ pub(super) mod tests {
         file
     }
 
-    fn tagged_flac_file(title: &str) -> tempfile::NamedTempFile {
+    pub(crate) fn tagged_flac_file(title: &str) -> tempfile::NamedTempFile {
         let audio = constant_flac_file(8000, 1);
         let bytes = std::fs::read(audio.path()).unwrap();
         let comments = [
@@ -2943,6 +2955,7 @@ pub(super) mod tests {
             "TRACKNUMBER=3/12".to_owned(),
             "DISCNUMBER=2/4".to_owned(),
             "DATE=2024-09".to_owned(),
+            "REPLAYGAIN_TRACK_PEAK=0.8".to_owned(),
         ];
         let mut payload = Vec::new();
         payload.extend_from_slice(&0_u32.to_le_bytes()); // Empty vendor string.
@@ -2984,6 +2997,10 @@ pub(super) mod tests {
             }
             let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
             assert_tagged_flac_info(source.info(), "Tagged title");
+            assert_eq!(source.replaygain_track_peak(), Some(0.8));
+            assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
+            source.seek(0.0).unwrap();
+            assert_eq!(source.replaygain_track_peak(), Some(0.8));
             assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
         }
     }
@@ -3077,6 +3094,7 @@ pub(super) mod tests {
                 assert_eq!(source.info().title, expected_title);
                 assert!(source.info().artist.is_empty());
                 assert!(source.info().album.is_empty());
+                assert_eq!(source.replaygain_track_peak(), Some(0.8));
                 assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
             }
         }

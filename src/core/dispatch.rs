@@ -315,9 +315,10 @@ impl Core {
         let _ = self.engine.send(AudioCommand::FfmpegEnabled(
             self.preferences.settings().ffmpeg_enabled,
         ));
-        let _ = self.engine.send(AudioCommand::ReplayGain(
-            self.preferences.settings().replaygain_enabled,
-        ));
+        let _ = self.engine.send(AudioCommand::ReplayGain {
+            enabled: self.preferences.settings().replaygain_enabled,
+            peak_policy: self.preferences.settings().replaygain_peak_policy,
+        });
         let _ = self.engine.send(AudioCommand::OutputSettings {
             request: self.output_settings_request,
             device: self.preferences.live().output_device.clone(),

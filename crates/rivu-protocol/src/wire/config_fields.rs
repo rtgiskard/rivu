@@ -142,6 +142,7 @@ macro_rules! config_wire_fields {
             ffmpeg_enabled: bool,
             pipewire_auto_mix: bool,
             replaygain_enabled: bool,
+            replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy,
             processing_bypassed: bool,
             equalizer: rivu_dsp::equalizer::config::EqualizerConfig,
             denoise: rivu_dsp::denoise::DenoiseConfig,

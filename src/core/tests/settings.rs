@@ -784,9 +784,18 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
 
 #[test]
 fn startup_sends_configured_replaygain_state() {
-    for enabled in [false, true] {
+    use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
+    for (enabled, policy) in [
+        (false, Off),
+        (true, Off),
+        (false, PreventClipping),
+        (true, PreventClipping),
+    ] {
         let (_directory, mut core) = fixture();
-        edit_preferences(&mut core, |config| config.replaygain_enabled = enabled);
+        edit_preferences(&mut core, |config| {
+            config.replaygain_enabled = enabled;
+            config.replaygain_peak_policy = policy;
+        });
         let (commands, audio) = async_channel::bounded(16);
         let _idle_commands = core.engine.replace_commands(commands);
 
@@ -794,11 +803,14 @@ fn startup_sends_configured_replaygain_state() {
 
         let replaygain: Vec<_> = std::iter::from_fn(|| audio.try_recv().ok())
             .filter_map(|queued| match queued.command {
-                AudioCommand::ReplayGain(enabled) => Some(enabled),
+                AudioCommand::ReplayGain {
+                    enabled,
+                    peak_policy,
+                } => Some((enabled, peak_policy)),
                 _ => None,
             })
             .collect();
-        assert_eq!(replaygain, [enabled]);
+        assert_eq!(replaygain, [(enabled, policy)]);
     }
 }
 
@@ -828,9 +840,39 @@ fn replaygain_apply_updates_audio_only_when_changed_even_with_processing_bypasse
         if changed {
             assert!(matches!(
                 audio.try_recv().unwrap().command,
-                AudioCommand::ReplayGain(actual) if actual == enabled
+                AudioCommand::ReplayGain { enabled: actual, peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off } if actual == enabled
             ));
         }
+        assert!(matches!(
+            audio.try_recv().unwrap().command,
+            AudioCommand::OutputSettings { .. }
+        ));
+        assert!(audio.is_empty());
+    }
+}
+
+#[test]
+fn peak_policy_only_changes_persist_and_hot_apply_while_replaygain_is_off() {
+    use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
+    let (_directory, mut core) = fixture();
+    let (commands, audio) = async_channel::bounded(2);
+    let _idle_commands = core.engine.replace_commands(commands);
+    for policy in [PreventClipping, Off] {
+        let baseline = core.preferences.checkpoint();
+        let mut draft = baseline.clone();
+        draft.replaygain_peak_policy = policy;
+        core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &baseline, &draft,
+        ))))
+        .unwrap();
+        assert_eq!(
+            Config::load(&core.state.configuration.config_path)
+                .unwrap()
+                .replaygain_peak_policy,
+            policy
+        );
+        assert!(matches!(audio.try_recv().unwrap().command,
+            AudioCommand::ReplayGain { enabled: false, peak_policy } if peak_policy == policy));
         assert!(matches!(
             audio.try_recv().unwrap().command,
             AudioCommand::OutputSettings { .. }
@@ -881,7 +923,10 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
             assert_eq!(core.output_settings_request, 1);
             assert!(matches!(
                 audio.try_recv().unwrap().command,
-                AudioCommand::ReplayGain(true)
+                AudioCommand::ReplayGain {
+                    enabled: true,
+                    peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off
+                }
             ));
             assert!(matches!(
                 audio.try_recv().unwrap().command,

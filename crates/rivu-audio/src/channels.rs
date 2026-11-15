@@ -25,6 +25,30 @@ pub enum Channel {
 }
 
 impl Channel {
+    /// Speaker abbreviation shared by source diagnostics and output negotiation.
+    pub(crate) fn short_name(self) -> &'static str {
+        match self {
+            Self::FrontLeft => "FL",
+            Self::FrontRight => "FR",
+            Self::FrontCenter => "FC",
+            Self::Lfe => "LFE",
+            Self::RearLeft => "RL",
+            Self::RearRight => "RR",
+            Self::RearCenter => "RC",
+            Self::SideLeft => "SL",
+            Self::SideRight => "SR",
+            Self::FrontLeftCenter => "FLC",
+            Self::FrontRightCenter => "FRC",
+            Self::TopCenter => "TC",
+            Self::TopFrontLeft => "TFL",
+            Self::TopFrontCenter => "TFC",
+            Self::TopFrontRight => "TFR",
+            Self::TopRearLeft => "TRL",
+            Self::TopRearCenter => "TRC",
+            Self::TopRearRight => "TRR",
+        }
+    }
+
     /// WAVE speaker-mask bit index, also shared by FFmpeg's first 18 AVChannel IDs.
     pub fn standard_index(self) -> u32 {
         match self {

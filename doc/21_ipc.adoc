@@ -532,6 +532,17 @@ accepted audio source, not the latest processing task or current editor draft.
 Desktop analysis and finite PCM requests use those facts to reject results from a
 retired source; path equality alone does not establish source identity.
 
+`PlaybackState.audio_output` is an optional runtime diagnostic snapshot, with its
+own `source_generation` and output `segment`. Core rejects observations from old
+sources or superseded segments; a retired segment cannot become active again.
+Audio owns measured values and negotiated output facts. Frontends format them
+without inferring hardware state from stream requests or library metadata.
+Periodic diagnostics are best-effort, bounded to one update per second; accepted
+control changes can publish sooner, and output retirement publishes final counters.
+No diagnostic timer is added to stable paused playback. See
+link:04_playback.adoc#output-diagnostics[Audio output diagnostics] for measurement
+boundaries and the distinction between supply wait, EOF padding and underrun.
+
 The IPC protocol version is independent of on-disk configuration and database
 schema versions: `WireConfig` transports runtime settings, not a versioned TOML
 document. Disk version authority belongs to

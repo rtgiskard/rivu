@@ -216,7 +216,11 @@ for IPC and MPRIS. Values are not rounded to whole percentages internally.
 
 `playback.replaygain_enabled` defaults to `false`. The desktop Playback settings
 switch applies the library's single track gain in dB, without loudness analysis.
-Missing values leave playback unchanged. No album fallback or peak limiting is applied.
+Missing values leave playback unchanged; there is no album fallback.
+`playback.replaygain_peak_policy` accepts `off` (default) or `prevent_clipping`.
+The latter limits ReplayGain using the opened original file's valid track sample-peak
+tag. Unknown peaks leave the requested gain unchanged; processed auditions do not
+reuse the original peak. This is not a limiter or a guarantee after EQ or device mixing.
 See link:04_playback.adoc#replaygain[ReplayGain] for playback scope and
 link:02_library.adoc#inline-track-details-edits[Track details] for editing and file tags.
 

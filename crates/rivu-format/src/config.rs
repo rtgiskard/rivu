@@ -29,6 +29,15 @@ pub use material::{MaterialChange, MaterialParameters, MaterialPreferences, Mate
 pub use processing_graph::ProcessingGraph;
 pub use rivu_dsp::{denoise::DenoiseConfig, equalizer::config::EqualizerConfig};
 
+/// Playback-only use of the selected source file's track peak tag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayGainPeakPolicy {
+    #[default]
+    Off,
+    PreventClipping,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NeuralDevice {
@@ -544,6 +553,7 @@ macro_rules! config_fields {
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
         pub replaygain_enabled: bool,
+        pub replaygain_peak_policy: $crate::config::ReplayGainPeakPolicy,
         pub processing_bypassed: bool,
         pub equalizer: $crate::config::EqualizerConfig,
         pub denoise: $crate::config::DenoiseConfig,
@@ -657,6 +667,7 @@ impl Config {
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
             replaygain_enabled: false,
+            replaygain_peak_policy: ReplayGainPeakPolicy::Off,
             processing_bypassed: false,
             equalizer: EqualizerConfig::default(),
             denoise: DenoiseConfig::default(),

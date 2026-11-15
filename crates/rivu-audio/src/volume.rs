@@ -11,16 +11,57 @@ pub(crate) fn gain(level: f32) -> f32 {
     }
 }
 
-/// Playback-only track gain, independent of master volume.
-/// Missing or invalid tags leave unity; finite gains saturate at PCM representability.
-pub(crate) fn replaygain(info: &crate::PlaybackMetadata, enabled: bool) -> f32 {
-    if !enabled {
-        return 1.0;
-    }
-    let Some(decibels) = info.replaygain_track_gain.filter(|value| value.is_finite()) else {
-        return 1.0;
+/// Resolve policy before master volume. Finite dB boosts saturate at f32::MAX;
+/// very negative finite gains may underflow to silence when converted to f32.
+pub(crate) fn replaygain(
+    info: &crate::PlaybackMetadata,
+    enabled: bool,
+    policy: rivu_format::config::ReplayGainPeakPolicy,
+    source_peak: Option<f64>,
+    processed_source: bool,
+) -> (f32, rivu_protocol::model::ReplayGainStatus) {
+    use rivu_format::config::ReplayGainPeakPolicy;
+    let requested_gain_db = info.replaygain_track_gain.filter(|value| value.is_finite());
+    let source_peak =
+        source_peak.filter(|peak| !processed_source && peak.is_finite() && *peak > 0.0);
+    let mut applied_gain_db = if enabled {
+        requested_gain_db
+            .unwrap_or(0.0)
+            .min(20.0 * f64::from(f32::MAX).log10())
+    } else {
+        0.0
     };
-    10.0_f64.powf(decibels / 20.0).min(f64::from(f32::MAX)) as f32
+    if enabled
+        && requested_gain_db.is_some()
+        && policy == ReplayGainPeakPolicy::PreventClipping
+        && let Some(peak) = source_peak
+    {
+        applied_gain_db = applied_gain_db.min(-20.0 * peak.log10());
+    }
+    let gain = 10.0_f64
+        .powf(applied_gain_db / 20.0)
+        .min(f64::from(f32::MAX)) as f32;
+    // Round downward when f32 conversion would otherwise exceed the peak cap.
+    let gain = if enabled
+        && requested_gain_db.is_some()
+        && policy == ReplayGainPeakPolicy::PreventClipping
+        && source_peak.is_some_and(|peak| f64::from(gain) * peak > 1.0)
+    {
+        gain.next_down().max(0.0)
+    } else {
+        gain
+    };
+    (
+        gain,
+        rivu_protocol::model::ReplayGainStatus {
+            enabled,
+            peak_policy: policy,
+            requested_gain_db,
+            applied_gain_db,
+            source_peak,
+            processed_source,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -33,12 +74,52 @@ mod tests {
             replaygain_track_gain: Some(-6.020599913279624),
             ..Default::default()
         };
-        assert_eq!(replaygain(&info, false), 1.0);
-        assert_eq!(replaygain(&info, true), 0.5);
+        assert_eq!(
+            replaygain(
+                &info,
+                false,
+                rivu_format::config::ReplayGainPeakPolicy::Off,
+                None,
+                false
+            )
+            .0,
+            1.0
+        );
+        assert_eq!(
+            replaygain(
+                &info,
+                true,
+                rivu_format::config::ReplayGainPeakPolicy::Off,
+                None,
+                false
+            )
+            .0,
+            0.5
+        );
         info.replaygain_track_gain = Some(0.0);
-        assert_eq!(replaygain(&info, true), 1.0);
+        assert_eq!(
+            replaygain(
+                &info,
+                true,
+                rivu_format::config::ReplayGainPeakPolicy::Off,
+                None,
+                false
+            )
+            .0,
+            1.0
+        );
         info.replaygain_track_gain = Some(12.041199826559248);
-        assert_eq!(replaygain(&info, true), 4.0);
+        assert_eq!(
+            replaygain(
+                &info,
+                true,
+                rivu_format::config::ReplayGainPeakPolicy::Off,
+                None,
+                false
+            )
+            .0,
+            4.0
+        );
     }
 
     #[test]
@@ -53,7 +134,17 @@ mod tests {
                 replaygain_track_gain: track_gain,
                 ..Default::default()
             };
-            assert_eq!(replaygain(&info, true), 1.0);
+            assert_eq!(
+                replaygain(
+                    &info,
+                    true,
+                    rivu_format::config::ReplayGainPeakPolicy::PreventClipping,
+                    Some(2.0),
+                    false
+                )
+                .0,
+                1.0
+            );
         }
     }
 
@@ -69,8 +160,52 @@ mod tests {
                 replaygain_track_gain: Some(decibels),
                 ..Default::default()
             };
-            assert_eq!(replaygain(&info, true), expected);
+            let (gain, status) = replaygain(
+                &info,
+                true,
+                rivu_format::config::ReplayGainPeakPolicy::Off,
+                None,
+                false,
+            );
+            assert_eq!(gain, expected);
+            assert!(status.applied_gain_db.is_finite());
         }
+    }
+
+    #[test]
+    fn peak_policy_caps_only_valid_unprocessed_track_peaks() {
+        use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
+        let info = crate::PlaybackMetadata {
+            replaygain_track_gain: Some(12.041199826559248),
+            ..Default::default()
+        };
+        for peak in [0.25, 0.8, 1.0, 2.0, f64::MAX] {
+            let (gain, status) = replaygain(&info, true, PreventClipping, Some(peak), false);
+            assert!(f64::from(gain) * peak <= 1.0);
+            assert_eq!(status.source_peak, Some(peak));
+            assert!(status.applied_gain_db <= status.requested_gain_db.unwrap());
+        }
+        for peak in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            let (gain, status) = replaygain(&info, true, PreventClipping, peak, false);
+            assert_eq!(gain, 4.0);
+            assert_eq!(status.source_peak, None);
+            assert_eq!(status.applied_gain_db, info.replaygain_track_gain.unwrap());
+        }
+        let (gain, status) = replaygain(&info, true, PreventClipping, Some(1.0), true);
+        assert_eq!(gain, 4.0);
+        assert!(status.processed_source);
+        assert_eq!(status.source_peak, None);
+        assert_eq!(replaygain(&info, true, Off, Some(1.0), false).0, 4.0);
+        assert_eq!(
+            replaygain(&info, false, PreventClipping, Some(2.0), false).0,
+            1.0
+        );
     }
 
     #[test]

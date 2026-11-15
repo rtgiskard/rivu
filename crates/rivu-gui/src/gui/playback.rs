@@ -121,12 +121,15 @@ pub(super) struct Playback {
     seek_preview: Option<f64>,
     dragging: Option<Dragging>,
     volume: VolumeIntent,
+    output_details: Option<u64>,
+    output_scope: rivu_ui::FocusScope,
+    output_return_focus: Option<gpui::FocusHandle>,
 }
 
 impl EventEmitter<PlaybackEvent> for Playback {}
 
 impl Playback {
-    pub(super) fn new(context: FeatureContext, _cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         Self {
             context,
@@ -134,6 +137,9 @@ impl Playback {
             seek_preview: None,
             dragging: None,
             volume: VolumeIntent::default(),
+            output_details: None,
+            output_scope: rivu_ui::FocusScope::new(cx),
+            output_return_focus: None,
         }
     }
 
@@ -392,12 +398,16 @@ impl Playback {
                             } else {
                                 ""
                             },
-                            self.context.tr(
-                                if self.state.playback.status == PlaybackStatus::Playing {
-                                    "gl-pause"
-                                } else {
-                                    "gl-play"
-                                },
+                            format!(
+                                "{} · {}",
+                                status,
+                                self.context.tr(
+                                    if self.state.playback.status == PlaybackStatus::Playing {
+                                        "gl-pause"
+                                    } else {
+                                        "gl-play"
+                                    },
+                                ),
                             ),
                         )
                         .surface(crate::gui::appearance::material::surface(cx)),
@@ -503,6 +513,7 @@ impl Playback {
                 .line_height(gpui::relative(1.))
                 .text_color(rgb(theme.muted).alpha(0.6))
         };
+        let output_popup = self.output_popup(panel_id, window, cx);
         column()
             .id(("transport-panel", panel_id))
             .size_full()
@@ -519,6 +530,49 @@ impl Playback {
                     .truncate()
                     .child(title),
                 rivu_ui::panel_header_actions()
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                IconButton::new(
+                                    ("audio-output-details", panel_id),
+                                    "󰋽",
+                                    self.context.tr("audio-output"),
+                                )
+                                .surface(crate::gui::appearance::material::surface(cx))
+                                .build_with(
+                                    IconButtonStyle::Bare,
+                                    IconButtonDensity::Compact,
+                                    cx,
+                                    move |this, window, cx| {
+                                        if this.output_details == Some(panel_id) {
+                                            this.close_output_details(window, cx);
+                                        } else {
+                                            this.output_return_focus = window.focused(cx);
+                                            this.output_details = Some(panel_id);
+                                            this.output_scope.focus(window, cx);
+                                            cx.notify();
+                                        }
+                                    },
+                                    |control| {
+                                        control
+                                            .p_0()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .text_color(rgb(theme.muted).alpha(0.4))
+                                            .group_hover("control", |style| {
+                                                style
+                                                    .bg(gpui::transparent_black())
+                                                    .text_color(rgb(theme.text))
+                                            })
+                                            .focus_visible(|style| {
+                                                style.text_color(rgb(theme.text))
+                                            })
+                                    },
+                                ),
+                            )
+                            .when_some(output_popup, |view, popup| view.child(popup)),
+                    )
                     .child(
                         IconButton::new(
                             ("playback-locate", panel_id),
@@ -555,8 +609,7 @@ impl Playback {
                                     })
                             },
                         ),
-                    )
-                    .child(caption(theme, status)),
+                    ),
             ))
             .child(
                 row()
@@ -674,6 +727,130 @@ impl Playback {
                     .child(volume_control),
             )
             .into_any_element()
+    }
+
+    fn close_output_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.output_details = None;
+        if let Some(focus) = self.output_return_focus.take() {
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn output_popup(
+        &self,
+        panel_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.output_details != Some(panel_id) {
+            return None;
+        }
+        let theme = rivu_ui::theme::palette(cx);
+        let inset = window.rem_size();
+        let mut details = column().gap_2().flex_shrink_0().child(
+            row()
+                .justify_between()
+                .flex_shrink_0()
+                .child(caption(theme, self.context.tr("audio-output")))
+                .child(
+                    row()
+                        .gap_1()
+                        .child(
+                            IconButton::new(
+                                ("audio-output-copy", panel_id),
+                                "⧉",
+                                self.context.tr("audio-output-copy"),
+                            )
+                            .build(
+                                IconButtonStyle::Bare,
+                                IconButtonDensity::Compact,
+                                cx,
+                                |this, _, cx| {
+                                    let text = rivu_presentation::audio_output::output_text(
+                                        this.state.playback.audio_output.as_deref(),
+                                        &this.context.i18n,
+                                    );
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                },
+                            ),
+                        )
+                        .child(
+                            IconButton::new(
+                                ("audio-output-close", panel_id),
+                                "×",
+                                self.context.tr("audio-output-close"),
+                            )
+                            .build(
+                                IconButtonStyle::Bare,
+                                IconButtonDensity::Compact,
+                                cx,
+                                |this, window, cx| this.close_output_details(window, cx),
+                            ),
+                        ),
+                ),
+        );
+        if let Some(state) = self.state.playback.audio_output.as_deref() {
+            for (label, value) in
+                rivu_presentation::audio_output::output_rows(state, &self.context.i18n)
+            {
+                details = details.child(
+                    column()
+                        .gap_0()
+                        .flex_shrink_0()
+                        .child(caption(theme, label).text_xs())
+                        .child(div().text_sm().child(value)),
+                );
+            }
+            details = details.child(
+                caption(theme, self.context.tr("audio-output-note"))
+                    .text_xs()
+                    .flex_shrink_0(),
+            );
+        } else {
+            details = details.child(caption(theme, self.context.tr("audio-output-empty")));
+        }
+        let scroll = self
+            .context
+            .scroll
+            .borrow_mut()
+            .content(("audio-output", panel_id));
+        let popup = self.output_scope.surface(
+            rivu_ui::Popover::surface(theme, ("audio-output-popup", panel_id))
+                .role(gpui::Role::Dialog)
+                .flex()
+                .flex_col()
+                .w(rems(34.))
+                .max_w((window.viewport_size().width - inset).max(gpui::px(0.)))
+                .max_h((window.viewport_size().height - inset).max(gpui::px(0.)))
+                .p_3()
+                .rounded_md()
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_output_details(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.output_details = None;
+                    this.output_return_focus = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }))
+                .child(details),
+        );
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomRight)
+                    .snap_to_window_with_margin(gpui::px(4.))
+                    .child(popup),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
     }
 
     fn slider_event(

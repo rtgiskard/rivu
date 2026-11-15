@@ -13,6 +13,7 @@ use rivu_format::config::ArtworkDirection;
 use rivu_format::config::ArtworkMode;
 use rivu_format::config::AudioVisualizerStyle;
 use rivu_format::config::LogLevel;
+use rivu_format::config::ReplayGainPeakPolicy;
 use rivu_format::config::SpectrumStyle;
 use rivu_format::config::VisualizationPalette;
 use rivu_format::config::VisualizationSignal;
@@ -428,28 +429,47 @@ impl Settings {
                 .gap_2()
                 .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx))
                 .child(
-                    visual_switch(
-                        &self.i18n,
-                        "settings-replaygain",
-                        "󰕾",
-                        self.tr("settings-replaygain"),
-                        self.model.draft.replaygain_enabled,
-                        cx,
-                        |config| config.replaygain_enabled = !config.replaygain_enabled,
-                    )
-                    .self_start(),
-                )
-                .child(
-                    visual_switch(
-                        &self.i18n,
-                        "settings-confirm-queue-replace",
-                        "󰁨",
-                        self.tr("settings-confirm-queue-replace"),
-                        self.model.draft.confirm_queue_replace,
-                        cx,
-                        |config| config.confirm_queue_replace = !config.confirm_queue_replace,
-                    )
-                    .self_start(),
+                    row()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(visual_switch(
+                            &self.i18n,
+                            "settings-replaygain",
+                            "󰓅",
+                            self.tr("settings-replaygain"),
+                            self.model.draft.replaygain_enabled,
+                            cx,
+                            |config| config.replaygain_enabled = !config.replaygain_enabled,
+                        ))
+                        .child(visual_switch(
+                            &self.i18n,
+                            "settings-replaygain-prevent-clipping",
+                            "󰒃",
+                            self.tr("settings-replaygain-prevent-clipping"),
+                            self.model.draft.replaygain_peak_policy
+                                == ReplayGainPeakPolicy::PreventClipping,
+                            cx,
+                            |config| {
+                                config.replaygain_peak_policy = match config.replaygain_peak_policy
+                                {
+                                    ReplayGainPeakPolicy::Off => {
+                                        ReplayGainPeakPolicy::PreventClipping
+                                    }
+                                    ReplayGainPeakPolicy::PreventClipping => {
+                                        ReplayGainPeakPolicy::Off
+                                    }
+                                }
+                            },
+                        ))
+                        .child(visual_switch(
+                            &self.i18n,
+                            "settings-confirm-queue-replace",
+                            "󰗇",
+                            self.tr("settings-confirm-queue-replace"),
+                            self.model.draft.confirm_queue_replace,
+                            cx,
+                            |config| config.confirm_queue_replace = !config.confirm_queue_replace,
+                        )),
                 ),
         );
         let audio = settings_card(

@@ -113,6 +113,7 @@ file_group!(Playback, PlaybackView {
     ffmpeg_enabled => ffmpeg_enabled: bool,
     pipewire_auto_mix => pipewire_auto_mix: bool,
     replaygain_enabled => replaygain_enabled: bool,
+    replaygain_peak_policy => replaygain_peak_policy: ReplayGainPeakPolicy,
     processing_bypassed => processing_bypassed: bool,
 });
 

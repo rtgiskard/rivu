@@ -155,6 +155,7 @@ pub(super) struct Worker {
     device: Option<String>,
     volume: f32,
     replaygain_enabled: bool,
+    replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy,
     media_read_buffer_len: usize,
     visualization_enabled: bool,
     ffmpeg_enabled: bool,
@@ -164,6 +165,8 @@ pub(super) struct Worker {
     seek_revision: u64,
     progress: Instant,
     last_progress: Option<(u64, u64, f64, f64)>,
+    diagnostics_at: Instant,
+    diagnostics_dirty: bool,
 }
 impl Worker {
     pub(super) fn new(
@@ -189,6 +192,7 @@ impl Worker {
             device: None,
             volume: 0.7,
             replaygain_enabled: false,
+            replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
             media_read_buffer_len,
             visualization_enabled: true,
             ffmpeg_enabled: false,
@@ -198,6 +202,8 @@ impl Worker {
             seek_revision: 0,
             progress: Instant::now(),
             last_progress: None,
+            diagnostics_at: Instant::now(),
+            diagnostics_dirty: true,
         }
     }
     fn event(&self, event: AudioEvent) {
@@ -214,6 +220,9 @@ impl Worker {
         }
         if let Some(mut playback) = self.playback.take() {
             self.last_snapshot = playback.close();
+            self.event(AudioEvent::OutputDiagnostics(Arc::new(
+                playback.output_diagnostics(self.volume),
+            )));
         }
         self.last_snapshot
     }
@@ -225,6 +234,19 @@ impl Worker {
         );
     }
     fn command(&mut self, command: AudioCommand) -> bool {
+        self.diagnostics_dirty |= matches!(
+            &command,
+            AudioCommand::Load { .. }
+                | AudioCommand::Audition { .. }
+                | AudioCommand::GraphAudition { .. }
+                | AudioCommand::Metadata { .. }
+                | AudioCommand::Pause(_)
+                | AudioCommand::Seek { .. }
+                | AudioCommand::Volume(_)
+                | AudioCommand::ReplayGain { .. }
+                | AudioCommand::Equalizer(_)
+                | AudioCommand::OutputSettings { .. }
+        );
         match command {
             AudioCommand::Shutdown => {
                 self.stop();
@@ -294,10 +316,14 @@ impl Worker {
                     playback.set_volume(volume);
                 }
             }
-            AudioCommand::ReplayGain(enabled) => {
+            AudioCommand::ReplayGain {
+                enabled,
+                peak_policy,
+            } => {
                 self.replaygain_enabled = enabled;
+                self.replaygain_peak_policy = peak_policy;
                 if let Some(playback) = self.playback.as_mut() {
-                    playback.set_replaygain(enabled, self.volume);
+                    playback.set_replaygain(enabled, peak_policy, self.volume);
                 }
             }
             AudioCommand::Equalizer(config) => {
@@ -592,6 +618,7 @@ impl Worker {
                         device: self.device.clone(),
                         volume: self.volume,
                         replaygain_enabled: self.replaygain_enabled,
+                        replaygain_peak_policy: self.replaygain_peak_policy,
                         pipewire_auto_mix: self.pipewire_auto_mix,
                         visualization_enabled: self.visualization_enabled,
                         equalizer: Arc::clone(&self.equalizer),
@@ -618,6 +645,7 @@ impl Worker {
                         });
                         self.playback = Some(playback);
                         self.refresh_pcm();
+                        self.diagnostics_dirty = true;
                     }
                     Err(error) => self.event(AudioEvent::Failed {
                         generation,
@@ -717,6 +745,22 @@ impl Worker {
                     self.last_progress = Some(snapshot);
                 }
                 self.progress = Instant::now();
+            }
+            if (self.diagnostics_dirty
+                && (self.playback.as_ref().unwrap().paused()
+                    || self.diagnostics_at.elapsed() >= Duration::from_millis(100)))
+                || self.diagnostics_at.elapsed() >= Duration::from_secs(1)
+            {
+                let state = self
+                    .playback
+                    .as_mut()
+                    .unwrap()
+                    .output_diagnostics(self.volume);
+                self.diagnostics_dirty = self
+                    .events
+                    .try_send(AudioEvent::OutputDiagnostics(Arc::new(state)))
+                    .is_err();
+                self.diagnostics_at = Instant::now();
             }
             if self.playback.as_ref().unwrap().finished() {
                 let playback = self.playback.as_ref().unwrap();
@@ -837,7 +881,10 @@ mod tests {
             let expected_source_gain = match step {
                 0 => 1.0, // Startup is off despite tagged metadata.
                 1 => {
-                    worker.command(AudioCommand::ReplayGain(true));
+                    worker.command(AudioCommand::ReplayGain {
+                        enabled: true,
+                        peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
+                    });
                     0.5
                 }
                 2 => {
@@ -855,11 +902,17 @@ mod tests {
                     4.0
                 }
                 4 => {
-                    worker.command(AudioCommand::ReplayGain(false));
+                    worker.command(AudioCommand::ReplayGain {
+                        enabled: false,
+                        peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
+                    });
                     1.0
                 }
                 5 => {
-                    worker.command(AudioCommand::ReplayGain(true));
+                    worker.command(AudioCommand::ReplayGain {
+                        enabled: true,
+                        peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
+                    });
                     4.0
                 }
                 6 => {
@@ -891,6 +944,53 @@ mod tests {
             }
         }
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn peak_policy_live_updates_render_gain_without_changing_master() {
+        use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
+        let file = crate::source::tests::tagged_flac_file("Runtime peak");
+        let (mut worker, _commands, _events, _shutdown) = opening_worker();
+        let (playback, mut render) =
+            crate::playback::tests::test_playback_selected(file.path(), None);
+        worker.playback = Some(playback);
+        worker.command(AudioCommand::Volume(0.5));
+        worker.command(AudioCommand::Metadata {
+            generation: 1,
+            metadata: Arc::new(PlaybackMetadata {
+                replaygain_track_gain: Some(12.041199826559248),
+                ..Default::default()
+            }),
+        });
+        worker.playback.as_mut().unwrap().fill().unwrap();
+        for (index, (enabled, peak_policy, expected)) in [
+            (true, Off, 4.0_f32),
+            (true, PreventClipping, 1.25),
+            (false, PreventClipping, 1.0),
+            (true, PreventClipping, 1.25),
+            (true, Off, 4.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            worker.command(AudioCommand::ReplayGain {
+                enabled,
+                peak_policy,
+            });
+            assert_eq!(worker.volume, 0.5);
+            let status = worker.playback.as_ref().unwrap().replaygain_status();
+            assert_eq!(status.source_peak, Some(0.8));
+            assert_eq!(status.enabled, enabled);
+            assert_eq!(status.peak_policy, peak_policy);
+            let mut samples = [0.0; 16];
+            render(&mut samples, index as u64 * 2);
+            for sample in samples {
+                assert!(
+                    (sample - (-5000.0 / 32768.0) * crate::volume::gain(0.5) * expected).abs()
+                        < 1e-7
+                );
+            }
+        }
     }
 
     #[test]
@@ -1186,8 +1286,9 @@ mod tests {
         assert_eq!(pcm.state().intent, pcm.state().applied_intent);
         assert_eq!(worker.device.as_deref(), Some("invalid-playing-target"));
         assert!(matches!(
-            engine.events.as_ref().unwrap().try_recv(),
-            Ok(AudioEvent::Failed {
+            std::iter::from_fn(|| engine.events.as_ref().unwrap().try_recv().ok())
+                .find(|event| !matches!(event, AudioEvent::OutputDiagnostics(_))),
+            Some(AudioEvent::Failed {
                 generation: 1,
                 kind: AudioFailureKind::Other,
                 ..
@@ -1768,7 +1869,16 @@ mod tests {
                     listened_seconds: 0.0,
                 }) if seek_revision == expected_revision
             ));
-            assert!(events.is_empty());
+            let mut final_output = None;
+            while let Ok(event) = events.try_recv() {
+                let AudioEvent::OutputDiagnostics(state) = event else {
+                    panic!("unexpected playback event: {event:?}");
+                };
+                assert_eq!(state.source_generation, 1);
+                assert_eq!(state.metrics.missing_frames, 0);
+                final_output = Some(state);
+            }
+            assert!(!final_output.expect("retired output snapshot").active);
         }
     }
 
@@ -1795,8 +1905,9 @@ mod tests {
             assert!(worker.opening.is_none());
             assert!(worker.playback.is_none());
             assert!(matches!(
-                events.try_recv(),
-                Ok(AudioEvent::Failed {
+                std::iter::from_fn(|| events.try_recv().ok())
+                    .find(|event| !matches!(event, AudioEvent::OutputDiagnostics(_))),
+                Some(AudioEvent::Failed {
                     kind: AudioFailureKind::Source,
                     ..
                 })

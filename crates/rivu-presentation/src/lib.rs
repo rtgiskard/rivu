@@ -1,3 +1,4 @@
+pub mod audio_output;
 pub mod history;
 pub mod i18n;
 pub mod keyboard;

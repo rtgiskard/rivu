@@ -22,13 +22,60 @@ link:01_config.adoc#volume[Volume configuration] for fractional values and
 
 Enable ReplayGain in Playback settings or with `playback.replaygain_enabled = true`.
 Playback applies the library's single track gain in dB. Missing or invalid gain
-leaves playback unchanged. Album gain and peak tags are not used; positive gain
-can clip. This is a fixed adjustment, not dynamic compression or a loudness scan.
+leaves playback unchanged. Album gain is not used. This is a fixed adjustment,
+not dynamic compression or a loudness scan.
 
 The switch and edits to the playing track take effect without restarting playback;
 master volume remains independent. ReplayGain is playback-only and does not change
 source samples, stored files, or processing exports. Scanning and explicit file-tag
 operations are described under link:02_library.adoc#inline-track-details-edits[Track details].
+
+`playback.replaygain_peak_policy = "prevent_clipping"` optionally constrains
+the requested gain using `REPLAYGAIN_TRACK_PEAK` from the opened original source:
+the applied dB gain is the smaller of the requested gain and `-20*log10(peak)`.
+The default `off` preserves the requested gain, including positive gain that can clip.
+Peak tags are runtime-only: opening reads them without changing library records
+or source files. Missing/invalid peaks leave gain unchanged and are reported as unknown.
+Processed PCM and graph auditions never reuse original-source peaks. Master volume
+does not influence the peak constraint; disabling ReplayGain disables the policy.
+The constraint covers source sample peaks only, not true peaks, later EQ/mixing,
+PipeWire processing or device conversion. Output diagnostics show requested/applied
+gain and the peak basis independently of final measured output levels.
+
+[[output-diagnostics]]
+=== Audio output diagnostics
+
+Open the information button in the Playback panel for Audio diagnostics.
+The Copy button beside Close copies the complete diagnostic text, including rows
+outside the visible scroll area. Source and application-stream speaker positions
+use the same abbreviations, such as `FL` and `FR`.
+`rivu status` and `rivu --json status` expose the same runtime snapshot; JSON places
+it under `playback.playback.audio_output`. No diagnostics are written to the database
+or periodically logged. The snapshot is retained after Stop and cleared when a new
+queue occurrence is selected; exiting the instance discards it.
+
+Details distinguish the actual decoded/audition source, applied processing and gain,
+negotiated application stream, connected PipeWire sink and permitted remixing.
+Graph clock observations are not physical-device parameters; unavailable hardware
+facts remain unknown. Permission to remix does not prove a remix occurred, and
+matching source/stream rates do not establish bit-perfect output.
+
+Rivu supply-underrun events count contiguous shortages, with missing frames and
+callback counts. Startup wait, pause and confirmed EOF padding are not underruns.
+A shortage pending confirmation remains visible as supply wait: later PCM proves
+a gap, while a published final input boundary can prove normal EOF padding.
+Segment counters restart when output is rebuilt; session totals retain confirmed
+underruns across seeks, device changes and audition replacement. These counters do
+not claim to include every PipeWire or hardware xrun.
+
+Sample peaks and over-range frame counts are measured after Rivu DSP and software
+gain, before PipeWire. A frame counts once if any channel exceeds full scale.
+Recent peak and headroom use a short callback-time window; peak hold covers the
+output segment. Silence, no measurement and unknown hardware state remain distinct.
+Negative sample headroom indicates downstream clipping risk, not proven clipping;
+sample headroom is not true-peak headroom. Dynamic snapshots are rate-limited and
+paused playback does not create a diagnostics polling timer.
+
 
 === Playback navigation
 

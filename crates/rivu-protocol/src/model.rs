@@ -7,6 +7,8 @@ mod query;
 pub use query::{Query, QueryIdentity, QueryImpact, QueryStamp};
 mod config;
 pub use config::{ConfigMutation, ConfigPatch};
+mod audio_output;
+pub use audio_output::*;
 pub use rivu_format::config::Config;
 
 use rivu_format::decoder_hint::DecoderHint;
@@ -413,6 +415,8 @@ pub struct PlaybackState {
     /// Source physically closed by Core, independent of statistics persistence.
     /// Absent for an unknown stop outcome; duplicate idle Stop preserves it.
     pub stopped_source_generation: Option<u64>,
+    /// Latest runtime output facts; retained after stop, replaced on source admission.
+    pub audio_output: Option<Arc<AudioOutputState>>,
 }
 
 /// Identity of a task whose owner-committed terminal outcome can be awaited.
@@ -555,6 +559,7 @@ impl Default for PlaybackState {
             repeat: RepeatMode::Off,
             seek_revision: 0,
             stopped_source_generation: None,
+            audio_output: None,
         }
     }
 }

@@ -129,6 +129,19 @@ pub fn read_tags(file: &mut File) -> Result<Option<Tags>> {
 /// Override only ID3 text explicitly marked Latin-1. Declared Unicode and
 /// non-ID3 tags are never reinterpreted; invalid byte sequences are errors.
 pub fn read_tags_with_encoding(file: &mut File, encoding: TagEncoding) -> Result<Option<Tags>> {
+    Ok(read_tags_and_peak(file, encoding)?.map(|(tags, _)| tags))
+}
+
+/// Read runtime playback peak alongside tags in one pass, without adding it to
+/// the persistent/descriptive Tags model. Unsupported containers return None.
+pub fn read_playback_tags(file: &mut File) -> Result<Option<(Tags, Option<f64>)>> {
+    read_tags_and_peak(file, TagEncoding::Declared)
+}
+
+fn read_tags_and_peak(
+    file: &mut File,
+    encoding: TagEncoding,
+) -> Result<Option<(Tags, Option<f64>)>> {
     configure_lofty(false);
     ensure!(
         file.metadata()?.is_file(),
@@ -139,6 +152,7 @@ pub fn read_tags_with_encoding(file: &mut File, encoding: TagEncoding) -> Result
     };
     let parsed = read_with_encoding(file, kind, encoding)?;
     let mut result = Tags::default();
+    let mut peak = None;
     // Primary format wins; other native tags fill only missing fields.
     for tag in parsed.primary_tag().into_iter().chain(
         parsed
@@ -147,8 +161,13 @@ pub fn read_tags_with_encoding(file: &mut File, encoding: TagEncoding) -> Result
             .filter(|t| t.tag_type() != parsed.primary_tag_type()),
     ) {
         fill_missing(&mut result, tag);
+        if peak.is_none() {
+            peak = first(tag, ItemKey::ReplayGainTrackPeak)
+                .and_then(|text| text.trim().parse::<f64>().ok())
+                .filter(|peak| peak.is_finite() && *peak > 0.0);
+        }
     }
-    Ok(Some(result))
+    Ok(Some((result, peak)))
 }
 
 fn read_with_encoding(

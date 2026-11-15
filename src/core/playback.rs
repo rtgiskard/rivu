@@ -18,6 +18,8 @@ pub(super) struct PlaybackOwner {
     pub(super) history: Vec<u64>,
     pub(super) history_cursor: usize,
     pub(super) processing_resume_generation: Option<u64>,
+    pub(super) output_prior_underruns: u64,
+    pub(super) output_prior_missing_seconds: f64,
     live_source: Option<u64>,
     physically_closed_source: Option<u64>,
     autoplay: Option<Autoplay>,
@@ -315,6 +317,42 @@ fn accept_session_end(session: &mut PlaybackSession, duration: Option<f64>, bitr
 }
 
 impl Core {
+    fn accept_output_diagnostics(
+        &mut self,
+        mut state: Arc<rivu_protocol::model::AudioOutputState>,
+    ) {
+        let current_source = state.source_generation == self.transport.generation;
+        let closing_source = !state.active
+            && self.state.playback.status == PlaybackStatus::Stopped
+            && self.transport.live_source == Some(state.source_generation)
+            && self
+                .state
+                .playback
+                .audio_output
+                .as_ref()
+                .is_some_and(|old| old.source_generation == state.source_generation);
+        if (!current_source && !closing_source)
+            || self
+                .state
+                .playback
+                .audio_output
+                .as_ref()
+                .is_some_and(|old| {
+                    old.source_generation == state.source_generation
+                        && (old.segment > state.segment
+                            || (old.segment == state.segment && !old.active && state.active))
+                })
+        {
+            return;
+        }
+        let totals = Arc::make_mut(&mut state);
+        totals.session_underruns = totals
+            .session_underruns
+            .saturating_add(self.transport.output_prior_underruns);
+        totals.session_missing_seconds += self.transport.output_prior_missing_seconds;
+        self.state.playback.audio_output = Some(state);
+    }
+
     pub(in crate::core) fn playback_metadata(track: &Track) -> Arc<audio::PlaybackMetadata> {
         Arc::new(audio::PlaybackMetadata {
             title: track.title.clone(),
@@ -352,6 +390,7 @@ impl Core {
 
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
+            AudioEvent::OutputDiagnostics(state) => self.accept_output_diagnostics(state),
             AudioEvent::Started { generation, info } if generation == self.transport.generation => {
                 self.transport.processing_resume_generation = None;
                 let accepting_start = self
@@ -807,6 +846,7 @@ impl Core {
         event: AudioEvent,
     ) -> Result<()> {
         match event {
+            AudioEvent::OutputDiagnostics(state) => self.accept_output_diagnostics(state),
             event @ (AudioEvent::Started { generation, .. }
             | AudioEvent::Progress { generation, .. }
             | AudioEvent::Ended { generation, .. })
@@ -1032,6 +1072,10 @@ impl Core {
     ) -> Result<()> {
         if let Err(error) = self.engine.send(command) {
             return self.finish_playback(Ok(None), Err(error));
+        }
+        if let Some(state) = self.state.playback.audio_output.take() {
+            self.transport.output_prior_underruns = state.session_underruns;
+            self.transport.output_prior_missing_seconds = state.session_missing_seconds;
         }
         self.transport.autoplay = None;
         self.transport.generation = self.transport.generation.wrapping_add(1);

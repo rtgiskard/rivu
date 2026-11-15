@@ -11,9 +11,11 @@ use crate::capture::{PcmAudioIdentity, PcmControl, PcmProducer};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
-use rivu_format::config::VisualizationSignal;
+use rivu_format::config::{ReplayGainPeakPolicy, VisualizationSignal};
 use rivu_format::decoder_hint::DecoderHint;
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+
+mod diagnostics;
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
 // Bound output/tap admission independently of device queue and decoder packet
@@ -38,6 +40,7 @@ pub(super) struct PlaybackOptions {
     pub(super) device: Option<String>,
     pub(super) volume: f32,
     pub(super) replaygain_enabled: bool,
+    pub(super) replaygain_peak_policy: ReplayGainPeakPolicy,
     pub(super) pipewire_auto_mix: bool,
     pub(super) visualization_enabled: bool,
     pub(super) equalizer: Arc<EqualizerConfig>,
@@ -64,7 +67,7 @@ pub(super) struct Playback {
     // Audition keeps the selected source's metadata/timeline, not PCM metadata.
     source_info: Option<MediaInfo>,
     replaygain_gain: f32,
-    replaygain_enabled: bool,
+    replaygain_status: rivu_protocol::model::ReplayGainStatus,
     pending: Vec<f32>,
     pending_start: f64,
     pending_position: u64,
@@ -81,6 +84,7 @@ pub(super) struct Playback {
     paused: bool,
     visualization: VisualizationCapture,
     render_source: super::AudioRenderSnapshot,
+    diagnostics: diagnostics::OutputHistory,
 }
 
 struct VisualizationCapture {
@@ -229,6 +233,7 @@ impl Playback {
             device,
             volume,
             replaygain_enabled,
+            replaygain_peak_policy,
             pipewire_auto_mix,
             visualization_enabled,
             equalizer,
@@ -259,7 +264,13 @@ impl Playback {
             source.info().sample_rate,
         );
         analyzer.set_generation(generation);
-        let replaygain_gain = crate::volume::replaygain(&metadata, replaygain_enabled);
+        let (replaygain_gain, replaygain_status) = crate::volume::replaygain(
+            &metadata,
+            replaygain_enabled,
+            replaygain_peak_policy,
+            source.replaygain_track_peak(),
+            source.pcm().is_some() || graph.is_some(),
+        );
         let output = Output::new(
             source.info().sample_rate,
             source.layout(),
@@ -298,7 +309,7 @@ impl Playback {
             source_eof: false,
             source_info,
             replaygain_gain,
-            replaygain_enabled,
+            replaygain_status,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             pending_start: start,
             pending_position: 0,
@@ -323,6 +334,7 @@ impl Playback {
                 before_position: 0,
             },
             render_source,
+            diagnostics: diagnostics::OutputHistory::default(),
         })
     }
     // Explicit input rejection leaves the source and current output/analysis epoch intact.
@@ -370,6 +382,7 @@ impl Playback {
             self.source.seek(position)?;
             (position, output_heard)
         };
+        self.archive_output_diagnostics();
         let heard = self.prior_heard + output_heard;
         self.equalizer.reset();
         if let Some(graph) = &mut self.graph {
@@ -454,9 +467,23 @@ impl Playback {
             .set_gain(crate::volume::gain(volume) * self.replaygain_gain);
     }
 
-    pub(super) fn set_replaygain(&mut self, enabled: bool, volume: f32) {
-        self.replaygain_enabled = enabled;
-        self.replaygain_gain = crate::volume::replaygain(&self.metadata, enabled);
+    pub(super) fn replaygain_status(&self) -> rivu_protocol::model::ReplayGainStatus {
+        self.replaygain_status
+    }
+
+    pub(super) fn set_replaygain(
+        &mut self,
+        enabled: bool,
+        policy: ReplayGainPeakPolicy,
+        volume: f32,
+    ) {
+        (self.replaygain_gain, self.replaygain_status) = crate::volume::replaygain(
+            &self.metadata,
+            enabled,
+            policy,
+            self.source.replaygain_track_peak(),
+            self.source.pcm().is_some() || self.graph.is_some(),
+        );
         self.set_volume(volume);
     }
 
@@ -490,7 +517,11 @@ impl Playback {
         if self.metadata != metadata {
             self.output.set_metadata(Arc::clone(&metadata))?;
             self.metadata = metadata;
-            self.set_replaygain(self.replaygain_enabled, volume);
+            self.set_replaygain(
+                self.replaygain_status.enabled,
+                self.replaygain_status.peak_policy,
+                volume,
+            );
         }
         Ok(())
     }
@@ -702,6 +733,7 @@ impl Playback {
             }
         }
         if self.eof && self.offset_frames == self.pending.len() / channels {
+            self.output.finish_input();
             self.visualization.reset_tap();
             self.graph_gaps = VecDeque::new();
             self.graph_mapping = VecDeque::new();
@@ -862,7 +894,7 @@ pub(super) mod tests {
                     0.75,
                 )
                 .unwrap();
-            playback.set_replaygain(true, 0.75);
+            playback.set_replaygain(true, ReplayGainPeakPolicy::Off, 0.75);
             let (_worker, mut captured) = attach_capture(&mut playback, signal);
             playback.fill().unwrap();
             let weights = crate::channels::analysis_weights(playback.source.layout());
@@ -890,11 +922,101 @@ pub(super) mod tests {
             .unwrap();
             assert_eq!(exported, original);
             // An explicit library clear must not revive the selected source's -40 dB tag.
+            let (output, mut resumed_render) = crate::output::test_backend(
+                playback.source.info().sample_rate,
+                false,
+                playback.source.layout(),
+            );
+            playback
+                .restart_output_with(Some(0.0), |_, _| Ok(output))
+                .unwrap();
             playback.set_metadata(Arc::default(), 0.75).unwrap();
-            assert_eq!(playback.output.push(&[0.25]), 1);
-            let mut cleared = [0.0];
-            render(&mut cleared, 40);
-            assert_eq!(cleared, [0.25 * crate::volume::gain(0.75)]);
+            playback.fill().unwrap();
+            resumed_render(&mut audible, 40);
+            for (actual, expected) in audible.iter().zip(&original) {
+                assert_eq!(*actual, expected * crate::volume::gain(0.75));
+            }
+        }
+    }
+
+    #[test]
+    fn processed_sources_discard_peak_but_monitor_eq_preserves_replaygain_policy() {
+        use rivu_format::config::processing_graph::GraphPort;
+        let file = crate::source::tests::tagged_flac_file("Source peak");
+        for processing in 0..4 {
+            let (mut playback, _) = test_playback_selected(file.path(), None);
+            match processing {
+                1 => {
+                    let mut builder = crate::PcmBuilder::new(
+                        8_000,
+                        Arc::from(playback.source.layout()),
+                        crate::PcmBudget::new(64 * 1024),
+                    )
+                    .unwrap();
+                    builder.push(&[0.5; 64]).unwrap();
+                    playback.source_info = Some(playback.source.info().clone());
+                    playback.source = Source::from_pcm(builder.finish().unwrap(), 0.0).unwrap();
+                }
+                2 => {
+                    playback.graph = Some(
+                        GraphRunner::compile(
+                            &unity_fir_graph(),
+                            GraphPort { node: 2, port: 0 },
+                            8_000,
+                            1,
+                        )
+                        .unwrap(),
+                    );
+                }
+                3 => playback
+                    .set_equalizer(&EqualizerConfig {
+                        enabled: true,
+                        preamp_db: 6.0,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                _ => {}
+            }
+            playback
+                .set_metadata(
+                    Arc::new(PlaybackMetadata {
+                        replaygain_track_gain: Some(12.041199826559248),
+                        ..Default::default()
+                    }),
+                    1.0,
+                )
+                .unwrap();
+            playback.set_replaygain(true, ReplayGainPeakPolicy::PreventClipping, 1.0);
+            let status = playback.replaygain_status();
+            if processing == 0 || processing == 3 {
+                assert_eq!(status.source_peak, Some(0.8));
+                assert!(!status.processed_source);
+                assert!((playback.replaygain_gain - 1.25).abs() < 1e-6);
+            } else {
+                assert_eq!(status.source_peak, None);
+                assert!(status.processed_source);
+                assert_eq!(playback.replaygain_gain, 4.0);
+                assert_eq!(status.applied_gain_db, status.requested_gain_db.unwrap());
+            }
+            if processing == 3 {
+                let gain = playback.replaygain_gain;
+                for config in [
+                    EqualizerConfig::default(),
+                    EqualizerConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    EqualizerConfig {
+                        enabled: true,
+                        preamp_db: 12.0,
+                        ..Default::default()
+                    },
+                ] {
+                    playback.set_equalizer(&config).unwrap();
+                    assert_eq!(playback.replaygain_status(), status);
+                    assert_eq!(playback.replaygain_gain, gain);
+                }
+            }
         }
     }
 
@@ -1220,6 +1342,13 @@ pub(super) mod tests {
         let (output, render) = crate::output::test_backend(rate, false, source.layout());
         let equalizer =
             Equalizer::new(&EqualizerConfig::default(), rate, source.layout().len()).unwrap();
+        let (_, replaygain_status) = crate::volume::replaygain(
+            &PlaybackMetadata::default(),
+            false,
+            ReplayGainPeakPolicy::Off,
+            source.replaygain_track_peak(),
+            false,
+        );
         let playback = Playback {
             source,
             output,
@@ -1235,7 +1364,7 @@ pub(super) mod tests {
             source_eof: false,
             source_info: None,
             replaygain_gain: 1.0,
-            replaygain_enabled: false,
+            replaygain_status,
             pending: Vec::new(),
             pending_start: 0.0,
             pending_position: 0,
@@ -1266,6 +1395,7 @@ pub(super) mod tests {
                 VisualizationSignal::After,
                 Arc::new(EqualizerConfig::default()),
             ),
+            diagnostics: diagnostics::OutputHistory::default(),
         };
         (playback, render)
     }

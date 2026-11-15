@@ -359,7 +359,10 @@ pub enum AudioCommand {
     },
     Volume(f32),
     /// Apply library track ReplayGain to playback only, independently of master volume.
-    ReplayGain(bool),
+    ReplayGain {
+        enabled: bool,
+        peak_policy: rivu_format::config::ReplayGainPeakPolicy,
+    },
     /// Prepared and applied on the audio worker, never in the device callback.
     Equalizer(Arc<rivu_dsp::equalizer::config::EqualizerConfig>),
     OutputSettings {
@@ -404,6 +407,7 @@ pub enum AudioFailureKind {
 
 #[derive(Clone, Debug)]
 pub enum AudioEvent {
+    OutputDiagnostics(Arc<rivu_protocol::model::AudioOutputState>),
     Started {
         generation: u64,
         info: MediaInfo,

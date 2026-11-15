@@ -175,7 +175,8 @@ impl Core {
             config.visualization_signal != previous.visualization_signal,
             !config.processing_bypassed && config.equalizer != previous.equalizer,
             config.ffmpeg_enabled != previous.ffmpeg_enabled,
-            config.replaygain_enabled != previous.replaygain_enabled,
+            config.replaygain_enabled != previous.replaygain_enabled
+                || config.replaygain_peak_policy != previous.replaygain_peak_policy,
         ];
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
@@ -246,8 +247,10 @@ impl Core {
                     .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
             }
             if replaygain_changed {
-                self.engine
-                    .send(AudioCommand::ReplayGain(config.replaygain_enabled))?;
+                self.engine.send(AudioCommand::ReplayGain {
+                    enabled: config.replaygain_enabled,
+                    peak_policy: config.replaygain_peak_policy,
+                })?;
             }
             self.engine.send(AudioCommand::OutputSettings {
                 request,

@@ -2,6 +2,94 @@ use super::*;
 use crate::core::dispatch::BusinessEvent;
 
 #[test]
+fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
+    use rivu_protocol::model::{
+        AudioOutputState, AudioSourceFormat, AudioStreamFormat, OutputMetrics, ReplayGainStatus,
+    };
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let mut state = AudioOutputState {
+        source_generation: core.transport.generation,
+        segment: 2,
+        active: true,
+        source: Arc::new(AudioSourceFormat {
+            codec: "PCM".into(),
+            sample_rate: 48000,
+            bits_per_sample: Some(24),
+            channels: vec!["FrontCenter".into()],
+            processed: false,
+        }),
+        graph_processing: false,
+        monitor_eq: false,
+        master_gain_db: Some(0.0),
+        replaygain: ReplayGainStatus {
+            enabled: false,
+            peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
+            requested_gain_db: None,
+            applied_gain_db: 0.0,
+            source_peak: None,
+            processed_source: false,
+        },
+        stream: Arc::new(AudioStreamFormat {
+            sample_rate: 48000,
+            sample_format: "F32LE".into(),
+            channels: vec!["FrontCenter".into()],
+        }),
+        sink: Some("test".into()),
+        remix_allowed: false,
+        graph_rate: None,
+        quantum_frames: None,
+        device_rate: None,
+        device_format: None,
+        metrics: OutputMetrics::default(),
+        session_underruns: 1,
+        session_missing_seconds: 0.01,
+    };
+    core.transport.output_prior_underruns = 3;
+    core.transport.output_prior_missing_seconds = 0.02;
+    core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
+        .unwrap();
+    assert_eq!(
+        core.state
+            .playback
+            .audio_output
+            .as_ref()
+            .unwrap()
+            .session_underruns,
+        4
+    );
+    assert_eq!(
+        core.state
+            .playback
+            .audio_output
+            .as_ref()
+            .unwrap()
+            .session_missing_seconds,
+        0.03
+    );
+    let accepted = core.state.playback.audio_output.clone();
+    state.segment = 1;
+    state.session_underruns = 90;
+    core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
+        .unwrap();
+    assert_eq!(core.state.playback.audio_output, accepted);
+    state.segment = 3;
+    state.source_generation = state.source_generation.wrapping_sub(1);
+    core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
+        .unwrap();
+    assert_eq!(core.state.playback.audio_output, accepted);
+    state.source_generation = core.transport.generation;
+    state.active = false;
+    core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
+        .unwrap();
+    let retired = core.state.playback.audio_output.clone();
+    state.active = true;
+    core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state)))
+        .unwrap();
+    assert_eq!(core.state.playback.audio_output, retired);
+}
+
+#[test]
 fn published_source_generation_tracks_audio_owner_not_pause_state() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
