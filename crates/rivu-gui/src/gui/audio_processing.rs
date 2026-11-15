@@ -2915,15 +2915,11 @@ impl AudioProcessing {
         selected_audio = selected_audio.child(
             IconButton::new(
                 ("processing-bypass", panel),
-                "󰓅",
-                self.tr(if bypassed {
-                    "processing-workspace-resume"
-                } else {
-                    "processing-workspace-bypass"
-                }),
+                "",
+                self.tr("processing-workspace-enable"),
             )
             .surface(crate::gui::appearance::material::surface(cx))
-            .toggled(bypassed)
+            .toggled(!bypassed)
             .selected_fill(false)
             .build(
                 IconButtonStyle::Quiet,
@@ -2939,11 +2935,7 @@ impl AudioProcessing {
                 },
             )
             .debug_selector(move || format!("processing-bypass-{panel}"))
-            .text_color(rgb(if bypassed {
-                theme.warning
-            } else {
-                theme.accent
-            })),
+            .text_color(rgb(if bypassed { theme.muted } else { theme.accent })),
         );
         if self.page != Page::Graph {
             self.deactivate_graph_inputs(window, cx);
