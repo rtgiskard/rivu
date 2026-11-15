@@ -183,6 +183,7 @@ gl-copy-value = Copy value
 gl-edit-value = Edit value
 gl-play-count-invalid = Enter a whole number from 0 to 9223372036854775807.
 gl-replaygain-track-gain = ReplayGain (dB)
+gl-replaygain-track-peak = Track Peak
 gl-replaygain-invalid = Enter a finite number. Empty clears.
 
 gl-tags-actions = Tag actions

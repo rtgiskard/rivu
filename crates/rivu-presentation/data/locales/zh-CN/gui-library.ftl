@@ -183,6 +183,7 @@ gl-copy-value = 复制值
 gl-edit-value = 编辑值
 gl-play-count-invalid = 请输入 0 至 9223372036854775807 之间的整数。
 gl-replaygain-track-gain = ReplayGain（dB）
+gl-replaygain-track-peak = Track Peak
 gl-replaygain-invalid = 请输入有限数值；留空清除。
 
 gl-tags-actions = 标签操作

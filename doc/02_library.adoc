@@ -463,6 +463,9 @@ Scanning reads `REPLAYGAIN_TRACK_GAIN` alongside other source metadata. Rescans
 refresh it from the file, including clearing removed tags, and can replace database
 edits. No loudness analysis is performed. Playback behavior:
 link:04_playback.adoc#replaygain[ReplayGain].
+Track Peak reads `REPLAYGAIN_TRACK_PEAK` from the file without scanning PCM. It is
+read-only and copyable; unavailable values and CUE segments display `-` without
+a copy action. Reload details after external tag changes.
 
 Only one inline field is edited at a time. Same-track refreshes preserve its input;
 a failed save retains the input and an error for correction or retry. Selecting a

@@ -34,6 +34,52 @@ pub(super) fn track(id: i64, title: &str) -> Track {
     }
 }
 
+#[gpui::test]
+fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let original = this.metadata.track().unwrap().clone();
+        let peak = SourcePeak {
+            track_id: original.id,
+            path: original.path.clone(),
+            source_serial: this.metadata.source.generation(),
+            reload: this.source_peak_reload,
+            eligible: true,
+            value: Some(0.75),
+        };
+        assert!(this.source_peak_current(&peak));
+
+        let mut relocated = original.clone();
+        relocated.path = "relocated.flac".into();
+        let read = this.metadata.begin_load(original.id);
+        assert!(this.metadata.accept_load(read, Some(relocated)));
+        assert!(!this.source_peak_current(&peak));
+
+        let read = this.metadata.begin_load(original.id);
+        assert!(this.metadata.accept_load(read, Some(original.clone())));
+        assert!(this.source_peak_current(&peak));
+        this.request_track(original.id, cx);
+        assert!(!this.source_peak_current(&peak));
+
+        let peak = SourcePeak {
+            reload: this.source_peak_reload,
+            source_serial: this.metadata.source.generation(),
+            ..peak
+        };
+        assert!(this.source_peak_current(&peak));
+        this.metadata.source.stage(file_tags());
+        assert!(!this.source_peak_current(&peak));
+
+        let peak = SourcePeak {
+            source_serial: this.metadata.source.generation(),
+            ..peak
+        };
+        assert!(this.source_peak_current(&peak));
+        this.metadata.select(original.id + 1);
+        assert!(!this.source_peak_current(&peak));
+    });
+}
+
 #[test]
 fn source_support_accepts_decoder_names_and_profiles() {
     for (extension, codec, supported) in [

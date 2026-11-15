@@ -46,6 +46,15 @@ struct InlineEdit {
     _submit: Subscription,
 }
 
+struct SourcePeak {
+    track_id: i64,
+    path: std::path::PathBuf,
+    source_serial: u64,
+    reload: u64,
+    eligible: bool,
+    value: Option<f64>,
+}
+
 pub(in crate::gui) enum MetadataEvent {
     ReloadPlaybackRequested,
     TrackChanged,
@@ -58,6 +67,9 @@ pub(in crate::gui) struct Metadata {
     state: Rc<GuiSnapshot>,
     metadata: MetadataSession,
     metadata_read: MetadataReadCoordinator,
+    source_peak: Option<SourcePeak>,
+    source_peak_reading: bool,
+    source_peak_reload: u64,
     refresh_wake: RefreshWake,
     edit: Option<InlineEdit>,
     edit_serial: u64,
@@ -93,6 +105,9 @@ impl Metadata {
             state,
             metadata: MetadataSession::default(),
             metadata_read: MetadataReadCoordinator::default(),
+            source_peak: None,
+            source_peak_reading: false,
+            source_peak_reload: 0,
             refresh_wake: RefreshWake::default(),
             edit: None,
             edit_serial: 0,
@@ -365,6 +380,8 @@ impl Metadata {
     }
 
     pub(in crate::gui) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.source_peak = None;
+        self.source_peak_reload = self.source_peak_reload.wrapping_add(1);
         if self.metadata.select(id) {
             self.cancel_edit(cx);
             self.close_hint(cx);
@@ -397,6 +414,7 @@ impl Metadata {
 
     fn demand_metadata(&mut self, cx: &mut Context<Self>) {
         self.sync_metadata_query();
+        self.prepare_source_peak(cx);
         let task = self.metadata_read.prepare(
             &mut self.metadata,
             self.visible || self.preview_demand,
@@ -408,6 +426,69 @@ impl Metadata {
         };
         cx.emit(MetadataEvent::TrackChanged);
         self.run_metadata_read(task, cx);
+    }
+
+    fn source_peak_current(&self, peak: &SourcePeak) -> bool {
+        self.metadata.identity() == Some(peak.track_id)
+            && peak.source_serial == self.metadata.source.generation()
+            && peak.reload == self.source_peak_reload
+            && self.metadata.track().is_some_and(|track| {
+                track.id == peak.track_id
+                    && track.path == peak.path
+                    && (track.cue.is_none() && !track.missing) == peak.eligible
+            })
+    }
+
+    fn prepare_source_peak(&mut self, cx: &mut Context<Self>) {
+        if !self.read_demand()
+            || self.source_peak_reading
+            || self
+                .source_peak
+                .as_ref()
+                .is_some_and(|peak| self.source_peak_current(peak))
+        {
+            return;
+        }
+        let Some(track) = self.metadata.track() else {
+            return;
+        };
+        if self.metadata.identity() != Some(track.id) {
+            return;
+        }
+        let mut peak = SourcePeak {
+            track_id: track.id,
+            path: track.path.clone(),
+            source_serial: self.metadata.source.generation(),
+            reload: self.source_peak_reload,
+            eligible: track.cue.is_none() && !track.missing,
+            value: None,
+        };
+        self.source_peak_reading = true;
+        // Keep one physical reader until completion, even if selection changes.
+        let read = cx.background_executor().spawn(async move {
+            if peak.eligible {
+                peak.value = std::fs::File::open(&peak.path).ok().and_then(|mut file| {
+                    rivu_metadata::read_playback_tags(&mut file)
+                        .ok()
+                        .flatten()
+                        .and_then(|(_, peak)| peak)
+                });
+            }
+            peak
+        });
+        cx.spawn(async move |this, cx| {
+            let peak = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.source_peak_reading = false;
+                if this.source_peak_current(&peak) {
+                    this.source_peak = Some(peak);
+                    cx.notify();
+                } else {
+                    this.prepare_source_peak(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn run_metadata_read(&mut self, task: MetadataReadTask, cx: &mut Context<Self>) {
@@ -1043,6 +1124,13 @@ impl Metadata {
         let identity = self.metadata.identity();
         let placeholder: SharedString = self.tr("gl-not-loaded");
         let copy_hint = track.map(|_| self.tr("gl-copy-value"));
+        let peak_label = self.tr("gl-replaygain-track-peak");
+        let peak_value: SharedString = self
+            .source_peak
+            .as_ref()
+            .filter(|peak| self.source_peak_current(peak))
+            .and_then(|peak| peak.value)
+            .map_or_else(|| "-".into(), |value| value.to_string().into());
         let presence_status = match self.metadata.availability() {
             MetadataAvailability::Unknown if identity.is_none() => {
                 self.context.i18n.text("gl-no-track")
@@ -1294,6 +1382,7 @@ impl Metadata {
                 .chain([
                     &self.tr("gl-decoder-hint"),
                     &self.tr("gl-replaygain-track-gain"),
+                    &peak_label,
                     &track_kind.0,
                 ])
                 .map(|label| {
@@ -1530,12 +1619,21 @@ impl Metadata {
                                 copy_hint.clone(),
                                 cx,
                             ))
-                            .child(self.panel_field(
-                                theme,
-                                Field::ReplayGainTrackGain,
-                                self.tr("gl-replaygain-track-gain"),
-                                label_widths[0],
-                                cx,
+                            .child(metadata_row(
+                                self.panel_field(
+                                    theme,
+                                    Field::ReplayGainTrackGain,
+                                    self.tr("gl-replaygain-track-gain"),
+                                    label_widths[0],
+                                    cx,
+                                ),
+                                label_value_row(
+                                    theme,
+                                    peak_label.clone(),
+                                    peak_value.clone(),
+                                    label_widths[1],
+                                    metadata_copy(peak_label, peak_value, copy_hint.clone(), cx),
+                                ),
                             ))
                             .child(metadata_row(
                                 self.panel_field(
