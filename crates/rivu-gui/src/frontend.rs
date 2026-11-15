@@ -191,45 +191,31 @@ impl Shared {
         true
     }
 
-    fn refresh_after_operation(&self, session: &mut ClientSession) -> Result<()> {
+    fn refresh_state(
+        &self,
+        session: &mut ClientSession,
+        announced: Option<rivu_protocol::response::StateRevisions>,
+    ) -> Result<()> {
         let _owner = self.refresh.lock();
-        let announced = session.get_state(StateSections::default())?.revisions;
         let current = self.published.read().observed.applied();
-        let sections = announced.changed_since(current);
-        if !sections.is_empty() {
-            let response = session.get_state(sections)?;
-            let complete = response.sections().intersection(sections) == sections;
+        if announced.is_some_and(|revisions| revisions.changed_since(current).is_empty()) {
+            return Ok(());
+        }
+        let response = session.get_state_since(StateSections::ALL, current)?;
+        let expected = response.revisions.changed_since(current);
+        let received = response.sections();
+        let complete = received.intersection(expected) == expected;
+        anyhow::ensure!(complete, "Incomplete GUI state refresh");
+        if !received.is_empty() {
             anyhow::ensure!(
                 self.merge(response),
                 "GUI disconnected before state refresh"
             );
-            anyhow::ensure!(complete, "Incomplete GUI state refresh");
         }
         anyhow::ensure!(
             !self.stop.is_cancelled(),
             "GUI disconnected before authoritative refresh"
         );
-        Ok(())
-    }
-
-    fn refresh_announced(
-        &self,
-        session: &mut ClientSession,
-        announced: rivu_protocol::response::StateRevisions,
-    ) -> Result<()> {
-        let _owner = self.refresh.lock();
-        let sections = announced.changed_since(self.published.read().observed.applied());
-        if !sections.is_empty() {
-            // A Watch carries only tokens: even a delayed notification reads
-            // the current payload here, inside the same mutex as ACK refreshes.
-            let response = session.get_state(sections)?;
-            let complete = response.sections().intersection(sections) == sections;
-            anyhow::ensure!(
-                self.merge(response),
-                "GUI disconnected before Watch refresh"
-            );
-            anyhow::ensure!(complete, "Incomplete GUI Watch refresh");
-        }
         Ok(())
     }
 
@@ -417,7 +403,7 @@ impl FrontendRuntime {
                         break;
                     }
                 };
-                if let Err(error) = shared.refresh_announced(&mut watcher, announced) {
+                if let Err(error) = shared.refresh_state(&mut watcher, Some(announced)) {
                     if !shared.stop.is_cancelled() {
                         shared.error(format!("GUI state refresh failed: {error:#}"), true);
                     }
@@ -511,7 +497,7 @@ fn command_worker(
                     !shared.stop.is_cancelled(),
                     "GUI disconnected before authoritative refresh"
                 );
-                shared.refresh_after_operation(&mut session)
+                shared.refresh_state(&mut session, None)
             },
         );
         if shutdown_complete {
@@ -1244,14 +1230,90 @@ mod tests {
         );
         assert!(delivery.observed_result().is_ok());
         let refreshed = runtime.handle.shared.published.read().observed.applied();
+        let publication = runtime.handle.shared.published.read().publication;
         runtime
             .handle
             .shared
-            .refresh_announced(&mut watch, old_announcement)
+            .refresh_state(&mut watch, Some(old_announcement))
             .unwrap();
         let published = runtime.handle.shared.published.read();
         assert_eq!(published.observed.snapshot().playback.volume, 0.31);
         assert_eq!(published.observed.applied().playback, refreshed.playback);
+        assert_eq!(published.publication, publication);
+        drop(published);
+        runtime
+            .handle
+            .shared
+            .refresh_state(&mut watch, None)
+            .unwrap();
+        assert_eq!(
+            runtime.handle.shared.published.read().publication,
+            publication
+        );
+    }
+
+    #[test]
+    fn incomplete_conditional_refresh_is_not_successful_or_published() {
+        use rivu::test_support::ipc;
+        use rivu_protocol::{
+            transport::encode_response_frame_into,
+            wire::{HelloResponse, WireRequest, WireResponse, wire_state},
+        };
+        use std::{io::Write, os::unix::net::UnixListener};
+
+        let (_directory, runtime) = fixture();
+        let directory = ipc::socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                .unwrap();
+        let shared = &runtime.handle.shared;
+        let baseline = shared.published.read().observed.applied();
+        let publication = shared.published.read().publication;
+        let instance_id = shared.instance_id;
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let reply = |stream: &mut std::os::unix::net::UnixStream, response| {
+                let mut frame = Vec::new();
+                encode_response_frame_into(&response, &mut frame).unwrap();
+                stream.write_all(&frame).unwrap();
+            };
+            assert!(matches!(
+                ipc::read_test_request(&mut stream),
+                WireRequest::Hello(_)
+            ));
+            reply(
+                &mut stream,
+                WireResponse::Hello(HelloResponse {
+                    instance_id: instance_id.to_le_bytes(),
+                    state: wire_state(StateResponse::default()),
+                }),
+            );
+            assert!(
+                matches!(ipc::read_test_request(&mut stream), WireRequest::State(request)
+                if request.sections == StateSections::ALL && request.since == Some(baseline))
+            );
+            reply(
+                &mut stream,
+                WireResponse::State(wire_state(StateResponse {
+                    revisions: rivu_protocol::response::StateRevisions {
+                        playback: baseline.playback.wrapping_add(1),
+                        ..baseline
+                    },
+                    ..Default::default()
+                })),
+            );
+        });
+        let mut session = rivu_client::client_session(directory.path());
+        session.bind_instance(instance_id).unwrap();
+        session.get_state(StateSections::default()).unwrap();
+        let error = shared.refresh_state(&mut session, None).unwrap_err();
+        assert!(error.to_string().contains("Incomplete GUI state refresh"));
+        assert_eq!(shared.published.read().publication, publication);
+        assert_eq!(shared.published.read().observed.applied(), baseline);
+        server.join().unwrap();
     }
 
     #[test]

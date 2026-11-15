@@ -411,19 +411,60 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         );
         ignored.send(()).unwrap();
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
+        // A stale announcement can yield no interested payload. Do not publish
+        // it or acknowledge the unread processing revision.
+        reply(
+            &mut stream,
+            WireResponse::Watch(StateRevisions {
+                playback: 1,
+                ..processing_only
+            }),
+        );
+        assert!(matches!(
+            ipc::read_test_request(&mut stream),
+            WireRequest::State(request) if request.sections == TERMINAL_SECTIONS
+                && request.since == Some(StateRevisions::default())
+        ));
+        reply(
+            &mut stream,
+            WireResponse::State(wire_state(StateResponse {
+                revisions: processing_only,
+                ..Default::default()
+            })),
+        );
+        assert!(matches!(
+            ipc::read_test_request(&mut stream),
+            WireRequest::Watch(watch) if watch.revisions == StateRevisions::default()
+        ));
+        ignored.send(()).unwrap();
+        continuation.recv_timeout(Duration::from_secs(5)).unwrap();
         let shutdown = StateRevisions {
             system: 1,
             ..processing_only
         };
         reply(&mut stream, WireResponse::Watch(shutdown));
         assert!(
-            matches!(ipc::read_test_request(&mut stream), WireRequest::State(sections)
-            if sections == (StateSections { system: true, ..Default::default() }))
+            matches!(ipc::read_test_request(&mut stream), WireRequest::State(request)
+            if request.sections == TERMINAL_SECTIONS
+                && request.since == Some(StateRevisions::default()))
         );
         reply(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
-                revisions: shutdown,
+                revisions: StateRevisions {
+                    playback: 2,
+                    ..shutdown
+                },
+                playback: Some(rivu_protocol::response::PlaybackSnapshot {
+                    playback: rivu_protocol::model::PlaybackState {
+                        volume: 0.42,
+                        ..Default::default()
+                    },
+                    current_track: None,
+                    source_generation: 0,
+                    processing_audition: None,
+                    processing_selection: None,
+                }),
                 system: Some(rivu_protocol::model::SystemState {
                     shutting_down: true,
                     ..Default::default()
@@ -444,6 +485,10 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
     assert!(watcher.latest.lock().is_none());
     assert!(watcher.receiver.try_recv().is_err());
     continue_watch.send(()).unwrap();
+    ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(watcher.latest.lock().is_none());
+    assert!(watcher.receiver.try_recv().is_err());
+    continue_watch.send(()).unwrap();
     watcher
         .receiver
         .recv_timeout(Duration::from_secs(5))
@@ -451,6 +496,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
     let (_, shutdown) = watcher.take_update().unwrap().unwrap();
     assert!(shutdown.system.shutting_down);
     assert!(shutdown.processing.is_none());
+    assert_eq!(shutdown.playback.volume, 0.42);
     server.join().unwrap();
 }
 

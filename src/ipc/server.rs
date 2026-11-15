@@ -437,8 +437,8 @@ async fn serve_connection(
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
                 session = SessionState::Bound(instance_id);
             }
-            WireRequest::State(sections) => {
-                let response = WireResponse::State(wire_state(handle.state(sections)));
+            WireRequest::State(request) => {
+                let response = WireResponse::State(wire_state(handle.read_state(request)));
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             request @ (WireRequest::Query(_) | WireRequest::QueryRetained(_)) => {
@@ -757,12 +757,12 @@ mod tests {
                 WireRequest::Hello(sections) if sections == StateSections::ALL
             ));
             async_io::Timer::after(FRAME_TIMEOUT * 2).await;
-            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut encoded)
                 .unwrap();
             writer.write_all(&encoded).await.unwrap();
             assert!(matches!(
                 reader.read(&mut stream).await.unwrap().unwrap(),
-                WireRequest::State(sections) if sections == StateSections::ALL
+                WireRequest::State(request) if request == StateSections::ALL.into()
             ));
         });
     }
@@ -804,7 +804,7 @@ mod tests {
                 if pipeline {
                     let mut encoded = Vec::new();
                     encode_request_frame_into(
-                        &WireRequest::State(StateSections::ALL),
+                        &WireRequest::State(StateSections::ALL.into()),
                         &mut encoded,
                     )
                     .unwrap();
@@ -1046,7 +1046,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut encoded = Vec::new();
-            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut encoded)
                 .unwrap();
             peer.write_all(&encoded).await.unwrap();
             encode_request_frame_into(
@@ -1068,7 +1068,7 @@ mod tests {
             let deadline = reader.deadline.unwrap();
             assert!(matches!(
                 reader.read(&mut stream).await.unwrap().unwrap(),
-                WireRequest::State(sections) if sections == StateSections::ALL
+                WireRequest::State(request) if request == StateSections::ALL.into()
             ));
             assert!(matches!(
                 reader.read(&mut stream).await.unwrap().unwrap(),
@@ -1104,7 +1104,8 @@ mod tests {
     fn query_read_ahead_never_crosses_a_prefix_or_body_boundary() {
         async_io::block_on(async {
             let mut first = Vec::new();
-            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut first).unwrap();
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut first)
+                .unwrap();
             let mut second = Vec::new();
             encode_request_frame_into(
                 &WireRequest::Watch(StateRevisions::default().into()),
@@ -1195,8 +1196,11 @@ mod tests {
                 let (_peer, mut stream) = socket_pair();
                 let mut reader = RequestReader::default();
                 let mut complete = Vec::new();
-                encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut complete)
-                    .unwrap();
+                encode_request_frame_into(
+                    &WireRequest::State(StateSections::ALL.into()),
+                    &mut complete,
+                )
+                .unwrap();
                 let bytes = if full {
                     let mut bytes = complete.clone();
                     bytes.extend_from_slice(&(MAX_REQUEST as u32).to_le_bytes());
@@ -1259,7 +1263,7 @@ mod tests {
             let (mut peer, mut stream) = socket_pair();
             let mut reader = RequestReader::default();
             let mut encoded = Vec::new();
-            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut encoded)
                 .unwrap();
             peer.write_all(&encoded).await.unwrap();
             while reader.pending.len() < encoded.len() {
@@ -1286,7 +1290,7 @@ mod tests {
             let (mut peer, mut stream) = socket_pair();
             let mut reader = RequestReader::default();
             let mut encoded = Vec::new();
-            encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut encoded)
+            encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut encoded)
                 .unwrap();
             peer.write_all(&encoded).await.unwrap();
             while reader.pending.len() < encoded.len() {
@@ -1387,7 +1391,7 @@ mod tests {
                     1 => {
                         let mut encoded = Vec::new();
                         encode_request_frame_into(
-                            &WireRequest::State(StateSections::ALL),
+                            &WireRequest::State(StateSections::ALL.into()),
                             &mut encoded,
                         )
                         .unwrap();

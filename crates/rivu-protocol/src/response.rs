@@ -59,6 +59,25 @@ impl StateSections {
     }
 }
 
+/// Read selected state sections, optionally only when their tokens differ.
+/// A baseline is valid only for the instance from which it was read. Responses
+/// always announce all current revisions, but only included payloads are applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateRequest {
+    pub sections: StateSections,
+    /// `None` reads every selected section; `Some` omits unchanged sections.
+    pub since: Option<StateRevisions>,
+}
+
+impl From<StateSections> for StateRequest {
+    fn from(sections: StateSections) -> Self {
+        Self {
+            sections,
+            since: None,
+        }
+    }
+}
+
 /// Domains and previously applied tokens for a selective state watch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateWatch {
@@ -324,7 +343,8 @@ pub struct ProcessingState {
     pub task: Option<Arc<crate::model::ProcessingTaskStatus>>,
 }
 
-/// Only requested sections are present; omitted sections must be preserved by clients.
+/// Unconditional reads include selected sections; conditional reads omit unchanged ones.
+/// Omitted payloads must be preserved. `revisions` always announces all current tokens.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StateResponse {
     pub revisions: StateRevisions,

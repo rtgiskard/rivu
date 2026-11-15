@@ -8,14 +8,16 @@ pub use config_patch::WireConfigMutation;
 use crate::{
     AppCommand,
     model::{Command, ConfigurationState, Query, SystemState},
-    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections, StateWatch},
+    response::{
+        Ack, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections, StateWatch,
+    },
 };
 use anyhow::{Context, Result, bail};
 use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 29;
+pub const PROTOCOL_VERSION: u8 = 40;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -96,7 +98,7 @@ impl SessionState {
 
 pub enum WireRequest {
     Hello(StateSections),
-    State(StateSections),
+    State(StateRequest),
     Query(WireQuery),
     Command(WireCommand),
     Watch(StateWatch),

@@ -97,7 +97,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     .unwrap();
     stream.write_all(&frame).unwrap();
     let reply = receive_query();
-    encode_request_frame_into(&WireRequest::State(StateSections::ALL), &mut frame).unwrap();
+    encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut frame).unwrap();
     stream.write_all(&frame).unwrap();
     encode_request_frame_into(
         &WireRequest::Query(WireQuery::from(Query::Track { track_id: 2 })),
@@ -174,7 +174,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
                     ..Default::default()
                 };
                 completed
-                    .send(watcher.get_state(sections).unwrap())
+                    .send(watcher.get_state_since(sections, before).unwrap())
                     .unwrap();
                 break;
             }

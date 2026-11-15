@@ -438,7 +438,8 @@ processing-only progress does not wake or redraw the terminal.
 Request types:
 
 * `Hello` (`0`) — initialize a session and optionally read selected state sections
-* `State` (`1`) — read selected state sections
+* `State` (`1`) — immediately read selected state sections, optionally only those
+  whose revisions differ from the client's applied versions
 * `Query` (`2`) — execute a read-only query
 * `Command` (`3`) — execute a state-changing command
 * `Watch` (`4`) — wait for a change in selected sections, carrying their prior revisions
@@ -468,6 +469,16 @@ and field order are part of the binary schema.
 
 [[wire-schemas]]
 === Wire schemas
+
+`State` carries `StateRequest { sections, since }` in that field order. With
+`since: None`, it returns every selected section. With `since: Some(revisions)`,
+it returns only selected sections whose current tokens differ from that baseline.
+The revision comparison, payload selection and response tokens come from one
+shared-state read lock; serialization and transport occur after releasing it.
+An unchanged request returns current revisions without section payloads, never
+waits for a future publication, and does not establish a Watch subscription.
+Use a baseline from the bound instance only. `ClientSession::get_state_since`
+uses an unconditional selected-section Hello when the session is unbound.
 
 Configuration state carries the low-frequency settings `Config` and `config_path`
 through the positional `WireConfig` adapter. Its copies of volume, shuffle, repeat
@@ -675,16 +686,18 @@ distinct from `SystemState.revision` and acknowledgement `revision`, which are
 the Core publication/wakeup sequence used to detect a newer assembled snapshot;
 neither token is a query-data freshness clock.
 
-Clients initialize from a state read, watch for revision changes, then read only
-the invalidated sections. State reads capture selected sections and all revision
-tokens under one shared-state lock. Omitted sections preserve the client's
-previous values; the client advances tokens only for sections actually read,
-otherwise it could acknowledge an unseen change. Notifications coalesce to the
-latest state. A server restart requires a fresh Hello and state read.
+Clients initialize from an unconditional state read, watch for revision changes,
+then request State with their interests and applied revisions. The conditional
+read returns current changed sections directly, without a separate revision
+probe; a delayed Watch notification need not retransmit already applied payloads.
+Omitted sections preserve the client's previous values; the client advances
+tokens only for sections actually read, otherwise it could acknowledge an unseen
+change. Notifications coalesce to the latest state. A server restart requires
+a fresh Hello and state read.
 `ObservedState` binds its private payload and applied tokens to one instance.
 Its single apply operation advances only sections actually present in the response.
 GUI reads and merges are serialized together: a late Watch notification causes
-a fresh read under that same ordering boundary, not a merge of old payload.
+a conditional read under that same ordering boundary, not a merge of old payload.
 
 Configuration changes advance their own token and wake Watch even when runtime
 System fields are unchanged. Runtime progress does not materialize or transmit

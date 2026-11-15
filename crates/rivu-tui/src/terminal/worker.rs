@@ -104,7 +104,8 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                         .changed_since(state.applied())
                         .intersection(TERMINAL_SECTIONS);
                     if !changed.is_empty() {
-                        match session.get_state(changed) {
+                        match session.get_state_since(TERMINAL_SECTIONS, state.applied()) {
+                            Ok(response) if response.sections().is_empty() => continue,
                             Ok(response) => {
                                 state.apply(state.instance_id(), response);
                                 let shutting_down = state.snapshot().system.shutting_down;

@@ -26,8 +26,8 @@ use rivu_protocol::query_tracking::QueryTicket;
 use rivu_protocol::{
     model::*,
     response::{
-        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
-        StateRevisions, StateSections, TaskOutcome, ViewResponse,
+        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateRequest,
+        StateResponse, StateRevisions, StateSections, TaskOutcome, ViewResponse,
     },
 };
 use std::{
@@ -321,7 +321,18 @@ impl CoreHandle {
 
     /// Read only requested state sections under one short shared-state lock.
     pub fn state(&self, sections: StateSections) -> StateResponse {
+        self.read_state(sections.into())
+    }
+
+    /// Compare revisions and capture matching payloads from the same publication.
+    pub(crate) fn read_state(&self, request: StateRequest) -> StateResponse {
         let state = self.state.read();
+        let sections = request.since.map_or(request.sections, |since| {
+            state
+                .revisions
+                .changed_since(since)
+                .intersection(request.sections)
+        });
         StateResponse {
             revisions: state.revisions,
             playback: sections.playback.then(|| PlaybackSnapshot {

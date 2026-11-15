@@ -14,8 +14,8 @@ use rivu_protocol::{
     model::Query,
     query_wait_timeout,
     response::{
-        Ack, AckStatus, QueryError, QueryResponse, StateResponse, StateRevisions, StateSections,
-        StateWatch,
+        Ack, AckStatus, QueryError, QueryResponse, StateRequest, StateResponse, StateRevisions,
+        StateSections, StateWatch,
     },
 };
 use std::{
@@ -291,7 +291,27 @@ impl ClientSession {
         result
     }
 
+    /// Read every selected section, regardless of its revision.
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
+        self.read_state(sections.into())
+    }
+
+    /// Read selected sections whose revisions differ from the applied baseline.
+    /// An unbound session always reads a complete selected snapshot via Hello;
+    /// tokens from a previous connection are not trusted before instance binding.
+    pub fn get_state_since(
+        &mut self,
+        sections: StateSections,
+        revisions: StateRevisions,
+    ) -> Result<StateResponse> {
+        self.read_state(StateRequest {
+            sections,
+            since: Some(revisions),
+        })
+    }
+
+    fn read_state(&mut self, request: StateRequest) -> Result<StateResponse> {
+        let sections = request.sections;
         if !self.session.is_bound() {
             let response = self.exchange(&WireRequest::Hello(sections), query_wait_timeout())?;
             return match unpack_hello(response) {
@@ -313,7 +333,7 @@ impl ClientSession {
                 }
             };
         }
-        match unpack_error(self.exchange(&WireRequest::State(sections), query_wait_timeout())?)? {
+        match unpack_error(self.exchange(&WireRequest::State(request), query_wait_timeout())?)? {
             WireResponse::State(state) => Ok(state_response(state)),
             _ => {
                 self.disconnect();
@@ -1065,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn selective_configuration_reads_survive_reconnect_and_reject_new_instance() {
+    fn conditional_reads_preserve_omitted_state_and_rebind_through_full_hello() {
         use rivu_protocol::model::{ConfigurationState, SystemState};
         use std::os::unix::net::UnixListener;
 
@@ -1100,9 +1120,8 @@ mod tests {
             ..Default::default()
         };
         let current = StateRevisions {
-            system: 2,
             configuration: 2,
-            ..Default::default()
+            ..initial
         };
         let latest = StateRevisions {
             system: 3,
@@ -1135,19 +1154,24 @@ mod tests {
                 }),
             );
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::State(sections) if sections == runtime)
+                matches!(read_test_request(&mut stream), WireRequest::State(request)
+                if request == (StateRequest { sections: runtime, since: Some(initial) }))
             );
             write_test_response(
                 &mut stream,
-                WireResponse::State(wire_state(response(current, None, true))),
+                WireResponse::State(wire_state(response(current, None, false))),
             );
             assert!(
                 matches!(read_test_request(&mut stream), WireRequest::Watch(revisions)
-                if revisions == (StateRevisions { system: 2, ..initial }).into())
+                if revisions == initial.into())
             );
             write_test_response(&mut stream, WireResponse::Watch(current));
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::State(sections) if sections == configuration)
+                matches!(read_test_request(&mut stream), WireRequest::State(request)
+                if request == (StateRequest {
+                    sections: configuration,
+                    since: Some(initial),
+                }))
             );
             // The failed selective read is not replayed. The caller explicitly retries later.
             drop(stream);
@@ -1179,14 +1203,19 @@ mod tests {
             }
         });
         let mut client = client_session(directory.path());
-        let first = client.get_state(StateSections::ALL).unwrap();
+        // Even an equal-looking baseline cannot suppress the first snapshot.
+        let first = client.get_state_since(StateSections::ALL, initial).unwrap();
+        assert!(first.system.is_some());
+        assert!(first.configuration.is_some());
         client.bind_instance(1).unwrap();
         let mut observed = rivu_protocol::response::ObservedState::new(1);
         assert!(observed.apply(1, first));
         let retained = Arc::clone(&observed.snapshot().configuration.config);
-        let update = client.get_state(runtime).unwrap();
-        assert!(update.configuration.is_none());
-        assert!(observed.apply(1, update));
+        let unchanged = client.get_state_since(runtime, observed.applied()).unwrap();
+        assert_eq!(unchanged.revisions, current);
+        assert!(unchanged.sections().is_empty());
+        assert!(observed.apply(1, unchanged));
+        assert_eq!(observed.applied(), initial);
         assert!(Arc::ptr_eq(
             &retained,
             &observed.snapshot().configuration.config
@@ -1198,15 +1227,20 @@ mod tests {
                 .changed_since(observed.applied()),
             configuration
         );
-        assert!(client.get_state(configuration).is_err());
+        assert!(
+            client
+                .get_state_since(configuration, observed.applied())
+                .is_err()
+        );
         assert_eq!(client.instance_id(), None);
         assert_eq!(
             observed.snapshot().configuration.config.query_batch_size,
             37
         );
-        assert_eq!(observed.applied().configuration, 1);
+        assert_eq!(observed.applied(), initial);
 
-        let update = client.get_state(configuration).unwrap();
+        // A disconnected session must not compare even matching tokens before Hello.
+        let update = client.get_state_since(configuration, latest).unwrap();
         assert_eq!(client.instance_id(), Some(1));
         assert_eq!(update.sections(), configuration);
         assert!(observed.apply(1, update));
@@ -1216,11 +1250,13 @@ mod tests {
         );
         assert_eq!(
             observed.snapshot().system.last_error.as_deref(),
-            Some("runtime 2")
+            Some("runtime 1")
         );
         assert_eq!(latest.changed_since(observed.applied()), runtime);
         client.disconnect();
-        let error = client.get_state(configuration).unwrap_err();
+        let error = client
+            .get_state_since(configuration, observed.applied())
+            .unwrap_err();
         assert!(error.downcast_ref::<InstanceChanged>().is_some());
         assert_eq!(
             observed.snapshot().configuration.config.query_batch_size,

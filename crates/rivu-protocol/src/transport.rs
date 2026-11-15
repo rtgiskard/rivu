@@ -637,7 +637,7 @@ mod tests {
             let mut write_started = false;
             let error = write_request_frame_buffered(
                 &mut PendingFlush,
-                &WireRequest::State(crate::response::StateSections::ALL),
+                &WireRequest::State(crate::response::StateSections::ALL.into()),
                 &mut Vec::new(),
                 &mut write_started,
             )

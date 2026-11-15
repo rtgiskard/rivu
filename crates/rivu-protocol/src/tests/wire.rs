@@ -1,7 +1,7 @@
 use crate as rivu_protocol;
 use crate::{
     model::{Command, Query},
-    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
+    response::{Ack, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections},
     transport::*,
     wire::*,
 };
@@ -1036,7 +1036,21 @@ fn request_round_trip_uses_explicit_message_types() {
             offset: 7,
             limit: 11,
         })),
-        WireRequest::State(StateSections::ALL),
+        WireRequest::State(StateRequest {
+            sections: StateSections {
+                playback: true,
+                configuration: true,
+                ..Default::default()
+            },
+            since: Some(StateRevisions {
+                playback: u64::MAX,
+                queue: 2,
+                library: 3,
+                system: 4,
+                configuration: 5,
+                processing: 6,
+            }),
+        }),
         WireRequest::Command(WireCommand::from(Command::MoveQueue {
             queue_id: 4,
             index: 9,
@@ -1081,7 +1095,25 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::Query(WireQuery::LibraryPage { offset, limit, .. }) => {
                 assert_eq!((offset, limit), (7, 11))
             }
-            WireRequest::State(_) | WireRequest::Hello(_) => {}
+            WireRequest::State(request) => assert_eq!(
+                request,
+                StateRequest {
+                    sections: StateSections {
+                        playback: true,
+                        configuration: true,
+                        ..Default::default()
+                    },
+                    since: Some(StateRevisions {
+                        playback: u64::MAX,
+                        queue: 2,
+                        library: 3,
+                        system: 4,
+                        configuration: 5,
+                        processing: 6,
+                    }),
+                }
+            ),
+            WireRequest::Hello(_) => {}
             WireRequest::QueryRetained(query) => {
                 assert_eq!(query.id, 73);
                 assert!(matches!(query.query, WireQuery::Track { track_id: 42 }));

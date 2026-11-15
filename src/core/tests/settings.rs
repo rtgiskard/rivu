@@ -150,6 +150,59 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
 }
 
 #[test]
+fn conditional_state_preserves_unread_revisions_and_omits_current_sections() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let mut observed = rivu_protocol::response::ObservedState::new(1);
+    assert!(observed.apply(1, handle.state(StateSections::ALL)));
+    let before = observed.applied();
+    core.state.configuration.config_path = "/relocated/config.toml".into();
+    core.state.system.last_error = Some("new runtime".into());
+
+    core.publish();
+    let request = StateRequest {
+        sections: StateSections {
+            configuration: true,
+            ..Default::default()
+        },
+        since: Some(before),
+    };
+    let response = handle.read_state(request);
+    assert_eq!(response.sections(), request.sections);
+    assert_eq!(response.revisions, handle.state_revisions());
+    assert_eq!(
+        response.configuration.as_ref().unwrap().config_path,
+        std::path::Path::new("/relocated/config.toml")
+    );
+    assert!(observed.apply(1, response));
+    assert_eq!(observed.applied().system, before.system);
+
+    let response = handle.read_state(StateRequest {
+        sections: StateSections::ALL,
+        since: Some(observed.applied()),
+    });
+    assert_eq!(
+        response.sections(),
+        StateSections {
+            system: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        response.system.as_ref().unwrap().last_error.as_deref(),
+        Some("new runtime")
+    );
+    assert!(observed.apply(1, response));
+    let current = handle.read_state(StateRequest {
+        sections: StateSections::ALL,
+        since: Some(observed.applied()),
+    });
+    assert!(current.sections().is_empty());
+    assert_eq!(current.revisions, observed.applied());
+}
+
+#[test]
 fn desktop_subscriptions_filter_clock_and_management_but_retain_owner_changes() {
     let (_directory, mut core) = fixture();
     core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
