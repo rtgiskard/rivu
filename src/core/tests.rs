@@ -107,6 +107,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         store,
         read_queries: None,
         initial_devices: None,
+        encoder_probe: None,
         engine: AudioEngine::new(1).unwrap(),
         logging: None,
         executor: tasks.handle.clone(),

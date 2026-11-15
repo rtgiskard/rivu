@@ -123,6 +123,7 @@ impl Core {
             export_path: None,
             source_run: None,
             cached_output: None,
+            audio_export: None,
         };
         let id =
             self.processing
@@ -173,6 +174,7 @@ impl Core {
             export_path: None,
             source_run: None,
             cached_output: None,
+            audio_export: None,
         };
         let task_id = self
             .processing
@@ -277,41 +279,78 @@ impl Core {
         node: GraphPort,
         path: PathBuf,
     ) -> Result<u64> {
-        let result = self
-            .processing
-            .results()
-            .iter()
-            .find(|r| r.id == id)
-            .context("Graph run is no longer retained")?;
-        let graph = self
-            .processing
-            .status(result.id)
-            .context("Graph run status is no longer retained")?
-            .settings
-            .graph
-            .clone()
-            .context("Not a graph run")?;
-        graph.ancestors(node)?;
-        let track = self.processing_source(&result.track, result.stamp)?;
-        let cached_output =
-            result
-                .graph_outputs
-                .get(&node)
-                .map(|output| crate::processing::CachedGraphOutput {
-                    pcm: output.pcm.clone(),
-                    stamp: result.stamp,
-                });
+        self.audio_export(AudioExportRequest {
+            source: AudioExportSource::Frozen { id, target: node },
+            path,
+            encoding: AudioExportEncoding::default(),
+            monitor_eq: None,
+        })
+    }
+
+    pub(in crate::core) fn audio_export(&mut self, request: AudioExportRequest) -> Result<u64> {
+        request.encoding.validate()?;
+        if let Some(eq) = &request.monitor_eq {
+            eq.validate()?;
+        }
         let mut config = self.preferences.checkpoint();
-        config.processing_graph = graph;
-        let request = crate::processing::GraphRequest {
-            target: node,
+        let (track, target, source_run, cached_output) = match request.source {
+            AudioExportSource::Original { track_id } => {
+                config.processing_graph = ProcessingGraph::default();
+                (
+                    self.track(track_id)?,
+                    GraphPort { node: 1, port: 0 },
+                    None,
+                    None,
+                )
+            }
+            AudioExportSource::Graph {
+                track_id,
+                target,
+                revision,
+            } => {
+                ensure!(
+                    config.processing_graph.revision == revision,
+                    "Processing graph changed before export admission"
+                );
+                config.processing_graph.ancestors(target)?;
+                (self.track(track_id)?, target, None, None)
+            }
+            AudioExportSource::Frozen { id, target } => {
+                let result = self
+                    .processing
+                    .results()
+                    .iter()
+                    .find(|r| r.id == id)
+                    .context("Graph run is no longer retained")?;
+                config.processing_graph = self
+                    .processing
+                    .status(id)
+                    .context("Graph run status is no longer retained")?
+                    .settings
+                    .graph
+                    .clone()
+                    .context("Not a graph run")?;
+                config.processing_graph.ancestors(target)?;
+                let track = self.processing_source(&result.track, result.stamp)?;
+                let cached = result.graph_outputs.get(&target).map(|output| {
+                    crate::processing::CachedGraphOutput {
+                        pcm: output.pcm.clone(),
+                        stamp: result.stamp,
+                    }
+                });
+                (track, target, Some(id), cached)
+            }
+        };
+        let graph_request = crate::processing::GraphRequest {
+            target,
             mode: GraphExecutionMode::Offline,
-            export_path: Some(path),
-            source_run: Some(id),
+            export_path: Some(request.path.clone()),
+            source_run,
             cached_output,
+            audio_export: Some(request),
         };
         self.processing
-            .start_graph(track, Arc::new(config), request)
+            .start_graph(track, Arc::new(config), graph_request)
     }
 
     pub(in crate::core) fn cancel_processing(&mut self, id: u64) -> Result<()> {

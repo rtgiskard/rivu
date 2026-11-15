@@ -6,6 +6,148 @@ pub use rivu_format::config::processing_graph::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioExportFormat {
+    Wav,
+    Flac,
+    Mp3,
+    Opus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AudioExportSource {
+    Original {
+        track_id: i64,
+    },
+    Graph {
+        track_id: i64,
+        target: GraphPort,
+        revision: u64,
+    },
+    Frozen {
+        id: u64,
+        target: GraphPort,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioExportEncoding {
+    pub format: AudioExportFormat,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    /// WAV: 32 is floating point; 16/24 are integer. FLAC: 16/24 only.
+    pub pcm_bits: u16,
+    pub bitrate_kbps: u32,
+    pub compression: u8,
+}
+impl Default for AudioExportEncoding {
+    fn default() -> Self {
+        Self {
+            format: AudioExportFormat::Wav,
+            sample_rate: None,
+            channels: None,
+            pcm_bits: 32,
+            bitrate_kbps: 192,
+            compression: 5,
+        }
+    }
+}
+impl AudioExportEncoding {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.sample_rate
+                .is_none_or(|r| (8_000..=192_000).contains(&r)),
+            "Export sample rate must be 8000..192000 Hz"
+        );
+        anyhow::ensure!(
+            self.channels.is_none_or(|c| matches!(c, 1 | 2)),
+            "Export channel conversion supports mono or stereo"
+        );
+        anyhow::ensure!(
+            matches!(self.pcm_bits, 16 | 24 | 32),
+            "Export PCM precision must be 16, 24 or 32 bits"
+        );
+        anyhow::ensure!(
+            self.format != AudioExportFormat::Flac || self.pcm_bits != 32,
+            "FLAC requires 16 or 24 bit integer PCM"
+        );
+        anyhow::ensure!(self.compression <= 8, "FLAC compression must be 0..8");
+        anyhow::ensure!(
+            (6..=512).contains(&self.bitrate_kbps),
+            "Export bitrate must be 6..512 kbit/s"
+        );
+        if self.format == AudioExportFormat::Mp3 {
+            anyhow::ensure!(
+                [
+                    32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320
+                ]
+                .contains(&self.bitrate_kbps),
+                "MP3 requires a supported constant bitrate (32..320 kbit/s)"
+            );
+        }
+        anyhow::ensure!(
+            self.format != AudioExportFormat::Opus || self.bitrate_kbps <= 510,
+            "Opus bitrate must be 6..510 kbit/s"
+        );
+        Ok(())
+    }
+    /// Validate the actual encoder input after explicit rate/layout conversion.
+    pub fn validate_stream(&self, rate: u32, channels: u16) -> anyhow::Result<()> {
+        self.validate()?;
+        anyhow::ensure!(
+            rate > 0 && rate <= i32::MAX as u32 && (1..=32).contains(&channels),
+            "Invalid export stream format"
+        );
+        if matches!(
+            self.format,
+            AudioExportFormat::Mp3 | AudioExportFormat::Opus
+        ) {
+            anyhow::ensure!(
+                channels <= 2,
+                "MP3/Opus export requires an explicit mono/stereo conversion for multichannel sources"
+            );
+        }
+        if self.format == AudioExportFormat::Opus {
+            anyhow::ensure!(
+                rate == 48_000,
+                "Opus export requires 48000 Hz; explicitly select 48000 Hz conversion"
+            );
+        }
+        if self.format == AudioExportFormat::Mp3 {
+            anyhow::ensure!(
+                [
+                    8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000
+                ]
+                .contains(&rate),
+                "MP3 does not support this sample rate; explicitly select a supported conversion rate"
+            );
+            anyhow::ensure!(
+                if rate >= 32_000 {
+                    self.bitrate_kbps != 144
+                } else {
+                    self.bitrate_kbps <= 160
+                },
+                "MP3 bitrate is unsupported at this sample rate; choose an explicit compatible bitrate"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioExportRequest {
+    pub source: AudioExportSource,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub encoding: AudioExportEncoding,
+    #[serde(default)]
+    pub monitor_eq: Option<EqualizerConfig>,
+}
+
 /// Immediate processing controls, resolved against Core's settings at execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +507,8 @@ pub struct ProcessingSettings {
     pub graph_boundary: Option<GraphPort>,
     #[serde(default)]
     pub graph_export_path: Option<PathBuf>,
+    #[serde(default)]
+    pub audio_export: Option<AudioExportRequest>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessingTaskStatus {

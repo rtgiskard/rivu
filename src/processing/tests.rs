@@ -169,6 +169,7 @@ fn cached_export_rejects_source_replacement_between_lookup_and_task_admission() 
                 export_path: Some(destination.clone()),
                 source_run: Some(1),
                 cached_output: Some(cached),
+                audio_export: None,
             },
         )
         .unwrap_err();
@@ -527,6 +528,7 @@ fn completed_graph(
             export_path: None,
             source_run: None,
             cached_output: None,
+            audio_export: None,
         },
     )?;
     loop {
@@ -794,6 +796,7 @@ sys.stdout.buffer.flush()
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -929,6 +932,7 @@ fn model_preparation_provenance_survives_later_graph_preparation_failure() {
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -989,6 +993,7 @@ fn model_preparation_provenance_survives_graph_decode_failure() {
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -1059,6 +1064,7 @@ fn assert_graph_failure(
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -1924,6 +1930,7 @@ fn expired_pinned_live_run_stops_without_replacing_newer_current() {
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -2062,6 +2069,7 @@ fn realtime_preparation_never_creates_processing_storage() {
                 export_path: None,
                 source_run: None,
                 cached_output: None,
+                audio_export: None,
             },
         )
         .unwrap();
@@ -2464,6 +2472,7 @@ fn native_file_exports_match_retained_timeline_without_pcm_budget() {
                         export_path: Some(destination.clone()),
                         source_run: None,
                         cached_output: None,
+                        audio_export: None,
                     },
                 )
                 .unwrap();

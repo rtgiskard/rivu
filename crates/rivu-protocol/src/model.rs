@@ -502,6 +502,8 @@ pub struct SystemState {
     pub revision: u64,
     pub mpris_status: String,
     pub ffmpeg_status: String,
+    #[serde(default)]
+    pub export_formats: Option<Vec<AudioExportFormat>>,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<RelocationTaskStatus>,
@@ -520,6 +522,7 @@ impl Default for SystemState {
             revision: 0,
             mpris_status: String::new(),
             ffmpeg_status: "disabled".into(),
+            export_formats: None,
             database_optimization: None,
             shutting_down: false,
             relocation_task: None,
@@ -982,6 +985,10 @@ pub enum Command {
         node: GraphPort,
         path: PathBuf,
     },
+    AudioExport {
+        request: AudioExportRequest,
+    },
+    ProbeAudioExportFormats,
     StartProcessing {
         track_id: i64,
         operation: ProcessingOperation,

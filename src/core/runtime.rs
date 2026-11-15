@@ -289,6 +289,7 @@ impl CoreRuntime {
             workers,
             read_queries: None,
             initial_devices: None,
+            encoder_probe: None,
             revision_updates,
             mpris_status,
             state: initial,

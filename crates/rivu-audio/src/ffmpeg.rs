@@ -35,12 +35,15 @@ compile_error!("the FFmpeg extension supports little-endian x86_64/aarch64 Linux
     non_camel_case_types,
     non_upper_case_globals,
     non_snake_case,
-    dead_code
+    dead_code,
+    clippy::type_complexity
 )]
 mod abi {
     include!(concat!(env!("OUT_DIR"), "/ffmpeg_bindings.rs"));
 }
 use abi::*;
+
+pub(crate) mod encode;
 
 const NOPTS: i64 = i64::MIN;
 const ERR_EAGAIN: c_int = -11;

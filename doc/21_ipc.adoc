@@ -1572,6 +1572,25 @@ an exported file. Cancelled or stale-source tasks publish neither partial PCM no
 partial export files. `CancelProcessing` also stops the selected live audition,
 but only while its run and playback generation still match.
 
+`AudioExport { request }` starts a processing task for encoded export without
+changing playback. `request.source` is `original { track_id }`,
+`graph { track_id, target, revision }`, or `frozen { id, target }`. A current graph
+request checks its revision; a frozen request uses the retained run's snapshot.
+`monitor_eq` is an optional complete EQ snapshot applied after the selected
+source, independently of playback controls. `encoding` specifies the format,
+optional sample rate/channel conversion, PCM precision, bitrate and compression
+level; `path` names a new absolute destination. The captured request is published
+in `settings.audio_export`. Completion and cancellation use existing processing
+tasks and `graph_exported_path`; accepted requests do not imply completed files.
+See link:27_audio_processing.adoc#encoded-export[Encoded export] for encoding and
+quality boundaries.
+
+`ProbeAudioExportFormats` requests coalesced background encoder discovery.
+`system.export_formats` is `null` until discovery completes, then lists the
+available formats. It is not eagerly populated at startup. Export admission
+still validates the requested codec and conversion; capability discovery alone
+does not guarantee that a particular input layout or sample rate is supported.
+
 `settings.graph`, `graph_target`, `graph_mode`, and `graph_revision` distinguish
 captured run state from later edits. `graph_outputs` lists only real cached output
 ports and optional causal `start_frame` context (separation ports 0/1 are

@@ -121,6 +121,15 @@ pub(super) enum ProcessingAction {
     Denoise { patch: String },
     /// Merge local interpreter/manifest settings from a NeuralPatch JSON object.
     Neural { patch: String },
+    /// Export an AudioExportRequest JSON value without changing playback.
+    Export {
+        request: String,
+        /// Bind retained-result references to their Core instance.
+        #[arg(long)]
+        instance: Option<u32>,
+        #[arg(long)]
+        wait: bool,
+    },
     /// Prepare a new local model bundle, without Core unless --activate is given.
     Setup(ProcessingSetup),
     /// Process one library source. Separation requires stereo.

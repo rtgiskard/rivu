@@ -270,6 +270,10 @@ impl Core {
                     .processing_graph_export(id, node, path)
                     .map(CommandOutcome::Processing);
             }
+            Command::AudioExport { request } => {
+                return self.audio_export(request).map(CommandOutcome::Processing);
+            }
+            Command::ProbeAudioExportFormats => self.probe_audio_export_formats(),
             Command::StartProcessing {
                 track_id,
                 operation,

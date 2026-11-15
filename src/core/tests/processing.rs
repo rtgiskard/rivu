@@ -100,6 +100,93 @@ fn begin_mix(core: &mut Core, id: u64) {
 }
 
 #[test]
+fn original_audio_export_is_a_fixed_source_snapshot_and_not_an_audition() {
+    let (directory, mut core) = fixture();
+    let original = source(directory.path());
+    let destination = directory.path().join("original export.wav");
+    let request = AudioExportRequest {
+        source: AudioExportSource::Original { track_id: 1 },
+        path: destination.clone(),
+        encoding: AudioExportEncoding::default(),
+        monitor_eq: None,
+    };
+    let id = core.audio_export(request.clone()).unwrap();
+    let event = completion(&mut core);
+    assert!(!destination.exists());
+    assert_eq!(
+        core.processing_status(id).unwrap().settings.audio_export,
+        Some(request.clone())
+    );
+    core.processing_event(event);
+    let status = core.processing_status(id).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Complete);
+    assert_eq!(status.graph_exported_path, Some(destination.clone()));
+    assert_eq!(status.settings.audio_export, Some(request));
+    assert!(!status.graph_actions_available);
+    let mut reader = hound::WavReader::open(destination).unwrap();
+    assert_eq!(
+        reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        original
+    );
+    assert!(core.processing.results().is_empty());
+}
+
+#[test]
+fn current_graph_audio_export_rejects_stale_revision_before_starting() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let destination = directory.path().join("stale.wav");
+    let revision = core.preferences.settings().processing_graph.revision;
+    let error = core
+        .audio_export(AudioExportRequest {
+            source: AudioExportSource::Graph {
+                track_id: 1,
+                target: GraphPort { node: 2, port: 0 },
+                revision: revision + 1,
+            },
+            path: destination.clone(),
+            encoding: AudioExportEncoding::default(),
+            monitor_eq: None,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("graph changed"));
+    assert!(core.processing.active_id().is_none());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn original_audio_export_cancelled_after_encoding_does_not_publish() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let destination = directory.path().join("cancelled original.wav");
+    let id = core
+        .audio_export(AudioExportRequest {
+            source: AudioExportSource::Original { track_id: 1 },
+            path: destination.clone(),
+            encoding: AudioExportEncoding::default(),
+            monitor_eq: None,
+        })
+        .unwrap();
+    let event = completion(&mut core);
+    core.cancel_processing(id).unwrap();
+    core.processing_event(event);
+    assert!(!destination.exists());
+    assert_eq!(
+        core.processing_status(id).unwrap().phase,
+        ProcessingPhase::Cancelled
+    );
+    assert!(
+        core.processing_status(id)
+            .unwrap()
+            .graph_exported_path
+            .is_none()
+    );
+}
+
+#[test]
 fn processing_progress_is_authoritative_without_waking_terminal_state_interest() {
     let (directory, mut core) = fixture();
     source(directory.path());

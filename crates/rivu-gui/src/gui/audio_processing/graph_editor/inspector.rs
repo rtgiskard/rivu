@@ -188,9 +188,6 @@ impl AudioProcessing {
             stamp.generation = self.graph_editor.draft_generation;
             self.graph_editor.field_errors.remove(&key);
         }
-        if key == FieldKey::GraphExport {
-            self.results.export_draft_generation += 1;
-        }
     }
 
     pub(in crate::gui::audio_processing) fn stage_graph_text(

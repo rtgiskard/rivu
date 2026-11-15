@@ -3073,7 +3073,18 @@ impl AudioProcessing {
             window,
             cx,
         );
-        column().gap_3().child(editor)
+        column().gap_3().child(editor).child(disabled_control(
+            rivu_ui::theme::palette(cx),
+            crate::gui::appearance::material::button(
+                ("eq-configure-export", panel),
+                self.tr("processing-export-with-eq"),
+                cx,
+                |this, _, cx| this.open_original_export(true, cx),
+            )
+            .debug_selector(move || format!("eq-configure-export-{panel}"))
+            .self_start(),
+            self.input_track().is_none(),
+        ))
     }
 
     pub(super) fn node_equalizer_view(

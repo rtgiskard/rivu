@@ -79,25 +79,18 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let export_visible = self.page == Page::Results
-            && self.state.system.processing.as_ref().is_some_and(|task| {
-                task.operation == ProcessingOperation::Graph
-                    && super::super::results::graph_action_run(task).is_some()
-            });
-        self.retire_graph_inputs(None, export_visible, window, cx);
+        self.retire_graph_inputs(None, window, cx);
     }
 
     fn retire_graph_inputs(
         &mut self,
         visible_node: Option<u64>,
-        export_visible: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let mut blur = false;
         for (key, field) in &mut self.fields {
-            let hidden = key.graph_node().is_some_and(|id| Some(id) != visible_node)
-                || (*key == FieldKey::GraphExport && !export_visible);
+            let hidden = key.graph_node().is_some_and(|id| Some(id) != visible_node);
             if hidden {
                 blur |= field.input.read(cx).is_focused(window);
                 field.retire(cx);
@@ -191,7 +184,6 @@ impl AudioProcessing {
         }
         self.retire_graph_inputs(
             self.graph_editor.selected.filter(|_| parameters_visible),
-            false,
             window,
             cx,
         );
@@ -673,6 +665,25 @@ impl AudioProcessing {
                 busy || no_input || target.is_none() || audition_blocked,
             ));
         }
+        let export_target = self.graph_editor.selected.map(|node| GraphPort {
+            node,
+            port: self.graph_editor.target_port,
+        });
+        controls = controls.child(disabled_control(
+            theme,
+            crate::gui::appearance::material::button(
+                ("graph-configure-export", panel),
+                self.tr("processing-export-configure"),
+                cx,
+                move |this, _, cx| {
+                    if let Some(target) = export_target {
+                        this.open_graph_export(target, cx);
+                    }
+                },
+            )
+            .debug_selector(move || format!("graph-configure-export-{panel}")),
+            no_input || export_target.is_none(),
+        ));
         let mut footer = column()
             .flex_shrink_0()
             .gap_1()

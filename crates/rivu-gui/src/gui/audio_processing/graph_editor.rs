@@ -211,6 +211,13 @@ impl Default for GraphEditorState {
 }
 
 impl GraphEditorState {
+    pub(super) fn selected_output(&self) -> Option<GraphPort> {
+        self.selected.map(|node| GraphPort {
+            node,
+            port: self.target_port,
+        })
+    }
+
     pub(super) fn equalizer_dependencies(&self) -> (bool, bool) {
         // Stamps are retired with their dirty fields. Availability depends on
         // draft presence, not every edit to an already-dirty field's text.
@@ -625,14 +632,6 @@ impl AudioProcessing {
             Some(node) if node == id => active_keys.contains(key),
             Some(_) => field.dirty,
         });
-        if !self.fields.contains_key(&FieldKey::GraphExport) {
-            self.field(
-                FieldKey::GraphExport,
-                &self.tr("processing-export-path"),
-                String::new(),
-                cx,
-            );
-        }
     }
 
     pub(super) fn graph_parameter_label(&self, field: GraphField) -> String {
@@ -2625,6 +2624,7 @@ mod tests {
                     graph_mode: Some(GraphExecutionMode::Offline),
                     graph_boundary: None,
                     graph_export_path: None,
+                    audio_export: None,
                 },
                 graph_revision: Some(config.processing_graph.revision),
                 graph_run_id: Some(1),
@@ -2635,6 +2635,8 @@ mod tests {
                 graph_plan: None,
             };
             Rc::make_mut(&mut this.state).system.processing = Some(Arc::new(task));
+            Rc::make_mut(&mut this.state).system.export_formats =
+                Some(vec![rivu_protocol::model::AudioExportFormat::Wav]);
             this.page = Page::Results;
         });
         let window = cx.open_window(size(px(1200.), px(900.)), {
@@ -2643,8 +2645,14 @@ mod tests {
         });
         let handle = window.into();
         draw(cx, handle);
+        let position = gpui::VisualTestContext::from_window(handle, cx)
+            .debug_bounds("graph-export-7-1-1-0")
+            .unwrap()
+            .center();
+        press(cx, handle, position);
+        release(cx, handle, position);
         let input = processing.read_with(cx, |this, _| {
-            this.fields[&FieldKey::GraphExport].input.clone()
+            this.fields[&FieldKey::ExportPath].input.clone()
         });
         cx.update_window(handle, |_, window, cx| {
             input.read(cx).focus_handle(cx).focus(window, cx);
@@ -2663,12 +2671,13 @@ mod tests {
         processing.read_with(cx, |this, cx| {
             assert_eq!(input.read(cx).text(), "out.wav");
             assert_eq!(
-                this.fields[&FieldKey::GraphExport].input.read(cx).text(),
+                this.fields[&FieldKey::ExportPath].input.read(cx).text(),
                 "out.wav"
             );
         });
         processing.update(cx, |this, cx| {
             this.command_active = true;
+            this.page = Page::Results;
             Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config).processing_bypassed =
                 true;
             cx.notify();
@@ -2694,15 +2703,24 @@ mod tests {
         press(cx, handle, position);
         release(cx, handle, position);
         processing.update(cx, |this, cx| {
+            assert!(this.page == Page::Export);
+            assert!(
+                this.commands.is_empty(),
+                "shortcut only opens the export draft"
+            );
             assert!(matches!(
-                this.commands.pop_front().unwrap().command,
-                Command::ProcessingGraphExport { id: 1, .. }
+                this.export_request(cx).unwrap().source,
+                rivu_protocol::model::AudioExportSource::Frozen {
+                    id: 1,
+                    target: GraphPort { node: 1, port: 0 }
+                }
             ));
-            this.pending = 0;
-            this.command_active = false;
             Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config).processing_bypassed =
                 false;
             cx.notify();
+        });
+        let mut input = processing.read_with(cx, |this, _| {
+            this.fields[&FieldKey::ExportPath].input.clone()
         });
         cx.update_window(handle, |_, window, cx| {
             input.read(cx).focus_handle(cx).focus(window, cx);
@@ -2720,11 +2738,7 @@ mod tests {
                 );
                 task.phase = phase;
                 task.id = 2; // An export receipt operates on source run #1.
-                let current = super::super::results::graph_export_request_current;
-                assert!(current(Some(task), 2, 1));
-                assert!(!current(Some(task), 1, 1));
-                assert!(!current(Some(task), 2, 2));
-                assert!(!current(None, 2, 1));
+                assert_eq!(super::super::results::graph_action_run(task), Some(1));
             });
             cx.update_window(handle, |_, window, cx| {
                 window.refresh();
@@ -2732,6 +2746,15 @@ mod tests {
                 assert!(input.read(cx).is_focused(window));
             })
             .unwrap();
+            processing.update(cx, |this, cx| {
+                assert!(matches!(
+                    this.export_request(cx).unwrap().source,
+                    rivu_protocol::model::AudioExportSource::Frozen { id: 1, .. }
+                ));
+                this.page = Page::Results;
+                cx.notify();
+            });
+            draw(cx, handle);
             for (present, absent) in [
                 ("graph-audition-7-1-1-0", "graph-audition-7-2-1-0"),
                 ("graph-export-7-1-1-0", "graph-export-7-2-1-0"),
@@ -2747,8 +2770,20 @@ mod tests {
                         .is_none()
                 );
             }
+            processing.update(cx, |this, cx| {
+                this.page = Page::Export;
+                cx.notify();
+            });
+            draw(cx, handle);
+            input = processing.read_with(cx, |this, _| {
+                this.fields[&FieldKey::ExportPath].input.clone()
+            });
+            cx.update_window(handle, |_, window, cx| {
+                input.read(cx).focus_handle(cx).focus(window, cx);
+            })
+            .unwrap();
         }
-        // The same retained input is no longer a focus owner when its result disappears.
+        // Leaving Export retires its input; lost frozen resources remove Results actions.
         processing.update(cx, |this, _| {
             Arc::make_mut(
                 Rc::make_mut(&mut this.state)
@@ -2758,11 +2793,7 @@ mod tests {
                     .unwrap(),
             )
             .graph_actions_available = false;
-            assert!(!super::super::results::graph_export_request_current(
-                this.state.system.processing.as_deref(),
-                2,
-                1,
-            ));
+            this.page = Page::Results;
         });
         cx.update_window(handle, |_, window, cx| {
             window.refresh();

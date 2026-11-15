@@ -30,7 +30,7 @@ use, memory use, and background work low.
   controls and system tray integration
 * *Audio processing:* live parametric EQ, restoration, speech enhancement, and
   vocal/accompaniment separation; real-time, hybrid and offline graphs with
-  auditioning and WAV export. See
+  auditioning, and WAV/FLAC/MP3/Opus export from original or processed audio. See
   link:doc/27_audio_processing.adoc#practical-workflow[workflow and quality limits]
 * *Visualizations and artwork:* views include waveform, spectrum, spectrogram,
   stereo analysis, and oscilloscope, alongside a separate Artwork panel
@@ -266,12 +266,17 @@ link:doc/21_ipc.adoc#consumer-and-application-lifetimes[frontend lifetimes].
 === FFmpeg and native-only builds
 
 Enabled by default; requires `libclang` and FFmpeg headers (`libavutil` 61.x,
-`libavcodec` 63.x, `libavformat` 63.x). Supported targets: little-endian x86-64
-and aarch64 Linux; cross-compiling is unsupported.
+`libavcodec` 63.x, `libavformat` 63.x, `libswresample` 7.x). Supported targets:
+little-endian x86-64 and aarch64 Linux; cross-compiling is unsupported.
 
 Enable at runtime with `playback.ffmpeg_enabled = true`. Libraries load on demand;
 native decoding works without them. See
 link:doc/04_playback.adoc#optional-ffmpeg-decoder[decoder behavior and runtime dependencies].
+Encoded audio export explicitly loads its required libraries independently of
+the decoding preference. FLAC uses FFmpeg's native encoder; MP3 and Opus require
+its `libmp3lame` and `libopus` encoders. WAV writing remains native. See
+link:doc/27_audio_processing.adoc#encoded-export[Encoded export] for format and
+conversion boundaries; the `ffmpeg` command-line executable is not required.
 
 To build without FFmpeg support, omit the FFmpeg package and disable default features:
 

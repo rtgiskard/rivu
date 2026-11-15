@@ -13,6 +13,7 @@ pub(super) enum BusinessEvent {
     SourceTags(source_tags::SourceTagFinished),
     FfmpegLoaded,
     DevicesEnumerated(Result<Vec<String>>),
+    EncodersDiscovered(Result<Vec<AudioExportFormat>>),
     MprisStatus,
     Shutdown(CoreLifecycle),
 }
@@ -122,6 +123,7 @@ impl Core {
         let Core {
             engine,
             initial_devices,
+            encoder_probe,
             scan_rx,
             relocation_rx,
             active_export,
@@ -159,6 +161,14 @@ impl Core {
                 }
             }.fuse() => BusinessEvent::DevicesEnumerated(result.unwrap_or_else(|_| {
                 Err(anyhow::anyhow!("Initial device enumeration ended without a result"))
+            })),
+            result = async {
+                match encoder_probe.as_mut() {
+                    Some(probe) => (&mut probe.finished).await,
+                    None => std::future::pending().await,
+                }
+            }.fuse() => BusinessEvent::EncodersDiscovered(result.unwrap_or_else(|_| {
+                Err(anyhow::anyhow!("Audio encoder discovery ended without a result"))
             })),
             event = async {
                 match active_external_admission.as_mut() {
@@ -228,6 +238,7 @@ impl Core {
                 self.complete_optimization(reply, result);
             }
             BusinessEvent::SourceTags(result) => self.finish_source_tags(result),
+            BusinessEvent::EncodersDiscovered(result) => self.finish_encoder_probe(result),
             BusinessEvent::FfmpegLoaded => {
                 self.state.system.ffmpeg_status = audio::ffmpeg_status()
                     .unwrap_or_else(|error| format!("unavailable: {error:#}"));

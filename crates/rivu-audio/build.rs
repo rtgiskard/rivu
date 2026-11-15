@@ -28,7 +28,12 @@ fn generate_ffmpeg_bindings() {
     );
 
     let mut includes = BTreeSet::new();
-    for (name, major) in [("libavutil", 61), ("libavcodec", 63), ("libavformat", 63)] {
+    for (name, major) in [
+        ("libavutil", 61),
+        ("libavcodec", 63),
+        ("libavformat", 63),
+        ("libswresample", 7),
+    ] {
         let package = pkg_config::Config::new()
             .cargo_metadata(false)
             .range_version(format!("{major}").as_str()..format!("{}", major + 1).as_str())
@@ -45,13 +50,16 @@ fn generate_ffmpeg_bindings() {
 #include <libavutil/channel_layout.h>\n\
 #include <libavcodec/avcodec.h>\n\
 #include <libavformat/avformat.h>\n\
-#if LIBAVUTIL_VERSION_MAJOR != 61 || LIBAVCODEC_VERSION_MAJOR != 63 || LIBAVFORMAT_VERSION_MAJOR != 63\n\
-#error Unsupported FFmpeg header ABI: expected 61/63/63\n\
+#include <libswresample/swresample.h>\n\
+#if LIBAVUTIL_VERSION_MAJOR != 61 || LIBAVCODEC_VERSION_MAJOR != 63 || LIBAVFORMAT_VERSION_MAJOR != 63 || LIBSWRESAMPLE_VERSION_MAJOR != 7\n\
+#error Unsupported FFmpeg header ABI: expected 61/63/63/7\n\
 #endif\n")
         .clang_arg(format!("--target={target}"))
-        .allowlist_type("AV(FormatContext|InputFormat|Dictionary|DictionaryEntry|Packet|Codec|CodecID|CodecContext|CodecParameters|Frame|Rational|ChannelLayout|Channel|ChannelOrder|MediaType|Discard|SampleFormat)")
+        .allowlist_type("AV(FormatContext|InputFormat|OutputFormat|Dictionary|DictionaryEntry|Packet|Codec|CodecID|CodecContext|CodecParameters|Frame|Rational|ChannelLayout|Channel|ChannelOrder|MediaType|Discard|SampleFormat)")
         .allowlist_type("AVStreamGroup")
-        .opaque_type("AVCodecContext|AVInputFormat|AVStreamGroup")
+        .opaque_type("AVInputFormat|AVStreamGroup|SwrContext")
+        .allowlist_type("SwrContext")
+        .allowlist_var("LIBSWRESAMPLE_VERSION_MAJOR")
         .allowlist_var("AV_TIME_BASE")
         .allowlist_var("LIBAV(UTIL|CODEC|FORMAT)_VERSION_MAJOR")
         .allowlist_function("^$")

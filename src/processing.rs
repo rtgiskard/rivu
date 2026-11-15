@@ -113,6 +113,7 @@ pub(crate) struct GraphRequest {
     pub export_path: Option<PathBuf>,
     pub source_run: Option<u64>,
     pub cached_output: Option<CachedGraphOutput>,
+    pub audio_export: Option<AudioExportRequest>,
 }
 
 pub(crate) struct CachedGraphOutput {
@@ -762,18 +763,19 @@ impl Service {
         profile: Option<NoiseSelection>,
         request: Option<GraphRequest>,
     ) -> Result<u64> {
-        let (target, mode, export_path, cached_output, source_run) = if let Some(request) = request
-        {
-            (
-                Some(request.target),
-                request.mode,
-                request.export_path,
-                request.cached_output,
-                request.source_run,
-            )
-        } else {
-            (None, GraphExecutionMode::Offline, None, None, None)
-        };
+        let (target, mode, export_path, cached_output, source_run, audio_export) =
+            if let Some(request) = request {
+                (
+                    Some(request.target),
+                    request.mode,
+                    request.export_path,
+                    request.cached_output,
+                    request.source_run,
+                    request.audio_export,
+                )
+            } else {
+                (None, GraphExecutionMode::Offline, None, None, None, None)
+            };
         ensure!(
             self.active.is_none(),
             "An audio processing task is already active"
@@ -838,6 +840,7 @@ impl Service {
                 graph_mode: None,
                 graph_boundary: None,
                 graph_export_path: export_path,
+                audio_export,
             },
             graph_revision: target.map(|_| config.processing_graph.revision),
             graph_run_id: target.map(|_| source_run.unwrap_or(id)),

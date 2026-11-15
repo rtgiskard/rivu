@@ -29,6 +29,8 @@ mod equalizer_editor;
 use equalizer_editor::EqualizerEditors;
 mod results;
 use results::ResultsState;
+mod export;
+use export::ExportState;
 
 #[cfg(test)]
 mod test_support {
@@ -92,6 +94,7 @@ pub(super) enum Page {
     Speech,
     Separation,
     Results,
+    Export,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -576,7 +579,10 @@ enum FieldKey {
     Denoise(DenoiseField),
     Neural(NeuralField),
     Graph(graph_editor::NodeField),
-    GraphExport,
+    ExportPath,
+    ExportRate,
+    ExportBitrate,
+    ExportCompression,
     PresetName,
     PresetPath,
     ProfileStart,
@@ -597,7 +603,7 @@ impl FieldKey {
         match self {
             Self::Neural(field) if field.input_kind() == FieldInputKind::Path => text,
             Self::Graph(binding) if binding.field.path_placeholder().is_some() => text,
-            Self::GraphExport | Self::PresetPath => text,
+            Self::ExportPath | Self::PresetPath => text,
             _ => text.trim(),
         }
     }
@@ -790,6 +796,7 @@ pub(super) struct AudioProcessing {
     preset_intent_generation: u64,
     preset_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     results: ResultsState,
+    export: ExportState,
 }
 
 impl AudioProcessing {
@@ -819,6 +826,7 @@ impl AudioProcessing {
             preset_intent_generation: 0,
             preset_bounds: Rc::new(Cell::new(None)),
             results: ResultsState::default(),
+            export: ExportState::default(),
         };
         this.sync_fields(cx);
         this
@@ -868,6 +876,7 @@ impl AudioProcessing {
             || self.state.system.processing_selection != state.system.processing_selection
             || self.state.playback.status != state.playback.status
             || format_changed
+            || self.state.system.export_formats != state.system.export_formats
             || title_changed;
         if self.state.system.processing.as_ref().map(|task| task.id)
             != state.system.processing.as_ref().map(|task| task.id)
@@ -1179,7 +1188,7 @@ impl AudioProcessing {
         let id = match key {
             FieldKey::Neural(field) => field.path_placeholder()?,
             FieldKey::PresetPath => "processing-preset-path-placeholder",
-            FieldKey::GraphExport => "processing-export-path-placeholder",
+            FieldKey::ExportPath => "processing-export-path-placeholder",
             FieldKey::Graph(binding) => binding.field.path_placeholder()?,
             _ => return None,
         };
@@ -2772,6 +2781,7 @@ impl AudioProcessing {
             (Page::Speech, "processing-tab-speech"),
             (Page::Separation, "processing-tab-separation"),
             (Page::Results, "processing-tab-results"),
+            (Page::Export, "processing-tab-export"),
         ] {
             tabs = tabs.child(
                 crate::gui::appearance::material::button(
@@ -2782,10 +2792,23 @@ impl AudioProcessing {
                         this.cancel_pointer(cx);
                         this.close_workbench_controls();
                         let _ = this.set_preset_popup(None, cx);
+                        if this.page == Page::Export
+                            && page != Page::Export
+                            && this
+                                .choosing_path
+                                .is_some_and(|request| request.key == FieldKey::ExportPath)
+                        {
+                            this.choosing_path = None;
+                        }
+                        if page == Page::Export {
+                            this.initialize_export(cx);
+                            this.probe_export_formats(cx);
+                        }
                         this.page = page;
                         cx.notify();
                     },
                 )
+                .debug_selector(move || format!("processing-page-{panel}-{label}"))
                 .role(Role::Tab)
                 .aria_selected(self.page == page)
                 .flex_shrink_0()
@@ -2951,6 +2974,7 @@ impl AudioProcessing {
         if !matches!(self.page, Page::Graph | Page::Equalizer) {
             self.deactivate_equalizer_panel(panel, window, cx);
         }
+        self.retire_export_inputs(window, cx);
         let body = match self.page {
             Page::Graph => self
                 .routing_graph_view(panel, window, cx)
@@ -2962,6 +2986,7 @@ impl AudioProcessing {
                     Page::Restoration => self.restoration_view(panel, cx),
                     Page::Speech => self.neural_view(panel, true, cx),
                     Page::Separation => self.neural_view(panel, false, cx),
+                    Page::Export => self.export_view(panel, cx),
                     Page::Graph | Page::Results => unreachable!(),
                 };
                 self.processing_scroll(panel, "processing-page-body", body.p_2())
@@ -2979,6 +3004,7 @@ impl AudioProcessing {
             Page::Separation => {
                 footer.child(self.task_controls(panel, ProcessingOperation::Separate, cx))
             }
+            Page::Export => footer.child(self.export_controls(panel, cx)),
             Page::Equalizer | Page::Results => footer,
         };
         if self.page != Page::Results {

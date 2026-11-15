@@ -226,6 +226,23 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
     let command = match action {
         ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),
         ProcessingAction::Setup(_) => unreachable!("setup does not use a Core session"),
+        ProcessingAction::Export {
+            request,
+            instance,
+            wait: requested,
+        } => {
+            let mut request: AudioExportRequest =
+                serde_json::from_str(&request).context("Parsing AudioExportRequest JSON")?;
+            if matches!(request.source, AudioExportSource::Frozen { .. }) && instance.is_none() {
+                anyhow::bail!("Frozen export requires --instance from the retained task reference");
+            }
+            if let Some(instance) = instance {
+                session.bind_instance(instance)?;
+            }
+            request.path = super::client_path(request.path)?;
+            wait = requested;
+            Command::AudioExport { request }
+        }
         ProcessingAction::Bypass { mode } => Command::ProcessingBypass {
             bypassed: matches!(mode, super::args::Switch::On),
         },

@@ -1,4 +1,4 @@
-use super::export::prepare_export;
+use super::export::prepare_encoded_export;
 use super::{
     AudioOutputs, CachedGraphOutput, Event, ModelOutputRetention, ModelRequest, ProcessingResult,
     SourceStamp, graph, neural,
@@ -83,9 +83,15 @@ pub(super) fn run_cached_export(
         .graph_export_path
         .as_ref()
         .context("Missing export destination")?;
-    let pending_export = Some(prepare_export(&pcm, destination, cancel, |done, total| {
-        progress.report(ProcessingPhase::Processing, done, Some(total));
-    })?);
+    let pending_export = Some(prepare_encoded_export(
+        &pcm,
+        destination,
+        status.settings.audio_export.as_ref(),
+        cancel,
+        |done, total| {
+            progress.report(ProcessingPhase::Processing, done, Some(total));
+        },
+    )?);
     ensure!(
         SourceStamp::read(&track.path)? == stamp,
         "Source changed while exporting; output discarded"
@@ -350,12 +356,13 @@ pub(super) fn run(
             .settings
             .graph_target
             .context("Missing export target")?;
-        pending_export = Some(prepare_export(
+        pending_export = Some(prepare_encoded_export(
             &graph_outputs
                 .get(&target)
                 .context("Missing export output")?
                 .pcm,
             destination,
+            status.settings.audio_export.as_ref(),
             cancel,
             |done, total| {
                 progress.report(ProcessingPhase::Processing, done, Some(total));

@@ -19,7 +19,7 @@ observations from the remaining acceptance gaps below.
 
 Add the Audio processing panel from the layout catalog. Each named layout allows
 one instance, providing Processing graph, Monitor EQ, Restoration, Speech
-enhancement, Separation and Results. Switching tabs or layouts does not run a
+enhancement, Separation, Results and Export. Switching tabs or layouts does not run a
 job, change audition or discard drafts. Closing and readding the panel preserves
 window-owned drafts for still-valid targets, but cancels focus and pointer
 interaction. Core owns committed settings. Monitor EQ affects playback
@@ -36,8 +36,8 @@ or limiter.
   node output or Run an Output node with the chosen execution mode.
 . Follow the task to completion; confirm the actual audition before comparing
   with Original at fixed levels.
-. To keep a graph output, Export WAV to a new file. Retained audition results
-  alone do not survive session retirement.
+. To save audio, use Export for an original track, a graph output, or a retained
+  result. Retained audition results alone do not survive session retirement.
 
 Core reports the actual audition independently of the latest task, identifying
 the retained run, graph port and live/hybrid/cached path separately from transport
@@ -133,14 +133,75 @@ selecting an audition. Process output targets the first Output node. To process
 another Output, select it and use Preview selected, or use its ID in the CLI.
 Neither action applies drafts implicitly.
 
-Audition and export use the frozen run and captured settings, not the current
-editor. Results retains outputs for audition and export. Desktop Export WAV
-requires an absolute path naming a new file in an existing directory; the CLI
-also accepts relative destinations.
+Audition uses the frozen run and captured settings, not the current editor.
+Results retains outputs for audition and provides an Export shortcut bound to
+that run. Exporting the current graph instead captures its selected output and
+revision when the request is accepted. Neither action applies graph drafts.
 
 Accepted graph and processing-setting edits save to `config.toml` immediately,
 independently of Settings Apply. Drafts, viewport and retained audio are not
 configuration commits. See link:01_config.adoc#saving-configuration[Saving configuration].
+
+[[encoded-export]]
+=== Encoded export
+
+Export is independent of playback and does not require a completed processing
+task. Select an original track for pure transcoding, optionally apply a captured
+Monitor EQ configuration, or select a graph output. The Results shortcut uses
+that retained run's frozen graph rather than later editor changes. Track identity
+stays explicit; changing the playing track does not retarget an export draft.
+
+Monitor EQ is optional post-processing. EQ nodes already included in a graph
+output are not automatically applied again. Playback volume, ReplayGain and
+temporary playback bypass do not become export processing. No normalization or
+limiter is added. Source files are never rewritten.
+
+WAV supports 16/24-bit integer or 32-bit float PCM; FLAC supports 16/24-bit integer
+PCM and a compression level. MP3 exposes a constant bitrate; Opus exposes a target
+bitrate. FLAC is lossless
+relative to the quantized integer samples, not the pre-quantization floating-point
+processing result. Use float WAV to retain finite floating-point samples,
+including peaks above full scale. Integer conversion uses triangular dither;
+integer and lossy export reject out-of-range samples instead of silently clipping.
+
+Sample rate and channel layout are preserved unless conversion is explicitly
+selected. Channel conversion offers mono or stereo. A codec's unsupported rate or
+layout is an error, not permission to downmix automatically. MP3 and Opus exports
+support mono/stereo; multichannel inputs require an explicit conversion. Opus
+uses 48 kHz; other source rates require explicitly selecting 48 kHz. MP3 also
+requires a rate and constant bitrate combination supported by its encoder.
+Resampling produces `ceil(source_frames * output_rate / source_rate)` frames;
+filter boundary extension does not lengthen the exported timeline. An empty
+source remains empty, and failure to produce the required tail fails the export.
+
+Native WAV writing is available without FFmpeg. Compressed export and rate/channel
+conversion use runtime-loaded FFmpeg libraries, including `libswresample`; no
+`ffmpeg` executable is required. Available encoders are discovered on explicit
+export-page demand, never on ordinary startup or from rendering a control.
+Missing encoders are unavailable rather than replaced with another format.
+This explicit export capability is independent of the optional FFmpeg decoding
+preference. See link:../readme.adoc#ffmpeg-and-native-only-builds[Build dependencies].
+
+Choose a new output file in an existing directory. Desktop destinations are
+absolute; CLI destinations may be relative to the invoking client's directory.
+Each submission freezes its source, graph, EQ and encoding parameters. Progress
+and cancellation use the processing task lifecycle; closing the page does not
+cancel an admitted task. Files are published only after successful encoding and
+source validation, without overwriting an existing destination.
+
+CLI requests use the same model:
+
+[source,sh]
+----
+rivu processing export '{"source":{"original":{"track_id":42}},"path":"out.flac","encoding":{"format":"flac","pcm_bits":24}}' --wait
+----
+
+Use `source.graph` with `track_id`, `target: {node, port}` and the current graph
+`revision` for a graph export. `source.frozen` takes a retained run `id` and
+`target`; pass `--instance` from that run's task reference to avoid applying a
+session-local ID to another Core instance. `monitor_eq` optionally carries a
+complete `EqualizerConfig` snapshot.
+
 
 === Equalizer
 

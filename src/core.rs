@@ -422,6 +422,7 @@ struct Core {
     workers: Arc<BlockingExecutor>,
     read_queries: Option<query_worker::ReadQueries>,
     initial_devices: Option<runtime::InitialDevices>,
+    encoder_probe: Option<export_capabilities::EncoderProbe>,
     revision_updates: Arc<RwLock<Vec<RevisionSubscription>>>,
     mpris_status: Arc<MprisStatusInbox>,
     state: CoreState,
@@ -486,6 +487,7 @@ impl Drop for Core {
         while self.relocation_rx.try_recv().is_ok() {}
         drop(self.active_optimization.take());
         drop(self.initial_devices.take());
+        drop(self.encoder_probe.take());
         // AudioEngine::drop sends shutdown and physically joins its worker.
     }
 }
@@ -517,6 +519,7 @@ mod catalog;
 mod command;
 mod dispatch;
 mod export;
+mod export_capabilities;
 mod maintenance;
 mod playback;
 mod playlists;

@@ -297,3 +297,7 @@ audio-output-note = Segment loudness; reference target: -18 LUFS. Headroom = −
 audio-output-empty = No output diagnostics yet
 audio-output-close = Close audio diagnostics
 audio-output-copy = Copy audio diagnostics
+core-help-processing-export = Export original audio or a graph output with explicit processing and encoding settings
+core-help-processing-export-request = AudioExportRequest JSON; relative output paths resolve in this client's directory
+core-help-processing-export-instance = Core instance ID; required for a frozen result reference
+core-help-processing-export-wait = Wait for export completion

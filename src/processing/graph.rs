@@ -1143,10 +1143,11 @@ pub(super) fn execute_native(
         let (frames, output, pending_export) = if let Some(destination) = destination {
             let mut frames = None;
             let mut written = 0_u64;
-            let pending = super::export::prepare_streaming_export(
+            let pending = super::export::prepare_streaming_encoded_export(
                 rate,
                 &layout,
                 destination,
+                status.settings.audio_export.as_ref(),
                 cancel,
                 |writer| {
                     frames = Some(engine.decode(

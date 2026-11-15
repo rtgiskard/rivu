@@ -17,7 +17,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 43;
+pub const PROTOCOL_VERSION: u8 = 44;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -542,6 +542,10 @@ pub enum WireCommand {
         node: crate::model::GraphPort,
         path: PathBuf,
     },
+    AudioExport {
+        request: crate::model::AudioExportRequest,
+    },
+    ProbeAudioExportFormats,
     CheckOtherTracks {
         force: bool,
     },
@@ -1404,6 +1408,8 @@ impl From<Command> for WireCommand {
             Command::ProcessingGraphExport { id, node, path } => {
                 Self::ProcessingGraphExport { id, node, path }
             }
+            Command::AudioExport { request } => Self::AudioExport { request },
+            Command::ProbeAudioExportFormats => Self::ProbeAudioExportFormats,
             Command::StartProcessing {
                 track_id,
                 operation,
@@ -1736,6 +1742,8 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::ProcessingGraphExport { id, node, path } => {
                 Self::ProcessingGraphExport { id, node, path }
             }
+            WireCommand::AudioExport { request } => Self::AudioExport { request },
+            WireCommand::ProbeAudioExportFormats => Self::ProbeAudioExportFormats,
             WireCommand::StartProcessing {
                 track_id,
                 operation,

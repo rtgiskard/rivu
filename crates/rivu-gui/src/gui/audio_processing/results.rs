@@ -7,22 +7,12 @@ use serde_json::{Value, json};
 
 #[derive(Default)]
 pub(super) struct ResultsState {
-    pub(super) export_draft_generation: u64,
     pub(super) details: bool,
-    pub(super) error: Option<String>,
     pub(super) task_details: bool,
 }
 
 pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus) -> Option<u64> {
     task.graph_run_id.filter(|_| task.graph_actions_available)
-}
-
-pub(super) fn graph_export_request_current(
-    task: Option<&rivu_protocol::model::ProcessingTaskStatus>,
-    task_id: u64,
-    run_id: u64,
-) -> bool {
-    task.is_some_and(|task| task.id == task_id && graph_action_run(task) == Some(run_id))
 }
 
 impl AudioProcessing {
@@ -335,8 +325,14 @@ impl AudioProcessing {
             .file_name()
             .map(|name| name.to_string_lossy())
             .unwrap_or_else(|| "—".into());
+        let export_label = self.tr("processing-tab-export");
+        let (operation, separator) = if task.settings.audio_export.is_some() {
+            (export_label.as_ref(), " · ")
+        } else {
+            ("", "")
+        };
         let summary = format!(
-            "{phase} · {} / {}",
+            "{operation}{separator}{phase} · {} / {}",
             task.completed,
             task.total
                 .map(|v| v.to_string())
@@ -403,6 +399,7 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
                 )
+                .debug_selector(move || format!("graph-cancel-task-{panel}"))
                 .flex_shrink_0()
                 .whitespace_nowrap(),
             );
@@ -436,114 +433,15 @@ impl AudioProcessing {
         content
     }
 
-    fn choose_graph_export_path(&mut self, panel: u64, task_id: u64, cx: &mut Context<Self>) {
-        if self.choosing_path.is_some() {
-            return;
-        }
-        let Some(run_id) = self
-            .state
-            .system
-            .processing
-            .as_deref()
-            .filter(|task| task.id == task_id)
-            .and_then(graph_action_run)
-        else {
-            return;
-        };
-        let Some(field) = self.fields.get(&FieldKey::GraphExport) else {
-            return;
-        };
-        let original = field.input.read(cx).text().to_owned();
-        let draft_generation = self.results.export_draft_generation;
-        let request = self.begin_path_request(panel, FieldKey::GraphExport);
-        let i18n = Arc::clone(&self.context.i18n);
-        cx.spawn(async move |this, cx| {
-            let result = ashpd::desktop::file_chooser::SelectedFiles::save_file()
-                .title(i18n.text("processing-result-choose-path"))
-                .accept_label(i18n.text("processing-result-choose-path"))
-                .modal(true)
-                .send()
-                .await
-                .and_then(|request| request.response());
-            let _ = this.update(cx, |this, cx| {
-                if !retire_path_request(&mut this.choosing_path, request) {
-                    return;
-                }
-                cx.notify();
-                if !graph_export_request_current(
-                    this.state.system.processing.as_deref(),
-                    task_id,
-                    run_id,
-                ) || !path_snapshot_current(
-                    (task_id, draft_generation, &original),
-                    (
-                        this.state
-                            .system
-                            .processing
-                            .as_ref()
-                            .map_or(0, |task| task.id),
-                        this.results.export_draft_generation,
-                        this.fields
-                            .get(&FieldKey::GraphExport)
-                            .map(|field| field.input.read(cx).text()),
-                    ),
-                ) {
-                    return;
-                }
-                match crate::gui::chooser_result(result) {
-                    Ok(Some(files)) => {
-                        if let Some(path) = crate::gui::chooser_path(&files) {
-                            match path.into_os_string().into_string() {
-                                Ok(path) => {
-                                    this.stage_graph_text(FieldKey::GraphExport, path, cx);
-                                    this.results.error = None;
-                                }
-                                Err(_) => {
-                                    this.results.error = Some(
-                                        this.tr("processing-result-path-encoding").to_string(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Ok(None) => return,
-                    Err(error) => {
-                        this.results.error = Some(error.to_string());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     pub(super) fn graph_task_status(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let export_input = if self
-            .state
-            .system
-            .processing
-            .as_ref()
-            .is_some_and(|task| graph_action_run(task).is_some())
-        {
-            Some(self.field_input(
-                panel,
-                FieldKey::GraphExport,
-                &self.tr("processing-export-path"),
-                cx,
-            ))
-        } else {
-            None
-        };
         let Some(task) = self.state.system.processing.as_ref() else {
             return column();
         };
-        let task_id = task.id;
         let Some(id) = task.graph_run_id else {
             return column();
         };
-        let export_receipt = id != task_id;
+        let export_receipt = id != task.id || task.settings.audio_export.is_some();
         let expanded = self.results.details;
         let mut content = column().flex_shrink_0().gap_2();
         if let Some(error) = &task.error {
@@ -587,28 +485,6 @@ impl AudioProcessing {
             content = content.child(caption(theme, self.tr("processing-audition-bypassed")));
         }
         if graph_action_run(task).is_some() {
-            content = content.child(
-                column()
-                    .min_w_0()
-                    .gap_1()
-                    .child(caption(theme, self.tr("processing-export-path")))
-                    .child(caption(theme, self.tr("processing-result-new-file")))
-                    .child(
-                        crate::gui::appearance::material::button(
-                            ("graph-choose-export", panel),
-                            self.tr("processing-result-choose-path"),
-                            cx,
-                            move |this, _, cx| this.choose_graph_export_path(panel, task_id, cx),
-                        )
-                        .self_start(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(export_input.expect("retained graph source export input")),
-                    ),
-            );
             let ports = task
                 .settings
                 .graph
@@ -681,40 +557,9 @@ impl AudioProcessing {
                                     "graph-export-{panel}-{id}-{}-{}",
                                     port.node, port.port
                                 )),
-                                self.tr(if export_receipt {
-                                    "processing-graph-export"
-                                } else if retained {
-                                    "processing-result-export-cached"
-                                } else {
-                                    "processing-result-calculate-export"
-                                }),
+                                self.tr("processing-export-configure"),
                                 cx,
-                                move |this, _, cx| {
-                                    let path = this
-                                        .fields
-                                        .get(&FieldKey::GraphExport)
-                                        .map(|field| field.input.read(cx).text().to_owned())
-                                        .unwrap_or_default();
-                                    if !path.is_empty() {
-                                        this.results.error = None;
-                                        this.send(
-                                            Command::ProcessingGraphExport {
-                                                id,
-                                                node: port,
-                                                path: PathBuf::from(path),
-                                            },
-                                            cx,
-                                        );
-                                    } else {
-                                        this.results.error = Some(
-                                            this.context
-                                                .i18n
-                                                .text("processing-graph-export-required")
-                                                .to_owned(),
-                                        );
-                                        cx.notify();
-                                    }
-                                },
+                                move |this, _, cx| this.open_frozen_export(id, port, cx),
                             )
                             .debug_selector(move || {
                                 format!("graph-export-{panel}-{id}-{}-{}", port.node, port.port)
@@ -722,9 +567,6 @@ impl AudioProcessing {
                         ),
                 );
             }
-        }
-        if let Some(error) = &self.results.error {
-            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content = content.child(
             crate::gui::appearance::material::button(
@@ -743,6 +585,9 @@ impl AudioProcessing {
             .self_start(),
         );
         if expanded {
+            if let Some(request) = &task.settings.audio_export {
+                content = content.child(self.export_receipt_settings(request, cx));
+            }
             if task.settings.graph.is_some() {
                 content = content.child(caption(
                     theme,

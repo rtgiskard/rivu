@@ -1953,6 +1953,54 @@ fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_pa
 }
 
 #[test]
+fn unified_audio_export_round_trip_preserves_sources_encoding_and_eq_snapshot() {
+    use rivu_protocol::model::{
+        AudioExportEncoding, AudioExportFormat, AudioExportRequest, AudioExportSource, GraphPort,
+    };
+    let mut encoded = Vec::new();
+    let target = GraphPort { node: 9, port: 1 };
+    for source in [
+        AudioExportSource::Original { track_id: 12 },
+        AudioExportSource::Graph {
+            track_id: 12,
+            target,
+            revision: 42,
+        },
+        AudioExportSource::Frozen {
+            id: u64::MAX,
+            target,
+        },
+    ] {
+        for format in [
+            AudioExportFormat::Wav,
+            AudioExportFormat::Flac,
+            AudioExportFormat::Mp3,
+            AudioExportFormat::Opus,
+        ] {
+            assert_command_round_trip(
+                &mut encoded,
+                Command::AudioExport {
+                    request: AudioExportRequest {
+                        source,
+                        path: "/rendered outputs/音楽 export".into(),
+                        encoding: AudioExportEncoding {
+                            format,
+                            sample_rate: Some(48_000),
+                            channels: Some(2),
+                            pcm_bits: 24,
+                            bitrate_kbps: 192,
+                            compression: 7,
+                        },
+                        monitor_eq: Some(Default::default()),
+                    },
+                },
+            );
+        }
+    }
+    assert_command_round_trip(&mut encoded, Command::ProbeAudioExportFormats);
+}
+
+#[test]
 fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges() {
     use rivu_protocol::model::{GraphEdit, GraphNodeKind};
     let mut config = rivu_format::config::Config::default();
@@ -2011,6 +2059,7 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
             graph_mode: Some(GraphExecutionMode::Offline),
             graph_boundary: Some(GraphPort { node: 1, port: 0 }),
             graph_export_path: Some("/rendered outputs/voice -6 dB.wav".into()),
+            audio_export: None,
         },
         graph_revision: Some(0),
         graph_run_id: Some(90),

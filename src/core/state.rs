@@ -100,6 +100,7 @@ impl CoreState {
                 || system.selected_device != old.selected_device
                 || system.mpris_status != old.mpris_status
                 || system.ffmpeg_status != old.ffmpeg_status
+                || system.export_formats != old.export_formats
                 || system.database_optimization != old.database_optimization
                 || system.shutting_down != old.shutting_down,
             configuration: !Arc::ptr_eq(&self.configuration.config, &previous.configuration.config)

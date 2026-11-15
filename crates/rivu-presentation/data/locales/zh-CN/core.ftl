@@ -297,3 +297,7 @@ audio-output-note = 响度按当前段累计，参考目标 -18 LUFS。余量为
 audio-output-empty = 暂无输出诊断
 audio-output-close = 关闭音频诊断
 audio-output-copy = 复制音频诊断
+core-help-processing-export = 按明确的处理及编码设置导出原音或处理图输出
+core-help-processing-export-request = AudioExportRequest JSON；相对输出路径以当前客户端目录为基准
+core-help-processing-export-instance = Core 实例 ID；导出冻结结果时必填
+core-help-processing-export-wait = 等待导出完成
