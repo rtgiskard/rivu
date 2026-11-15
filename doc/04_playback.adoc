@@ -482,7 +482,7 @@ The search scope follows the page:
   album, and file name, including unloaded pages. Repeated tracks retain their
   distinct queue or playlist occurrence identities for play and removal.
 * At Library's top level, search shows matching tracks from the full library,
-  matching title, artist, or full source path. Within a directory, search keeps
+  matching title, artist, album, or full source path. Within a directory, search keeps
   immediate tracks and directories with matching descendants, using the same
   fields. In Other, search stays within that collection and preserves its
   favorite/missing filters and sort order.

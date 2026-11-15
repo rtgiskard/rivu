@@ -101,7 +101,7 @@ impl Store {
             .to_str()
             .context("Album directory is not UTF-8")?;
         let query = search_query(query);
-        let filter = format!("{} AND {}", album_filter(), search_filter("tracks", "?3"));
+        let filter = format!("{} AND {}", album_filter(), search_filter!("tracks", "?3"));
         let total =
             self.cached_count(
                 super::CountDomain::AlbumTracks,

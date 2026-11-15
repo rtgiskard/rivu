@@ -11,7 +11,51 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(tracks.title || ' ' || tracks.artist || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
+/// Case-insensitive literal match of the query bound at `$parameter` against
+/// track title, artist, album and a path term. Library passes the full source
+/// path so folder names find their tracks; occurrence and album lists default
+/// to the file name.
+macro_rules! search_filter {
+    ($table:literal, $parameter:literal) => {
+        search_filter!(
+            $table,
+            $parameter,
+            concat!(
+                "substr(",
+                $table,
+                ".path,length(rtrim(",
+                $table,
+                ".path,replace(",
+                $table,
+                ".path,'/','')))+1)"
+            )
+        )
+    };
+    ($table:literal, $parameter:literal, $path:expr) => {
+        concat!(
+            "(",
+            $parameter,
+            " IS NULL OR instr(lower(",
+            $table,
+            ".title || ' ' || ",
+            $table,
+            ".artist || ' ' || ",
+            $table,
+            ".album || ' ' || ",
+            $path,
+            "),",
+            $parameter,
+            ")>0)"
+        )
+    };
+}
+pub(super) use search_filter;
+
+const TRACK_SEARCH_FILTER: &str = concat!(
+    "WHERE ",
+    search_filter!("tracks", "?1", "tracks.path"),
+    " AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)"
+);
 pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_path WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
@@ -33,12 +77,6 @@ pub(super) fn search_query(query: Option<&str>) -> Option<String> {
     query
         .filter(|query| !query.is_empty())
         .map(str::to_lowercase)
-}
-
-pub(super) fn search_filter(table: &str, parameter: &str) -> String {
-    format!(
-        "({parameter} IS NULL OR instr(lower({table}.title || ' ' || {table}.artist || ' ' || {table}.album || ' ' || substr({table}.path,length(rtrim({table}.path,replace({table}.path,'/','')))+1)),{parameter})>0)"
-    )
 }
 
 fn directory_prefix(path: &Path) -> Result<String> {

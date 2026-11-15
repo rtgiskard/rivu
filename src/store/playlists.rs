@@ -85,7 +85,7 @@ impl Store {
         let sql = if query.is_some() {
             format!(
                 "WITH matched AS (SELECT e.id,e.track_id,e.position,row_number() OVER (ORDER BY e.position,e.id)-1 AS offset FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {}) SELECT id,track_id,position,offset FROM matched WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
-                search_filter("t", "?3")
+                search_filter!("t", "?3")
             )
         } else {
             "SELECT id,track_id,position,position AS offset FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id".into()
@@ -110,7 +110,7 @@ impl Store {
         let sql = if query.is_some() {
             format!(
                 "SELECT (SELECT COUNT(*) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {}) FROM playlists WHERE id=?1",
-                search_filter("t", "?2")
+                search_filter!("t", "?2")
             )
         } else {
             "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1 AND ?2 IS NULL".into()
@@ -267,7 +267,7 @@ impl Store {
         if !exists {
             bail!("Playlist not found");
         }
-        let filter = search_filter("t", "?2");
+        let filter = search_filter!("t", "?2");
         let (position, id) =
             after.map_or((-1, 0), |after| (after.cursor.position, after.cursor.id));
         let start = after.map_or(0, |after| after.offset);
@@ -376,7 +376,7 @@ impl Store {
                 rows: Vec::new(),
             });
         }
-        let filter = search_filter("t", "?2");
+        let filter = search_filter!("t", "?2");
         // Keep the index seek for unfiltered windows; filtered windows page matches.
         let paging = if query.is_some() {
             "ORDER BY e.position,e.id LIMIT ?4 OFFSET ?3"

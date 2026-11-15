@@ -791,7 +791,7 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
     store
         .conn
         .execute(
-            "UPDATE tracks SET artist='Été_100%' WHERE path='/music/search/two.wav'",
+            "UPDATE tracks SET artist='Été_100%', album='Ålbum Live' WHERE path='/music/search/two.wav'",
             [],
         )
         .unwrap();
@@ -801,6 +801,7 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
         "/music/search/two.wav",
         "raw title",
         "étéX100Z",
+        "ålbum live",
     ] {
         let directory = store
             .directory_page(Path::new("/music/search"), Some(query), None, None, 0, 10)
@@ -866,6 +867,16 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
             .total,
         0
     );
+    // Album metadata matches tracks and the ancestors that lead to them.
+    for (directory, total) in [("/music/search", 1), ("/music", 1)] {
+        assert_eq!(
+            store
+                .directory_page(Path::new(directory), Some("ålbum live"), None, None, 0, 10)
+                .unwrap()
+                .total,
+            total
+        );
+    }
 }
 
 #[test]

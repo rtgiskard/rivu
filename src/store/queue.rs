@@ -174,7 +174,7 @@ impl Store {
         limit: usize,
     ) -> Result<Page<QueueRow>> {
         let query = search_query(query);
-        let filter = search_filter("t", "?1");
+        let filter = search_filter!("t", "?1");
         let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
             if query.is_some() {
                 Ok(self.conn.prepare_cached(&format!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter}"))?.query_row([query.as_deref()], |row| integer(row, 0))?)
@@ -225,7 +225,7 @@ impl Store {
         if after.is_some_and(|after| after.scope != scope) {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
-        let filter = search_filter("t", "?4");
+        let filter = search_filter!("t", "?4");
         let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (
@@ -281,7 +281,7 @@ impl Store {
         let sql = if query.is_some() {
             format!(
                 "WITH matched AS (SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset FROM matched q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
-                search_filter("t", "?2")
+                search_filter!("t", "?2")
             )
         } else {
             format!(
