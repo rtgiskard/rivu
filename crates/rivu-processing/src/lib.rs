@@ -1,8 +1,8 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
-use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use async_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
+use rivu_format::config::Config;
 use rivu_protocol::audio::SourceIdentity;
 use rivu_protocol::model::*;
 use std::{
@@ -18,26 +18,28 @@ use std::{
 };
 
 mod export;
-pub(crate) mod graph;
+mod graph;
 #[cfg(feature = "onnx")]
 mod native_speech;
 mod neural;
 mod reclaim;
 mod render;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-pub(crate) const MEMORY_LIMIT: u64 = 512 * 1024 * 1024;
-pub(crate) const WORKER_REQUEST_VERSION: u64 = 4;
-pub(crate) const WORKER_EVENT_VERSION: u64 = 4;
+const MEMORY_LIMIT: u64 = 512 * 1024 * 1024;
+pub const WORKER_REQUEST_VERSION: u64 = 4;
+pub const WORKER_EVENT_VERSION: u64 = 4;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static PANIC_ON_NEURAL_PROGRESS: std::cell::Cell<Option<Arc<AtomicBool>>> = const { std::cell::Cell::new(None) };
 }
 
-pub(super) struct Cancellation {
+struct Cancellation {
     requested: AtomicBool,
     wake: OwnedFd,
 }
@@ -85,9 +87,9 @@ impl Cancellation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SourceStamp(SourceIdentity);
+pub struct SourceStamp(SourceIdentity);
 impl SourceStamp {
-    pub(crate) fn read(path: &Path) -> Result<Self> {
+    pub fn read(path: &Path) -> Result<Self> {
         let m = fs::metadata(path)?;
         ensure!(
             m.is_file() && m.len() <= MAX_SOURCE_BYTES,
@@ -95,10 +97,10 @@ impl SourceStamp {
         );
         Ok(Self(audio::source_identity_from_metadata(&m)))
     }
-    pub(crate) fn identity(self) -> SourceIdentity {
+    pub fn identity(self) -> SourceIdentity {
         self.0
     }
-    pub(crate) fn validate_rendered(&self, identity: SourceIdentity) -> Result<()> {
+    pub fn validate_rendered(&self, identity: SourceIdentity) -> Result<()> {
         ensure!(
             self.0 == identity,
             "Rendered source differs from the source admitted for processing"
@@ -107,7 +109,7 @@ impl SourceStamp {
     }
 }
 
-pub(crate) struct GraphRequest {
+pub struct GraphRequest {
     pub target: GraphPort,
     pub mode: GraphExecutionMode,
     pub export_path: Option<PathBuf>,
@@ -116,20 +118,20 @@ pub(crate) struct GraphRequest {
     pub audio_export: Option<AudioExportRequest>,
 }
 
-pub(crate) struct CachedGraphOutput {
+pub struct CachedGraphOutput {
     pub pcm: audio::PcmAudio,
     pub stamp: SourceStamp,
 }
 
 #[derive(Default)]
-pub(crate) struct AudioOutputs {
+pub struct AudioOutputs {
     pub denoised: Option<audio::PcmAudio>,
     pub vocals: Option<audio::PcmAudio>,
     pub accompaniment: Option<audio::PcmAudio>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ModelOutputRetention {
+enum ModelOutputRetention {
     Speech,
     Vocals,
     Accompaniment,
@@ -147,7 +149,7 @@ impl ModelOutputRetention {
 }
 
 /// Model inputs are independent from the enclosing processing operation/graph.
-pub(super) struct ModelRequest<'a> {
+struct ModelRequest<'a> {
     pub task_id: u64,
     pub operation: ProcessingOperation,
     pub retain: ModelOutputRetention,
@@ -158,27 +160,27 @@ pub(super) struct ModelRequest<'a> {
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct ModelProvenance {
+pub struct ModelProvenance {
     pub id: Option<String>,
     pub sha256: Option<String>,
 }
 
-pub(super) struct ModelOutcome {
+struct ModelOutcome {
     pub provenance: ModelProvenance,
     pub result: Result<AudioOutputs>,
 }
 
-pub(crate) struct GraphAudioContext {
+pub struct GraphAudioContext {
     pub pcm: audio::PcmAudio,
     pub start_frame: i64,
 }
 
-pub(crate) struct GraphAudioOutput {
+pub struct GraphAudioOutput {
     pub pcm: audio::PcmAudio,
     pub context: Option<GraphAudioContext>,
 }
 
-pub(crate) struct ProcessingResult {
+pub struct ProcessingResult {
     pub track: Track,
     pub stamp: SourceStamp,
     pub status: ProcessingTaskStatus,
@@ -188,14 +190,14 @@ pub(crate) struct ProcessingResult {
     pub runner: Option<audio::GraphRunner>,
 }
 impl ProcessingResult {
-    pub(crate) fn retains_audio(&self) -> bool {
+    fn retains_audio(&self) -> bool {
         // Export scratch belongs to publication, not to the audition cache.
         // Live runs still retain their frozen graph even without cached PCM.
         self.status.settings.graph_export_path.is_none()
     }
 }
 
-pub(crate) struct RetainedResult {
+pub struct RetainedResult {
     pub id: u64,
     pub track: Track,
     pub stamp: SourceStamp,
@@ -203,7 +205,7 @@ pub(crate) struct RetainedResult {
     pub graph_outputs: BTreeMap<GraphPort, GraphAudioOutput>,
     pub runner: Option<audio::GraphRunner>,
 }
-pub(crate) enum Event {
+pub enum Event {
     Model {
         id: u64,
         provenance: ModelProvenance,
@@ -259,7 +261,7 @@ enum AuditionResource {
     },
 }
 
-pub(crate) struct Service {
+pub struct Service {
     pub sender: Sender<Event>,
     pub receiver: Receiver<Event>,
     active: Option<ActiveTask>,
@@ -271,13 +273,19 @@ pub(crate) struct Service {
     audition: Option<RetainedAudition>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
-    #[cfg(test)]
-    pub(crate) panic_after_processing: bool,
-    #[cfg(test)]
-    pub(crate) panic_after_mix: bool,
-    #[cfg(test)]
-    pub(crate) panic_on_neural_progress: Option<Arc<AtomicBool>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub panic_after_processing: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub panic_after_mix: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub panic_on_neural_progress: Option<Arc<AtomicBool>>,
 }
+impl Default for Service {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Service {
     pub fn new() -> Self {
         let (sender, receiver) = bounded(8);
@@ -293,26 +301,26 @@ impl Service {
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
             audition: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             panic_after_processing: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             panic_after_mix: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             panic_on_neural_progress: None,
         }
     }
-    #[cfg(test)]
-    pub(crate) fn with_memory_limit(limit: u64) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_memory_limit(limit: u64) -> Self {
         let mut service = Self::new();
         service.budget = audio::PcmBudget::new(limit);
         service
     }
-    pub(crate) fn active_id(&self) -> Option<u64> {
+    pub fn active_id(&self) -> Option<u64> {
         self.active.as_ref().map(|task| task.id)
     }
 
     /// Source admitted by a retained result or by the still-active run.
-    pub(crate) fn source_stamp(&self, id: u64) -> Option<SourceStamp> {
+    pub fn source_stamp(&self, id: u64) -> Option<SourceStamp> {
         self.results
             .iter()
             .find(|result| result.id == id)
@@ -325,7 +333,7 @@ impl Service {
             })
     }
 
-    pub(crate) fn cancellation_requested(&self, id: u64) -> Option<bool> {
+    pub fn cancellation_requested(&self, id: u64) -> Option<bool> {
         self.active
             .as_ref()
             .filter(|task| task.id == id)
@@ -333,7 +341,7 @@ impl Service {
     }
 
     /// Retire the worker only after its reliable terminal event has been received.
-    pub(crate) fn finish_task(&mut self, id: u64) -> Option<bool> {
+    pub fn finish_task(&mut self, id: u64) -> Option<bool> {
         if self.active_id() != Some(id) {
             return None;
         }
@@ -343,16 +351,16 @@ impl Service {
         Some(cancelled)
     }
 
-    pub(crate) fn results(&self) -> &VecDeque<RetainedResult> {
+    pub fn results(&self) -> &VecDeque<RetainedResult> {
         &self.results
     }
 
-    pub(crate) fn current_projection(&self) -> Option<Arc<ProcessingTaskStatus>> {
+    pub fn current_projection(&self) -> Option<Arc<ProcessingTaskStatus>> {
         self.current.and_then(|id| self.records.get(&id).cloned())
     }
 
-    #[cfg(test)]
-    pub(crate) fn history(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn history(
         &self,
     ) -> impl ExactSizeIterator<Item = &ProcessingTaskStatus> + DoubleEndedIterator {
         self.history
@@ -360,7 +368,7 @@ impl Service {
             .map(|id| self.records.get(id).unwrap().as_ref())
     }
 
-    pub(crate) fn status(&self, id: u64) -> Option<&ProcessingTaskStatus> {
+    pub fn status(&self, id: u64) -> Option<&ProcessingTaskStatus> {
         self.records.get(&id).map(Arc::as_ref)
     }
 
@@ -379,7 +387,7 @@ impl Service {
         });
     }
 
-    pub(crate) fn progress(
+    pub fn progress(
         &mut self,
         id: u64,
         completed: u64,
@@ -397,7 +405,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn node_status(&mut self, id: u64, node: GraphNodeStatus) {
+    pub fn node_status(&mut self, id: u64, node: GraphNodeStatus) {
         if self.active_id() == Some(id)
             && let Some(status) = self.records.get_mut(&id)
             && let Some(index) = status
@@ -410,7 +418,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn graph_prepared(
+    pub fn graph_prepared(
         &mut self,
         id: u64,
         mode: GraphExecutionMode,
@@ -430,7 +438,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn model_provenance(&mut self, id: u64, provenance: ModelProvenance) {
+    pub fn model_provenance(&mut self, id: u64, provenance: ModelProvenance) {
         if self.active_id() == Some(id)
             && let Some(status) = self.records.get_mut(&id)
             && (status.model_id != provenance.id || status.model_sha256 != provenance.sha256)
@@ -441,7 +449,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn outcome(&mut self, id: u64, phase: ProcessingPhase, error: Option<String>) {
+    pub fn outcome(&mut self, id: u64, phase: ProcessingPhase, error: Option<String>) {
         if let Some(status) = self.records.get_mut(&id) {
             let aborting = matches!(phase, ProcessingPhase::Failed | ProcessingPhase::Cancelled);
             let unfinished_nodes = aborting
@@ -468,7 +476,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn retain_terminal(&mut self, id: u64) {
+    pub fn retain_terminal(&mut self, id: u64) {
         if !self.records.contains_key(&id) || self.history.contains(&id) {
             return;
         }
@@ -558,7 +566,7 @@ impl Service {
     }
 
     /// Commit the complete cached selection only after audio source admission.
-    pub(crate) fn select_cached_audition(
+    pub fn select_cached_audition(
         &mut self,
         id: u64,
         generation: u64,
@@ -572,7 +580,7 @@ impl Service {
         }));
     }
 
-    pub(crate) fn select_graph_audition(
+    pub fn select_graph_audition(
         &mut self,
         id: u64,
         generation: u64,
@@ -593,7 +601,7 @@ impl Service {
         }));
     }
 
-    pub(crate) fn clear_audition(&mut self) {
+    pub fn clear_audition(&mut self) {
         self.replace_audition(None);
     }
 
@@ -607,15 +615,13 @@ impl Service {
     }
 
     /// Bypass and resume replace audio without replacing the retained selection.
-    pub(crate) fn retain_audition_for_generation(&mut self, generation: u64) {
+    pub fn retain_audition_for_generation(&mut self, generation: u64) {
         if let Some(audition) = &mut self.audition {
             audition.generation = generation;
         }
     }
 
-    pub(crate) fn resume_audition(
-        &self,
-    ) -> Result<(Option<audio::PcmAudio>, Option<audio::GraphRunner>)> {
+    pub fn resume_audition(&self) -> Result<(Option<audio::PcmAudio>, Option<audio::GraphRunner>)> {
         let audition = self
             .audition
             .as_ref()
@@ -628,7 +634,7 @@ impl Service {
         }
     }
 
-    pub(crate) fn audition_projection(&self) -> Option<ProcessingAudition> {
+    pub fn audition_projection(&self) -> Option<ProcessingAudition> {
         self.audition.as_ref().map(|audition| {
             let (output, mode) = match &audition.resource {
                 AuditionResource::Cached { output, .. } => {
@@ -644,11 +650,11 @@ impl Service {
         })
     }
 
-    pub(crate) fn audition_id(&self) -> Option<u64> {
+    pub fn audition_id(&self) -> Option<u64> {
         self.audition.as_ref().map(|audition| audition.id)
     }
 
-    pub(crate) fn audition_selected(&self, id: u64, generation: u64) -> bool {
+    pub fn audition_selected(&self, id: u64, generation: u64) -> bool {
         self.audition
             .as_ref()
             .is_some_and(|audition| audition.id == id && audition.generation == generation)
@@ -656,7 +662,7 @@ impl Service {
 
     /// A successful render/export is committed before optional playback admission.
     /// Later audition failure changes its operation receipt, never its resources.
-    pub(crate) fn accept_result(&mut self, result: Box<ProcessingResult>) {
+    pub fn accept_result(&mut self, result: Box<ProcessingResult>) {
         let retains_audio = result.retains_audio();
         let ProcessingResult {
             track,
@@ -692,7 +698,7 @@ impl Service {
         self.accept_status(status);
     }
 
-    pub(crate) fn take_graph_runner(&mut self, id: u64) -> Option<audio::GraphRunner> {
+    pub fn take_graph_runner(&mut self, id: u64) -> Option<audio::GraphRunner> {
         self.results
             .iter_mut()
             .find(|result| result.id == id)?
@@ -700,7 +706,7 @@ impl Service {
             .take()
     }
 
-    pub(crate) fn stop_live_audition(&mut self, id: u64) {
+    pub fn stop_live_audition(&mut self, id: u64) {
         let Some(status) = self.records.get_mut(&id) else {
             return;
         };
@@ -871,9 +877,9 @@ impl Service {
             self.reclaimer = Some(reclaim::Reclaimer::new()?);
         }
         let budget = Arc::clone(&self.budget);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let panic_after_processing = std::mem::take(&mut self.panic_after_processing);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let panic_on_neural_progress = std::mem::take(&mut self.panic_on_neural_progress);
         let (worker, release) =
             self.reclaimer
@@ -881,7 +887,7 @@ impl Service {
                 .unwrap()
                 .spawn_waiting("rivu-processing", move |retired| {
                     // This new thread executes only this task.
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     PANIC_ON_NEURAL_PROGRESS.set(panic_on_neural_progress);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         retired?;
@@ -916,7 +922,7 @@ impl Service {
                         } else {
                             render::run(track, stamp, config, budget, initial, &flag, &tx)
                         }?;
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         if panic_after_processing {
                             panic!("injected native processing worker panic");
                         }
@@ -980,16 +986,16 @@ impl Service {
             reclaimer.shutdown();
         }
     }
-    pub(crate) fn export_destination(&self, destination: &Path) -> Result<PathBuf> {
+    pub fn export_destination(&self, destination: &Path) -> Result<PathBuf> {
         export::export_destination(destination)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn memory_bytes(&self) -> u64 {
         self.budget.used_bytes()
     }
-    #[cfg(test)]
-    pub(crate) fn hold_reclamation(&self) -> std::sync::mpsc::Sender<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_reclamation(&self) -> std::sync::mpsc::Sender<()> {
         self.reclaimer
             .as_ref()
             .expect("reclamation requires an admitted worker")
@@ -1042,7 +1048,7 @@ impl Drop for Service {
     }
 }
 impl Service {
-    pub(crate) fn start_mix(
+    pub fn start_mix(
         &mut self,
         id: u64,
         generation: u64,
@@ -1080,7 +1086,7 @@ impl Service {
         let cancelled = Arc::new(Cancellation::new()?);
         let cancellation = Arc::clone(&cancelled);
         let tx = self.sender.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let panic_after_mix = std::mem::take(&mut self.panic_after_mix);
         let worker = self
             .reclaimer
@@ -1121,7 +1127,7 @@ impl Service {
                             position += frames as u64;
                         }
                         render::check_cancel(cancel)?;
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         if panic_after_mix {
                             panic!("injected stem mix worker panic");
                         }

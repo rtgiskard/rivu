@@ -6,7 +6,7 @@ pub(super) enum BusinessEvent {
     AudioStopped,
     Scan(ScanEvent),
     Relocation(RelocationFinished),
-    Processing(crate::processing::Event),
+    Processing(rivu_processing::Event),
     Export(Result<()>),
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),

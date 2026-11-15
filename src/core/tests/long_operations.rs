@@ -61,7 +61,7 @@ fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
             .unwrap()
             .unwrap()
         });
-        let finished = matches!(event, crate::processing::Event::Finished { .. });
+        let finished = matches!(event, rivu_processing::Event::Finished { .. });
         core.processing_event(event);
         if finished {
             break;

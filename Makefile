@@ -32,6 +32,8 @@ test-rust:
 	cargo test --locked -p rivu --no-default-features --features gui
 	cargo test --locked -p rivu --no-default-features --features tui
 	cargo test --locked -p rivu-dsp --no-default-features
+	cargo test --locked -p rivu-processing --no-default-features
+	cargo test --locked -p rivu-processing --all-features
 	cargo test --locked -p rivu-format --no-default-features
 	cargo test --locked -p rivu-utils --no-default-features
 	cargo test --locked -p rivu-utils --no-default-features --features logging

@@ -3,10 +3,10 @@ use super::{
     AudioOutputs, CachedGraphOutput, Event, ModelOutputRetention, ModelRequest, ProcessingResult,
     SourceStamp, graph, neural,
 };
-use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use async_channel::Sender;
 use rivu_audio as audio;
+use rivu_format::config::Config;
 use rivu_protocol::model::*;
 use std::{
     collections::BTreeMap,

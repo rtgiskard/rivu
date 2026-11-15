@@ -129,7 +129,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         active_optimization: None,
         active_source_tags: None,
         pending_written_source: None,
-        processing: crate::processing::Service::new(),
+        processing: rivu_processing::Service::new(),
         pending_processing_audition: None,
         scan_tx,
         scan_rx,

@@ -703,6 +703,15 @@ task cancelled; stopping a cached offline audition leaves its completed status
 intact. Current status, bounded task history and retained runs resolve the same
 task record, including later audition or stem-mix failure.
 
+`rivu-processing` owns processing workers, graph execution, native and neural
+backends, export rendering and retained PCM reclamation. Core retains admission,
+current-source validation, published task state, playback/audition decisions and final
+export publication; the processing crate does not depend on Core or application storage.
+Its `onnx` feature owns the ONNX Runtime, FFT and model-hash dependencies, while
+`ffmpeg` enables the audio decoder's FFmpeg support. The application forwards
+these features without enabling processing defaults implicitly. Test-only worker
+hooks are exposed through the explicit `test-support` feature.
+
 Results are immutable shared in-memory PCM: node execution creates no processing
 directory, intermediate WAV, request file or result report. A 512 MiB allocation
 budget covers active, retained and retiring PCM, charging shared backing storage

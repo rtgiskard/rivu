@@ -5,7 +5,6 @@ pub(crate) mod execution;
 pub mod ipc;
 pub(crate) mod library;
 pub(crate) mod mpris;
-mod processing;
 pub(crate) mod projection;
 pub(crate) mod store;
 #[cfg(feature = "gui")]

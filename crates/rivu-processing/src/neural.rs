@@ -523,7 +523,7 @@ fn run_model(
                             }
                             match event["type"].as_str() {
                                 Some("progress") => {
-                                    #[cfg(test)]
+                                    #[cfg(any(test, feature = "test-support"))]
                                     if let Some(triggered) = super::PANIC_ON_NEURAL_PROGRESS.take()
                                     {
                                         triggered.store(true, std::sync::atomic::Ordering::Release);
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn readiness_pidfd_waits_for_exit_after_both_output_eofs() {
         if crate::test_support::run_in_subprocess(
-            "processing::neural::tests::readiness_pidfd_waits_for_exit_after_both_output_eofs",
+            "neural::tests::readiness_pidfd_waits_for_exit_after_both_output_eofs",
             std::time::Duration::from_secs(20),
         ) {
             return;
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn prepare_rejects_nonregular_manifests_without_waiting_for_a_writer() {
         if crate::test_support::run_in_subprocess(
-            "processing::neural::tests::prepare_rejects_nonregular_manifests_without_waiting_for_a_writer",
+            "neural::tests::prepare_rejects_nonregular_manifests_without_waiting_for_a_writer",
             std::time::Duration::from_secs(5),
         ) {
             return;

@@ -27,14 +27,14 @@ fn finish_scan(core: &mut Core) {
     }
 }
 
-fn processing_completion(core: &mut Core) -> crate::processing::Event {
+fn processing_completion(core: &mut Core) -> rivu_processing::Event {
     loop {
         let event = core
             .processing
             .receiver
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
-        if matches!(event, crate::processing::Event::Finished { .. }) {
+        if matches!(event, rivu_processing::Event::Finished { .. }) {
             return event;
         }
         core.processing_event(event);
@@ -203,7 +203,7 @@ fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
         .unwrap();
     let completion = processing_completion(&mut core);
     // A terminal-looking worker progress report is not the owner's acceptance.
-    core.processing_event(crate::processing::Event::Progress {
+    core.processing_event(rivu_processing::Event::Progress {
         id,
         completed: 4096,
         total: Some(4096),

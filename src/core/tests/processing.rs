@@ -23,7 +23,7 @@ pub(super) fn source(directory: &Path) -> Vec<f32> {
     writer.finalize().unwrap();
     samples
 }
-fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<crate::processing::Event> {
+fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<rivu_processing::Event> {
     futures::executor::block_on(async {
         rivu_protocol::transport::timeout(timeout, core.processing.receiver.recv())
             .await
@@ -32,10 +32,10 @@ fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<crate::pr
     })
 }
 
-fn completion(core: &mut Core) -> crate::processing::Event {
+fn completion(core: &mut Core) -> rivu_processing::Event {
     loop {
         let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
-        if matches!(event, crate::processing::Event::Finished { .. }) {
+        if matches!(event, rivu_processing::Event::Finished { .. }) {
             return event;
         }
     }
@@ -69,7 +69,7 @@ fn pcm_samples(pcm: &audio::PcmAudio) -> Vec<f32> {
     samples
 }
 
-fn populate_stems(result: &mut crate::processing::ProcessingResult) {
+fn populate_stems(result: &mut rivu_processing::ProcessingResult) {
     let stem = result.outputs.denoised.clone().unwrap();
     result.outputs.vocals = Some(stem.clone());
     result.outputs.accompaniment = Some(stem);
@@ -82,7 +82,7 @@ fn prepare_mix(core: &mut Core) {
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     let mut event = completion(core);
-    let crate::processing::Event::Finished {
+    let rivu_processing::Event::Finished {
         result: Ok(result), ..
     } = &mut event
     else {
@@ -256,12 +256,9 @@ fn processing_progress_is_authoritative_without_waking_terminal_state_interest()
     );
 }
 
-fn mix_completion(core: &mut Core) -> crate::processing::Event {
+fn mix_completion(core: &mut Core) -> rivu_processing::Event {
     let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
-    assert!(matches!(
-        event,
-        crate::processing::Event::MixFinished { .. }
-    ));
+    assert!(matches!(event, rivu_processing::Event::MixFinished { .. }));
     event
 }
 
@@ -391,7 +388,7 @@ fn shutdown_mix_retires_queued_output_and_keeps_latest_retained_outcome() {
     let event = mix_completion(&mut core);
     assert!(matches!(
         &event,
-        crate::processing::Event::MixFinished { result: Ok(_), .. }
+        rivu_processing::Event::MixFinished { result: Ok(_), .. }
     ));
     assert!(core.processing.sender.try_send(event).is_ok());
     core.shutdown_processing();
@@ -490,7 +487,7 @@ fn uncertain_database_rejects_held_processing_completion_before_source_read_or_e
         .unwrap();
     let mut event = completion(&mut core);
     let destination = directory.path().join("must-not-publish.wav");
-    if let crate::processing::Event::Finished {
+    if let rivu_processing::Event::Finished {
         result: Ok(result), ..
     } = &mut event
     {
@@ -1550,7 +1547,7 @@ fn rejected_mix_audition_retires_new_pcm_without_releasing_retained_stems() {
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
     assert!(matches!(
         event,
-        crate::processing::Event::MixFinished { result: Ok(_), .. }
+        rivu_processing::Event::MixFinished { result: Ok(_), .. }
     ));
     let rendered = core.processing.memory_bytes();
     assert!(rendered > retained);
@@ -1664,7 +1661,7 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
     assert!(matches!(
         &event,
-        crate::processing::Event::MixFinished { result: Ok(_), .. }
+        rivu_processing::Event::MixFinished { result: Ok(_), .. }
     ));
     core.command(Command::EditTrack {
         track_id: 1,
@@ -1696,10 +1693,7 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     core.audition_processing(1, AuditionMode::Mix, -6.0, 0.0)
         .unwrap();
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
-    assert!(matches!(
-        event,
-        crate::processing::Event::MixFinished { .. }
-    ));
+    assert!(matches!(event, rivu_processing::Event::MixFinished { .. }));
     core.processing_event(event);
     let (mixed, _) = core.processing.resume_audition().unwrap();
     let actual = pcm_samples(mixed.as_ref().unwrap());
@@ -1810,7 +1804,7 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
     writer.finalize().unwrap();
     let alias = directory.path().join("source.wav");
     symlink(directory.path().join("1.wav"), &alias).unwrap();
-    let admitted = crate::processing::SourceStamp::read(&alias).unwrap();
+    let admitted = rivu_processing::SourceStamp::read(&alias).unwrap();
     std::fs::remove_file(&alias).unwrap();
     symlink(&alternate, &alias).unwrap();
     let renderer = audio::SourceRenderer::open(
@@ -1830,7 +1824,7 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
     std::fs::remove_file(&alias).unwrap();
     symlink(directory.path().join("1.wav"), &alias).unwrap();
     assert_eq!(
-        crate::processing::SourceStamp::read(&alias).unwrap(),
+        rivu_processing::SourceStamp::read(&alias).unwrap(),
         admitted
     );
     assert!(admitted.validate_rendered(identity).is_err());
@@ -2046,7 +2040,7 @@ fn neural_cancellation_fixture(close_outputs: &str, wait: &str, description: &st
             .receiver
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
-            Ok(event @ crate::processing::Event::Finished { .. }) => break Some(event),
+            Ok(event @ rivu_processing::Event::Finished { .. }) => break Some(event),
             Ok(event) => core.processing_event(event),
             Err(_) => break None,
         }
@@ -2080,7 +2074,7 @@ fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retiremen
     source(directory.path());
     let worker = directory.path().join("panic_progress.sh");
     let progress = serde_json::json!({
-        "version": crate::processing::WORKER_EVENT_VERSION,
+        "version": rivu_processing::WORKER_EVENT_VERSION,
         "task_id": "1",
         "type": "progress",
         "completed": 0,
@@ -2547,7 +2541,7 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
             assert_eq!(pcm_samples(&context_pcm), cached);
             assert_eq!(
                 expected_identity,
-                crate::processing::SourceStamp::read(&path)
+                rivu_processing::SourceStamp::read(&path)
                     .unwrap()
                     .identity()
             );
@@ -3143,7 +3137,7 @@ fn stopped_graph_preparation_after_command(command: Command) {
     let event = completion(&mut core);
     assert!(matches!(
         &event,
-        crate::processing::Event::Finished { result: Ok(_), .. }
+        rivu_processing::Event::Finished { result: Ok(_), .. }
     ));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     let generation = core.transport.generation;
@@ -3269,7 +3263,7 @@ fn settings_patch_cannot_overwrite_graph_from_a_stale_snapshot() {
 fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
     let (directory, mut core) = fixture();
     let expected = source(directory.path());
-    core.processing = crate::processing::Service::with_memory_limit(48 * 1024);
+    core.processing = rivu_processing::Service::with_memory_limit(48 * 1024);
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     complete(&mut core);
@@ -3910,7 +3904,7 @@ fn playback_bypass_revokes_late_mix_selection_and_retires_completed_audio() {
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
     assert!(matches!(
         event,
-        crate::processing::Event::MixFinished { result: Ok(_), .. }
+        rivu_processing::Event::MixFinished { result: Ok(_), .. }
     ));
     let generation = core.transport.generation;
     core.command(Command::ProcessingBypass { bypassed: true })
@@ -4106,7 +4100,7 @@ fn graph_export_rechecks_canonical_parent_before_publication() {
     let event = completion(&mut core);
     assert!(matches!(
         &event,
-        crate::processing::Event::Finished { result: Ok(result), .. }
+        rivu_processing::Event::Finished { result: Ok(result), .. }
             if result.pending_export.is_some()
     ));
     let scratch = directory.path().join("other-parent");
@@ -4217,7 +4211,7 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
         let event = mix_completion(&mut core);
         assert!(matches!(
             &event,
-            crate::processing::Event::MixFinished { result: Ok(_), .. }
+            rivu_processing::Event::MixFinished { result: Ok(_), .. }
         ));
         core.processing_bypass(true).unwrap();
         match change {
@@ -4271,7 +4265,7 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     let event = mix_completion(&mut core);
     assert!(matches!(
         &event,
-        crate::processing::Event::MixFinished { result: Ok(_), .. }
+        rivu_processing::Event::MixFinished { result: Ok(_), .. }
     ));
     let generation = core.transport.generation;
     core.database_outcome_uncertain();
@@ -4542,7 +4536,7 @@ fn streamed_graph_exports_recheck_publication_and_reclaim_unpublished_files() {
     for failure in 0..3 {
         let (directory, mut core) = fixture();
         source(directory.path());
-        core.processing = crate::processing::Service::with_memory_limit(0);
+        core.processing = rivu_processing::Service::with_memory_limit(0);
         core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
             .unwrap();
         complete(&mut core);
@@ -5006,7 +5000,7 @@ fn rescanned_cue_audition_reloads_validated_source_without_changing_occurrence()
                 };
                 if audition == "mix" {
                     let mut event = completion(&mut core);
-                    let crate::processing::Event::Finished {
+                    let rivu_processing::Event::Finished {
                         result: Ok(result), ..
                     } = &mut event
                     else {

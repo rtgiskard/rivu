@@ -5288,11 +5288,9 @@ dependencies = [
  "futures-lite",
  "hound",
  "libc",
- "ort",
  "parking_lot 0.13.0",
  "postcard",
  "rand 0.10.3",
- "realfft",
  "ringbuf",
  "rivu-audio",
  "rivu-client",
@@ -5301,6 +5299,7 @@ dependencies = [
  "rivu-gui",
  "rivu-metadata",
  "rivu-presentation",
+ "rivu-processing",
  "rivu-protocol",
  "rivu-shm",
  "rivu-tui",
@@ -5308,7 +5307,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
@@ -5484,6 +5482,31 @@ dependencies = [
  "fluent-syntax",
  "rivu-format",
  "rivu-protocol",
+]
+
+[[package]]
+name = "rivu-processing"
+version = "0.2.20"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "blake3",
+ "futures",
+ "hound",
+ "libc",
+ "ort",
+ "parking_lot 0.13.0",
+ "realfft",
+ "rivu-audio",
+ "rivu-dsp",
+ "rivu-format",
+ "rivu-protocol",
+ "rivu-utils",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

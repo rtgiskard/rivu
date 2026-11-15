@@ -441,7 +441,7 @@ struct Core {
     active_optimization: Option<maintenance::OptimizationTask>,
     active_source_tags: Option<source_tags::SourceTagTask>,
     pending_written_source: Option<source_tags::PendingWrittenSource>,
-    processing: crate::processing::Service,
+    processing: rivu_processing::Service,
     pending_processing_audition: Option<(u64, u64)>,
     scan_tx: mpsc::Sender<ScanEvent>,
     scan_rx: mpsc::Receiver<ScanEvent>,

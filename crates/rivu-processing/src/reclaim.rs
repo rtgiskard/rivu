@@ -26,7 +26,7 @@ enum Work {
         graph_outputs: BTreeMap<GraphPort, GraphAudioOutput>,
         runner: Option<audio::GraphRunner>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Hold {
         resume: mpsc::Receiver<()>,
         events: Sender<Event>,
@@ -37,7 +37,7 @@ enum Work {
 pub(super) struct Reclaimer {
     sender: Option<mpsc::SyncSender<Work>>,
     worker: Option<JoinHandle<()>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fail_spawns: bool,
 }
 
@@ -53,7 +53,7 @@ impl Work {
                 graph_outputs,
                 runner,
             } => drop((outputs, graph_outputs, runner)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Work::Hold { resume, events } => {
                 while !events.is_closed() {
                     match resume.recv_timeout(std::time::Duration::from_millis(10)) {
@@ -82,7 +82,7 @@ impl Reclaimer {
         Ok(Self {
             sender: Some(sender),
             worker: Some(worker),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_spawns: false,
         })
     }
@@ -137,7 +137,7 @@ impl Reclaimer {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn hold(&self, events: Sender<Event>) -> mpsc::Sender<()> {
         let (release, resume) = mpsc::channel();
         self.send(Work::Hold { resume, events });
@@ -160,7 +160,7 @@ impl Reclaimer {
         work: impl FnOnce(Result<()>) + Send + 'static,
     ) -> Result<(JoinHandle<()>, Release)> {
         let (sender, receiver) = mpsc::channel::<std::result::Result<(), String>>();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.fail_spawns {
             return Err(std::io::Error::other("injected processing worker spawn failure").into());
         }

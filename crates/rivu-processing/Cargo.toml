@@ -1,0 +1,36 @@
+[package]
+name = "rivu-processing"
+version = "0.2.20"
+edition = "2024"
+description = "Offline audio processing and retained audition resources for Rivu"
+
+[features]
+default = []
+ffmpeg = ["rivu-audio/ffmpeg"]
+onnx = ["dep:ort", "dep:parking_lot", "dep:realfft", "dep:sha2"]
+test-support = []
+
+[dependencies]
+anyhow = "1"
+async-channel = "2"
+hound = "3.5"
+libc = "0.2"
+rivu-audio = { path = "../rivu-audio", default-features = false }
+rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
+rivu-format = { path = "../rivu-format", default-features = false }
+rivu-protocol = { path = "../rivu-protocol" }
+rivu-utils = { path = "../rivu-utils", default-features = false }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+tempfile = "3.27"
+tracing = "0.1"
+sha2 = { version = "0.11", optional = true }
+realfft = { version = "3.5", optional = true }
+parking_lot = { version = "0.13", optional = true }
+# Load an explicitly installed runtime; never download/link a runtime at build time.
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "load-dynamic", "api-23"] }
+
+[dev-dependencies]
+blake3 = "1"
+futures = "0.3"
+rivu-audio = { path = "../rivu-audio", default-features = false, features = ["test-support"] }

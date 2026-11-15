@@ -117,7 +117,7 @@ impl Core {
         mode: GraphExecutionMode,
     ) -> Result<u64> {
         let track = self.track(track_id)?;
-        let request = crate::processing::GraphRequest {
+        let request = rivu_processing::GraphRequest {
             target,
             mode,
             export_path: None,
@@ -168,7 +168,7 @@ impl Core {
         }
         let mut config = self.preferences.checkpoint();
         config.processing_graph = graph;
-        let request = crate::processing::GraphRequest {
+        let request = rivu_processing::GraphRequest {
             target: node,
             mode: GraphExecutionMode::Auto,
             export_path: None,
@@ -333,7 +333,7 @@ impl Core {
                 config.processing_graph.ancestors(target)?;
                 let track = self.processing_source(&result.track, result.stamp)?;
                 let cached = result.graph_outputs.get(&target).map(|output| {
-                    crate::processing::CachedGraphOutput {
+                    rivu_processing::CachedGraphOutput {
                         pcm: output.pcm.clone(),
                         stamp: result.stamp,
                     }
@@ -341,7 +341,7 @@ impl Core {
                 (track, target, Some(id), cached)
             }
         };
-        let graph_request = crate::processing::GraphRequest {
+        let graph_request = rivu_processing::GraphRequest {
             target,
             mode: GraphExecutionMode::Offline,
             export_path: Some(request.path.clone()),
@@ -617,7 +617,7 @@ impl Core {
     fn processing_source(
         &self,
         source: &Track,
-        stamp: crate::processing::SourceStamp,
+        stamp: rivu_processing::SourceStamp,
     ) -> Result<Track> {
         ensure!(
             !self.database_unavailable,
@@ -632,7 +632,7 @@ impl Core {
             "Processing result is stale: source identity changed before publication"
         );
         ensure!(
-            crate::processing::SourceStamp::read(&track.path)? == stamp,
+            rivu_processing::SourceStamp::read(&track.path)? == stamp,
             "Processing result is stale: source file changed before publication"
         );
         Ok(track)
@@ -640,7 +640,7 @@ impl Core {
 
     fn admit_processing_result(
         &self,
-        result: &crate::processing::ProcessingResult,
+        result: &rivu_processing::ProcessingResult,
         cancelled: bool,
     ) -> Result<()> {
         ensure!(!cancelled, "Processing cancelled");
@@ -648,8 +648,8 @@ impl Core {
         Ok(())
     }
 
-    pub(in crate::core) fn processing_event(&mut self, event: crate::processing::Event) {
-        use crate::processing::Event;
+    pub(in crate::core) fn processing_event(&mut self, event: rivu_processing::Event) {
+        use rivu_processing::Event;
         match event {
             Event::GraphPrepared {
                 id,
@@ -998,7 +998,7 @@ impl Core {
             .as_ref()
             .clone();
         let admitted_source = if bypassing {
-            crate::processing::SourceStamp::read(&track.path)?
+            rivu_processing::SourceStamp::read(&track.path)?
         } else {
             let stamp = self
                 .processing
@@ -1008,7 +1008,7 @@ impl Core {
                 self.processing_source(&result.track, stamp)?;
             } else {
                 ensure!(
-                    crate::processing::SourceStamp::read(&track.path)? == stamp,
+                    rivu_processing::SourceStamp::read(&track.path)? == stamp,
                     "Processing result is stale"
                 );
             }
