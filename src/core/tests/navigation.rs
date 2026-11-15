@@ -552,6 +552,9 @@ fn ended_missing_next_stops_and_resume_attempts_a_load() {
     assert!(error.to_string().contains("2.wav"));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.state.playback.position, 0.0);
+    assert_eq!(core.state.queue.current_id, Some(2));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    assert_queue_saved(&core);
     assert!(core.transport.session.is_none());
     assert_eq!(core.store.history(1).unwrap()[0].track_id, 1);
     assert_ne!(core.transport.generation, generation);
@@ -565,24 +568,102 @@ fn ended_missing_next_stops_and_resume_attempts_a_load() {
     assert_eq!(core.state.playback.position, 0.0);
     // Resume must try to reopen the selected track, not send Pause(false)
     // to an empty worker and falsely report playing.
-    missing(&mut core, Command::Resume, 1);
+    missing(&mut core, Command::Resume, 2);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
 }
 
 #[test]
-fn missing_manual_next_preserves_current_playback() {
-    let (_directory, mut core) = fixture();
-    playing(&mut core, 1);
-    core.state.playback.position = 4.0;
-    let generation = core.transport.generation;
-    let played_at = core.store.history(1).unwrap()[0].played_at;
-    missing(&mut core, Command::Next, 2);
-    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.state.queue.current_id, Some(1));
-    assert_eq!(core.state.playback.position, 4.0);
-    assert_eq!(core.transport.generation, generation);
-    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 1);
-    assert_eq!(core.store.history(1).unwrap()[0].played_at, played_at);
+fn missing_manual_navigation_stops_at_the_failed_occurrence() {
+    for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+        for command in [Command::Next, Command::Previous] {
+            let (directory, mut core) = navigation_fixture(status);
+            let index = if matches!(command, Command::Next) {
+                2
+            } else {
+                0
+            };
+            let expected = core.store.queue_id_at(index).unwrap().unwrap();
+            let track_id = core.store.queue_track_id(expected).unwrap();
+            let path = core.track(track_id).unwrap().path;
+            std::fs::rename(&path, directory.path().join("moved.wav")).unwrap();
+            core.state.playback.position = 4.0;
+            let generation = core.transport.generation;
+            missing(&mut core, command, track_id);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, Some(expected));
+            assert_eq!(core.state.current_track().unwrap().path, path);
+            assert_eq!(core.state.playback.position, 0.0);
+            assert_ne!(core.transport.generation, generation);
+            assert!(core.transport.session.is_none());
+            assert_queue_saved(&core);
+        }
+    }
+}
+
+#[test]
+fn decoder_open_failures_stop_at_manual_and_automatic_targets() {
+    use crate::core::dispatch::BusinessEvent;
+    use rivu_format::decoder_hint::DecoderHint;
+
+    for natural in [false, true] {
+        for hint in [DecoderHint::Ffmpeg, DecoderHint::Native] {
+            let (directory, mut core) = fixture();
+            std::fs::write(directory.path().join("2.wav"), b"invalid audio").unwrap();
+            core.command(Command::EditTrack {
+                track_id: 2,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: Some(hint),
+                release_date: None,
+            })
+            .unwrap();
+            core.engine
+                .send(AudioCommand::FfmpegEnabled(false))
+                .unwrap();
+            playing(&mut core, 1);
+            core.state.playback.position = 4.0;
+            let generation = core.transport.generation;
+            if natural {
+                core.audio_event(AudioEvent::Ended {
+                    generation,
+                    completed_duration: None,
+                    bitrate_bps: None,
+                })
+                .unwrap();
+            } else {
+                core.command(Command::Next).unwrap();
+            }
+            let mut events = core.engine.events.as_ref().unwrap().clone();
+            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                &event,
+                AudioEvent::Failed { generation, .. } if *generation == core.transport.generation
+            ));
+            core.business_event(BusinessEvent::Audio(event));
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.playback.position, 0.0);
+            assert_eq!(core.state.queue.current_id, Some(2));
+            assert_eq!(core.state.current_track().unwrap().id, 2);
+            assert!(core.transport.session.is_none());
+            assert!(core.state.system.last_error.is_some());
+            assert_eq!(play_count(&core, 2), 0);
+            assert_queue_saved(&core);
+            let published = core.shared.read();
+            assert_eq!(published.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(published.current_track().unwrap().id, 2);
+            if hint == DecoderHint::Ffmpeg {
+                assert!(
+                    published
+                        .system
+                        .last_error
+                        .as_ref()
+                        .unwrap()
+                        .contains("disabled")
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -591,6 +672,9 @@ fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
     playing(&mut core, 1);
     edit_preferences(&mut core, |config| config.repeat = RepeatMode::One);
     missing(&mut core, Command::Next, 2);
+    // The failed manual navigation stopped playback; model a new active source
+    // before exercising natural Repeat One.
+    playing(&mut core, 1);
     let generation = core.transport.generation;
     let error = core
         .audio_event(AudioEvent::Ended {
@@ -599,8 +683,10 @@ fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
             bitrate_bps: None,
         })
         .unwrap_err();
-    assert!(error.to_string().contains("1.wav"));
+    assert!(format!("{error:#}").contains("Missing audio file"));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_queue_saved(&core);
     core.command(Command::RemoveTracks {
         track_ids: vec![2, 3, 4],
     })
@@ -1423,4 +1509,491 @@ fn mpris_set_position_allows_unknown_duration_without_queue_recovery() {
         AudioCommand::Seek { seconds: 1.25, .. }
     ));
     assert!(commands.try_recv().is_err());
+}
+
+fn natural_end(core: &mut Core) {
+    core.audio_event(AudioEvent::Ended {
+        generation: core.transport.generation,
+        completed_duration: None,
+        bitrate_bps: None,
+    })
+    .unwrap();
+}
+
+/// Report each missing source the way the decoder would, until one loads.
+fn fail_missing_sources(core: &mut Core) {
+    while core.state.playback.status != PlaybackStatus::Stopped
+        && core
+            .state
+            .current_track()
+            .is_some_and(|track| !track.path.is_file())
+    {
+        fail_current_source(core, audio::AudioFailureKind::Source);
+    }
+}
+
+fn fail_current_source(core: &mut Core, kind: audio::AudioFailureKind) {
+    core.audio_event(AudioEvent::Failed {
+        generation: core.transport.generation,
+        kind,
+        message: "source rejected".into(),
+    })
+    .unwrap();
+}
+
+#[test]
+fn natural_missing_sources_skip_duplicates_and_keep_notice_after_started() {
+    let (directory, mut core) = fixture();
+    std::fs::write(directory.path().join("3.wav"), []).unwrap();
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    playing(&mut core, 1);
+    let _commands = recording_audio(&mut core);
+    natural_end(&mut core);
+    fail_missing_sources(&mut core);
+    let expected = core.store.queue_id_at(3).unwrap().unwrap();
+    assert_eq!(core.state.queue.current_id, Some(expected));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    let notice = core.state.system.last_error.clone().unwrap();
+    assert!(notice.contains("Skipped 2"));
+    assert!(notice.contains("2.wav"));
+    let started = started_event(&core, Some(10.0));
+    core.audio_event(started).unwrap();
+    assert_eq!(
+        core.state.system.last_error.as_deref(),
+        Some(notice.as_str())
+    );
+    assert_queue_saved(&core);
+}
+
+#[test]
+fn all_missing_autoplay_is_bounded_by_occurrence_and_preserves_last_failure() {
+    for shuffle in [false, true] {
+        let (_directory, mut core) = fixture();
+        edit_preferences(&mut core, |config| {
+            config.repeat = RepeatMode::All;
+            config.shuffle = shuffle;
+        });
+        playing(&mut core, 1);
+        core.transport.reset_history();
+        let _commands = recording_audio(&mut core);
+        natural_end(&mut core);
+        fail_missing_sources(&mut core);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert!(core.transport.session.is_none());
+        assert_eq!(core.transport.history.len(), 5);
+        let unique: std::collections::HashSet<_> = core.transport.history.iter().collect();
+        assert_eq!(unique.len(), 5);
+        assert_eq!(
+            core.transport.history.last(),
+            core.state.queue.current_id.as_ref()
+        );
+        let notice = core.state.system.last_error.as_ref().unwrap();
+        assert!(notice.contains("Skipped 5"));
+        assert!(notice.contains("no playable tracks"));
+        assert!(
+            notice.contains(
+                &core
+                    .state
+                    .current_track()
+                    .unwrap()
+                    .path
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn real_decoder_autoplay_visits_each_bad_occurrence_once() {
+    use rivu_format::decoder_hint::DecoderHint;
+
+    for repeat in [RepeatMode::Off, RepeatMode::All, RepeatMode::One] {
+        for shuffle in [false, true] {
+            let (directory, mut core) = fixture();
+            for track_id in 1..=4 {
+                std::fs::write(
+                    directory.path().join(format!("{track_id}.wav")),
+                    b"invalid audio",
+                )
+                .unwrap();
+                core.command(Command::EditTrack {
+                    track_id,
+                    title: None,
+                    artist: None,
+                    album: None,
+                    decoder_hint: Some(DecoderHint::Native),
+                    release_date: None,
+                })
+                .unwrap();
+            }
+            core.engine
+                .send(AudioCommand::FfmpegEnabled(false))
+                .unwrap();
+            edit_preferences(&mut core, |config| {
+                config.repeat = repeat;
+                config.shuffle = shuffle;
+            });
+            playing(&mut core, 1);
+            natural_end(&mut core);
+            let mut attempted = std::collections::HashSet::new();
+            let mut events = core.engine.events.as_ref().unwrap().clone();
+            while core.state.playback.status != PlaybackStatus::Stopped {
+                assert!(attempted.insert(core.state.queue.current_id.unwrap()));
+                assert!(attempted.len() <= 5);
+                let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(matches!(
+                    event,
+                    AudioEvent::Failed {
+                        kind: audio::AudioFailureKind::Source,
+                        ..
+                    }
+                ));
+                core.audio_event(event).unwrap();
+            }
+            assert_eq!(
+                attempted.len(),
+                if repeat == RepeatMode::All { 5 } else { 1 }
+            );
+            assert!(attempted.contains(&core.state.queue.current_id.unwrap()));
+            assert_queue_saved(&core);
+            if repeat == RepeatMode::All {
+                let notice = core.state.system.last_error.as_ref().unwrap();
+                assert!(notice.contains("Skipped 5"));
+                assert!(notice.contains("no playable tracks"));
+            }
+        }
+    }
+}
+
+#[test]
+fn paused_autoplay_source_failure_stays_paused_and_other_failure_stops() {
+    for kind in [
+        audio::AudioFailureKind::Source,
+        audio::AudioFailureKind::Other,
+    ] {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+        edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+        let _commands = recording_audio(&mut core);
+        natural_end(&mut core);
+        let failed = core.state.queue.current_id;
+        core.command(Command::Pause).unwrap();
+        fail_current_source(&mut core, kind);
+        if kind == audio::AudioFailureKind::Source {
+            assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+            assert_ne!(core.state.queue.current_id, failed);
+            assert!(
+                core.state
+                    .system
+                    .last_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Skipped 1")
+            );
+        } else {
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, failed);
+            assert_eq!(
+                core.state.system.last_error.as_deref(),
+                Some("source rejected")
+            );
+        }
+    }
+}
+
+#[test]
+fn manual_controls_cancel_autoplay_and_late_source_failure_cannot_advance() {
+    for command in [
+        Command::Stop,
+        Command::Next,
+        Command::Previous,
+        Command::PlayQueue { queue_id: 1 },
+    ] {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+        edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+        let _commands = recording_audio(&mut core);
+        natural_end(&mut core);
+        let stale_generation = core.transport.generation;
+        core.command(command).unwrap();
+        let selected = core.state.queue.current_id;
+        let status = core.state.playback.status;
+        core.audio_event(AudioEvent::Failed {
+            generation: stale_generation,
+            kind: audio::AudioFailureKind::Source,
+            message: "late failure".into(),
+        })
+        .unwrap();
+        assert_eq!(core.state.queue.current_id, selected);
+        assert_eq!(core.state.playback.status, status);
+        if status != PlaybackStatus::Stopped {
+            fail_current_source(&mut core, audio::AudioFailureKind::Source);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, selected);
+        }
+    }
+}
+
+#[test]
+fn repeat_off_selected_during_autoplay_cancels_source_skipping() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    let _commands = recording_audio(&mut core);
+    natural_end(&mut core);
+    let failed = core.state.queue.current_id;
+    core.command(Command::Repeat {
+        mode: RepeatMode::Off,
+    })
+    .unwrap();
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert_eq!(core.state.queue.current_id, failed);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+}
+
+#[test]
+fn stale_started_and_failed_do_not_reset_an_active_bounded_search() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    let _commands = recording_audio(&mut core);
+    let stale_start = started_event(&core, Some(10.0));
+    let stale_generation = core.transport.generation;
+    natural_end(&mut core);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    let selected = core.state.queue.current_id;
+    let notice = core.state.system.last_error.clone();
+    core.audio_event(stale_start).unwrap();
+    core.audio_event(AudioEvent::Failed {
+        generation: stale_generation,
+        kind: audio::AudioFailureKind::Source,
+        message: "stale failure".into(),
+    })
+    .unwrap();
+    assert_eq!(core.state.queue.current_id, selected);
+    assert_eq!(core.state.system.last_error, notice);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert!(
+        core.state
+            .system
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("Skipped 2")
+    );
+}
+
+#[test]
+fn repeat_modes_never_skip_real_decoder_failure_after_manual_navigation() {
+    use rivu_format::decoder_hint::DecoderHint;
+
+    for repeat in [RepeatMode::All, RepeatMode::One] {
+        for command in [
+            Command::Next,
+            Command::Previous,
+            Command::PlayQueue { queue_id: 5 },
+        ] {
+            let (directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+            let expected = match &command {
+                Command::Next => 3,
+                Command::Previous => 1,
+                Command::PlayQueue { queue_id } => *queue_id,
+                _ => unreachable!(),
+            };
+            let track_id = core.store.queue_track_id(expected).unwrap();
+            std::fs::write(
+                directory.path().join(format!("{track_id}.wav")),
+                b"invalid audio",
+            )
+            .unwrap();
+            core.command(Command::EditTrack {
+                track_id,
+                title: None,
+                artist: None,
+                album: None,
+                decoder_hint: Some(DecoderHint::Native),
+                release_date: None,
+            })
+            .unwrap();
+            core.engine
+                .send(AudioCommand::FfmpegEnabled(false))
+                .unwrap();
+            edit_preferences(&mut core, |config| config.repeat = repeat);
+            core.command(command).unwrap();
+            let mut events = core.engine.events.as_ref().unwrap().clone();
+            let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                event,
+                AudioEvent::Failed {
+                    kind: audio::AudioFailureKind::Source,
+                    ..
+                }
+            ));
+            core.audio_event(event).unwrap();
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, Some(expected));
+            assert!(
+                !core
+                    .state
+                    .system
+                    .last_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Skipped")
+            );
+            assert_queue_saved(&core);
+        }
+    }
+}
+
+#[test]
+fn failed_repeat_one_stops_on_its_occurrence_without_skipping() {
+    let (directory, mut core) = fixture();
+    std::fs::write(directory.path().join("1.wav"), []).unwrap();
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::One);
+    playing(&mut core, 5);
+    let _commands = recording_audio(&mut core);
+    let error = core
+        .audio_event(AudioEvent::Ended {
+            generation: core.transport.generation,
+            completed_duration: None,
+            bitrate_bps: None,
+        })
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("Missing audio file"));
+    assert_eq!(core.state.queue.current_id, Some(5));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_queue_saved(&core);
+}
+
+#[test]
+fn a_started_source_begins_a_fresh_bounded_search_on_later_read_failure() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    let _commands = recording_audio(&mut core);
+    natural_end(&mut core);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    core.audio_event(started_event(&core, Some(10.0))).unwrap();
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert!(
+        core.state
+            .system
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("Skipped 1")
+    );
+    // The earlier failed occurrence may be retried only after that real start.
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert!(
+        core.state
+            .system
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("Skipped 5")
+    );
+}
+
+#[test]
+fn unavailable_music_folder_stops_instead_of_skipping() {
+    for (manual, mounted) in [(false, false), (true, false), (false, true)] {
+        let (directory, mut core) = fixture();
+        let volume = directory.path().join("volume");
+        std::fs::create_dir(&volume).unwrap();
+        if mounted {
+            // A present, non-empty root: ordinary missing files still skip.
+            std::fs::write(volume.join("other.wav"), []).unwrap();
+        }
+        edit_preferences(&mut core, |config| {
+            config.library_roots = vec![volume.clone()]
+        });
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        for id in 2..=4 {
+            let path = volume.join(format!("{id}.wav"));
+            connection
+                .execute(
+                    "UPDATE tracks SET path=?1 WHERE id=?2",
+                    rusqlite::params![path.to_str().unwrap(), id],
+                )
+                .unwrap();
+        }
+        core.store.invalidate_caches();
+        core.refresh_queue_tracks().unwrap();
+        edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+        playing(&mut core, 1);
+        let _commands = recording_audio(&mut core);
+        if manual {
+            let error = core.command(Command::Next).unwrap_err();
+            assert!(format!("{error:#}").contains("Music folder unavailable"));
+        } else {
+            natural_end(&mut core);
+            fail_missing_sources(&mut core);
+            if mounted {
+                assert!(core.state.queue.current_id != Some(2));
+                continue;
+            }
+            let error = core.state.system.last_error.clone().unwrap();
+            assert!(error.contains("Music folder unavailable"), "{error}");
+            assert!(error.contains(&volume.display().to_string()), "{error}");
+        }
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, Some(2));
+        assert_queue_saved(&core);
+    }
+}
+
+#[test]
+fn maintenance_deferred_autoplay_uses_pause_and_resume_intent() {
+    for (command, expected) in [
+        (Command::Pause, PlaybackStatus::Paused),
+        (Command::Resume, PlaybackStatus::Playing),
+    ] {
+        let (directory, mut core) = fixture();
+        // Natural advance skips missing track 2 and loads track 3; its failure
+        // defers the search, which must load track 4 with the latest intent.
+        std::fs::write(directory.path().join("3.wav"), []).unwrap();
+        std::fs::write(directory.path().join("4.wav"), []).unwrap();
+        edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+        playing(&mut core, 1);
+        if expected == PlaybackStatus::Playing {
+            core.command(Command::Pause).unwrap();
+        }
+        let _commands = recording_audio(&mut core);
+        natural_end(&mut core);
+        fail_missing_sources(&mut core);
+        assert_eq!(core.state.current_track().unwrap().id, 3);
+        core.database_unavailable = true;
+        fail_current_source(&mut core, audio::AudioFailureKind::Source);
+        assert!(core.transport.pending_navigation.is_some());
+        core.command(command).unwrap();
+        core.database_unavailable = false;
+        core.flush_deferred_playback().unwrap();
+        assert_eq!(core.state.current_track().unwrap().id, 4);
+        assert_eq!(core.state.playback.status, expected);
+    }
+}
+
+#[test]
+fn admitted_manual_seek_cancels_autoplay_but_invalid_seek_does_not() {
+    for seconds in [f64::NAN, 0.5] {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+        edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+        let _commands = recording_audio(&mut core);
+        natural_end(&mut core);
+        let selected = core.state.queue.current_id;
+        assert_eq!(core.seek(seconds).is_ok(), seconds.is_finite());
+        fail_current_source(&mut core, audio::AudioFailureKind::Source);
+        if seconds.is_finite() {
+            assert_eq!(core.state.queue.current_id, selected);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        } else {
+            assert_ne!(core.state.queue.current_id, selected);
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        }
+    }
 }

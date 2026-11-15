@@ -75,7 +75,10 @@ mod ffmpeg {
             _: rivu_metadata::Tags,
             _: Option<&AtomicBool>,
         ) -> Result<Self> {
-            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+            Err(
+                anyhow::anyhow!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+                    .context(super::source::SourceFailure),
+            )
         }
 
         pub(super) fn from_input(
@@ -83,7 +86,7 @@ mod ffmpeg {
             _: rivu_metadata::Tags,
             _: Option<&AtomicBool>,
         ) -> Result<Self> {
-            availability()?;
+            availability().map_err(|error| error.context(super::source::SourceFailure))?;
             unreachable!("FFmpeg input cannot be opened without the ffmpeg feature")
         }
 
@@ -117,11 +120,17 @@ mod ffmpeg {
             _: Option<&AtomicBool>,
             _: &mut usize,
         ) -> Result<super::source::DecodeStep<super::source::FrameTiming>> {
-            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+            Err(
+                anyhow::anyhow!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+                    .context(super::source::SourceFailure),
+            )
         }
 
         pub(super) fn seek(&mut self, _: f64, _: Option<&AtomicBool>) -> Result<()> {
-            bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+            Err(
+                anyhow::anyhow!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
+                    .context(super::source::SourceFailure),
+            )
         }
     }
 }
@@ -380,6 +389,15 @@ impl AudioCommand {
         )
     }
 }
+/// Whether a failure belongs to the selected track or to the playback engine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioFailureKind {
+    /// Track I/O, unsupported media, demuxing, decoding, or decoder seeking.
+    Source,
+    /// Output, processing, resource exhaustion, backend, or unknown failures.
+    Other,
+}
+
 #[derive(Clone, Debug)]
 pub enum AudioEvent {
     Started {
@@ -413,6 +431,7 @@ pub enum AudioEvent {
     },
     Failed {
         generation: u64,
+        kind: AudioFailureKind,
         message: String,
     },
     OutputSettingsFailed {

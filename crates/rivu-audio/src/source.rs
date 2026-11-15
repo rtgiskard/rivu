@@ -83,9 +83,9 @@ fn metadata_budget() -> symphonia_metadata::budget::MetadataBudget {
 
 /// Capture the content version of an already admitted ordinary file.
 pub fn source_identity(file: &File) -> Result<SourceIdentity> {
-    let metadata = file.metadata()?;
+    let metadata = file.metadata().map_err(source_io_error)?;
     if !metadata.is_file() {
-        bail!("Audio source is not an ordinary file");
+        return Err(anyhow!("Audio source is not an ordinary file").context(SourceFailure));
     }
     Ok(source_identity_from_metadata(&metadata))
 }
@@ -131,6 +131,76 @@ fn native_error(error: SymphoniaError) -> anyhow::Error {
         SymphoniaError::Unsupported(message) => anyhow!(UnsupportedNative(message.to_string())),
         error => error.into(),
     }
+}
+
+#[derive(Debug)]
+pub(super) struct SourceFailure;
+
+impl std::fmt::Display for SourceFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Audio source failed")
+    }
+}
+
+impl std::error::Error for SourceFailure {}
+
+fn is_source_io_error(error: &std::io::Error) -> bool {
+    // Only failures attributable to the selected file. Transient, resource,
+    // argument and unknown statuses are engine failures and must not skip.
+    match error.raw_os_error() {
+        Some(code) => matches!(
+            code,
+            libc::ENOENT
+                | libc::EACCES
+                | libc::EPERM
+                | libc::EIO
+                | libc::ENXIO
+                | libc::ENODEV
+                | libc::ESTALE
+                | libc::EISDIR
+                | libc::ELOOP
+                | libc::ENAMETOOLONG
+                | libc::ENOTDIR
+        ),
+        None => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::InvalidData
+                // open_regular_file rejects non-regular objects with this kind.
+                | std::io::ErrorKind::InvalidInput
+        ),
+    }
+}
+
+pub(super) fn source_io_error(error: std::io::Error) -> anyhow::Error {
+    if is_source_io_error(&error) {
+        anyhow::Error::new(error).context(SourceFailure)
+    } else {
+        error.into()
+    }
+}
+
+pub(super) fn is_source_failure(error: &anyhow::Error) -> bool {
+    if error.is::<SourceFailure>() || error.is::<UnsupportedNative>() {
+        return true;
+    }
+    if let Some(error) = error.downcast_ref::<SymphoniaError>() {
+        return match error {
+            SymphoniaError::IoError(error) => is_source_io_error(error),
+            SymphoniaError::DecodeError(_)
+            | SymphoniaError::SeekError(_)
+            | SymphoniaError::Unsupported(_)
+            | SymphoniaError::LimitError(_)
+            // Unhandled demuxer resets, e.g. chained Ogg physical streams.
+            | SymphoniaError::ResetRequired => true,
+            _ => false,
+        };
+    }
+    error
+        .downcast_ref::<opus::Error>()
+        .is_some_and(|error| error.code() == opus::ErrorCode::InvalidPacket)
 }
 
 pub(super) fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<()> {
@@ -234,7 +304,8 @@ fn trim_samples(
 ) -> Result<usize> {
     let time = base
         .calc_duration(trim)
-        .context("Packet trim out of range")?;
+        .context("Packet trim out of range")
+        .context(SourceFailure)?;
     Ok((seconds(time) * rate as f64).round().max(0.0) as usize)
 }
 fn trim_sample_count(base: TimeBase, ticks: u64, rate: u32) -> Option<u64> {
@@ -323,13 +394,16 @@ fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Res
     let head = params
         .extra_data
         .as_deref()
-        .context("Opus stream has no identification header")?;
+        .context("Opus stream has no identification header")
+        .context(SourceFailure)?;
     if head.len() < 19 || &head[..8] != b"OpusHead" {
-        bail!("Invalid Opus identification header");
+        return Err(anyhow!("Invalid Opus identification header").context(SourceFailure));
     }
     let channels = head[9] as usize;
     if channels == 0 || (head[18] == 0 && channels > 2) {
-        bail!("Invalid Opus channel count for its mapping family");
+        return Err(
+            anyhow!("Invalid Opus channel count for its mapping family").context(SourceFailure)
+        );
     }
     if head[18] != 0 {
         return Err(anyhow!(UnsupportedNative(
@@ -523,7 +597,7 @@ impl Source {
     ) -> Result<Self> {
         let mut source = Self::open_file_unprimed(
             path,
-            open_regular_file(path)?,
+            open_regular_file(path).map_err(source_io_error)?,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
@@ -546,7 +620,7 @@ impl Source {
         check_cancelled(cancelled)?;
         Self::open_file_with_cancel(
             path,
-            open_regular_file(path)?,
+            open_regular_file(path).map_err(source_io_error)?,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
@@ -606,6 +680,7 @@ impl Source {
             Tags::default()
         };
         file.rewind()
+            .map_err(source_io_error)
             .context("Rewinding audio source after metadata")?;
         check_cancelled(cancelled)?;
         match decoder_hint {
@@ -617,7 +692,10 @@ impl Source {
             }
             DecoderHint::Ffmpeg => {
                 if !ffmpeg_enabled {
-                    bail!("This track requires FFmpeg, but the FFmpeg extension is disabled");
+                    return Err(anyhow!(
+                        "This track requires FFmpeg, but the FFmpeg extension is disabled"
+                    )
+                    .context(SourceFailure));
                 }
                 return Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
                     path, file, tags, cancelled,
@@ -642,6 +720,7 @@ impl Source {
         let fallback = if ffmpeg_enabled {
             Some(
                 file.try_clone()
+                    .map_err(source_io_error)
                     .context("Retaining audio source for FFmpeg fallback")?,
             )
         } else {
@@ -795,10 +874,11 @@ impl Source {
         } else {
             params
                 .sample_rate
-                .context("Audio track has no sample rate")?
+                .context("Audio track has no sample rate")
+                .context(SourceFailure)?
         };
         if rate == 0 {
-            bail!("Audio track has zero sample rate");
+            return Err(anyhow!("Audio track has zero sample rate").context(SourceFailure));
         }
         let codec = if is_opus {
             "Opus".into()
@@ -1274,7 +1354,9 @@ impl Source {
                 self.opening_fallback = None;
                 Ok(true)
             }
-            DecodeStep::Eof => bail!("Audio track contains no decodable samples"),
+            DecodeStep::Eof => {
+                Err(anyhow!("Audio track contains no decodable samples").context(SourceFailure))
+            }
         }
     }
 
@@ -1842,7 +1924,8 @@ impl Source {
             let mut packet_start = seconds(
                 self.time_base
                     .calc_time(packet.pts)
-                    .context("Packet timestamp out of range")?,
+                    .context("Packet timestamp out of range")
+                    .context(SourceFailure)?,
             );
             let encoded_samples = match &mut self.decode {
                 Decode::Native(decoder) => {
@@ -1853,18 +1936,23 @@ impl Source {
                         packet.trim_start.get(),
                         self.info.sample_rate,
                     )
-                    .context("Packet leading trim out of range")?;
+                    .context("Packet leading trim out of range")
+                    .context(SourceFailure)?;
                     let trailing = trim_sample_count(
                         self.time_base,
                         packet.trim_end.get(),
                         self.info.sample_rate,
                     )
-                    .context("Packet trailing trim out of range")?;
+                    .context("Packet trailing trim out of range")
+                    .context(SourceFailure)?;
                     packet.trim_start = symphonia::core::units::Duration::new(leading);
                     packet.trim_end = symphonia::core::units::Duration::new(trailing);
                     let audio = decoder.decode(&packet).map_err(native_error)?;
                     if audio.spec().rate() != self.info.sample_rate {
-                        bail!("Sample rate changes within this track are unsupported");
+                        return Err(anyhow!(
+                            "Sample rate changes within this track are unsupported"
+                        )
+                        .context(SourceFailure));
                     }
                     update_layout(audio.spec().channels(), &mut self.layout)?;
                     self.info.channels = self.layout.len() as u16;
@@ -1879,7 +1967,9 @@ impl Source {
                     let start = if let Some(timing) = &mut self.vorbis_timing {
                         timing.packet(
                             packet_start,
-                            represented.context("Vorbis sample count out of range")?,
+                            represented
+                                .context("Vorbis sample count out of range")
+                                .context(SourceFailure)?,
                             trim,
                             audio.frames() * self.layout.len(),
                         )
@@ -1955,11 +2045,14 @@ impl Source {
 fn update_layout(channels: &Channels, layout: &mut Arc<[Channel]>) -> Result<()> {
     let count = channels.count();
     if count == 0 {
-        bail!("Decoded audio has no channels");
+        return Err(anyhow!("Decoded audio has no channels").context(SourceFailure));
     }
     let initial = layout.is_empty();
     if !initial && layout.len() != count {
-        bail!("Channel layout changes within this track are unsupported");
+        return Err(
+            anyhow!("Channel layout changes within this track are unsupported")
+                .context(SourceFailure),
+        );
     }
     let mut initial_layout = initial.then(|| Vec::with_capacity(count));
     for index in 0..count {
@@ -1980,11 +2073,15 @@ fn update_layout(channels: &Channels, layout: &mut Arc<[Channel]>) -> Result<()>
         let channel = position
             .filter(|position| position.bits().count_ones() == 1)
             .and_then(|position| Channel::from_standard_index(position.bits().trailing_zeros()))
-            .context("Audio has an unsupported or unspecified speaker position; refusing to guess its routing")?;
+            .context("Audio has an unsupported or unspecified speaker position; refusing to guess its routing")
+            .context(SourceFailure)?;
         if initial {
             initial_layout.as_mut().unwrap().push(channel);
         } else if layout[index] != channel {
-            bail!("Channel layout changes within this track are unsupported");
+            return Err(
+                anyhow!("Channel layout changes within this track are unsupported")
+                    .context(SourceFailure),
+            );
         }
     }
     if let Some(initial_layout) = initial_layout {
@@ -2201,7 +2298,45 @@ pub(super) mod tests {
         .unwrap();
         assert!(!source.poll_open().unwrap());
         assert!(!source.poll_open().unwrap());
-        assert!(source.poll_open().is_err());
+        assert!(is_source_failure(&source.poll_open().unwrap_err()));
+    }
+
+    #[test]
+    fn native_demux_failures_remain_source_failures_after_opening() {
+        for failure in [
+            SymphoniaError::IoError(std::io::Error::from_raw_os_error(libc::EIO)),
+            SymphoniaError::DecodeError("invalid packet"),
+        ] {
+            let file = opening_prefix_file(0, true);
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            let mut failure = Some(failure);
+            let mut budget = DECODE_WORK_BUDGET;
+            let error = source
+                .read_next_with_reader(None, &mut budget, |_| Err(failure.take().unwrap()))
+                .unwrap_err()
+                .context("Refilling active playback");
+            assert!(is_source_failure(&error));
+            assert!(!source.complete_stream);
+        }
+    }
+
+    #[test]
+    fn opus_packet_corruption_is_distinct_from_backend_argument_errors() {
+        let mut decoder = opus::Decoder::new(48_000, opus::Channels::Mono).unwrap();
+        let error = decoder
+            .decode_float(&[0xff], &mut [0.0; 5760], false)
+            .unwrap_err();
+        assert_eq!(error.code(), opus::ErrorCode::InvalidPacket);
+        assert!(is_source_failure(&anyhow!(error).context("Decoding Opus")));
+        let error = match opus::Decoder::new(1, opus::Channels::Mono) {
+            Ok(_) => panic!("invalid decoder rate was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), opus::ErrorCode::BadArg);
+        assert!(!is_source_failure(
+            &anyhow!(error).context("Creating decoder")
+        ));
     }
 
     #[cfg(feature = "ffmpeg")]

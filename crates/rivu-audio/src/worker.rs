@@ -1,8 +1,8 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent, AudioShutdownReceiver, AudioSnapshot, PlaybackMetadata,
-    QueuedAudioCommand,
+    AudioCommand, AudioEvent, AudioFailureKind, AudioShutdownReceiver, AudioSnapshot,
+    PlaybackMetadata, QueuedAudioCommand,
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
@@ -543,6 +543,7 @@ impl Worker {
         let generation = self.stop().generation;
         self.event(AudioEvent::Failed {
             generation,
+            kind: failure_kind(&error),
             message: format!("{error:#}"),
         });
     }
@@ -611,6 +612,7 @@ impl Worker {
                     }
                     Err(error) => self.event(AudioEvent::Failed {
                         generation,
+                        kind: failure_kind(&error),
                         message: format!("{error:#}"),
                     }),
                 }
@@ -791,12 +793,177 @@ fn send_event(
     }
 }
 
+fn failure_kind(error: &anyhow::Error) -> AudioFailureKind {
+    if super::source::is_source_failure(error) {
+        AudioFailureKind::Source
+    } else {
+        AudioFailureKind::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
     use futures::channel::oneshot;
+
+    #[test]
+    fn failure_kinds_follow_provenance_through_context_not_error_messages() {
+        use crate::source::{reserve_pcm, source_io_error};
+        use symphonia::core::errors::Error as NativeError;
+
+        let file = crate::source::opening_prefix_file(0, true);
+        let errors = [
+            (
+                source_io_error(std::io::Error::from_raw_os_error(libc::EIO))
+                    .context("Opening PipeWire output"),
+                AudioFailureKind::Source,
+            ),
+            (
+                anyhow!(NativeError::DecodeError("Output stream disconnected")),
+                AudioFailureKind::Source,
+            ),
+            (
+                anyhow!(NativeError::Unsupported("Processing failed")),
+                AudioFailureKind::Source,
+            ),
+            (
+                anyhow!("FFmpeg receive audio frame failed: invalid data"),
+                AudioFailureKind::Other,
+            ),
+            (
+                anyhow!(std::io::Error::from_raw_os_error(libc::EIO)),
+                AudioFailureKind::Other,
+            ),
+            (
+                reserve_pcm(&mut Vec::new(), usize::MAX, 2).unwrap_err(),
+                AudioFailureKind::Other,
+            ),
+            (
+                source_io_error(std::io::Error::from(std::io::ErrorKind::OutOfMemory)),
+                AudioFailureKind::Other,
+            ),
+            (
+                anyhow!(NativeError::IoError(std::io::Error::from(
+                    std::io::ErrorKind::OutOfMemory,
+                ))),
+                AudioFailureKind::Other,
+            ),
+            (
+                anyhow!(NativeError::ResetRequired),
+                AudioFailureKind::Source,
+            ),
+            (
+                anyhow!(NativeError::IoError(std::io::Error::from(
+                    std::io::ErrorKind::Interrupted,
+                ))),
+                AudioFailureKind::Other,
+            ),
+            (
+                source_io_error(std::io::Error::from_raw_os_error(libc::EINVAL)),
+                AudioFailureKind::Other,
+            ),
+            (
+                source_io_error(std::io::Error::from_raw_os_error(libc::EAGAIN)),
+                AudioFailureKind::Other,
+            ),
+            (
+                anyhow!(NativeError::IoError(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                ))),
+                AudioFailureKind::Source,
+            ),
+            (
+                source_io_error(std::io::Error::from_raw_os_error(libc::EMFILE)),
+                AudioFailureKind::Other,
+            ),
+        ];
+        for (error, expected) in errors {
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            load_prefix(&mut worker, file.path(), DecoderHint::Native, 71);
+            worker.fail(error.context("Outer lifecycle context"));
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::Failed { generation: 71, kind, .. }) if kind == expected
+            ));
+            assert!(worker.opening.is_none());
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_file_opening_reports_a_source_failure_before_output_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        load_prefix(
+            &mut worker,
+            &directory.path().join("missing.wav"),
+            DecoderHint::Auto,
+            72,
+        );
+        worker.poll_opening();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed {
+                generation: 72,
+                kind: AudioFailureKind::Source,
+                ..
+            })
+        ));
+        assert!(worker.opening.is_none());
+        assert!(worker.playback.is_none());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_track_requiring_disabled_ffmpeg_reports_a_source_failure() {
+        let file = crate::source::opening_prefix_file(0, true);
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 74);
+        worker.ffmpeg_enabled = false;
+        worker.poll_opening();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed {
+                generation: 74,
+                kind: AudioFailureKind::Source,
+                ..
+            })
+        ));
+        assert!(worker.opening.is_none());
+        assert!(worker.playback.is_none());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn processing_and_output_failures_after_source_open_are_not_skippable() {
+        let file = crate::source::opening_prefix_file(0, true);
+        for output_failure in [false, true] {
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            if output_failure {
+                worker.device = Some("invalid-output-target".into());
+            } else {
+                worker.equalizer = Arc::new(EqualizerConfig {
+                    preamp_db: f64::NAN,
+                    ..Default::default()
+                });
+            }
+            load_prefix(&mut worker, file.path(), DecoderHint::Native, 73);
+            worker.poll_opening();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::Failed {
+                    generation: 73,
+                    kind: AudioFailureKind::Other,
+                    ..
+                })
+            ));
+            assert!(worker.opening.is_none());
+            assert!(worker.playback.is_none());
+            assert!(events.is_empty());
+        }
+    }
 
     fn admitted_worker() -> (Worker, crate::AudioEngine) {
         let (worker, commands, events, shutdown) = opening_worker();
@@ -935,7 +1102,11 @@ mod tests {
         assert_eq!(worker.device.as_deref(), Some("invalid-playing-target"));
         assert!(matches!(
             engine.events.as_ref().unwrap().try_recv(),
-            Ok(AudioEvent::Failed { generation: 1, .. })
+            Ok(AudioEvent::Failed {
+                generation: 1,
+                kind: AudioFailureKind::Other,
+                ..
+            })
         ));
     }
 
@@ -1176,7 +1347,14 @@ mod tests {
             assert!(worker.opening.is_none());
             assert!(worker.playback.is_none());
             let event = events.try_recv().unwrap();
-            assert!(matches!(event, AudioEvent::Failed { generation: 91, .. }));
+            assert!(matches!(
+                event,
+                AudioEvent::Failed {
+                    generation: 91,
+                    kind: AudioFailureKind::Other,
+                    ..
+                }
+            ));
             assert!(events.is_empty());
         }
     }
@@ -1531,7 +1709,13 @@ mod tests {
             });
             assert!(worker.opening.is_none());
             assert!(worker.playback.is_none());
-            assert!(matches!(events.try_recv(), Ok(AudioEvent::Failed { .. })));
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::Failed {
+                    kind: AudioFailureKind::Source,
+                    ..
+                })
+            ));
             assert!(events.is_empty());
         }
     }
@@ -1721,7 +1905,11 @@ mod tests {
         worker.poll_opening();
         assert!(matches!(
             events.try_recv(),
-            Ok(AudioEvent::Failed { generation: 41, .. })
+            Ok(AudioEvent::Failed {
+                generation: 41,
+                kind: AudioFailureKind::Source,
+                ..
+            })
         ));
         let (reply, mut response) = oneshot::channel();
         worker.command(AudioCommand::StopAndSnapshot(reply));
@@ -1760,7 +1948,11 @@ mod tests {
             worker.poll_opening();
             assert!(matches!(
                 events.try_recv(),
-                Ok(AudioEvent::Failed { generation: 42, .. })
+                Ok(AudioEvent::Failed {
+                    generation: 42,
+                    kind: AudioFailureKind::Source,
+                    ..
+                })
             ));
             assert!(events.is_empty());
             assert!(worker.opening.is_none());
@@ -1814,7 +2006,11 @@ mod tests {
         assert!(!worker.pipewire_auto_mix);
         assert!(matches!(
             events.try_recv(),
-            Ok(AudioEvent::Failed { generation: 41, .. })
+            Ok(AudioEvent::Failed {
+                generation: 41,
+                kind: AudioFailureKind::Other,
+                ..
+            })
         ));
         assert!(events.is_empty());
     }
@@ -2452,6 +2648,7 @@ mod tests {
                 &shutdown,
                 AudioEvent::Failed {
                     generation: 3,
+                    kind: AudioFailureKind::Source,
                     message: "decoder failed".into(),
                 },
             );

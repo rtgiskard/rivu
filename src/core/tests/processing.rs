@@ -3231,6 +3231,7 @@ fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
     let generation = core.transport.generation;
     core.audio_event(AudioEvent::Failed {
         generation,
+        kind: audio::AudioFailureKind::Source,
         message: "reopen rejected".into(),
     })
     .unwrap();
@@ -5016,4 +5017,32 @@ fn rescanned_cue_audition_reloads_validated_source_without_changing_occurrence()
             }
         }
     }
+}
+
+#[test]
+fn processing_replacement_does_not_inherit_natural_autoplay_failure_recovery() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _commands = recording_audio(&mut core);
+    edit_preferences(&mut core, |config| config.repeat = RepeatMode::All);
+    playing(&mut core, 1);
+    core.advance_with_status(true, PlaybackStatus::Playing)
+        .unwrap();
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    assert!(core.processing.audition_projection().is_some());
+    let selected = core.state.queue.current_id;
+    core.audio_event(AudioEvent::Failed {
+        generation: core.transport.generation,
+        kind: audio::AudioFailureKind::Source,
+        message: "processing decoder failed".into(),
+    })
+    .unwrap();
+    assert_eq!(core.state.queue.current_id, selected);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(
+        core.state.system.last_error.as_deref(),
+        Some("processing decoder failed")
+    );
 }

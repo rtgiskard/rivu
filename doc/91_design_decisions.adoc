@@ -616,6 +616,26 @@ display, retained payload residency, and bounded result comparison, not delayed
 playback controls or relaxed data validity. Current behavior and exclusions are
 defined in link:22_cache.adoc#window-local-query-retention[window-local retention].
 
+[[DEC-026]]
+=== DEC-026: Skip only track faults, and only during unattended playback
+
+Status: implemented, 2026-11-15.
+
+Manual selection stops on a failed track so the cause stays visible; only Repeat
+All autoplay skips, so one bad file does not halt unattended playback. Repeat One
+names a single track, so its failure stops rather than playing a different one.
+
+Skip only failures attributable to the track, classified by provenance (typed
+markers, decoder and FFmpeg status codes) rather than message text. Skipping a
+system fault, including transient I/O or an unavailable music folder, would
+misreport good files as bad and walk the whole queue to a misleading "no playable
+tracks" result. Every attempt, including a missing file, is an ordinary load whose
+failure returns as an audio event, so a large failing queue cannot delay controls.
+
+Reconsider when a decoder reports a new source-specific status, or if an empty
+music folder becomes a legitimate configuration. See
+link:04_playback.adoc#transport-and-timing[current behavior].
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

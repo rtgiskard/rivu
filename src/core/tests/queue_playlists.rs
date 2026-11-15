@@ -1987,7 +1987,9 @@ fn failed_playlist_start_does_not_keep_an_obsolete_queue_selection() {
         .unwrap_err();
     assert!(error.to_string().contains("2.wav"));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    assert_eq!(core.state.queue.current_id, None);
+    assert_eq!(core.state.queue.current_position, Some(0));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    assert_queue_saved(&core);
     missing(&mut core, Command::Resume, 2);
 }
 

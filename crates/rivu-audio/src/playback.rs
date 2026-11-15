@@ -2078,7 +2078,7 @@ pub(super) mod tests {
                 });
                 let control = Arc::clone(playback.output.pcm_control_for_test());
                 let epoch = control.state().epoch;
-                playback
+                let error = playback
                     .restart_output_with(target, |source, is_paused| {
                         assert_eq!(is_paused, paused);
                         assert_eq!(control.state().heard_frame, 64);
@@ -2088,6 +2088,7 @@ pub(super) mod tests {
                         bail!("injected native output open failure")
                     })
                     .unwrap_err();
+                assert!(!crate::source::is_source_failure(&error));
                 assert_ne!(control.state().epoch, epoch);
                 assert_eq!(control.state().heard_frame, 0);
                 let expected = crate::AudioSnapshot {

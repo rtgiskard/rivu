@@ -20,6 +20,7 @@ pub(super) struct PlaybackOwner {
     pub(super) processing_resume_generation: Option<u64>,
     live_source: Option<u64>,
     physically_closed_source: Option<u64>,
+    autoplay: Option<Autoplay>,
 }
 
 impl PlaybackOwner {
@@ -81,6 +82,31 @@ impl PlaybackOwner {
         self.selection_pending = false;
         self.physically_closed_source = None;
         self.reset_history();
+    }
+}
+
+/// Repeat All search after natural advancement. Occurrences, not tracks, are
+/// excluded, so duplicates remain independent choices.
+#[derive(Default)]
+struct Autoplay {
+    attempted: std::collections::HashSet<u64>,
+    skipped: usize,
+    last_failure: Option<String>,
+}
+
+impl Autoplay {
+    fn notice(&self, exhausted: bool) -> Option<String> {
+        self.last_failure.as_ref().map(|reason| {
+            let outcome = if exhausted {
+                "; no playable tracks found"
+            } else {
+                ""
+            };
+            format!(
+                "Skipped {} unavailable queue occurrence(s){outcome}. Last failure: {reason}",
+                self.skipped
+            )
+        })
     }
 }
 
@@ -327,9 +353,19 @@ impl Core {
         match event {
             AudioEvent::Started { generation, info } if generation == self.transport.generation => {
                 self.transport.processing_resume_generation = None;
+                let accepting_start = self
+                    .transport
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.started);
                 if let Err(error) = self.playback_started(info) {
                     self.stop().with_context(|| format!("{error:#}"))?;
                     return Err(error);
+                }
+                if accepting_start && let Some(autoplay) = self.transport.autoplay.as_mut() {
+                    // A real start ends this search; a later read failure of
+                    // this naturally reached track starts a fresh one.
+                    *autoplay = Autoplay::default();
                 }
             }
             AudioEvent::Progress {
@@ -350,6 +386,7 @@ impl Core {
             } if generation == self.transport.generation => {
                 self.playback_ended(completed_duration, bitrate_bps);
                 let status = self.state.playback.status;
+                self.transport.autoplay = None;
                 self.stop_playback()?;
                 self.advance_with_status(true, status)?;
             }
@@ -368,14 +405,49 @@ impl Core {
             }
             AudioEvent::Failed {
                 generation,
+                kind,
                 message,
             } if generation == self.transport.generation => {
                 let resume_failed = self.transport.processing_resume_generation == Some(generation);
-                self.stop().with_context(|| message.clone())?;
-                if resume_failed {
-                    self.processing_bypass(true)?;
+                if kind == audio::AudioFailureKind::Source
+                    && self.transport.autoplay.is_some()
+                    && self.preferences.live().repeat == RepeatMode::All
+                    && !resume_failed
+                {
+                    let status = self.state.playback.status;
+                    let failed = self.state.queue.current_id;
+                    let path = self.state.current_track().map(|track| track.path.clone());
+                    self.stop_for_replacement()
+                        .with_context(|| message.clone())?;
+                    // An absent or empty music folder affects every track
+                    // below it: stop rather than walk the queue.
+                    if let Some(path) = &path
+                        && let Some(root) = self.unavailable_root(path)
+                    {
+                        self.transport.autoplay = None;
+                        self.state.system.last_error = Some(format!(
+                            "Music folder unavailable: {}; cannot open {}",
+                            root.display(),
+                            path.display()
+                        ));
+                        return Ok(());
+                    }
+                    let autoplay = self.transport.autoplay.as_mut().expect("search is active");
+                    autoplay.attempted.extend(failed);
+                    autoplay.skipped += 1;
+                    autoplay.last_failure = Some(path.map_or_else(
+                        || message.clone(),
+                        |path| format!("{message} ({})", path.display()),
+                    ));
+                    self.state.system.last_error = autoplay.notice(false);
+                    self.continue_autoplay(status)?;
+                } else {
+                    self.stop().with_context(|| message.clone())?;
+                    if resume_failed {
+                        self.processing_bypass(true)?;
+                    }
+                    self.state.system.last_error = Some(message);
                 }
-                self.state.system.last_error = Some(message);
             }
             event @ (AudioEvent::OutputSettingsFailed { .. }
             | AudioEvent::EqualizerSettingsFailed { .. }) => self.audio_settings_failed(event),
@@ -470,28 +542,68 @@ impl Core {
         history: QueueHistory,
         status: PlaybackStatus,
     ) -> Result<()> {
+        self.transport.autoplay = None;
+        self.start_occurrence(queue_id, history, status, true)
+    }
+
+    /// The configured root containing `path` when it is absent, unreadable or
+    /// empty, as with an unmounted removable or network volume.
+    fn unavailable_root(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let roots = library::normalize_roots(&self.preferences.settings().library_roots).ok()?;
+        let root = roots
+            .into_iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())?;
+        let available = std::fs::read_dir(&root)
+            .is_ok_and(|mut entries| entries.next().is_some_and(|entry| entry.is_ok()));
+        (!available).then_some(root)
+    }
+
+    /// Manual starts check for a missing file up front. Autoplay leaves it to
+    /// the decoder, so every source failure reaches the same `Failed` handler.
+    fn start_occurrence(
+        &mut self,
+        queue_id: u64,
+        history: QueueHistory,
+        status: PlaybackStatus,
+        check_missing: bool,
+    ) -> Result<()> {
         self.ensure_queue_control_ready()?;
         let (track_id, position) = self
             .store
             .queue_location(queue_id)?
             .context("Queue entry not found")?;
         let track = self.track(track_id)?;
-        if status != PlaybackStatus::Stopped && !track.path.is_file() {
-            bail!("Missing audio file: {}", track.path.display());
-        }
         // Independent controls do not depend on database recovery. Only a new
         // playback owner must settle the previous producer before replacing it.
         if self.transport.retired.is_some() {
             self.flush_deferred_playback()?;
         }
-        self.stop()?;
+        self.stop_for_replacement()?;
         anyhow::ensure!(
             self.transport.retired.is_none(),
             "Previous audio source has not confirmed its final stop"
         );
         // Retiring Started/Ended bookkeeping can enrich this same track in the store.
-        // Keep the missing-file preflight above, but load the authoritative snapshot now.
         let track = Arc::new(self.track(track.id)?);
+        if check_missing && status != PlaybackStatus::Stopped && !track.path.is_file() {
+            let path = track.path.display().to_string();
+            let root = self.unavailable_root(&track.path);
+            self.accept_loaded_occurrence(
+                queue_id,
+                position,
+                track,
+                PlaybackStatus::Stopped,
+                history,
+            )?;
+            if let Some(root) = root {
+                bail!(
+                    "Music folder unavailable: {}; cannot open {path}",
+                    root.display()
+                );
+            }
+            bail!("Missing audio file: {path}");
+        }
         if status != PlaybackStatus::Stopped {
             let source = self.playback_source(&track).unwrap_or_else(|error| {
                 tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
@@ -848,11 +960,20 @@ impl Core {
     }
 
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
+        self.transport.autoplay = None;
+        self.stop_for_replacement()
+    }
+
+    fn stop_for_replacement(&mut self) -> Result<()> {
         // Stop relinquishes pending audition intent even without a physical source.
         // Prepared graph handoff consumes its intent before establishing a source.
         self.pending_processing_audition = None;
         self.transport.pending_navigation = None;
-        self.stop_playback()
+        let result = self.stop_playback();
+        if result.is_err() {
+            self.transport.autoplay = None;
+        }
+        result
     }
 
     pub(in crate::core) fn prepare_source_replacement(&mut self) -> Result<SourceReplacement> {
@@ -911,6 +1032,7 @@ impl Core {
         if let Err(error) = self.engine.send(command) {
             return self.finish_playback(Ok(None), Err(error));
         }
+        self.transport.autoplay = None;
         self.transport.generation = self.transport.generation.wrapping_add(1);
         self.transport.admit_source();
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
@@ -963,11 +1085,76 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Paused;
         Ok(())
     }
+    /// Load the next untried occurrence: a random or following position, then
+    /// the first untried one after it. Failures return through `Failed`, so
+    /// each attempt yields to the event loop.
+    fn continue_autoplay(&mut self, status: PlaybackStatus) -> Result<()> {
+        if self.database_maintenance_active() {
+            self.transport.pending_navigation = Some(status);
+            return Ok(());
+        }
+        let result = self.load_autoplay(status);
+        if result.is_err() {
+            self.transport.autoplay = None;
+        }
+        result
+    }
+
+    fn load_autoplay(&mut self, status: PlaybackStatus) -> Result<()> {
+        self.ensure_queue_control_ready()?;
+        let total = self.state.queue.total;
+        let first = if total == 0 {
+            0
+        } else if self.preferences.live().shuffle {
+            use rand::RngExt;
+            rand::rng().random_range(0..total)
+        } else {
+            self.state
+                .queue
+                .current_position
+                .map_or(0, |index| (index + 1) % total)
+        };
+        let autoplay = self.transport.autoplay.as_ref().expect("search is active");
+        let mut candidate = None;
+        for offset in 0..total {
+            let id = self
+                .store
+                .queue_id_at((first + offset) % total)?
+                .context("Queue positions are inconsistent")?;
+            if !autoplay.attempted.contains(&id) {
+                candidate = Some(id);
+                break;
+            }
+        }
+        let Some(id) = candidate else {
+            let notice = autoplay.notice(true);
+            self.stop()?;
+            self.state.system.last_error = notice;
+            return Ok(());
+        };
+        let notice = autoplay.notice(false);
+        self.transport
+            .autoplay
+            .as_mut()
+            .expect("search is active")
+            .attempted
+            .insert(id);
+        self.start_occurrence(id, QueueHistory::Record, status, false)?;
+        // Selection admission clears last_error; keep the aggregate notice.
+        if notice.is_some() {
+            self.state.system.last_error = notice;
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn advance_with_status(
         &mut self,
         natural: bool,
         status: PlaybackStatus,
     ) -> Result<()> {
+        if !natural {
+            self.transport.autoplay = None;
+        }
         if self.database_maintenance_active() {
             if natural {
                 self.transport.pending_navigation = Some(status);
@@ -980,6 +1167,14 @@ impl Core {
             return if natural { self.stop() } else { Ok(()) };
         }
         let current = self.state.queue.current_id;
+        if natural
+            && status != PlaybackStatus::Stopped
+            && self.preferences.live().repeat == RepeatMode::All
+        {
+            // Repeat One stops on its failed source; only Repeat All skips.
+            self.transport.autoplay = Some(Autoplay::default());
+            return self.continue_autoplay(status);
+        }
         if natural
             && self.preferences.live().repeat == RepeatMode::One
             && let Some(id) = current
@@ -1006,6 +1201,7 @@ impl Core {
     }
     pub(in crate::core) fn previous(&mut self) -> Result<()> {
         let status = self.state.playback.status;
+        self.transport.autoplay = None;
         self.ensure_queue_control_ready()?;
         if self.preferences.live().shuffle {
             if let Some(index) = self.transport.history_cursor.checked_sub(
@@ -1053,6 +1249,9 @@ impl Core {
         let seconds = end.map_or(seconds, |end| seconds.min(end));
         let revision = self.state.playback.seek_revision.wrapping_add(1);
         self.engine.send(AudioCommand::Seek { seconds, revision })?;
+        // A decoder failure caused by this admitted manual seek belongs to
+        // this occurrence, not to the earlier natural navigation search.
+        self.transport.autoplay = None;
         self.state.playback.position = seconds;
         self.state.playback.seek_revision = revision;
         self.transport.progress_seek_revision = revision;
@@ -1151,7 +1350,15 @@ impl Core {
             if let Some(status) = self.transport.pending_navigation.take()
                 && !self.state.system.shutting_down
             {
-                self.advance_with_status(true, status)?;
+                if self.transport.autoplay.is_some() {
+                    if self.preferences.live().repeat == RepeatMode::All {
+                        self.continue_autoplay(status)?;
+                    } else {
+                        self.stop()?;
+                    }
+                } else {
+                    self.advance_with_status(true, status)?;
+                }
             }
             Ok(())
         });

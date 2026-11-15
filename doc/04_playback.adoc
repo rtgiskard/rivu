@@ -54,17 +54,31 @@ Ctrl+Home/End seek to zero or the known duration. A delayed seek cannot affect a
 different queue occurrence. Pointer dragging and CLI seek/volume specify absolute
 targets.
 
-If a manual playback request is rejected by the pre-open file check, for example
-because the source is missing or not an ordinary file, active playback continues.
-Once that check passes, opening stops the previous playback; a later open or load
-failure leaves playback stopped. Neither failure rolls back earlier queue edits,
-including an occurrence appended by library-track Play.
+Manual selection stops at a source that cannot be opened or decoded, including
+a missing file or a track requiring disabled FFmpeg support. Previous playback
+stops; the failed occurrence remains selected at position zero, with playback
+Stopped and an error reported. Play or Resume retries it from the beginning.
 
-Whole-album and whole-playlist Play stop existing playback and save the replacement
-queue before opening its first source. An open failure leaves playback stopped
-and does not restore the old queue. Inspect Queue and play another entry after
-correcting or skipping the source. Failure to open the next entry at natural end
-also stops playback.
+Automatic advancement with Repeat Off or Repeat One also stops on source errors;
+a failed Repeat One source stays selected instead of switching to another track.
+With Repeat All enabled, automatic playback skips failed sources and searches for
+a playable occurrence from the next position, or a random one when shuffling,
+wrapping when necessary. Each queue occurrence is attempted at most once per
+search. If all candidates fail, playback stops on the last failed occurrence with
+a summary. Output-device, processing, and other system errors stop playback
+instead of skipping tracks.
+A missing file under an absent, unreadable, or empty music folder, such as an
+unmounted drive, also stops playback and reports the folder instead of skipping.
+
+Skipped-source messages are aggregated and remain visible after playback
+continues, through the existing GUI footer, TUI message area, and CLI status
+error output. These are application messages, not system desktop notifications.
+
+An open failure does not roll back earlier queue edits, including an occurrence
+appended by library-track Play. Whole-album and whole-playlist Play are manual
+requests: they save the replacement queue before opening its first source;
+failure keeps that queue and selects its failed first occurrence rather than
+restoring the old queue.
 
 The desktop Playback panel shows title, artist, album, progress, transport, and
 volume. Blank artist or album metadata uses the same symbol placeholders and

@@ -6,7 +6,9 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DecodeStep, FrameTiming, check_cancelled, finite_sample},
+    source::{
+        DecodeStep, FrameTiming, SourceFailure, check_cancelled, finite_sample, source_io_error,
+    },
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
@@ -43,6 +45,11 @@ use abi::*;
 const NOPTS: i64 = i64::MIN;
 const ERR_EAGAIN: c_int = -11;
 const ERR_EOF: c_int = -541_478_725;
+const ERR_INVALID_DATA: c_int = -c_int::from_le_bytes(*b"INDA");
+const ERR_DECODER_NOT_FOUND: c_int = -c_int::from_le_bytes([0xf8, b'D', b'E', b'C']);
+const ERR_DEMUXER_NOT_FOUND: c_int = -c_int::from_le_bytes([0xf8, b'D', b'E', b'M']);
+const ERR_STREAM_NOT_FOUND: c_int = -c_int::from_le_bytes([0xf8, b'S', b'T', b'R']);
+const ERR_PATCHWELCOME: c_int = -c_int::from_le_bytes(*b"PAWE");
 pub(super) const SEEK_PREROLL_SECONDS: f64 = 2.0;
 
 const MAX_PACKET_SIDE_DATA: i32 = 64;
@@ -372,6 +379,39 @@ fn error_text(rt: &Runtime, code: c_int, operation: &str) -> anyhow::Error {
     };
     anyhow::anyhow!("FFmpeg {operation} failed: {detail} ({code})")
 }
+
+fn source_failure_code(code: c_int) -> bool {
+    // FFmpeg's tagged source errors and ordinary input I/O failures. Unknown
+    // statuses, allocation failures and backend contract errors remain fatal.
+    matches!(
+        code,
+        ERR_INVALID_DATA
+            | ERR_DECODER_NOT_FOUND
+            | ERR_DEMUXER_NOT_FOUND
+            | ERR_STREAM_NOT_FOUND
+            | ERR_PATCHWELCOME
+    ) || matches!(
+        code.checked_neg(),
+        Some(
+            libc::ENOENT
+                | libc::EACCES
+                | libc::EPERM
+                | libc::EIO
+                | libc::ENXIO
+                | libc::ENODEV
+                | libc::EILSEQ
+        )
+    )
+}
+
+fn source_error_text(rt: &Runtime, code: c_int, operation: &str) -> anyhow::Error {
+    let error = error_text(rt, code, operation);
+    if source_failure_code(code) {
+        error.context(SourceFailure)
+    } else {
+        error
+    }
+}
 fn cstr(ptr: *const c_char) -> String {
     if ptr.is_null() {
         String::new()
@@ -441,7 +481,7 @@ impl Input {
             (rt.f.dict_free)(&mut options);
         }
         if ret < 0 {
-            return Err(error_text(rt, ret, "open input"));
+            return Err(source_error_text(rt, ret, "open input"));
         }
         // Disable every non-audio stream before stream-info analysis. This prevents
         // an audio-only player from implicitly opening a video decoder.
@@ -459,7 +499,7 @@ impl Input {
         }
         let ret = unsafe { (rt.f.find_info)(input.format, ptr::null_mut()) };
         if ret < 0 {
-            return Err(error_text(rt, ret, "find stream info"));
+            return Err(source_error_text(rt, ret, "find stream info"));
         }
         let ctx = unsafe { &*input.format };
         for index in 0..ctx.nb_streams {
@@ -485,10 +525,15 @@ impl Input {
             stream = Some((index as c_int, candidate));
             break;
         }
-        let (stream_index, stream_ptr) = stream.context("FFmpeg input has no audio stream")?;
+        let (stream_index, stream_ptr) = stream
+            .context("FFmpeg input has no audio stream")
+            .context(SourceFailure)?;
         let params = unsafe { (*stream_ptr).codecpar };
         if params.is_null() {
-            bail!("FFmpeg audio stream has no codec parameters");
+            return Err(
+                anyhow::anyhow!("FFmpeg audio stream has no codec parameters")
+                    .context(SourceFailure),
+            );
         }
         input.stream = stream_index;
         input.stream_ptr = stream_ptr;
@@ -525,12 +570,16 @@ pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
     match file.read_exact_at(&mut magic, 0) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error).context("read WAVE container magic"),
+        Err(error) => return Err(source_io_error(error)).context("read WAVE container magic"),
     }
     if !matches!(&magic[..4], b"RIFF" | b"RIFX" | b"RF64" | b"BW64") || &magic[8..] != b"WAVE" {
         return Ok(None);
     }
-    Ok(Some(Input::from_file(path, file.try_clone()?, rt)?))
+    Ok(Some(Input::from_file(
+        path,
+        file.try_clone().map_err(source_io_error)?,
+        rt,
+    )?))
 }
 
 pub(super) struct Decoder {
@@ -584,7 +633,10 @@ impl Decoder {
         let decoder = unsafe { (rt.f.find_decoder)((*params).codec_id) };
         if decoder.is_null() {
             let name = unsafe { (rt.f.codec_name)((*params).codec_id) };
-            bail!("FFmpeg decoder unavailable for {}", cstr(name));
+            return Err(
+                anyhow::anyhow!("FFmpeg decoder unavailable for {}", cstr(name))
+                    .context(SourceFailure),
+            );
         }
         let mut codec = unsafe { (rt.f.alloc_codec)(decoder) };
         if codec.is_null() {
@@ -611,7 +663,7 @@ impl Decoder {
                 (rt.f.packet_free)(&mut packet);
                 (rt.f.free_codec)(&mut codec);
             }
-            return Err(error_text(rt, ret, "copy codec parameters"));
+            return Err(source_error_text(rt, ret, "copy codec parameters"));
         }
         // Automatic skip-sample trimming must adjust frame PTS in the stream
         // clock; codec parameters alone do not populate this field.
@@ -638,7 +690,7 @@ impl Decoder {
                 (rt.f.packet_free)(&mut packet);
                 (rt.f.free_codec)(&mut codec);
             }
-            return Err(error_text(rt, ret, "open audio decoder"));
+            return Err(source_error_text(rt, ret, "open audio decoder"));
         }
         let p = unsafe { &*params };
         let codec_name = cstr(unsafe { (rt.f.codec_name)(p.codec_id) });
@@ -761,12 +813,15 @@ impl Decoder {
         &self.info
     }
     pub(super) fn time_base(&self) -> Result<symphonia::core::units::TimeBase> {
-        let numer =
-            u32::try_from(self.time_base.num).context("Invalid FFmpeg time base numerator")?;
-        let denom =
-            u32::try_from(self.time_base.den).context("Invalid FFmpeg time base denominator")?;
+        let numer = u32::try_from(self.time_base.num)
+            .context("Invalid FFmpeg time base numerator")
+            .context(SourceFailure)?;
+        let denom = u32::try_from(self.time_base.den)
+            .context("Invalid FFmpeg time base denominator")
+            .context(SourceFailure)?;
         symphonia::core::units::TimeBase::try_new(numer, denom)
             .context("FFmpeg stream has a zero time base")
+            .context(SourceFailure)
     }
     /// Stream origin is a timestamp anchor, not a decoded zero-length frame.
     pub(super) fn vorbis_timing(&self) -> Option<(u32, Option<f64>)> {
@@ -833,30 +888,42 @@ impl Decoder {
                 let rate = frame.sample_rate;
                 let channels = frame.ch_layout.nb_channels;
                 if rate <= 0 || channels <= 0 || frame.nb_samples <= 0 {
-                    bail!("FFmpeg returned invalid or unknown audio frame layout");
+                    return Err(anyhow::anyhow!(
+                        "FFmpeg returned invalid or unknown audio frame layout"
+                    )
+                    .context(SourceFailure));
                 }
                 if self.layout.is_empty() {
                     for index in 0..channels as u32 {
                         self.layout
                             .push(frame_channel(self.rt, &frame.ch_layout, index).context(
                                 "FFmpeg returned an unknown or unsupported audio channel layout",
-                            )?);
+                            ).context(SourceFailure)?);
                     }
                     self.info.channels = channels as u16;
                 }
                 if channels as usize != self.layout.len() {
-                    bail!("FFmpeg audio channel layout changed during decode");
+                    return Err(anyhow::anyhow!(
+                        "FFmpeg audio channel layout changed during decode"
+                    )
+                    .context(SourceFailure));
                 }
                 if self.info.sample_rate == 0 {
                     self.info.sample_rate = rate as u32;
                 } else if self.info.sample_rate != rate as u32 {
-                    bail!("FFmpeg audio sample rate changed during decode");
+                    return Err(
+                        anyhow::anyhow!("FFmpeg audio sample rate changed during decode")
+                            .context(SourceFailure),
+                    );
                 }
                 for index in 0..channels as u32 {
                     if frame_channel(self.rt, &frame.ch_layout, index)
                         != Some(self.layout[index as usize])
                     {
-                        bail!("FFmpeg audio channel layout changed during decode");
+                        return Err(anyhow::anyhow!(
+                            "FFmpeg audio channel layout changed during decode"
+                        )
+                        .context(SourceFailure));
                     }
                 }
                 let timestamp = if frame.best_effort_timestamp != NOPTS {
@@ -871,7 +938,10 @@ impl Decoder {
                     )
                     .unwrap_or(0.0)
                 } else if self.require_timestamp {
-                    bail!("FFmpeg seek produced an audio frame without a timestamp")
+                    return Err(anyhow::anyhow!(
+                        "FFmpeg seek produced an audio frame without a timestamp"
+                    )
+                    .context(SourceFailure));
                 } else {
                     self.next_sample as f64 / rate as f64
                 };
@@ -902,7 +972,7 @@ impl Decoder {
                     }
                     return Ok(DecodeStep::Eof);
                 }
-                bail!("{}", error_text(self.rt, ret, "receive audio frame"));
+                return Err(source_error_text(self.rt, ret, "receive audio frame"));
             }
             if self.draining {
                 bail!("FFmpeg decoder requested input while draining");
@@ -916,10 +986,10 @@ impl Decoder {
                 self.draining = true;
                 let sent = unsafe { (self.rt.f.send_packet)(self.codec, ptr::null()) };
                 if sent < 0 && sent != ERR_EOF {
-                    bail!("{}", error_text(self.rt, sent, "drain decoder"));
+                    return Err(source_error_text(self.rt, sent, "drain decoder"));
                 }
             } else if read < 0 {
-                bail!("{}", error_text(self.rt, read, "read audio packet"));
+                return Err(source_error_text(self.rt, read, "read audio packet"));
             } else {
                 let packet = unsafe { &*self.packet };
                 if packet.stream_index != self.stream {
@@ -948,7 +1018,7 @@ impl Decoder {
                 }
                 unsafe { (self.rt.f.packet_unref)(self.packet) };
                 if sent < 0 {
-                    bail!("{}", error_text(self.rt, sent, "send audio packet"));
+                    return Err(source_error_text(self.rt, sent, "send audio packet"));
                 }
             }
         }
@@ -999,6 +1069,7 @@ impl Decoder {
             let file = self
                 ._file
                 .try_clone()
+                .map_err(source_io_error)
                 .context("Retaining FFmpeg seek source")?;
             let input = Input::from_file(self.path.clone(), file, self.rt)?;
             let tags = Tags {
@@ -1023,7 +1094,7 @@ impl Decoder {
             return self.seek(0.0, cancelled);
         }
         if ret < 0 {
-            return Err(error_text(self.rt, ret, "seek audio stream"));
+            return Err(source_error_text(self.rt, ret, "seek audio stream"));
         }
         unsafe {
             (self.rt.f.flush)(self.codec);
@@ -1164,6 +1235,56 @@ unsafe fn copy_samples<T: Copy>(
 mod tests {
     use super::*;
     use rivu_utils::regular_file::open_regular_file;
+
+    #[test]
+    fn source_status_codes_exclude_resources_backend_bugs_and_unknown_errors() {
+        for code in [
+            ERR_INVALID_DATA,
+            ERR_DECODER_NOT_FOUND,
+            ERR_DEMUXER_NOT_FOUND,
+            ERR_STREAM_NOT_FOUND,
+            ERR_PATCHWELCOME,
+            -libc::EIO,
+            -libc::EACCES,
+        ] {
+            assert!(source_failure_code(code), "source status {code}");
+        }
+        for code in [
+            -libc::EINVAL,
+            -libc::ENOMEM,
+            -libc::EMFILE,
+            ERR_EAGAIN,
+            ERR_EOF,
+            -1_234_567,
+            c_int::MIN,
+        ] {
+            assert!(!source_failure_code(code), "non-source status {code}");
+        }
+    }
+
+    #[test]
+    fn packet_reader_preserves_typed_source_and_system_failures_through_context() {
+        let file = pcm_file();
+        for (status, source_failure) in [
+            (ERR_INVALID_DATA, true),
+            (-libc::EIO, true),
+            (-libc::ENOMEM, false),
+            (-1_234_567, false),
+        ] {
+            let mut decoder = Decoder::from_file(
+                file.path(),
+                open_regular_file(file.path()).unwrap(),
+                Tags::default(),
+                None,
+            )
+            .unwrap();
+            let error = decoder
+                .next_frames_with_reader(&mut Vec::new(), None, &mut 64, |_, _| status)
+                .unwrap_err()
+                .context("Refilling audio output");
+            assert_eq!(crate::source::is_source_failure(&error), source_failure);
+        }
+    }
 
     #[test]
     fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {

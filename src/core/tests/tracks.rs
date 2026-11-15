@@ -1587,7 +1587,9 @@ fn removing_tracks_prunes_history_and_previous_retains_the_remaining_gap() {
     assert_eq!(core.transport.history, [1, 4, 5]);
     assert_eq!(core.transport.history_cursor, 2);
     missing(&mut core, Command::Previous, 1);
-    assert_eq!(core.transport.history_cursor, 2);
+    assert_eq!(core.transport.history_cursor, 1);
+    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_queue_saved(&core);
 }
 

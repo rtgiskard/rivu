@@ -129,6 +129,7 @@ pub(super) fn probe(
     let summary = inspect(source, cancelled);
     source
         .seek(SeekFrom::Start(position))
+        .map_err(super::source::source_io_error)
         .context("Restoring native probe position")?;
     check_cancelled(cancelled)?;
     Ok(summary)

@@ -320,6 +320,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
         let terminal = if failed {
             AudioEvent::Failed {
                 generation,
+                kind: audio::AudioFailureKind::Source,
                 message: "Decoder failed".into(),
             }
         } else {
@@ -509,9 +510,10 @@ fn audio_eof_resolved_duration_publishes_final_count_without_album_invalidation(
     };
     assert!(core.business_event(BusinessEvent::Audio(event)));
     let state = core.shared.read();
-    assert_eq!(state.playback.duration, Some(3.0));
+    assert_eq!(state.playback.duration, None);
+    assert_eq!(state.current_track().unwrap().id, 2);
     assert_eq!(state.playback.status, PlaybackStatus::Stopped);
-    assert_eq!(state.current_track().unwrap().play_count, 1);
+    assert_eq!(state.current_track().unwrap().play_count, 0);
     assert_eq!(play_count(&core, 1), 1);
     assert_eq!(state.library.album_revision, before);
 }
@@ -1295,6 +1297,7 @@ fn failed_load_and_stale_events_neither_count_nor_record_recent() {
     progress(&mut core, 10.0, 10.0);
     core.audio_event(AudioEvent::Failed {
         generation,
+        kind: audio::AudioFailureKind::Source,
         message: "Decoder failed".into(),
     })
     .unwrap();
@@ -1468,6 +1471,7 @@ fn retiring_settings_failures_publish_only_current_targets_across_stop_and_repla
             sender
                 .try_send(AudioEvent::Failed {
                     generation,
+                    kind: audio::AudioFailureKind::Source,
                     message: "retired playback failure".into(),
                 })
                 .unwrap();
@@ -1569,6 +1573,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         sender
             .try_send(AudioEvent::Failed {
                 generation,
+                kind: audio::AudioFailureKind::Source,
                 message: "Retired failure".into(),
             })
             .unwrap();
@@ -1673,6 +1678,7 @@ fn stale_events_cannot_count_or_stop_new_playback() {
     .unwrap();
     core.audio_event(AudioEvent::Failed {
         generation,
+        kind: audio::AudioFailureKind::Source,
         message: "Old failure".into(),
     })
     .unwrap();
@@ -1757,7 +1763,8 @@ fn unknown_duration_waits_for_complete_traversal_eof() {
             .is_err()
         );
         assert_eq!(play_count(&core, 1), expected);
-        assert_eq!(core.state.playback.duration, Some(10.0));
+        assert_eq!(core.state.playback.duration, None);
+        assert_eq!(core.state.current_track().unwrap().id, 2);
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     }
 }
@@ -1948,6 +1955,7 @@ fn count_save_failure_still_stops_and_preserves_audio_error() {
     let error = core
         .audio_event(AudioEvent::Failed {
             generation,
+            kind: audio::AudioFailureKind::Source,
             message: "Decoder failed".into(),
         })
         .unwrap_err();
