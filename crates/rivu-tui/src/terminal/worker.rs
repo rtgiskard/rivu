@@ -484,11 +484,10 @@ impl ReadKind<'_> {
             return ReadChanges::default();
         }
         let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
-        let previous = query.stamp(previous).revisions();
-        let next = query.stamp(next).revisions();
+        let impact = query.stamp(previous).impact(query.stamp(next));
         ReadChanges {
-            rows_changed: previous != next,
-            coordinates_changed: previous.with_bitrate_revision(0) != next.with_bitrate_revision(0),
+            rows_changed: impact.rows_changed(),
+            coordinates_changed: impact.coordinates_changed,
         }
     }
 }

@@ -60,6 +60,13 @@ link:21_ipc.adoc#query-results-and-pagination[IPC query results]. Page boundarie
 are demand, not projection identity. Physical-worker occupancy is independent of
 either freshness check.
 
+Consumers use the
+link:21_ipc.adoc#query-results-and-pagination[query-owned change classification]
+rather than interpreting revision fields themselves. Data owners still reconcile
+selection, tree ancestry, editing sessions and current demand. Cancelling a
+submission does not by itself invalidate an accepted payload or release a physical
+worker.
+
 [[core-owned-lookup-retention]]
 === Core-owned lookup retention
 
@@ -278,8 +285,11 @@ statistics. Search/filter, source, collection and page-boundary changes discard
 incompatible presentation immediately. Flat-list/album query changes discard old
 geometry; tree filter changes preserve expansion choices while invalidating facts.
 Playback controls, synchronous state projections, and realtime visualization
-frames are not delayed by this policy. GUI deadline and wake ownership lives in
-link:../crates/rivu-ui/src/refresh.rs[the refresh presentation mechanism].
+frames are not delayed by this policy. The display deadline is platform-neutral
+and shared by GUI and TUI in
+link:../crates/rivu-presentation/src/refresh.rs[the refresh presentation mechanism];
+GUI wake ownership remains in
+link:../crates/rivu-ui/src/refresh.rs[the feature-local wake mechanism].
 
 The TUI applies the same display-only lifetime to query-backed Queue, Library,
 Playlist catalog/member pages and same-track details. It moves bounded visible

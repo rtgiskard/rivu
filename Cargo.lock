@@ -5514,6 +5514,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "rivu-format",
+ "rivu-presentation",
  "unicode-segmentation",
 ]
 

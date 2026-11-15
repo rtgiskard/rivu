@@ -1,6 +1,6 @@
 use gpui::UniformListScrollHandle;
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_protocol::model::{DirectoryRow, Page};
-use rivu_ui::refresh::RefreshDeadline;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
@@ -668,6 +668,7 @@ impl DirectoryTree {
 
     /// Retire track authority immediately, preserving display until its fixed deadline.
     pub(super) fn invalidate_payloads_at(&mut self, now: Instant) -> bool {
+        self.expire_refresh(now);
         let mut changed = false;
         self.pages.retain(|_, page| !page.failed);
         for branch in self.branches.values_mut() {
@@ -685,8 +686,8 @@ impl DirectoryTree {
                 page.failed = false;
                 changed = true;
                 if !page.stale {
-                    page.retained = true;
                     self.retention.begin(now);
+                    page.retained = self.retention.visible(now);
                 }
             }
         }
@@ -695,14 +696,18 @@ impl DirectoryTree {
 
     /// Same-query revisions retire all positional authority without blanking rows.
     pub(super) fn refresh(&mut self, now: Instant) {
+        self.expire_refresh(now);
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.pages.retain(|_, page| !page.failed);
         for page in self.pages.values_mut() {
             if !page.stale && !page.stale_tracks && !page.rows.is_empty() {
-                page.retained = true;
                 self.retention.begin(now);
+                page.retained = self.retention.visible(now);
             }
             page.stale = true;
+            if !self.retention.visible(now) {
+                page.rows.clear();
+            }
         }
         self.retire_geometry();
     }
@@ -716,13 +721,17 @@ impl DirectoryTree {
     }
 
     fn settle_refresh(&mut self) {
-        if !self.pages.values().any(|page| page.retained) {
+        if !self
+            .pages
+            .values()
+            .any(|page| page.stale || page.stale_tracks)
+        {
             self.retention.clear();
         }
     }
 
     pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
-        if !self.retention.expired(now) {
+        if !self.retention.expire(now) {
             return false;
         }
         let mut changed = false;
@@ -741,7 +750,6 @@ impl DirectoryTree {
                 page.retained = false;
             }
         }
-        self.retention.clear();
         changed
     }
 
@@ -1583,6 +1591,34 @@ mod tests {
         assert!(
             tree.refresh_deadline().is_none(),
             "expired pages must not revive"
+        );
+        tree.begin(forest.clone(), 0, 4);
+        assert!(tree.accept_at(
+            &forest,
+            4,
+            page(&["/fresh"], 2),
+            start + Duration::from_secs(1)
+        ));
+        assert!(matches!(
+            tree.display_item_at(0, start + Duration::from_secs(1)),
+            Some(TreeItem::Entry(_))
+        ));
+        tree.refresh(start + Duration::from_secs(1));
+        assert!(tree.refresh_deadline().is_none());
+        assert!(tree.pages.values().all(|page| page.rows.is_empty()));
+        for (offset, token) in [(0, 5), (1, 6)] {
+            tree.begin(forest.clone(), offset, token);
+            assert!(tree.accept_at(
+                &forest,
+                token,
+                page(&["/fresh"], 2),
+                start + Duration::from_secs(1)
+            ));
+        }
+        tree.refresh(start + Duration::from_secs(1));
+        assert_eq!(
+            tree.refresh_deadline(),
+            Some(start + Duration::from_secs(1) + rivu_presentation::refresh::REFRESH_RETENTION)
         );
     }
 

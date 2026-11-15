@@ -1,5 +1,5 @@
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_protocol::model::Page;
-use rivu_ui::refresh::RefreshDeadline;
 use std::{collections::BTreeMap, ops::Range, time::Instant};
 
 const MAX_PAGES: usize = 8;
@@ -112,7 +112,11 @@ impl<T> PagedRows<T> {
     pub(super) fn refresh_at(&mut self, now: Instant) {
         self.expire(now);
         self.retention.begin(now);
-        self.retained.append(&mut self.pages);
+        if self.retention.visible(now) {
+            self.retained.append(&mut self.pages);
+        } else {
+            self.pages.clear();
+        }
         self.retired = false;
         self.total = None;
         self.layout_len = self.layout_len.max(1);
@@ -129,10 +133,9 @@ impl<T> PagedRows<T> {
         self.retention.deadline()
     }
     pub(super) fn expire(&mut self, now: Instant) -> bool {
-        if !self.retention.expired(now) {
+        if !self.retention.expire(now) {
             return false;
         }
-        self.retention.clear();
         let changed = !self.retained.is_empty();
         self.retained.clear();
         changed
@@ -207,7 +210,9 @@ impl<T> PagedRows<T> {
             self.visible = start..page.total;
         }
         self.trim();
-        if self.retained.is_empty() {
+        if (self.visible.start..self.visible.end.min(page.total))
+            .all(|index| self.get(index).is_some())
+        {
             self.retention.clear();
         }
         changed
@@ -309,7 +314,7 @@ mod tests {
         fill(&mut rows, 0, 20);
         let now = std::time::Instant::now();
         rows.refresh_at(now);
-        let deadline = now + rivu_ui::refresh::REFRESH_RETENTION;
+        let deadline = now + rivu_presentation::refresh::REFRESH_RETENTION;
         rows.refresh_at(deadline - std::time::Duration::from_millis(1));
         rows.retry();
         assert_eq!(rows.refresh_deadline(), Some(deadline));
@@ -357,7 +362,7 @@ mod tests {
         rows.retry();
         assert_eq!(
             rows.refresh_deadline(),
-            Some(now + rivu_ui::refresh::REFRESH_RETENTION)
+            Some(now + rivu_presentation::refresh::REFRESH_RETENTION)
         );
         rows.begin(0, 20);
         rows.accept_at(
@@ -387,6 +392,51 @@ mod tests {
             total,
             rows: (offset..(offset + 20).min(total)).collect(),
         });
+    }
+
+    #[test]
+    fn expired_window_requires_all_visible_pages_to_be_fresh_before_reopening() {
+        let mut rows = PagedRows::default();
+        rows.demand(0..40, 20);
+        fill(&mut rows, 0, 40);
+        fill(&mut rows, 20, 40);
+        let start = Instant::now();
+        let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
+        rows.refresh_at(start);
+        assert!(rows.expire(deadline));
+        assert!(rows.retained.is_empty());
+        rows.begin(0, 20);
+        assert!(rows.accept_at(
+            Page {
+                total: 40,
+                rows: (0..20).collect()
+            },
+            deadline
+        ));
+        assert_eq!(rows.display_at(0, deadline), Some(&0));
+        assert_eq!(rows.display_at(20, deadline), None);
+        rows.refresh_at(deadline);
+        assert_eq!(rows.refresh_deadline(), None);
+        assert!(rows.retained.is_empty());
+        assert_eq!(rows.display_at(0, deadline), None);
+
+        for offset in [0, 20] {
+            rows.begin(offset, 20);
+            rows.accept_at(
+                Page {
+                    total: 40,
+                    rows: (offset..offset + 20).collect(),
+                },
+                deadline,
+            );
+        }
+        rows.refresh_at(deadline);
+        assert_eq!(
+            rows.refresh_deadline(),
+            Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
+        );
+        assert_eq!(rows.display_at(0, deadline), Some(&0));
+        assert_eq!(rows.display_at(20, deadline), Some(&20));
     }
 
     #[test]

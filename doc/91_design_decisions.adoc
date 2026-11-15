@@ -597,7 +597,7 @@ open the library database. See link:02_library.adoc#source-file-tags[operation a
 [[DEC-025]]
 === DEC-025: Separate refresh authority from bounded stale presentation
 
-Status: accepted, 2026-11-14.
+Status: implemented, 2026-11-15.
 
 Invalidate query authority immediately, but retain compatible existing display
 payloads for at most 200 ms while current data is read. Clearing first creates an
@@ -605,9 +605,11 @@ avoidable empty frame during ordinary fast refreshes; waiting indefinitely for a
 successful reply can conceal stalled or failed reads. Further invalidation must
 not renew an old payload's deadline.
 
-Share the deadline and cancellable wake mechanism, not a second whole-window or
-collection snapshot cache. Existing bounded data owners retain their request,
-version, action-admission, comparison, and resource-release responsibilities.
+Share query-owned invalidation impact and a platform-neutral display deadline,
+not a second whole-window or collection snapshot cache or a universal scheduler.
+GUI wakes and terminal input waits remain platform-specific. Existing bounded
+data owners retain their request, action-admission, selection/session, comparison,
+and resource-release responsibilities.
 Reuse buffers and unchanged artwork where possible; equality does not suppress
 notifications needed to restore current interactions. The tradeoff is brief stale
 display, retained payload residency, and bounded result comparison, not delayed

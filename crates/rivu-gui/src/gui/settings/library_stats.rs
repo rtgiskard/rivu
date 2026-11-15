@@ -1,11 +1,11 @@
 use super::{Settings, Target};
 use gpui::{Context, SharedString};
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_protocol::query_tracking::{QueryTicket, QueryTracker};
 use rivu_protocol::{
     model::{LibraryRootStats, MAX_QUERY_ROWS, Query},
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
-use rivu_ui::refresh::RefreshDeadline;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -69,6 +69,10 @@ impl RootStats {
     }
 
     fn restart_at(&mut self, now: Instant) {
+        self.expire(now);
+        if self.retention.expired(now) {
+            self.values.clear();
+        }
         if !self.values.is_empty() {
             self.retention.begin(now);
         }
@@ -97,14 +101,13 @@ impl RootStats {
     }
 
     fn expire(&mut self, now: Instant) -> bool {
-        if !self.retention.expired(now) {
+        if !self.retention.expire(now) {
             return false;
         }
         let mut changed = false;
         for path in &self.roots[self.next..] {
             changed |= self.values.remove(path).is_some();
         }
-        self.retention.clear();
         changed
     }
 
@@ -560,11 +563,11 @@ mod tests {
             stats
                 .visible_value(
                     Path::new("/music"),
-                    start + rivu_ui::refresh::REFRESH_RETENTION
+                    start + rivu_presentation::refresh::REFRESH_RETENTION
                 )
                 .is_none()
         );
-        assert!(stats.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(stats.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
         assert!(stats.in_flight.pending());
         let obsolete = response(&read, 2, 99);
         stats.complete(read, obsolete);
@@ -579,6 +582,43 @@ mod tests {
                 .total,
             4
         );
+    }
+
+    #[test]
+    fn partial_statistics_after_expiry_cannot_reopen_the_stale_window() {
+        let mut stats = RootStats::default();
+        let roots = (0..=MAX_QUERY_ROWS)
+            .map(|index| PathBuf::from(format!("/music/{index}")))
+            .collect::<Vec<_>>();
+        let start = Instant::now();
+        let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
+        stats.sync_at(&roots, 1, start);
+        while let Some(read) = stats.prepare() {
+            let loaded = response(&read, 1, 3);
+            stats.complete(read, loaded);
+        }
+        stats.sync_at(&roots, 2, start);
+        assert!(stats.expire(deadline));
+        assert!(stats.values.is_empty());
+        let read = stats.prepare().unwrap();
+        let partial = response(&read, 2, 4);
+        stats.complete(read, partial);
+        assert_eq!(stats.visible_value(&roots[0], deadline).unwrap().total, 4);
+        assert_eq!(stats.next, MAX_QUERY_ROWS);
+        stats.sync_at(&roots, 3, deadline);
+        assert_eq!(stats.retention.deadline(), None);
+        assert!(stats.values.is_empty());
+        assert!(stats.visible_value(&roots[0], deadline).is_none());
+        while let Some(read) = stats.prepare() {
+            let loaded = response(&read, 3, 5);
+            stats.complete(read, loaded);
+        }
+        stats.sync_at(&roots, 4, deadline);
+        assert_eq!(
+            stats.retention.deadline(),
+            Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
+        );
+        assert_eq!(stats.visible_value(&roots[0], deadline).unwrap().total, 5);
     }
 
     #[test]

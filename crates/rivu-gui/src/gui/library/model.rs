@@ -2,10 +2,10 @@
 use super::{DirectoryTree, LibraryNode, TreeBranch, selection::LibrarySelection};
 use crate::gui::coordination::manual_actions::ManualIntentId;
 use gpui::ScrollStrategy;
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
-use rivu_ui::refresh::RefreshDeadline;
 use std::{collections::HashSet, ops::Range, sync::Arc, time::Instant};
 
 pub(in crate::gui) fn merge_selection(
@@ -174,10 +174,13 @@ impl LibraryBrowser {
         let query = self.search_count_query();
         let counts = &mut self.search_counts;
         let roots_changed = counts.roots != roots;
-        let structure_changed = counts
-            .projection
-            .stamp()
-            .is_none_or(|stamp| stamp.revisions().structure != revisions.structure);
+        let membership_query = Query::OtherTracksCount;
+        let structure_changed = counts.projection.stamp().is_none_or(|stamp| {
+            membership_query
+                .stamp(stamp.revisions())
+                .impact(membership_query.stamp(revisions))
+                .rows_changed()
+        });
         let same_query = counts.projection.matches_identity(&query) && !roots_changed;
         let changed = counts.projection.sync(&query, revisions) || roots_changed;
         if roots_changed || structure_changed {
@@ -188,9 +191,11 @@ impl LibraryBrowser {
                 counts.projection.cancel();
                 counts.roots = roots.to_vec();
             }
-            if same_query && counts.totals.is_some() {
+            if same_query {
                 counts.stale = true;
-                counts.retention.begin(now);
+                if counts.totals.is_some() {
+                    counts.retention.begin(now);
+                }
             } else {
                 counts.totals = None;
                 counts.root_counts.clear();
@@ -404,21 +409,15 @@ impl LibraryBrowser {
 
     pub(super) fn sync_projection_at(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         let query = self.projection_query();
-        let same_query = self.projection.matches_identity(&query);
-        let payload_only = self.projection.stamp().is_some_and(|stamp| {
-            let mut previous = stamp.revisions();
-            previous.bitrate = revisions.bitrate;
-            self.projection.matches_identity(&query)
-                && query.stamp(previous) == query.stamp(revisions)
-        });
+        let impact = self.projection.impact(&query, revisions);
         if !self.projection.sync(&query, revisions) {
             return false;
         }
-        if payload_only {
+        if !impact.coordinates_changed {
             self.tree.invalidate_payloads_at(now);
         } else {
             self.invalidate_projection();
-            if same_query {
+            if !impact.identity_changed {
                 self.tree.refresh(now);
             } else {
                 self.tree.invalidate();
@@ -440,17 +439,15 @@ impl LibraryBrowser {
 
     pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
         let mut changed = self.tree.expire_refresh(now);
-        if self.counts.retention.expired(now) {
+        if self.counts.retention.expire(now) {
             changed |= !self.counts.retained.is_empty();
             self.counts.retained = Arc::default();
-            self.counts.retention.clear();
         }
-        if self.search_counts.retention.expired(now) {
+        if self.search_counts.retention.expire(now) {
             changed |= self.search_counts.totals.is_some();
             self.search_counts.totals = None;
             self.search_counts.root_counts.clear();
             self.search_counts.other_tracks = None;
-            self.search_counts.retention.clear();
         }
         changed
     }
@@ -497,11 +494,17 @@ impl LibraryBrowser {
                     .collect();
             }
             if self.counts.roots == roots {
+                self.counts.retention.expire(now);
                 if !self.counts.totals.is_empty() {
-                    self.counts.retained = std::mem::take(&mut self.counts.totals);
-                }
-                if !self.counts.retained.is_empty() {
                     self.counts.retention.begin(now);
+                    if self.counts.retention.visible(now) {
+                        self.counts.retained = std::mem::take(&mut self.counts.totals);
+                    } else {
+                        self.counts.totals = Arc::default();
+                    }
+                }
+                if self.counts.retention.expired(now) {
+                    self.counts.retained = Arc::default();
                 }
             } else {
                 self.counts.totals = Arc::default();
@@ -1075,6 +1078,66 @@ mod tests {
         assert!(library.counts_current(generation, &roots, revisions.structure));
         assert!(ticket.is_current());
         assert!(library.counts.pending.contains(&0));
+    }
+
+    #[test]
+    fn partial_root_counts_after_expiry_cannot_reopen_the_stale_window() {
+        let roots = (0..=rivu_protocol::model::MAX_QUERY_ROWS)
+            .map(|index| std::path::PathBuf::from(format!("/music/{index}")))
+            .collect::<Vec<_>>();
+        let mut library = LibraryBrowser::default();
+        let start = Instant::now();
+        let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
+        for revision in [0, 2] {
+            loop {
+                let (generation, offsets) = library.begin_root_counts(&roots, revision);
+                if offsets.is_empty() {
+                    break;
+                }
+                for offset in offsets {
+                    library.accept_root_counts(
+                        generation,
+                        offset,
+                        roots[offset
+                            ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
+                            .iter()
+                            .map(|path| rivu_protocol::model::LibraryRootCount {
+                                path: path.clone(),
+                                total: 3,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            if revision == 0 {
+                library.sync_root_counts_at(&roots, 1, start);
+                assert!(library.expire_refresh(deadline));
+                let (generation, offsets) = library.begin_root_counts(&roots, 1);
+                assert_eq!(offsets, vec![0]);
+                library.accept_root_counts(
+                    generation,
+                    0,
+                    roots[..rivu_protocol::model::MAX_QUERY_ROWS]
+                        .iter()
+                        .map(|path| rivu_protocol::model::LibraryRootCount {
+                            path: path.clone(),
+                            total: 4,
+                        })
+                        .collect(),
+                );
+                assert_eq!(library.root_count_display_at(&roots[0], deadline), Some(4));
+                library.sync_root_counts_at(&roots, 2, deadline);
+                assert_eq!(library.counts.retention.deadline(), None);
+                assert!(library.counts.retained.is_empty());
+                assert_eq!(library.root_count_display_at(&roots[0], deadline), None);
+            }
+        }
+        library.sync_root_counts_at(&roots, 3, deadline);
+        assert_eq!(
+            library.counts.retention.deadline(),
+            Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
+        );
+        assert_eq!(library.root_count_display_at(&roots[0], deadline), Some(3));
     }
 
     #[test]

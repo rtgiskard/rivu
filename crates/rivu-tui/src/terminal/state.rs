@@ -9,6 +9,7 @@ use rivu_presentation::{
     history::{activity_key, compare_recent, playback_activity, reorder_changed_rows},
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext, Modifiers},
+    refresh::RefreshDeadline,
 };
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
@@ -152,7 +153,8 @@ pub(super) struct Details {
     pub(super) error_max_scroll: usize,
     pub(super) layout: Option<super::render::DetailsLayout>,
     pub(super) failed_request: Option<Arc<ReadSpec>>,
-    pub(super) retained: Option<(DetailState, Instant)>,
+    pub(super) retained: Option<DetailState>,
+    pub(super) retention: RefreshDeadline,
 }
 
 impl Details {
@@ -195,30 +197,32 @@ impl Details {
     }
 
     fn begin_query(&mut self, now: Instant) {
+        self.expire_refresh(now);
         self.stamp = None;
         let previous = std::mem::take(&mut self.state);
         if matches!(&previous, DetailState::Ready(track) if Some(track.id) == self.target)
             && self.retained.is_none()
         {
-            self.retained = Some((previous, now + Duration::from_millis(200)));
+            self.retention.begin(now);
+            if self.retention.visible(now) {
+                self.retained = Some(previous);
+            }
         }
     }
 
     pub(super) fn display_state(&self) -> &DetailState {
         self.retained
             .as_ref()
-            .map_or(&self.state, |(state, _)| state)
+            .filter(|_| self.retention.visible(Instant::now()))
+            .unwrap_or(&self.state)
     }
 
     pub(super) fn refresh_deadline(&self) -> Option<Instant> {
-        self.retained.as_ref().map(|(_, deadline)| *deadline)
+        self.retained.as_ref().and(self.retention.deadline())
     }
 
     pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
-        if self
-            .refresh_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
+        if self.retention.expire(now) {
             self.retained = None;
             return true;
         }
@@ -226,7 +230,6 @@ impl Details {
     }
 
     fn accept(&mut self, stamp: rivu_protocol::model::QueryStamp, view: ViewResponse) -> bool {
-        self.retained = None;
         let state = match view {
             ViewResponse::Track(Some(track)) if Some(track.id) == self.target => {
                 DetailState::Ready(Arc::new(track))
@@ -234,6 +237,8 @@ impl Details {
             ViewResponse::Track(None) => DetailState::Removed,
             _ => return false,
         };
+        self.retained = None;
+        self.retention.clear();
         self.error_scroll = 0;
         self.stamp = Some(stamp);
         self.state = state;
@@ -1469,6 +1474,7 @@ impl UiState {
         }
         if !self.details_active {
             self.details.retained = None;
+            self.details.retention.clear();
         }
         let changed = if self.details_active || self.show_help {
             self.view.discard_refresh();

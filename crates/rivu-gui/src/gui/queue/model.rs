@@ -413,24 +413,20 @@ impl QueueBrowser {
     }
     pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
         let query = self.query();
-        let identity_changed = !self.page_projection.matches_identity(&query);
-        let content_changed = self
-            .page_projection
-            .stamp()
-            .is_none_or(|stamp| stamp.revisions().queue != revisions.queue);
+        let impact = self.page_projection.impact(&query, revisions);
         let changed = self.page_projection.sync(&query, revisions);
         self.projection.sync(&query, revisions);
         if changed {
             self.locate.invalidate();
             self.locate_filtered = None;
-            if identity_changed {
+            if impact.identity_changed {
                 self.rows.clear();
-            } else if content_changed {
+            } else if impact.coordinates_changed {
                 self.rows.invalidate();
             } else {
                 self.rows.invalidate_payload();
             }
-            if content_changed || identity_changed {
+            if impact.coordinates_changed {
                 self.cancel();
                 self.schedule_reconcile(revisions);
             } else {

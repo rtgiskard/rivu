@@ -1,4 +1,6 @@
 use super::*;
+use rivu_presentation::refresh::REFRESH_RETENTION;
+use std::time::Duration;
 
 #[test]
 fn viewport_navigation_and_retention_do_not_depend_on_batch_size() {

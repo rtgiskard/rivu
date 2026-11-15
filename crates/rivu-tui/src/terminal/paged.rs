@@ -1,10 +1,9 @@
 use ratatui::widgets::ListState;
 use rivu_presentation::keyboard::Action;
+use rivu_presentation::refresh::RefreshDeadline;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-const REFRESH_RETENTION: Duration = Duration::from_millis(200);
+use std::time::Instant;
 
 pub(super) struct RetainedPages<T> {
     pages: HashMap<usize, Vec<T>>,
@@ -14,8 +13,7 @@ pub(super) struct RetainedPages<T> {
     selected: Option<usize>,
     identity_scan: bool,
     rows: usize,
-    deadline: Instant,
-    expired: bool,
+    retention: RefreshDeadline,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -84,7 +82,8 @@ impl<T> PagedList<T> {
     }
 
     pub(super) fn invalidate_pages(&mut self) {
-        self.expire_refresh(Instant::now());
+        let now = Instant::now();
+        self.expire_refresh(now);
         if self.retained.as_ref().is_some_and(|retained| {
             (!retained.identity_scan && retained.start != self.selection.offset())
                 || retained.rows != self.viewport_rows
@@ -103,11 +102,14 @@ impl<T> PagedList<T> {
                 rows: self.viewport_rows,
                 selected: self.selection.selected(),
                 identity_scan: false,
-                deadline: Instant::now() + REFRESH_RETENTION,
-                expired: false,
+                retention: {
+                    let mut retention = RefreshDeadline::default();
+                    retention.begin(now);
+                    retention
+                },
             });
         } else if let Some(retained) = &mut self.retained
-            && !retained.expired
+            && retained.retention.visible(now)
         {
             if self.loaded && !retained.identity_scan {
                 retained.total = self.total;
@@ -127,21 +129,19 @@ impl<T> PagedList<T> {
     pub(super) fn refresh_deadline(&self) -> Option<Instant> {
         self.retained
             .as_ref()
-            .filter(|retained| !retained.expired)
-            .map(|retained| retained.deadline)
+            .and_then(|retained| retained.retention.deadline())
     }
 
     pub(super) fn expire_refresh(&mut self, now: Instant) -> bool {
         let Some(retained) = &mut self.retained else {
             return false;
         };
-        if retained.expired || now < retained.deadline {
+        if !retained.retention.expire(now) {
             return false;
         }
         retained.pages.clear();
         // Keep the expired interval until fresh visible rows restore authority.
         // Repeated invalidation must not start another stale display interval.
-        retained.expired = true;
         self.columns = None;
         true
     }
@@ -154,7 +154,7 @@ impl<T> PagedList<T> {
 
     fn retained_display(&self) -> Option<&RetainedPages<T>> {
         self.retained.as_ref().filter(|retained| {
-            !retained.expired
+            retained.retention.visible(Instant::now())
                 && retained.rows == self.viewport_rows
                 && (retained.identity_scan || retained.start == self.selection.offset())
         })

@@ -5,8 +5,8 @@
 use super::source::{SourceAction, SourceTags, SourceToken, database_tags};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_protocol::model::{Command, Track};
-use rivu_ui::refresh::RefreshDeadline;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -219,13 +219,12 @@ impl MetadataSession {
     }
 
     pub(super) fn expire(&mut self, now: Instant) -> bool {
-        if !self.retention.expired(now) {
+        if !self.retention.expire(now) {
             return false;
         }
         let changed =
             !self.details_expired && matches!(self.availability, MetadataAvailability::Present(_));
         self.details_expired = true;
-        self.retention.clear();
         changed
     }
 
@@ -569,10 +568,10 @@ mod tests {
         );
         assert!(
             session
-                .display_track_at(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .display_track_at(start + rivu_presentation::refresh::REFRESH_RETENTION)
                 .is_none()
         );
-        assert!(session.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(session.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
         assert!(!session.expire(start + Duration::from_secs(1)));
         assert!(session.complete_save(save));
         let read = session.begin_load(1);

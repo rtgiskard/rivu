@@ -176,6 +176,8 @@ impl Library {
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
         let now = Instant::now();
+        // Expiry can change cached presentation without changing query authority.
+        let expired = self.library.expire_refresh(now);
         let display_changed = display_changed(&self.state, &state);
         let roots_changed =
             self.state.system.config.library_roots != state.system.config.library_roots;
@@ -213,7 +215,7 @@ impl Library {
         }
         self.sync_loading_text(cx);
         self.schedule_refresh_wake(cx);
-        if display_changed || projection_changed {
+        if display_changed || projection_changed || expired {
             cx.notify();
         }
     }

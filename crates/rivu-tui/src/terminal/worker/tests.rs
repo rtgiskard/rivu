@@ -5,6 +5,32 @@ use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
 use std::time::Duration;
 
+#[test]
+fn read_kind_changes_follow_shared_payload_coordinate_and_count_dependencies() {
+    let previous = TuiSnapshot::default();
+    let mut bitrate = previous.clone();
+    bitrate.library.bitrate_revision = 1;
+    for kind in [ReadKind::Queue, ReadKind::Search("needle")] {
+        let changes = kind.changes(&previous, &bitrate, "");
+        assert!(changes.rows_changed);
+        assert!(!changes.coordinates_changed);
+    }
+    let count = ReadKind::OtherTracksCount.changes(&previous, &bitrate, "");
+    assert!(!count.rows_changed && !count.coordinates_changed);
+
+    let mut structure = previous.clone();
+    structure.library.structure_revision = 1;
+    let count = ReadKind::OtherTracksCount.changes(&previous, &structure, "");
+    assert!(count.rows_changed && count.coordinates_changed);
+    let queue = ReadKind::Queue.changes(&previous, &structure, "needle");
+    assert!(!queue.rows_changed && !queue.coordinates_changed);
+
+    let mut combined = bitrate;
+    combined.queue.revision = 1;
+    let queue = ReadKind::Queue.changes(&previous, &combined, "needle");
+    assert!(queue.rows_changed && queue.coordinates_changed);
+}
+
 fn assert_query_socket_closed(mut stream: std::os::unix::net::UnixStream) {
     use std::io::Read;
     let mut received = Vec::new();

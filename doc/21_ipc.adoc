@@ -802,6 +802,16 @@ changes do not invalidate them. Duplicate groups use `duplicate_groups`; members
 use library, `duplicate_members`, and queue content. Playlist reference changes
 advance member facts, while playlist names and order do not.
 
+`QueryImpact` separates query identity changes, changes to payload-only
+dependencies, and loss of membership/order/count authority. Stamps compare the
+selected dependencies; trackers add identity changes. These facts are independent:
+a bitrate update can accompany a collection edit, so payload-only dependency
+changes must not be inferred from the absence of coordinate changes. Album-member
+statistics refresh payloads while the album token still owns member coordinates.
+Revision zero is a valid equality token, never an indicator of query kind.
+The classification does not own cached rows, selection, cancellation policy or
+physical execution slots; consumers apply it to their own state transitions.
+
 Task-status queries select no query-data revision domains. Their empty stamp does
 not make status immutable: query the exact task again or use `WaitTask` for its
 terminal result. For presentation updates, subscribe to System for scan and

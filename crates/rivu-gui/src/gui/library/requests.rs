@@ -371,6 +371,83 @@ impl Library {
 mod tests {
     use super::super::test_support::with_library;
     use super::*;
+    use gpui::AppContext;
+
+    #[gpui::test]
+    fn playback_tick_repaints_expired_rows_without_retiring_the_read(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut owner = None;
+        let mut pending = None;
+        with_library(cx, |browser, cx| {
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let mut state = (*browser.state).clone();
+            let config = std::sync::Arc::make_mut(&mut state.system.config);
+            config.library_roots = roots.clone();
+            config.query_batch_size = 20;
+            browser.available = true;
+            browser.visible = true;
+            browser.reconcile(std::rc::Rc::new(state), cx);
+            let branch = root_branches(browser, &roots).remove(0);
+            browser.library.expand_directory(&branch, true);
+            let baseline = browser.state.query_revisions(None);
+            let read = browser
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .read
+                .unwrap();
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            std::rc::Rc::make_mut(&mut browser.state)
+                .library
+                .bitrate_revision += 1;
+            let current = browser.state.query_revisions(None);
+            browser.library.sync_projection_at(
+                current,
+                std::time::Instant::now() - rivu_presentation::refresh::REFRESH_RETENTION,
+            );
+            pending = browser
+                .prepare_directory_read(branch, 0, 20, &roots, current)
+                .read;
+            assert!(pending.is_some());
+            browser.sync_loading_text(cx);
+            owner = Some(cx.entity());
+        });
+        let owner = owner.unwrap();
+        let pending = pending.unwrap();
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = std::rc::Rc::clone(&notifications);
+        let _observer = cx.new(|cx| {
+            cx.observe(&owner, move |_: &mut (), _, _| {
+                count.set(count.get() + 1);
+            })
+            .detach();
+        });
+        owner.update(cx, |browser, cx| {
+            assert!(browser.library.refresh_deadline().is_some());
+            browser.schedule_refresh_wake(cx);
+            // Consume expiry before the queued timer callback can execute.
+            let mut next = (*browser.state).clone();
+            next.playback.position += 1.0;
+            browser.reconcile(std::rc::Rc::new(next), cx);
+            assert!(browser.library.refresh_deadline().is_none());
+            assert!(matches!(
+                browser.library.tree().display_item(1),
+                Some(library::tree::TreeItem::Placeholder { .. })
+            ));
+            assert!(browser.directory_read_current(&pending, browser.state.query_revisions(None)));
+            assert!(pending.ticket.is_current());
+        });
+        assert!(
+            notifications.get() > 0,
+            "expiry must invalidate the cached panel"
+        );
+        notifications.set(0);
+        owner.update(cx, |browser, cx| {
+            let mut next = (*browser.state).clone();
+            next.playback.position += 1.0;
+            browser.reconcile(std::rc::Rc::new(next), cx);
+        });
+        assert_eq!(notifications.get(), 0, "ordinary playback ticks stay quiet");
+    }
 
     #[gpui::test]
     fn stalled_library_refresh_expires_without_another_snapshot_or_response(
@@ -392,7 +469,7 @@ mod tests {
             let current = browser.state.query_revisions(None);
             browser.library.sync_projection_at(
                 current,
-                std::time::Instant::now() - rivu_ui::refresh::REFRESH_RETENTION,
+                std::time::Instant::now() - rivu_presentation::refresh::REFRESH_RETENTION,
             );
             browser.prepare_directory_read(library::TreeBranch::default(), 0, 20, &roots, current);
             let read = browser

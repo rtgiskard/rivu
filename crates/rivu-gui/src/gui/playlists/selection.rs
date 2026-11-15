@@ -1245,7 +1245,19 @@ impl Playlists {
                         .playlist_selection_mut()
                         .finish_read(job.intent, generation)
                 {
-                    if job.commit.scope.bitrate != this.state.library.bitrate_revision {
+                    let query = Query::PlaylistEntries {
+                        playlist_id: job.commit.scope.playlist_id,
+                        query: None,
+                        offset: 0,
+                        limit: 0,
+                    };
+                    let revisions = this
+                        .state
+                        .query_revisions(Some(job.commit.scope.playlist_id));
+                    let impact = query
+                        .stamp(job.commit.scope.revisions())
+                        .impact(query.stamp(revisions));
+                    if impact.payload_changed {
                         job.commit.scope.bitrate = this.state.library.bitrate_revision;
                         this.browser
                             .playlist_selection_mut()

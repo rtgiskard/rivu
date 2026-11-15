@@ -23,4 +23,5 @@ path = "examples/showcase.rs"
 required-features = ["showcase"]
 
 [dev-dependencies]
+rivu-presentation = { path = "../rivu-presentation" }
 gpui = { workspace = true, features = ["test-support"] }

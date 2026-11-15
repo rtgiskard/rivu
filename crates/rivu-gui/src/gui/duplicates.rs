@@ -4,6 +4,7 @@
 use super::feature::FeatureContext;
 use crate::projection::GuiSnapshot;
 use gpui::{prelude::*, *};
+use rivu_presentation::refresh::RefreshDeadline;
 use rivu_presentation::time::format_time;
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
@@ -15,9 +16,7 @@ use rivu_protocol::{
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
-    column, panel_toolbar,
-    refresh::{RefreshDeadline, RefreshWake},
-    row, status_message,
+    column, panel_toolbar, refresh::RefreshWake, row, status_message,
 };
 use std::{
     rc::Rc,
@@ -691,15 +690,16 @@ impl DuplicateReview {
             self.groups_dirty = true;
             self.groups_failed = false;
         }
-        let bitrate_changed = self
-            .members_projection
-            .stamp()
-            .is_some_and(|stamp| stamp.revisions().bitrate != revisions.bitrate);
-        let members_changed = self
-            .members_query()
-            .is_some_and(|query| self.members_projection.sync(&query, revisions));
+        let members_query = self.members_query();
+        let impact = members_query
+            .as_ref()
+            .map(|query| self.members_projection.impact(query, revisions))
+            .unwrap_or_default();
+        let members_changed = members_query
+            .as_ref()
+            .is_some_and(|query| self.members_projection.sync(query, revisions));
         if members_changed {
-            if bitrate_changed {
+            if impact.payload_changed {
                 self.retired_selection = Some(self.selection_ids());
                 self.source = None;
                 self.target = None;
@@ -777,13 +777,13 @@ impl DuplicateReview {
     }
 
     fn visible_groups(&self, now: Instant) -> Option<&Page<DuplicateGroup>> {
-        self.groups.as_ref().filter(|_| {
-            self.groups_retention.deadline().is_none() || self.groups_retention.visible(now)
-        })
+        self.groups
+            .as_ref()
+            .filter(|_| !self.groups_retention.expired(now))
     }
 
     fn visible_members(&self, now: Instant) -> &[Member] {
-        if self.members_retention.deadline().is_some() && !self.members_retention.visible(now) {
+        if self.members_retention.expired(now) {
             &[]
         } else {
             &self.members
@@ -800,18 +800,16 @@ impl DuplicateReview {
 
     fn expire(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        if self.groups_retention.expired(now) {
+        if self.groups_retention.expire(now) {
             changed |= self.groups.take().is_some();
-            self.groups_retention.clear();
         }
-        if self.members_retention.expired(now) {
+        if self.members_retention.expire(now) {
             changed |= !self.members.is_empty() || self.source.is_some() || self.target.is_some();
             self.members.clear();
             self.members_total = 0;
             self.retired_selection = Some(self.selection_ids());
             self.source = None;
             self.target = None;
-            self.members_retention.clear();
         }
         changed
     }
@@ -2349,6 +2347,28 @@ mod tests {
     }
 
     #[test]
+    fn combined_payload_and_reference_refresh_retires_choices_until_reloaded() {
+        let mut review = ready_review();
+        review.request_members("fingerprint".into(), 0, QueryRevisions::default());
+        let (read, _) = review.begin_members().unwrap();
+        assert!(review.sync_queries(QueryRevisions {
+            bitrate: 1,
+            queue: 1,
+            duplicate_members: 1,
+            ..Default::default()
+        }));
+        assert!(review.source.is_none() && review.target.is_none());
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
+        assert!(!review.can_relocate());
+        assert!(review.members_pending);
+        assert!(review.begin_members().is_none());
+        review.members_worker_finished();
+        let (next, selected) = review.begin_members().unwrap();
+        assert_ne!(next.generation, read.generation);
+        assert_eq!(selected, vec![1, 2]);
+    }
+
+    #[test]
     fn bitrate_change_rejects_old_member_reply_and_reloads_saved_selection() {
         let mut review = ready_review();
         review.request_members("fingerprint".into(), 8, QueryRevisions::default());
@@ -3404,15 +3424,15 @@ mod tests {
         );
         assert!(
             review
-                .visible_groups(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .visible_groups(start + rivu_presentation::refresh::REFRESH_RETENTION)
                 .is_none()
         );
         assert!(
             review
-                .visible_members(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .visible_members(start + rivu_presentation::refresh::REFRESH_RETENTION)
                 .is_empty()
         );
-        assert!(review.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(review.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
         assert!(review.groups.is_none() && review.members.is_empty());
         assert!(review.source.is_none() && review.target.is_none());
         assert_eq!(review.selection_ids(), (Some(1), Some(2)));
@@ -3490,7 +3510,7 @@ mod tests {
         review
             .members_retention
             .begin(start + Duration::from_millis(50));
-        let first = start + rivu_ui::refresh::REFRESH_RETENTION;
+        let first = start + rivu_presentation::refresh::REFRESH_RETENTION;
         let next = first + Duration::from_millis(50);
         assert_eq!(review.deadline(), Some(first));
         assert!(review.expire(first));

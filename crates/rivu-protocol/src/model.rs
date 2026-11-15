@@ -4,7 +4,7 @@ mod duplicates;
 pub use duplicates::{DuplicateGroup, DuplicateMember};
 
 mod query;
-pub use query::{Query, QueryIdentity, QueryStamp};
+pub use query::{Query, QueryIdentity, QueryImpact, QueryStamp};
 mod config;
 pub use config::{ConfigMutation, ConfigPatch};
 pub use rivu_format::config::Config;

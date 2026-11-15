@@ -99,8 +99,10 @@ impl PlaylistBrowser {
             offset: 0,
             limit: 1,
         };
-        let summaries = summaries_query.stamp(previous.query_revisions(0, None))
-            != summaries_query.stamp(next.query_revisions(0, None));
+        let summaries = summaries_query
+            .stamp(previous.query_revisions(0, None))
+            .impact(summaries_query.stamp(next.query_revisions(0, None)))
+            .rows_changed();
         let (entries, entry_payload_only) =
             self.entries
                 .playlist_id
@@ -111,13 +113,12 @@ impl PlaylistBrowser {
                         offset: 0,
                         limit: 1,
                     };
-                    let mut previous = previous.query_revisions(0, Some(playlist_id));
-                    let next = next.query_revisions(0, Some(playlist_id));
-                    let changed = query.stamp(previous) != query.stamp(next);
-                    previous.bitrate = next.bitrate;
+                    let impact = query
+                        .stamp(previous.query_revisions(0, Some(playlist_id)))
+                        .impact(query.stamp(next.query_revisions(0, Some(playlist_id))));
                     (
-                        changed,
-                        changed && query.stamp(previous) == query.stamp(next),
+                        impact.rows_changed(),
+                        impact.payload_changed && !impact.coordinates_changed,
                     )
                 });
         PlaylistRefresh {

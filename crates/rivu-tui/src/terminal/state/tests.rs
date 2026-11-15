@@ -848,6 +848,38 @@ fn details_refresh_has_one_display_only_deadline() {
 }
 
 #[test]
+fn expired_details_cannot_retain_old_state_again_before_a_fresh_acceptance() {
+    let state = query_snapshot();
+    let track = Arc::new(full_track(2));
+    let mut details = Details {
+        target: Some(2),
+        state: DetailState::Ready(Arc::clone(&track)),
+        ..Details::default()
+    };
+    let start = Instant::now();
+    let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
+    details.begin_query(start);
+    assert!(!details.expire_refresh(deadline - Duration::from_nanos(1)));
+    assert!(details.expire_refresh(deadline));
+    assert!(details.retained.is_none());
+    details.state = DetailState::Ready(track);
+    details.begin_query(deadline);
+    assert_eq!(details.refresh_deadline(), None);
+    assert!(details.retained.is_none());
+    assert!(matches!(details.display_state(), DetailState::Loading));
+
+    let stamp = details.current_stamp(&state).unwrap();
+    assert!(details.accept(stamp, ViewResponse::Track(Some(full_track(2)))));
+    assert!(matches!(details.display_state(), DetailState::Ready(_)));
+    details.begin_query(deadline);
+    assert_eq!(
+        details.refresh_deadline(),
+        Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
+    );
+    assert!(matches!(details.display_state(), DetailState::Ready(_)));
+}
+
+#[test]
 fn details_refresh_completion_replaces_or_discards_old_display() {
     for outcome in 0..8 {
         let state = query_snapshot();

@@ -97,6 +97,36 @@ pub struct QueryTracker {
 }
 
 impl QueryTracker {
+    /// Inspect the current query's revision dependencies without rebuilding its identity.
+    /// An owner with no query has no revision dependencies yet.
+    pub fn revision_impact(
+        &self,
+        revisions: crate::response::QueryRevisions,
+    ) -> crate::model::QueryImpact {
+        match (&self.identity, self.stamp) {
+            (Some(query), Some(stamp)) => stamp.impact(query.stamp(revisions)),
+            _ => crate::model::QueryImpact::default(),
+        }
+    }
+
+    /// Inspect invalidation facts without changing authority or worker ownership.
+    pub fn impact(
+        &self,
+        query: &crate::model::Query,
+        revisions: crate::response::QueryRevisions,
+    ) -> crate::model::QueryImpact {
+        if !self.matches_identity(query) {
+            return crate::model::QueryImpact {
+                identity_changed: true,
+                payload_changed: false,
+                coordinates_changed: true,
+            };
+        }
+        self.stamp
+            .expect("a tracked identity has a stamp")
+            .impact(query.stamp(revisions))
+    }
+
     pub fn sync(
         &mut self,
         query: &crate::model::Query,
@@ -178,6 +208,62 @@ impl QueryTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn impact_distinguishes_identity_payload_and_coordinates_without_retiring_reads() {
+        use crate::{model::Query, response::QueryRevisions};
+        let mut tracker = QueryTracker::default();
+        let query = Query::QueuePage {
+            query: None,
+            offset: 0,
+            limit: 2,
+        };
+        let initial = QueryRevisions::default();
+        assert!(!tracker.revision_impact(initial).rows_changed());
+        let first = tracker.impact(&query, initial);
+        assert!(first.identity_changed && first.coordinates_changed && first.rows_changed());
+        tracker.sync(&query, initial);
+        let ticket = tracker.ticket();
+        let generation = tracker.generation();
+        let payload = initial.with_bitrate_revision(1);
+        let change = tracker.impact(&query, payload);
+        assert_eq!(change, tracker.revision_impact(payload));
+        assert!(change.payload_changed && change.rows_changed());
+        assert!(!change.identity_changed && !change.coordinates_changed);
+        assert!(ticket.is_current());
+        assert_eq!(tracker.generation(), generation);
+        assert!(tracker.sync(&query, payload));
+        assert!(!ticket.is_current());
+        assert_eq!(
+            tracker.impact(&query, payload),
+            crate::model::QueryImpact::default()
+        );
+        let next_page = Query::QueuePage {
+            query: None,
+            offset: 2,
+            limit: 4,
+        };
+        assert!(!tracker.impact(&next_page, payload).rows_changed());
+        let unrelated = QueryRevisions {
+            library: 1,
+            ..payload
+        };
+        assert!(!tracker.impact(&query, unrelated).rows_changed());
+        let related = QueryRevisions {
+            queue: 1,
+            ..payload
+        };
+        assert!(tracker.impact(&query, related).coordinates_changed);
+        let filtered = Query::QueuePage {
+            query: Some("needle".into()),
+            offset: 0,
+            limit: 2,
+        };
+        let identity = tracker.impact(&filtered, payload);
+        assert!(
+            identity.identity_changed && identity.coordinates_changed && identity.rows_changed()
+        );
+    }
 
     #[test]
     fn cancelling_or_dropping_an_epoch_invalidates_its_tickets() {

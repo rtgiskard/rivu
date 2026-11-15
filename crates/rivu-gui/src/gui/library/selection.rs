@@ -120,11 +120,9 @@ impl Scope {
     }
 
     fn same_coordinates(&self, other: &Self) -> bool {
-        // Bitrate refreshes payloads without changing row coordinates. Range
-        // jobs still use the full stamp through matches and response checks.
-        let mut revisions = self.stamp.revisions();
-        revisions.bitrate = other.stamp.revisions().bitrate;
-        revisions == other.stamp.revisions() && self.projection == other.projection
+        // Range jobs still require the full stamp; anchors only require the
+        // shared coordinate contract plus this owner's tree projection.
+        !self.stamp.impact(other.stamp).coordinates_changed && self.projection == other.projection
     }
 
     fn total(&self) -> usize {

@@ -1,37 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{Context, Task};
-
-/// Maximum display-only lifetime after data loses authority.
-pub const REFRESH_RETENTION: Duration = Duration::from_millis(200);
-
-/// One continuous stale interval. Superseding requests never extend its deadline.
-#[derive(Default)]
-pub struct RefreshDeadline {
-    deadline: Option<Instant>,
-}
-
-impl RefreshDeadline {
-    pub fn begin(&mut self, now: Instant) {
-        self.deadline.get_or_insert(now + REFRESH_RETENTION);
-    }
-
-    pub fn deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    pub fn visible(&self, now: Instant) -> bool {
-        self.deadline.is_some_and(|deadline| now < deadline)
-    }
-
-    pub fn expired(&self, now: Instant) -> bool {
-        self.deadline.is_some_and(|deadline| now >= deadline)
-    }
-
-    pub fn clear(&mut self) {
-        self.deadline = None;
-    }
-}
 
 /// One cancellable wake per feature, independent of query completion or frames.
 #[derive(Default)]
@@ -72,22 +41,8 @@ impl RefreshWake {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repeated_invalidation_cannot_extend_stale_display() {
-        let start = Instant::now();
-        let mut retention = RefreshDeadline::default();
-        retention.begin(start);
-        retention.begin(start + Duration::from_millis(150));
-        assert!(retention.visible(start + Duration::from_millis(199)));
-        assert!(!retention.visible(start + REFRESH_RETENTION));
-        assert!(retention.expired(start + REFRESH_RETENTION));
-        retention.begin(start + Duration::from_secs(1));
-        assert!(!retention.visible(start + Duration::from_secs(1)));
-        retention.clear();
-        retention.begin(start + Duration::from_secs(1));
-        assert!(retention.visible(start + Duration::from_secs(1)));
-    }
+    use rivu_presentation::refresh::{REFRESH_RETENTION, RefreshDeadline};
+    use std::time::Duration;
 
     #[gpui::test]
     fn stalled_refresh_expires_without_another_publication(cx: &mut gpui::TestAppContext) {
@@ -107,8 +62,7 @@ mod tests {
             view.retention.begin(start);
             view.wake
                 .schedule(view.retention.deadline(), cx, |view, now, _| {
-                    if view.retention.expired(now) {
-                        view.retention.clear();
+                    if view.retention.expire(now) {
                         return view.text.take().is_some();
                     }
                     false
@@ -119,6 +73,7 @@ mod tests {
 
         view.update(cx, |view, cx| {
             view.text = Some("another old result");
+            view.retention.clear();
             view.retention
                 .begin(Instant::now() + Duration::from_secs(60));
             view.wake

@@ -1220,7 +1220,7 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
         );
         assert!(
             this.metadata
-                .expire(start + rivu_ui::refresh::REFRESH_RETENTION)
+                .expire(start + rivu_presentation::refresh::REFRESH_RETENTION)
         );
         assert!(this.metadata.track().is_none());
         assert_eq!(this.track(), Some(original.as_ref()));

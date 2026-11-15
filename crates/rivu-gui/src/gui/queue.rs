@@ -112,12 +112,12 @@ impl Queue {
     }
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
-        // Queue query stamps depend on queue identity and, only while filtered,
-        // library metadata. Playback clocks do not invalidate rows or demand.
-        let projection_changed = self.state.queue.revision != state.queue.revision
-            || (self.model.query.is_some()
-                && self.state.library.revision != state.library.revision)
-            || self.state.library.bitrate_revision != state.library.bitrate_revision;
+        // Playback clocks and unrelated publications do not invalidate rows.
+        let projection_changed = self
+            .model
+            .page_projection
+            .revision_impact(state.query_revisions(None))
+            .rows_changed();
         let total_changed = self.state.queue.total != state.queue.total;
         let page_size_changed =
             self.state.system.config.query_batch_size != state.system.config.query_batch_size;

@@ -797,14 +797,14 @@ mod tests {
                 .display_track_at(start + Duration::from_millis(199))
                 .is_some()
         );
-        assert!(session.expire(start + rivu_ui::refresh::REFRESH_RETENTION));
+        assert!(session.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
         assert!(owner.worker == Some(ReadWorker::Reading(first.read)));
         assert!(
             owner
                 .prepare(
                     &mut session,
                     true,
-                    start + rivu_ui::refresh::REFRESH_RETENTION
+                    start + rivu_presentation::refresh::REFRESH_RETENTION
                 )
                 .is_none()
         );
@@ -827,7 +827,7 @@ mod tests {
                 .prepare(
                     &mut session,
                     true,
-                    start + rivu_ui::refresh::REFRESH_RETENTION
+                    start + rivu_presentation::refresh::REFRESH_RETENTION
                 )
                 .is_some()
         );

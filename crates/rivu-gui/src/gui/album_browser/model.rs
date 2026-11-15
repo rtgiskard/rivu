@@ -675,16 +675,13 @@ fn sync_pages<T>(
     query: &Query,
     revisions: QueryRevisions,
 ) -> bool {
-    let identity_changed = !projection.matches_identity(query);
-    let membership_changed = projection
-        .stamp()
-        .is_none_or(|stamp| stamp.revisions().album != revisions.album);
+    let impact = projection.impact(query, revisions);
     if !projection.sync(query, revisions) {
         return false;
     }
-    if identity_changed {
+    if impact.identity_changed {
         pages.clear();
-    } else if membership_changed {
+    } else if impact.coordinates_changed {
         // Same-query rows remain display-only until replacement or the owner wake.
         pages.invalidate();
     } else {
