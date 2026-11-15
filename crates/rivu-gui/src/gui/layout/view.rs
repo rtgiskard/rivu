@@ -432,8 +432,12 @@ impl WindowView {
                                     cx.new(|_| drag.clone())
                                 })
                             })
-                            .tooltip(rivu_ui::text_tooltip(title.clone()))
-                            .child(div().min_w_0().truncate().child(title))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(rivu_ui::truncated_label("panel-tab-title", title)),
+                            )
                             .when(
                                 active == panel_id && surface == rivu_ui::SurfaceStyle::Translucent,
                                 |view| {

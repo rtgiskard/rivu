@@ -89,6 +89,8 @@ strip = "symbols"
 [patch.crates-io]
 # GPUI schedules nested idle callbacks; use its pinned nonblocking dispatcher.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+# Preserve task-waker identity across clones and polls, matching the GPUI fork.
+async-task = { git = "https://github.com/smol-rs/async-task", rev = "41fd3359c75e221bd8b187a8ee361aa309c1714c" }
 # Bound metadata before allocation, including embedded and nested ID3 readers.
 symphonia-metadata = { path = "vendor/symphonia-metadata" }
 symphonia-bundle-flac = { path = "vendor/symphonia-bundle-flac" }
@@ -99,7 +101,7 @@ symphonia-format-riff = { path = "vendor/symphonia-format-riff" }
 
 # Pinned GPUI extensions maintained together in the independent renderer repository.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/rtgiskard/gpui-wgpu", tag = "v0.2.2" }
-gpui_wgpu = { git = "https://github.com/rtgiskard/gpui-wgpu", tag = "v0.2.2" }
-gpui_linux = { git = "https://github.com/rtgiskard/gpui-wgpu", tag = "v0.2.2" }
-gpui_platform = { git = "https://github.com/rtgiskard/gpui-wgpu", tag = "v0.2.2" }
+gpui = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "9ca5724d4b87f2e021e04e84c619db5559d58a67" }
+gpui_wgpu = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "9ca5724d4b87f2e021e04e84c619db5559d58a67" }
+gpui_linux = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "9ca5724d4b87f2e021e04e84c619db5559d58a67" }
+gpui_platform = { git = "https://github.com/rtgiskard/gpui-wgpu", rev = "9ca5724d4b87f2e021e04e84c619db5559d58a67" }

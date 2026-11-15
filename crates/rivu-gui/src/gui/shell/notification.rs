@@ -88,8 +88,10 @@ impl WindowView {
                         .flex_initial()
                         .min_w_0()
                         .truncate()
-                        .child(message.clone())
-                        .tooltip(rivu_ui::text_tooltip(message)),
+                        .child(rivu_ui::truncated_label(
+                            "footer-notification-label",
+                            message,
+                        )),
                 )
                 .child(buttons)
                 .into_any_element(),

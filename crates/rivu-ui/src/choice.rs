@@ -2,7 +2,6 @@ use crate::{
     focus::dropdown_key,
     list::VirtualList,
     menu::POPOVER_MAX_REMS,
-    overlay::text_tooltip,
     row::{DROPDOWN_ROW_REMS, dropdown_row, single_line_row_height},
     surface::Popover,
     theme::palette,
@@ -238,6 +237,7 @@ fn choice_callback<Owner: 'static, Value: 'static>(
 pub struct ChoiceSelect {
     id: ElementId,
     label: SharedString,
+    hint: Option<SharedString>,
 }
 
 impl ChoiceSelect {
@@ -245,7 +245,13 @@ impl ChoiceSelect {
         Self {
             id: id.into(),
             label: label.into(),
+            hint: None,
         }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 
     pub fn build<Owner: 'static, Value: 'static>(
@@ -257,13 +263,18 @@ impl ChoiceSelect {
         choose: impl Fn(&mut Owner, usize, &mut Window, &mut Context<Owner>) + 'static,
         dismiss: impl Fn(&mut Owner, &mut Window, &mut Context<Owner>) + 'static,
     ) -> Stateful<Div> {
-        let trigger = crate::dropdown_trigger(
-            palette(cx),
-            self.id,
-            self.label,
-            state(owner).is_some_and(|choices| choices.is_open()),
-            cx,
-        )
+        let expanded = state(owner).is_some_and(|choices| choices.is_open());
+        let trigger = match self.hint {
+            Some(hint) => crate::dropdown_trigger_with_hint(
+                palette(cx),
+                self.id,
+                self.label,
+                expanded,
+                hint,
+                cx,
+            ),
+            None => crate::dropdown_trigger(palette(cx), self.id, self.label, expanded, cx),
+        }
         .role(Role::ComboBox)
         .capture_key_down(cx.listener(move |owner, event, window, cx| {
             let Some(choices) = state(owner) else {
@@ -360,7 +371,6 @@ impl ChoicePopup {
                                     });
                                 }
                             })
-                            .tooltip(text_tooltip(hint))
                             .on_click(
                                 cx.listener(move |owner, _, window, cx| choose(owner, window, cx)),
                             ),

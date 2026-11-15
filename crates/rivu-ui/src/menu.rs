@@ -1,4 +1,7 @@
-use crate::{control::activate_control, overlay::text_tooltip};
+use crate::{
+    control::activate_control,
+    overlay::{text_tooltip, truncated_label},
+};
 use gpui::{Context, Div, ElementId, Role, SharedString, Stateful, Window, div, prelude::*, rgb};
 
 pub const POPOVER_MAX_REMS: f32 = 15.0;
@@ -28,7 +31,13 @@ pub fn menu_item<T: 'static>(
     let theme = crate::theme::palette(cx);
     let label = label.into();
     activate_control(
-        menu_item_style(theme, id, label.clone(), label, cx),
+        menu_item_style(
+            theme,
+            id,
+            label.clone(),
+            truncated_label("label", label),
+            cx,
+        ),
         cx,
         action,
     )
@@ -61,8 +70,13 @@ pub fn menu_back<T: 'static>(
 ) -> Stateful<Div> {
     let label = label.into();
     let theme = crate::theme::palette(cx);
-    activate_control(menu_item_style(theme, id, label, "", cx), cx, action)
-        .font_family(crate::theme::icon_family(cx))
+    activate_control(
+        menu_item_style(theme, id, label.clone(), "", cx),
+        cx,
+        action,
+    )
+    .tooltip(text_tooltip(label))
+    .font_family(crate::theme::icon_family(cx))
 }
 
 /// Destructive menu rows use text, not a button border, to identify the action.
@@ -113,7 +127,6 @@ pub fn menu_item_style(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .tooltip(text_tooltip(label))
                 .child(content),
         )
 }

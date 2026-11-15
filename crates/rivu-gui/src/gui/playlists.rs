@@ -1101,30 +1101,29 @@ impl Playlists {
             .min_h_0()
             .child(
                 status_message(
+                    (
+                        if kind == ViewRequestKind::Entries {
+                            "playlist-entries-empty-status"
+                        } else {
+                            "playlist-catalog-empty-status"
+                        },
+                        panel_id,
+                    ),
                     theme,
-                    message.clone(),
+                    message,
                     if rows_error.is_some() {
                         StatusKind::Error
                     } else {
                         StatusKind::Info
                     },
                 )
-                .id((
-                    if kind == ViewRequestKind::Entries {
-                        "playlist-entries-empty-status"
-                    } else {
-                        "playlist-catalog-empty-status"
-                    },
-                    panel_id,
-                ))
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .when(
                     pending && !self.loading_text.show(&kind, rows_error.is_some()),
                     |text| text.invisible(),
-                )
-                .tooltip(rivu_ui::text_tooltip(message)),
+                ),
             )
             .when(rows_error.is_some(), |view| {
                 view.child(
@@ -1219,12 +1218,15 @@ impl Playlists {
             .min_h_8()
             .overflow_hidden()
             .child(
-                status_message(theme, selection_message.clone(), StatusKind::Info)
-                    .id(("playlist-selection-status", panel_id))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(rivu_ui::text_tooltip(selection_message)),
+                status_message(
+                    ("playlist-selection-status", panel_id),
+                    theme,
+                    selection_message,
+                    StatusKind::Info,
+                )
+                .flex_1()
+                .min_w_0()
+                .truncate(),
             )
             .child(div().min_w_16().min_h_8().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,
@@ -1269,12 +1271,15 @@ impl Playlists {
                 .min_h_8()
                 .overflow_hidden()
                 .child(
-                    status_message(theme, message.clone(), StatusKind::Error)
-                        .id(("playlist-summary-status", panel_id))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .tooltip(rivu_ui::text_tooltip(message)),
+                    status_message(
+                        ("playlist-summary-status", panel_id),
+                        theme,
+                        message,
+                        StatusKind::Error,
+                    )
+                    .flex_1()
+                    .min_w_0()
+                    .truncate(),
                 )
                 .child(
                     IconButton::new(

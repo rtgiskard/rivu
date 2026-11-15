@@ -3,8 +3,8 @@ use crate::{
     surface::floating_surface,
 };
 use gpui::{
-    AnyView, App, ClipboardItem, Context, Div, ElementId, Render, SharedString, Stateful, Window,
-    div, prelude::*, px, rgb,
+    AnyView, App, ClipboardItem, Context, Div, ElementId, InteractiveText, Render, SharedString,
+    Stateful, StyledText, Window, div, prelude::*, px, rgb,
 };
 
 pub fn copyable_message<T: 'static>(
@@ -29,10 +29,9 @@ pub fn copyable_message<T: 'static>(
                 .flex_initial()
                 .min_w_0()
                 .truncate()
-                .child(message.clone()),
+                .child(truncated_label("message", message.clone())),
         )
         .child(div().flex_shrink_0().child("⧉"))
-        .tooltip(text_tooltip(message.clone()))
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
             cx.stop_propagation();
@@ -69,6 +68,25 @@ pub fn text_tooltip(
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
     move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
+}
+
+/// Label whose tooltip appears only when its shaped text differs after truncation.
+/// The parent supplies the normal width, typography and wrapping styles.
+pub fn truncated_label(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> InteractiveText {
+    let label = label.into();
+    let text = StyledText::new(label.clone());
+    let layout = text.layout().clone();
+    InteractiveText::new(id, text).tooltip(move |_, _, cx| {
+        (layout.text() != label.as_ref()).then(|| {
+            cx.new(|_| ButtonTooltip {
+                text: label.clone(),
+            })
+            .into()
+        })
+    })
 }
 
 /// Shared tooltip used by icon buttons.

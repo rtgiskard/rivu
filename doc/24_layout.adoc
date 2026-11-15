@@ -314,6 +314,12 @@ Layout management separates its heading, list and action footer. Names shrink
 while current-layout and delete actions retain equal-sized slots without changing
 row height; Duplicate/Rename stay grouped and Sync sits opposite them in a wrapping footer.
 
+Text controls, menu items and selection labels show their full text on hover only
+when the displayed label is truncated. Fully visible labels do not repeat their
+text in a tooltip. Icon descriptions and hints that add help, state or shortcut
+information remain available independently of truncation; accessible names are
+unchanged.
+
 Tooltip placement belongs to GPUI's window overlay. It anchors to the pointer
 position at opening, prefers above, then below or a side, and clamps against
 viewport clearance. Placement does not truncate oversized text or change the

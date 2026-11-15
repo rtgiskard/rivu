@@ -1370,7 +1370,6 @@ impl Duplicates {
                         )
                         .role(gpui::Role::RadioButton)
                         .aria_label(group_label.clone())
-                        .tooltip(rivu_ui::text_tooltip(group_label.clone()))
                         .aria_toggled(if selected {
                             gpui::Toggled::True
                         } else {
@@ -1384,7 +1383,10 @@ impl Duplicates {
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().text_sm().truncate().child(group_label))
+                                .child(div().text_sm().truncate().child(rivu_ui::truncated_label(
+                                    "duplicate-group-title",
+                                    group_label,
+                                )))
                                 .child(
                                     caption(
                                         theme,
@@ -1536,11 +1538,10 @@ impl Duplicates {
                         .id(("review-path", id as u64))
                         .text_sm()
                         .truncate()
-                        .child(track.path.display().to_string())
-                        .tooltip({
-                            let path = track.path.display().to_string();
-                            rivu_ui::text_tooltip(path)
-                        }),
+                        .child(rivu_ui::truncated_label(
+                            "review-path-text",
+                            track.path.display().to_string(),
+                        )),
                 )
                 .child(caption(
                     theme,
@@ -1716,6 +1717,7 @@ impl Duplicates {
             }
             if selectable_target && has_target_state(value) {
                 card = card.child(status_message(
+                    ("duplicate-target-warning", id as u64),
                     theme,
                     self.tr("gl-target-state-warning"),
                     StatusKind::Error,
@@ -1754,6 +1756,7 @@ impl Duplicates {
         if review.confirming {
             decisions = decisions
                 .child(status_message(
+                    "duplicate-confirmation-note",
                     theme,
                     self.tr("gl-confirm-relocation-note"),
                     StatusKind::Info,
@@ -1819,6 +1822,7 @@ impl Duplicates {
         }
         if let Some(task) = review.busy {
             decisions = decisions.child(status_message(
+                "duplicate-review-progress",
                 theme,
                 match task {
                     Busy::Starting => self.tr("gl-verification-starting"),
@@ -1857,7 +1861,12 @@ impl Duplicates {
                     StatusKind::Error,
                 ),
             };
-            decisions = decisions.child(status_message(theme, message, kind));
+            decisions = decisions.child(status_message(
+                "duplicate-review-feedback",
+                theme,
+                message,
+                kind,
+            ));
         }
         surface.child(
             rivu_ui::Dialog::card(theme)

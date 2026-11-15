@@ -176,29 +176,30 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
         .child(panel_heading_row(caption(theme, heading).truncate(), actions).min_h_8())
         .child(bar)
         .child(
-            caption(theme, path.clone())
+            div()
+                .text_xs()
+                .text_color(rgb(theme.secondary))
                 .id(("media-task-path", panel_id))
                 .min_h_5()
                 .flex_shrink_0()
                 .min_w_0()
                 .truncate()
-                .tooltip(rivu_ui::text_tooltip(path)),
+                .child(rivu_ui::truncated_label("media-task-path-text", path)),
         )
         .child(
             status_message(
+                ("media-task-message", panel_id),
                 theme,
-                message.clone(),
+                message,
                 if failed {
                     StatusKind::Error
                 } else {
                     StatusKind::Info
                 },
             )
-            .id(("media-task-message", panel_id))
             .min_h_5()
             .flex_shrink_0()
             .min_w_0()
-            .truncate()
-            .tooltip(rivu_ui::text_tooltip(message)),
+            .truncate(),
         )
 }

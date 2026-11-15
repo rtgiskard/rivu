@@ -305,7 +305,6 @@ pub(in crate::gui) fn render(
                 cx.notify();
             },
         )
-        .tooltip(rivu_ui::text_tooltip(preset_label(material, &tr)))
         .relative()
         .child(
             canvas(
@@ -415,6 +414,7 @@ pub(in crate::gui) fn render(
                 && edit.parameter as usize == parameter as usize
         }) {
             row()
+                .id(("material-parameter-value", parameter as usize))
                 .group("label-value-row")
                 .min_w_0()
                 .h(height)
@@ -481,6 +481,7 @@ pub(in crate::gui) fn render(
                             .text_size(rems(0.75)),
                     ));
             label_value_row(
+                ("material-parameter-value", parameter as usize),
                 theme,
                 label,
                 parameter.display(material, settings, &tr),

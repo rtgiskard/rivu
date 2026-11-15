@@ -1,4 +1,4 @@
-use crate::overlay::text_tooltip;
+use crate::overlay::{text_tooltip, truncated_label};
 use gpui::{
     Context, Div, ElementId, Role, SharedString, Stateful, Toggled, Window, div, prelude::*, rgb,
 };
@@ -86,25 +86,30 @@ pub fn button_style(
     surface: SurfaceStyle,
 ) -> Stateful<Div> {
     let label = label.into();
-    text_button_surface(theme, id, label.clone(), label, surface)
+    text_button_surface(theme, id, label, None, surface)
 }
 
 fn text_button_surface(
     theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     label: SharedString,
-    hint: SharedString,
+    hint: Option<SharedString>,
     surface: SurfaceStyle,
 ) -> Stateful<Div> {
+    let complete_label = hint.is_none();
     control_surface(theme, id, surface)
         .role(Role::Button)
         .aria_label(label.clone())
         .justify_center()
         .max_w_full()
-        .when(!hint.is_empty(), |control| {
+        .when_some(hint.filter(|hint| !hint.is_empty()), |control, hint| {
             control.tooltip(text_tooltip(hint))
         })
-        .child(div().min_w_0().truncate().child(label))
+        .child(div().min_w_0().truncate().child(if complete_label {
+            truncated_label("label", label).into_any_element()
+        } else {
+            label.into_any_element()
+        }))
 }
 
 /// Text button with shared application event handling.
@@ -139,7 +144,13 @@ pub fn button_with_hint<T: 'static>(
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     activate_control(
-        text_button_surface(theme, id, label.into(), hint.into(), SurfaceStyle::Opaque),
+        text_button_surface(
+            theme,
+            id,
+            label.into(),
+            Some(hint.into()),
+            SurfaceStyle::Opaque,
+        ),
         cx,
         action,
     )
@@ -563,7 +574,30 @@ pub fn dropdown_trigger(
     expanded: bool,
     cx: &gpui::App,
 ) -> Stateful<Div> {
-    let label = label.into();
+    dropdown_trigger_surface(theme, id, label.into(), expanded, None, cx)
+}
+
+/// Explicit trigger information takes priority over truncated-label completion.
+pub fn dropdown_trigger_with_hint(
+    theme: &'static rivu_format::palette::Palette,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    expanded: bool,
+    hint: impl Into<SharedString>,
+    cx: &gpui::App,
+) -> Stateful<Div> {
+    dropdown_trigger_surface(theme, id, label.into(), expanded, Some(hint.into()), cx)
+}
+
+fn dropdown_trigger_surface(
+    theme: &'static rivu_format::palette::Palette,
+    id: impl Into<ElementId>,
+    label: SharedString,
+    expanded: bool,
+    hint: Option<SharedString>,
+    cx: &gpui::App,
+) -> Stateful<Div> {
+    let complete_label = hint.is_none();
     control_surface(theme, id, SurfaceStyle::Opaque)
         .role(Role::Button)
         .aria_label(label.clone())
@@ -571,7 +605,20 @@ pub fn dropdown_trigger(
         .aria_expanded(expanded)
         .w_full()
         .gap_2()
-        .child(div().flex_1().min_w_0().truncate().child(label))
+        .when_some(hint.filter(|hint| !hint.is_empty()), |control, hint| {
+            control.tooltip(text_tooltip(hint))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(if complete_label {
+                    truncated_label("label", label).into_any_element()
+                } else {
+                    label.into_any_element()
+                }),
+        )
         .child(
             div()
                 .flex_shrink_0()
@@ -629,6 +676,158 @@ pub fn checkbox<T: 'static>(
 mod tests {
     use super::*;
     use gpui::{Element, FocusHandle, InputEvent, Render, TestAppContext};
+
+    const TOOLTIP_LABEL: &str = "A sufficiently descriptive label";
+
+    struct TooltipControl {
+        kind: &'static str,
+        width: f32,
+        bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
+    }
+
+    impl Render for TooltipControl {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = crate::theme::palette(cx);
+            let control = match self.kind {
+                "button" => button("control", TOOLTIP_LABEL, cx, |_, _, _| {}),
+                "hint" => button_with_hint(
+                    "control",
+                    TOOLTIP_LABEL,
+                    "Additional explanation",
+                    cx,
+                    |_, _, _| {},
+                ),
+                "empty-hint" => button_with_hint("control", TOOLTIP_LABEL, "", cx, |_, _, _| {}),
+                "icon" => IconButton::new("control", "♥", "Favorite").build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Compact,
+                    cx,
+                    |_, _, _| {},
+                ),
+                "menu" => crate::menu::menu_item("control", TOOLTIP_LABEL, cx, |_, _, _| {}),
+                "back" => crate::menu::menu_back("control", "Back", cx, |_, _, _| {}),
+                "multiline" => crate::layout::status_message(
+                    "control",
+                    theme,
+                    "First line\nSecond line",
+                    crate::layout::StatusKind::Info,
+                ),
+                "choice" => {
+                    crate::row::dropdown_row(theme, "control", false, TOOLTIP_LABEL, gpui::px(32.))
+                }
+                "trigger" => dropdown_trigger(theme, "control", TOOLTIP_LABEL, false, cx),
+                "trigger-hint" => dropdown_trigger_with_hint(
+                    theme,
+                    "control",
+                    TOOLTIP_LABEL,
+                    false,
+                    "Trigger explanation",
+                    cx,
+                ),
+                "trigger-empty-hint" => {
+                    dropdown_trigger_with_hint(theme, "control", TOOLTIP_LABEL, false, "", cx)
+                }
+                "select-hint" => crate::ChoiceSelect::new("control", TOOLTIP_LABEL)
+                    .with_hint("Select explanation")
+                    .build::<_, ()>(
+                        self,
+                        |_| None,
+                        cx,
+                        |_, _, _| {},
+                        |_, _, _, _| {},
+                        |_, _, _| {},
+                    ),
+                _ => unreachable!(),
+            };
+            let bounds = self.bounds.clone();
+            div()
+                .size_full()
+                .font(crate::theme::font(cx).clone())
+                .child(control.w(gpui::px(self.width)))
+                .on_children_prepainted(move |children, _, _| bounds.set(children[0]))
+        }
+    }
+
+    #[gpui::test]
+    fn tooltip_hover_distinguishes_truncation_from_additional_information(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        for (kind, width, expected) in [
+            ("button", 400., None),
+            ("button", 80., Some(TOOLTIP_LABEL)),
+            ("menu", 400., None),
+            ("menu", 80., Some(TOOLTIP_LABEL)),
+            ("choice", 400., None),
+            ("choice", 80., Some(TOOLTIP_LABEL)),
+            ("trigger", 400., None),
+            ("trigger", 80., Some(TOOLTIP_LABEL)),
+            ("trigger-hint", 80., Some("Trigger explanation")),
+            ("trigger-empty-hint", 80., None),
+            ("select-hint", 80., Some("Select explanation")),
+            ("hint", 400., Some("Additional explanation")),
+            ("hint", 80., Some("Additional explanation")),
+            ("empty-hint", 80., None),
+            ("icon", 80., Some("Favorite")),
+            ("back", 80., Some("Back")),
+            ("multiline", 400., None),
+        ] {
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observed = seen.clone();
+            let subscription = cx.update(|cx| {
+                cx.observe_new::<crate::overlay::ButtonTooltip>(move |tooltip, _, _| {
+                    observed.borrow_mut().push(tooltip.text.clone());
+                })
+            });
+            let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
+            let window = cx.add_window(|_, _| TooltipControl {
+                kind,
+                width,
+                bounds: bounds.clone(),
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let bounds = bounds.get();
+                // Start inside the visible text, not the trailing empty row area.
+                let x =
+                    if kind == "button" || kind == "hint" || kind == "empty-hint" || kind == "icon"
+                    {
+                        bounds.center().x
+                    } else {
+                        bounds.left() + gpui::px(12.)
+                    };
+                window.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position: gpui::point(
+                            x,
+                            if kind == "multiline" {
+                                bounds.top() + gpui::px(6.)
+                            } else {
+                                bounds.center().y
+                            },
+                        ),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            let seen = seen.borrow();
+            if let Some(expected) = expected {
+                assert!(!seen.is_empty(), "kind={kind}, width={width}");
+                assert!(
+                    seen.iter().all(|text| text.as_ref() == expected),
+                    "kind={kind}, width={width}: {seen:?}"
+                );
+            } else {
+                assert!(seen.is_empty(), "kind={kind}, width={width}: {seen:?}");
+            }
+            drop(subscription);
+        }
+    }
 
     struct Controls {
         focus: FocusHandle,

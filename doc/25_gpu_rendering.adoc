@@ -35,9 +35,9 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 == Pinned renderer maintenance
 
 `Cargo.toml` overrides `gpui`, `gpui_wgpu`, `gpui_linux` and `gpui_platform`
-with the same `v0.2.2` tag from
-https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. `Cargo.lock` records the
-resolved commit `c87defed1058ac1e3986e99070c2e104b227f87f`. These crates are maintained
+with the same commit `9ca5724d4b87f2e021e04e84c619db5559d58a67` from
+https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. `Cargo.lock` records that exact
+revision. These crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
 https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f];
 the remaining GPUI support and non-Linux platform crates retain that pinned baseline.
@@ -45,6 +45,10 @@ This is a maintained capability patch, not a framework replacement or upgrade.
 The layout engine follows the Taffy 0.15 update in
 https://github.com/zed-industries/zed/commit/b488c4e81451f2042d5f47d93f6158732ac28212[Zed revision b488c4e81451f2042d5f47d93f6158732ac28212],
 without upgrading the remaining platform crates.
+
+Rivu also repeats the fork's root `async-task` patch at
+`41fd3359c75e221bd8b187a8ee361aa309c1714c` to preserve task-waker identity across
+clones and polls; dependency workspace patches do not propagate to consumers.
 
 Shared images retain their normal image and atlas lifetimes.
 
@@ -69,7 +73,7 @@ The extra fields also increase shared vertex/sprite record sizes, so this
 patch is not a universal rendering or memory improvement.
 
 Maintain framework, renderer and Linux platform changes in `gpui-wgpu`, then update
-all four Rivu patch tags together. When updating the upstream baseline, compare these
+all four Rivu patch revisions together. When updating the upstream baseline, compare these
 extensions against it, keep Rust and shader record layouts synchronized, and
 preserve transformed image clipping, palette Path mapping, atlas lifetime and
 drawing order. Revalidate ordinary untransformed images and plain paths as well
@@ -88,7 +92,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout v0.2.2
+git checkout 9ca5724d4b87f2e021e04e84c619db5559d58a67
 make test
 ----
 
@@ -151,10 +155,10 @@ bottom-to-top palette coordinates retain their initial behavior. Palette samples
 are straight-alpha sRGB values, interpolated in sRGB numerical space.
 
 The interface and retirement contracts are tied to the coordinated `Cargo.toml`
-patches at `v0.2.2`:
-https://github.com/rtgiskard/gpui-wgpu/blob/v0.2.2/crates/gpui/src/gpu.rs[`gpui::gpu`] and
-https://github.com/rtgiskard/gpui-wgpu/blob/v0.2.2/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
-Update all four patch tags together and check these contracts; historical timings do
+patches at `9ca5724d4b87f2e021e04e84c619db5559d58a67`:
+https://github.com/rtgiskard/gpui-wgpu/blob/9ca5724d4b87f2e021e04e84c619db5559d58a67/crates/gpui/src/gpu.rs[`gpui::gpu`] and
+https://github.com/rtgiskard/gpui-wgpu/blob/9ca5724d4b87f2e021e04e84c619db5559d58a67/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
+Update all four patch revisions together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
 Attached-window state and import belong only to the

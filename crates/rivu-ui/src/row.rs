@@ -177,7 +177,13 @@ pub fn dropdown_row(
                 theme.highlight
             }))
         })
-        .child(div().flex_1().min_w_0().truncate().child(label.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(crate::overlay::truncated_label("label", label)),
+        )
 }
 
 /// Uniform two-line row height, growing only when text no longer fits the geometry.

@@ -891,7 +891,7 @@ impl Metadata {
         label: SharedString,
         width: gpui::Pixels,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> gpui::Stateful<Div> {
         let value: SharedString = self.metadata.track().map_or_else(
             || self.tr("gl-not-loaded"),
             |track| self.metadata.source.field_text(field, track).into(),
@@ -899,6 +899,7 @@ impl Metadata {
         let identity = self.metadata.editor_identity();
         if let Some(edit) = self.edit.as_ref().filter(|edit| edit.field == field) {
             return row()
+                .id(("metadata-field", field as usize))
                 .group("label-value-row")
                 .min_w_0()
                 .h_6()
@@ -968,7 +969,14 @@ impl Metadata {
                 cx,
             ));
         let value = if value.is_empty() { "-".into() } else { value };
-        label_value_row(theme, label, value, width, Some(actions))
+        label_value_row(
+            ("metadata-field", field as usize),
+            theme,
+            label,
+            value,
+            width,
+            Some(actions),
+        )
     }
 
     fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
@@ -1017,13 +1025,14 @@ impl Metadata {
 }
 
 fn label_value_row(
+    id: impl Into<gpui::ElementId>,
     theme: &'static rivu_format::palette::Palette,
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
     width: gpui::Pixels,
     action: Option<gpui::Stateful<Div>>,
-) -> Div {
-    rivu_ui::label_value_row(theme, label, value, width, action)
+) -> gpui::Stateful<Div> {
+    rivu_ui::label_value_row(id, theme, label, value, width, action)
         .h_6()
         .items_center()
 }
@@ -1054,35 +1063,43 @@ fn metadata_copy(
 }
 
 fn metadata_rows(
+    id: impl Into<gpui::ElementId>,
     theme: &'static rivu_format::palette::Palette,
     rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
     copy_hint: Option<SharedString>,
     cx: &mut Context<Metadata>,
-) -> Div {
+) -> gpui::Stateful<Div> {
     column()
+        .id(id)
         .gap_0()
-        .children(rows.into_iter().map(|[first, second]| {
-            metadata_row(
-                label_value_row(
-                    theme,
-                    first.0.clone(),
-                    first.1.clone(),
-                    label_widths[0],
-                    metadata_copy(first.0, first.1, copy_hint.clone(), cx),
-                ),
-                label_value_row(
-                    theme,
-                    second.0.clone(),
-                    second.1.clone(),
-                    label_widths[1],
-                    metadata_copy(second.0, second.1, copy_hint.clone(), cx),
-                ),
-            )
-        }))
+        .children(
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, [first, second])| {
+                    metadata_row(
+                        label_value_row(
+                            ("metadata-first-value", index),
+                            theme,
+                            first.0.clone(),
+                            first.1.clone(),
+                            label_widths[0],
+                            metadata_copy(first.0, first.1, copy_hint.clone(), cx),
+                        ),
+                        label_value_row(
+                            ("metadata-second-value", index),
+                            theme,
+                            second.0.clone(),
+                            second.1.clone(),
+                            label_widths[1],
+                            metadata_copy(second.0, second.1, copy_hint.clone(), cx),
+                        ),
+                    )
+                }),
+        )
 }
 
-fn metadata_row(first: Div, second: Div) -> Div {
+fn metadata_row(first: impl IntoElement + Styled, second: impl IntoElement + Styled) -> Div {
     row()
         .flex_wrap()
         .gap_x_4()
@@ -1434,9 +1451,8 @@ impl Metadata {
                     .flex_shrink_0()
                     .gap_3()
                     .child(rivu_ui::panel_heading_row(
-                        rivu_ui::list_panel_header(theme, heading, status.clone())
-                            .id(("metadata-status", panel_id))
-                            .tooltip(rivu_ui::text_tooltip(status)),
+                        rivu_ui::list_panel_header(theme, heading, status)
+                            .id(("metadata-status", panel_id)),
                         rivu_ui::panel_header_actions()
                             .child(
                                 favorite_button(("metadata-favorite", panel_id), favorite, |key| {
@@ -1497,23 +1513,21 @@ impl Metadata {
                         column()
                             .gap_0()
                             .child(metadata_row(
-                                div().flex_1().min_w_0().child(
-                                    label_value_row(
-                                        theme,
+                                div().flex_1().min_w_0().child(label_value_row(
+                                    ("metadata-path", panel_id),
+                                    theme,
+                                    file[0][0].0.clone(),
+                                    file[0][0].1.clone(),
+                                    label_widths[0],
+                                    metadata_copy(
                                         file[0][0].0.clone(),
                                         file[0][0].1.clone(),
-                                        label_widths[0],
-                                        metadata_copy(
-                                            file[0][0].0.clone(),
-                                            file[0][0].1.clone(),
-                                            copy_hint.clone(),
-                                            cx,
-                                        ),
-                                    )
-                                    .id(("metadata-path", panel_id))
-                                    .tooltip(rivu_ui::text_tooltip(file[0][0].1.clone())),
-                                ),
+                                        copy_hint.clone(),
+                                        cx,
+                                    ),
+                                )),
                                 label_value_row(
+                                    ("metadata-file-value", panel_id),
                                     theme,
                                     file[0][1].0.clone(),
                                     file[0][1].1.clone(),
@@ -1529,6 +1543,7 @@ impl Metadata {
                             .child(
                                 metadata_row(
                                     label_value_row(
+                                        ("metadata-track-kind", panel_id),
                                         theme,
                                         track_kind.0.clone(),
                                         track_kind.1.clone(),
@@ -1546,6 +1561,7 @@ impl Metadata {
                             )
                             .when(has_cue, |file| {
                                 file.child(metadata_rows(
+                                    ("metadata-cue-values", panel_id),
                                     theme,
                                     cue_fields,
                                     label_widths,
@@ -1558,7 +1574,14 @@ impl Metadata {
                     .child(metadata_group(
                         theme,
                         self.tr("gl-metadata"),
-                        metadata_rows(theme, metadata, label_widths, copy_hint.clone(), cx),
+                        metadata_rows(
+                            ("metadata-values", panel_id),
+                            theme,
+                            metadata,
+                            label_widths,
+                            copy_hint.clone(),
+                            cx,
+                        ),
                     ))
                     .child(metadata_group(
                         theme,
@@ -1613,6 +1636,7 @@ impl Metadata {
                                 ),
                             ))
                             .child(metadata_rows(
+                                ("metadata-tag-values", panel_id),
                                 theme,
                                 tags,
                                 label_widths,
@@ -1628,6 +1652,7 @@ impl Metadata {
                                     cx,
                                 ),
                                 label_value_row(
+                                    ("metadata-peak-value", panel_id),
                                     theme,
                                     peak_label.clone(),
                                     peak_value.clone(),
@@ -1644,6 +1669,7 @@ impl Metadata {
                                     cx,
                                 ),
                                 label_value_row(
+                                    ("metadata-last-played-value", panel_id),
                                     theme,
                                     last_played.0.clone(),
                                     last_played.1.clone(),

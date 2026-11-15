@@ -879,7 +879,12 @@ impl WindowView {
                                                     rivu_ui::theme::palette(cx),
                                                     ("content-playlist-target", id as u64),
                                                     name.clone(),
-                                                    div().min_w_0().truncate().child(name),
+                                                    div().min_w_0().truncate().child(
+                                                        rivu_ui::truncated_label(
+                                                            "content-playlist-target-label",
+                                                            name,
+                                                        ),
+                                                    ),
                                                     cx,
                                                 );
                                                 if this

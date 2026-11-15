@@ -706,13 +706,8 @@ impl Library {
         } else {
             self.i18n.text("shell-loading").to_owned()
         };
-        let heading = list_panel_header(
-            theme,
-            self.tr("shell-panel-library"),
-            selection_label.clone(),
-        )
-        .id(("library-selection-count", panel_id))
-        .tooltip(rivu_ui::text_tooltip(selection_label));
+        let heading = list_panel_header(theme, self.tr("shell-panel-library"), selection_label)
+            .id(("library-selection-count", panel_id));
         let tools = rivu_ui::panel_header_actions()
             .child(self.library_search.clone())
             .child(
@@ -876,11 +871,12 @@ impl Library {
         if let Some(error) = &self.scan_error {
             let message: SharedString = error.clone().into();
             panel = panel.child(rivu_ui::panel_heading_row(
-                caption(theme, message.clone())
+                div()
+                    .text_xs()
                     .id(("library-scan-request-error", panel_id))
                     .text_color(rgb(theme.error))
                     .truncate()
-                    .tooltip(rivu_ui::text_tooltip(message)),
+                    .child(rivu_ui::truncated_label("library-scan-error-text", message)),
                 rivu_ui::panel_header_actions().child(
                     IconButton::new(
                         ("library-dismiss-scan-request-error", panel_id),

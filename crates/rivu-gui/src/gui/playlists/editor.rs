@@ -155,6 +155,7 @@ impl Playlists {
             content = content
                 .child(caption(theme, self.name_input.read(cx).text().to_owned()))
                 .child(status_message(
+                    "playlist-name-saving",
                     theme,
                     self.tr("gl-saving"),
                     StatusKind::Info,
@@ -164,7 +165,12 @@ impl Playlists {
                 FormField::new(theme, self.tr("gl-name"), self.name_input.clone()).into_div(),
             );
             if let Some(error) = &editor.error {
-                content = content.child(status_message(theme, error.clone(), StatusKind::Error));
+                content = content.child(status_message(
+                    "playlist-name-error",
+                    theme,
+                    error.clone(),
+                    StatusKind::Error,
+                ));
             }
             content = content.child(
                 row()

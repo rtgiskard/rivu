@@ -433,14 +433,13 @@ impl Field {
 impl Settings {
     fn dropdown_button(
         &mut self,
-        id: &'static str,
+        select: ChoiceSelect,
         name: impl Into<SharedString>,
-        label: impl Into<SharedString>,
         anchor: Measured,
         cx: &mut Context<Self>,
         open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
-        let trigger = ChoiceSelect::new(id, label)
+        let trigger = select
             .build(
                 self,
                 move |this| (this.dropdown_anchor == anchor).then_some(&mut this.dropdown),
@@ -1067,6 +1066,7 @@ impl Settings {
         self.field_state(self.spectrum_layout_field(), cx)
             .when_some(self.layout_switch_error.as_ref(), |control, error| {
                 control.child(status_message(
+                    "settings-spectrum-layout-error",
                     palette(cx),
                     error.clone(),
                     StatusKind::Error,
@@ -1831,8 +1831,13 @@ impl Settings {
                     .cursor_pointer()
                     .group_hover("control", |style| style.bg(rgb(theme.highlight)))
                     .aria_label(label.clone())
-                    .tooltip(rivu_ui::text_tooltip(label.clone()))
-                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(rivu_ui::truncated_label("settings-tab-label", label)),
+                    ),
                 cx,
                 move |this, _, cx| {
                     this.dropdown.close();
@@ -2463,6 +2468,7 @@ impl Settings {
         );
         let feedback = if self.model.applying() {
             status_message(
+                "settings-apply-status",
                 colors,
                 self.tr("settings-applying-settings"),
                 StatusKind::Info,
@@ -2478,10 +2484,13 @@ impl Settings {
                 )
                 .text_color(rgb(colors.error))
                 .into_any_element(),
-                Some(Ok(())) => {
-                    status_message(colors, self.tr("settings-applied"), StatusKind::Success)
-                        .into_any_element()
-                }
+                Some(Ok(())) => status_message(
+                    "settings-apply-status",
+                    colors,
+                    self.tr("settings-applied"),
+                    StatusKind::Success,
+                )
+                .into_any_element(),
                 None => div().into_any_element(),
             }
         };

@@ -18,6 +18,7 @@ use rivu_format::config::SpectrumStyle;
 use rivu_format::config::VisualizationPalette;
 use rivu_format::config::VisualizationSignal;
 use rivu_presentation::theme::Theme;
+use rivu_ui::ChoiceSelect;
 use rivu_ui::{
     ChoiceItem, FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, button,
     caption, column, copyable_message, disabled_control, input_aligned_control, row,
@@ -104,6 +105,7 @@ impl Settings {
                         ),
                 )
                 .child(status_message(
+                    "settings-cache-cleanup-warning",
                     colors,
                     self.tr("settings-cache-cleanup-warning"),
                     StatusKind::Info,
@@ -119,6 +121,7 @@ impl Settings {
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
+                "settings-cache-progress",
                 colors,
                 self.i18n.format(
                     if clean {
@@ -134,6 +137,7 @@ impl Settings {
         if let Some((days, clean, report)) = &self.artwork_cache_report {
             content = content
                 .child(status_message(
+                    "settings-cache-report",
                     colors,
                     self.i18n.format(
                         if *clean {
@@ -180,6 +184,7 @@ impl Settings {
                     ),
                 ))
                 .child(status_message(
+                    "settings-cache-failures",
                     colors,
                     self.i18n.format(
                         "settings-cache-failures",
@@ -382,9 +387,8 @@ impl Settings {
             .child(caption(palette(cx), self.tr("settings-output-device")))
             .child(
                 self.dropdown_button(
-                    "output-device-selector",
+                    ChoiceSelect::new("output-device-selector", chosen_device),
                     self.tr("settings-output-device"),
-                    chosen_device.clone(),
                     Measured::Device,
                     cx,
                     |this, _, _| {
@@ -414,10 +418,6 @@ impl Settings {
                     },
                 )
                 .relative()
-                .tooltip({
-                    let chosen_device = chosen_device.clone();
-                    rivu_ui::text_tooltip(chosen_device)
-                })
                 .child(self.measurement(Measured::Device, cx)),
             );
         let ffmpeg = self.model.draft.ffmpeg_enabled;
@@ -550,13 +550,16 @@ impl Settings {
         let colors = palette(cx);
         let language = self
             .dropdown_button(
-                "settings-language",
+                ChoiceSelect::new(
+                    "settings-language",
+                    match self.model.draft.ui_language.as_str() {
+                        "en-US" => SharedString::from("English"),
+                        "zh-CN" => SharedString::from("简体中文"),
+                        _ => self.tr("settings-language-auto"),
+                    },
+                )
+                .with_hint(self.tr("settings-language-restart")),
                 self.tr("settings-language"),
-                match self.model.draft.ui_language.as_str() {
-                    "en-US" => SharedString::from("English"),
-                    "zh-CN" => SharedString::from("简体中文"),
-                    _ => self.tr("settings-language-auto"),
-                },
                 Measured::Language,
                 cx,
                 |this, _, _| {
@@ -580,14 +583,13 @@ impl Settings {
                     this.open_setting_dropdown(items, selected);
                 },
             )
-            .tooltip(text_tooltip(self.tr("settings-language-restart")))
             .relative()
             .child(self.measurement(Measured::Language, cx));
         let theme = self
             .dropdown_button(
-                "settings-theme",
+                ChoiceSelect::new("settings-theme", self.model.draft.ui_theme.label())
+                    .with_hint(self.tr("settings-theme-hint")),
                 self.tr("settings-theme"),
-                self.model.draft.ui_theme.label(),
                 Measured::Theme,
                 cx,
                 |this, _, _| {
@@ -602,7 +604,6 @@ impl Settings {
                     this.open_setting_dropdown(items, selected);
                 },
             )
-            .tooltip(text_tooltip(self.tr("settings-theme-hint")))
             .relative()
             .child(self.measurement(Measured::Theme, cx));
         settings_card(
@@ -720,9 +721,12 @@ impl Settings {
     pub(super) fn logging_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let log_level_dropdown = self
             .dropdown_button(
-                "settings-log-level",
+                ChoiceSelect::new(
+                    "settings-log-level",
+                    SettingChoice::LogLevel(self.model.draft.log_level).label(&self.i18n),
+                )
+                .with_hint(self.tr("settings-logging-scope")),
                 self.tr("settings-log-level"),
-                SettingChoice::LogLevel(self.model.draft.log_level).label(&self.i18n),
                 Measured::SettingsLogLevel,
                 cx,
                 |this, _, _| {
@@ -846,9 +850,11 @@ impl Settings {
         let colors = palette(cx);
         let style = self
             .dropdown_button(
-                "artwork-style",
+                ChoiceSelect::new(
+                    "artwork-style",
+                    SettingChoice::ArtworkStyle(self.model.draft.artwork_style).label(&self.i18n),
+                ),
                 self.tr("settings-style"),
-                SettingChoice::ArtworkStyle(self.model.draft.artwork_style).label(&self.i18n),
                 Measured::ArtworkStyle,
                 cx,
                 |this, _, _| {
@@ -873,9 +879,11 @@ impl Settings {
             .child(self.measurement(Measured::ArtworkStyle, cx));
         let mode = self
             .dropdown_button(
-                "artwork-mode",
+                ChoiceSelect::new(
+                    "artwork-mode",
+                    SettingChoice::ArtworkMode(self.model.draft.artwork_mode).label(&self.i18n),
+                ),
                 self.tr("settings-mode"),
-                SettingChoice::ArtworkMode(self.model.draft.artwork_mode).label(&self.i18n),
                 Measured::ArtworkMode,
                 cx,
                 |this, _, _| {
@@ -900,10 +908,12 @@ impl Settings {
             .child(self.measurement(Measured::ArtworkMode, cx));
         let direction = self
             .dropdown_button(
-                "artwork-direction",
+                ChoiceSelect::new(
+                    "artwork-direction",
+                    SettingChoice::ArtworkDirection(self.model.draft.artwork_direction)
+                        .label(&self.i18n),
+                ),
                 self.tr("settings-direction"),
-                SettingChoice::ArtworkDirection(self.model.draft.artwork_direction)
-                    .label(&self.i18n),
                 Measured::ArtworkDirection,
                 cx,
                 |this, _, _| {
@@ -978,9 +988,8 @@ impl Settings {
             visualization_style_label(&self.i18n, self.model.draft.default_visualizer_style).into();
         let style = self
             .dropdown_button(
-                "default-visualizer-style",
+                ChoiceSelect::new("default-visualizer-style", style_label),
                 self.tr("settings-style"),
-                style_label,
                 Measured::DefaultVisualizerStyle,
                 cx,
                 |this, _, _| {
@@ -1104,12 +1113,15 @@ impl Settings {
             VisualPage::General => {
                 let palette_control = self
                     .dropdown_button(
-                        "visual-palette",
+                        ChoiceSelect::new(
+                            "visual-palette",
+                            visualization_palette_label(
+                                &self.i18n,
+                                self.model.draft.visualization_palette,
+                            ),
+                        )
+                        .with_hint(self.tr("settings-appearance-help")),
                         self.tr("settings-color-scheme"),
-                        visualization_palette_label(
-                            &self.i18n,
-                            self.model.draft.visualization_palette,
-                        ),
                         Measured::SettingsStyle,
                         cx,
                         |this, _, _| {
@@ -1143,9 +1155,12 @@ impl Settings {
                     .child(self.measurement(Measured::SettingsStyle, cx));
                 let fft = self
                     .dropdown_button(
-                        "analysis-fft",
+                        ChoiceSelect::new(
+                            "analysis-fft",
+                            self.model.draft.analysis_fft_size.to_string(),
+                        )
+                        .with_hint(self.tr("settings-analysis-help")),
                         self.tr("settings-fft-size-samples"),
-                        self.model.draft.analysis_fft_size.to_string(),
                         Measured::SettingsFft,
                         cx,
                         |this, _, _| {
@@ -1172,9 +1187,13 @@ impl Settings {
                     .child(self.measurement(Measured::SettingsFft, cx));
                 let window = self
                     .dropdown_button(
-                        "analysis-window",
+                        ChoiceSelect::new(
+                            "analysis-window",
+                            SettingChoice::Window(self.model.draft.analysis_window)
+                                .label(&self.i18n),
+                        )
+                        .with_hint(self.tr("settings-analysis-help")),
                         self.tr("settings-fft-window"),
-                        SettingChoice::Window(self.model.draft.analysis_window).label(&self.i18n),
                         Measured::SettingsWindow,
                         cx,
                         |this, _, _| {
@@ -1205,10 +1224,13 @@ impl Settings {
                     .child(self.measurement(Measured::SettingsWindow, cx));
                 let signal = self
                     .dropdown_button(
-                        "visualization-signal",
+                        ChoiceSelect::new(
+                            "visualization-signal",
+                            SettingChoice::Signal(self.model.draft.visualization_signal)
+                                .label(&self.i18n),
+                        )
+                        .with_hint(self.tr("settings-visualization-signal-hint")),
                         self.tr("settings-visualization-signal"),
-                        SettingChoice::Signal(self.model.draft.visualization_signal)
-                            .label(&self.i18n),
                         Measured::SettingsSignal,
                         cx,
                         |this, _, _| {
@@ -1266,10 +1288,7 @@ impl Settings {
                                     )
                                     .into_div()
                                     .min_w(rems(180. / 16.))
-                                    .id("settings-visualization-signal-help")
-                                    .tooltip(text_tooltip(
-                                        self.tr("settings-visualization-signal-hint"),
-                                    )),
+                                    .id("settings-visualization-signal-help"),
                                 ),
                                 self.field(Field::GpuMaterialBudgetMib, cx),
                             ))
@@ -1318,9 +1337,11 @@ impl Settings {
             VisualPage::Spectrum => {
                 let style = self
                     .dropdown_button(
-                        "spectrum-style",
+                        ChoiceSelect::new(
+                            "spectrum-style",
+                            spectrum_style_label(&self.i18n, self.model.draft.spectrum_style),
+                        ),
                         self.tr("settings-style"),
-                        spectrum_style_label(&self.i18n, self.model.draft.spectrum_style),
                         Measured::SettingsStyle,
                         cx,
                         |this, _, _| {
@@ -1354,9 +1375,8 @@ impl Settings {
                 let mode = SpectrumLayoutMode::from_layout(self.model.draft.spectrum_bar_layout);
                 let layout = self
                     .dropdown_button(
-                        "spectrum-bar-layout",
+                        ChoiceSelect::new("spectrum-bar-layout", self.tr(mode.label_id())),
                         self.tr("settings-spectrum-bar-layout"),
-                        self.tr(mode.label_id()),
                         Measured::SpectrumLayout,
                         cx,
                         |this, _, _| {

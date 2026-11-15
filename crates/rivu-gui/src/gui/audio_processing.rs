@@ -1500,9 +1500,17 @@ impl AudioProcessing {
         let label: SharedString = label.into();
         let input = self.field_input(panel, key, &label, cx);
         Self::parameter_row(
-            caption(theme, label.clone())
+            div()
+                .text_xs()
+                .text_color(rgb(theme.secondary))
                 .id(SharedString::from(format!("field-label-{key:?}")))
-                .tooltip(rivu_ui::text_tooltip(self.path_help(key).unwrap_or(label))),
+                .map(|view| {
+                    if let Some(help) = self.path_help(key) {
+                        view.child(label).tooltip(rivu_ui::text_tooltip(help))
+                    } else {
+                        view.child(rivu_ui::truncated_label("field-label-text", label))
+                    }
+                }),
             input,
         )
     }

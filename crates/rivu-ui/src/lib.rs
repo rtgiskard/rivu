@@ -19,8 +19,8 @@ pub use choice::{ChoiceAction, ChoiceItem, ChoiceMode, ChoicePopup, ChoiceSelect
 pub use control::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, SurfaceStyle,
     activate_control, active_control, button, button_on_surface, button_style, button_with_hint,
-    checkbox, danger_control, disabled_control, dropdown_trigger, icon, icon_button_height,
-    sortable_header,
+    checkbox, danger_control, disabled_control, dropdown_trigger, dropdown_trigger_with_hint, icon,
+    icon_button_height, sortable_header,
 };
 pub use focus::{FocusScope, context_menu_key, dropdown_key, tab_key};
 pub use input::input_aligned_control;
@@ -37,7 +37,7 @@ pub use menu::{
 pub use overlay::{
     ButtonTooltip, ListDragPreview, anchor_list_drag_preview, begin_list_drag, copyable_message,
     drag_preview, drag_preview_surface, lazy_row_tooltip, list_drag_preview, row_tooltip,
-    text_tooltip, tooltip_surface,
+    text_tooltip, tooltip_surface, truncated_label,
 };
 pub use row::{
     DROPDOWN_ROW_REMS, LIST_ROW_REMS, dropdown_row, hover_actions, hover_reveal, list_drop_overlay,

@@ -278,12 +278,15 @@ impl Queue {
             .flex_shrink_0()
             .overflow_hidden()
             .child(
-                status_message(theme, selection_message.clone(), selection_kind)
-                    .id(("queue-selection-status", panel_id))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(rivu_ui::text_tooltip(selection_message)),
+                status_message(
+                    ("queue-selection-status", panel_id),
+                    theme,
+                    selection_message,
+                    selection_kind,
+                )
+                .flex_1()
+                .min_w_0()
+                .truncate(),
             )
             .when(
                 self.model.selection_error.is_some() || self.model.selection_retired,

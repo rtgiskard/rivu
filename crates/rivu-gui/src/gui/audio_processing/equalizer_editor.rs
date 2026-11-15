@@ -2557,13 +2557,14 @@ impl EqualizerEditor {
                     .border_b_1()
                     .border_color(rgb(theme.border))
                     .child(
-                        caption(theme, title.clone())
+                        div()
+                            .text_xs()
                             .min_w_0()
                             .flex_1()
                             .truncate()
                             .text_color(rgb(theme.accent))
                             .id(("eq-band-title", panel))
-                            .tooltip(rivu_ui::text_tooltip(title)),
+                            .child(rivu_ui::truncated_label("eq-band-title-text", title)),
                     )
                     .child(
                         row()

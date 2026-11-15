@@ -380,14 +380,24 @@ impl WindowView {
         match self.workspace.save_status {
             workspace::SaveStatus::Saving => {
                 content = content.child(
-                    status_message(theme, self.tr("shell-layouts-syncing"), StatusKind::Info)
-                        .px_2(),
+                    status_message(
+                        "layout-sync-status",
+                        theme,
+                        self.tr("shell-layouts-syncing"),
+                        StatusKind::Info,
+                    )
+                    .px_2(),
                 );
             }
             workspace::SaveStatus::Finished if self.workspace.save_error.is_none() => {
                 content = content.child(
-                    status_message(theme, self.tr("shell-layouts-synced"), StatusKind::Success)
-                        .px_2(),
+                    status_message(
+                        "layout-sync-status",
+                        theme,
+                        self.tr("shell-layouts-synced"),
+                        StatusKind::Success,
+                    )
+                    .px_2(),
                 );
             }
             _ => {}
