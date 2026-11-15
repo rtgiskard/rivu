@@ -154,6 +154,7 @@ pub(super) struct Worker {
     opening: Option<Opening>,
     device: Option<String>,
     volume: f32,
+    speed: super::PlaybackSpeed,
     replaygain_enabled: bool,
     replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy,
     media_read_buffer_len: usize,
@@ -191,6 +192,7 @@ impl Worker {
             opening: None,
             device: None,
             volume: 0.7,
+            speed: super::PlaybackSpeed::NORMAL,
             replaygain_enabled: false,
             replaygain_peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
             media_read_buffer_len,
@@ -243,6 +245,7 @@ impl Worker {
                 | AudioCommand::Pause(_)
                 | AudioCommand::Seek { .. }
                 | AudioCommand::Volume(_)
+                | AudioCommand::Speed(_)
                 | AudioCommand::ReplayGain { .. }
                 | AudioCommand::Equalizer(_)
                 | AudioCommand::OutputSettings { .. }
@@ -314,6 +317,17 @@ impl Worker {
                 self.volume = volume;
                 if let Some(playback) = &self.playback {
                     playback.set_volume(volume);
+                }
+            }
+            AudioCommand::Speed(speed) => {
+                self.speed = speed;
+                if self
+                    .playback
+                    .as_mut()
+                    .is_some_and(|playback| playback.set_speed(speed))
+                    && let Err(error) = self.reopen(None)
+                {
+                    self.fail(error);
                 }
             }
             AudioCommand::ReplayGain {
@@ -625,6 +639,7 @@ impl Worker {
                         source_info: opening.source_info,
                         listened_seconds: opening.listened_seconds,
                         graph: opening.graph,
+                        speed: self.speed,
                     },
                     &self.analyzer,
                 );

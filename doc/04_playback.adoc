@@ -10,12 +10,35 @@ processing are independent of the output device.
 == Transport and timing
 
 Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
-next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
+next, previous, seek, volume, speed, shuffle, and repeat controls. Seek positions are
 seconds; CLI volume is an integer percentage from 0 to 100.
 Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
 50% is -30 dB, and 100% leaves the source gain unchanged. See
 link:01_config.adoc#volume[Volume configuration] for fractional values and
 <<keyboard-controls,Keyboard controls>> for relative volume steps.
+
+[[playback-speed]]
+=== Playback speed
+
+Playback speed ranges from 0.5× to 2× and preserves pitch. Set it with
+`rivu playback speed 1.25`, the keyboard (<<keyboard-controls,Keyboard controls>>)
+or MPRIS `Rate`. It applies to every track until the instance exits; each launch starts
+at 1×, and the setting is not saved in the configuration. A speed other than 1×
+appears in the desktop transport, the terminal status row and `rivu status`;
+JSON status always includes `playback.playback.speed`.
+
+A change restarts output at the audible position, like a seek, so the change is
+audible after a short output restart rather than instantly. Positions, durations,
+seeks and CUE boundaries stay in track time: a 4-minute track still shows 4:00
+and finishes after 2 minutes at 2×. Play-count thresholds also measure track time
+heard, so the same portion of a track counts at any speed.
+
+At 1× audio passes through unchanged. Other speeds time-stretch the processed
+signal after audio processing and before output, using the bundled
+link:../vendor/signalsmith-stretch/README.adoc[Signalsmith Stretch] library.
+While stretching, visualizations show the stretched audio as heard for either
+`visualizations.general.signal` value; `before` samples have no one-to-one output
+frame to align with. See link:23_visuals.adoc[Visualizations].
 
 [[replaygain]]
 === ReplayGain
@@ -116,7 +139,7 @@ rivu playback play
 rivu playback seek 30
 ----
 
-Keyboard volume steps, repeat cycling, and shuffle toggles accumulate against
+Keyboard volume and speed steps, repeat cycling, and shuffle toggles accumulate against
 the core's current state, even before the display updates. Ctrl+Left/Right and
 seek-slider arrows seek by five seconds; slider Home/End and terminal
 Ctrl+Home/End seek to zero or the known duration. A delayed seek cannot affect a
@@ -336,6 +359,7 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 |Space |Play/pause
 |n / p |Next/previous track
 |[ / ] |Lower/raise volume by five percentage points (3 dB except at mute)
+|{ / } |Lower/raise playback speed by 0.05×, within 0.5–2×
 |r / s |Cycle repeat mode / toggle shuffle
 |Ctrl+Left / Ctrl+Right |Seek backward/forward five seconds
 |===
@@ -585,7 +609,7 @@ Truncation does not change stored metadata.
 Track lists use semantic colors to distinguish metadata, favorites, and playback
 state.
 
-The status row shows volume, shuffle, repeat, and current-track codec, sample rate,
+The status row shows volume, shuffle, repeat, speed when not 1×, and current-track codec, sample rate,
 bit depth, and available bitrate in `kbps` where space permits, without distinguishing
 estimated and confirmed bitrates. A separate bottom row holds notices, then scan
 status, core errors, or the startup help hint, in that priority order. Notices and
@@ -696,7 +720,8 @@ and desktop metadata when ready. Cache failures do not prevent playback.
 Use link:01_config.adoc#artwork-cache-maintenance[Settings artwork maintenance]
 to inspect disk usage and manually clean expired cover files.
 
-MPRIS supports transport, volume, shuffle, and repeat at rate `1.0`. Relative Seek
+MPRIS supports transport, volume, shuffle, repeat and `Rate` from `MinimumRate`
+0.5 to `MaximumRate` 2; out-of-range rates are clamped and `Rate` 0 pauses. Relative Seek
 accumulates against the current position and stays bound to its queue occurrence;
 stale or stopped requests are ignored. Seeking strictly beyond a known end advances
 if another occurrence exists; the exact endpoint stays within the current one,

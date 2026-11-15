@@ -473,7 +473,23 @@ impl Playback {
                         )
                     },
                 ),
-            );
+            )
+            .when(self.state.playback.speed != 1.0, |view| {
+                view.child(
+                    caption(theme, format!("{:.2}×", self.state.playback.speed))
+                        .id(("playback-speed", panel_id))
+                        .font_features(tabular_numbers())
+                        .text_color(rgb(theme.accent))
+                        .bg(crate::gui::appearance::material::surface(cx)
+                            .fill(theme.selected, 0.86))
+                        .rounded(rems(0.5))
+                        .px_2()
+                        .py_1()
+                        .whitespace_nowrap()
+                        .flex_shrink_0()
+                        .tooltip(rivu_ui::text_tooltip(self.context.tr("gl-playback-speed"))),
+                )
+            });
         let volume_control = row()
             .id(("volume-control", panel_id))
             .gap_1()

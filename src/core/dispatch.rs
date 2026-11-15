@@ -46,6 +46,7 @@ impl PublicationChanges {
             mpris: transport_changed
                 || current.queue != previous.queue
                 || current.playback.volume != previous.playback.volume
+                || current.playback.speed != previous.playback.speed
                 || current.playback.duration != previous.playback.duration
                 || current.playback.seek_revision != previous.playback.seek_revision,
             #[cfg(feature = "gui")]

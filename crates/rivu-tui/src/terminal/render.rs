@@ -625,6 +625,8 @@ fn help_group(action: Action) -> usize {
         | Action::Previous
         | Action::VolumeDown
         | Action::VolumeUp
+        | Action::SpeedDown
+        | Action::SpeedUp
         | Action::Repeat
         | Action::Shuffle
         | Action::SeekBackward
@@ -649,6 +651,8 @@ fn help_order(action: Action) -> u8 {
         | Action::Parent
         | Action::VolumeDown
         | Action::VolumeUp
+        | Action::SpeedDown
+        | Action::SpeedUp
         | Action::Favorite => 4,
         Action::Activate | Action::Repeat | Action::Remove => 5,
         Action::Shuffle => 6,
@@ -1092,15 +1096,15 @@ fn draw_status(
         RepeatMode::All => ("󰑖", colors.positive),
         RepeatMode::One => ("󰑘", colors.positive),
     };
-    let modes = Line::from(vec![
-        Span::styled(
-            format!(" {volume_icon}  {volume}%  "),
-            Style::default().fg(if state.playback.volume == 0.0 {
-                colors.disabled
-            } else {
-                colors.accent
-            }),
-        ),
+    let mut modes = Line::from(vec![Span::styled(
+        format!(" {volume_icon}  {volume}%  "),
+        Style::default().fg(if state.playback.volume == 0.0 {
+            colors.disabled
+        } else {
+            colors.accent
+        }),
+    )]);
+    modes.spans.extend([
         Span::styled(
             "󰒟",
             Style::default().fg(if state.playback.shuffle {
@@ -1113,6 +1117,12 @@ fn draw_status(
         Span::styled(repeat_icon, Style::default().fg(repeat_color)),
         Span::raw("  "),
     ]);
+    if state.playback.speed != 1.0 {
+        modes.spans.push(Span::styled(
+            format!("{:.2}×  ", state.playback.speed),
+            Style::default().fg(colors.accent),
+        ));
+    }
     let columns = Layout::horizontal([
         Constraint::Length(modes.width().min(area.width.saturating_sub(8) as usize) as u16),
         Constraint::Min(0),

@@ -960,7 +960,9 @@ circular backgrounds as typography changes. Volume appears in a hover hint or
 an immediate tooltip-styled value during drag/focus, without taking layout space.
 Pointer volume keeps one command in flight and replaces its single waiting target;
 the slider shows that target until acknowledgement, and a volume key discards
-an unsent pointer target rather than racing it.
+an unsent pointer target rather than racing it. A speed other than 1× appears as
+a passive, theme-accent badge after the repeat button, with a subtle background;
+the transport has no speed control. At 1× the badge takes no space.
 
 ==== Integration and showcase
 

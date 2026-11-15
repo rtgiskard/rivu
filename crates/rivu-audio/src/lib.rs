@@ -151,8 +151,10 @@ mod output;
 mod pcm;
 mod playback;
 mod processor;
+mod speed;
 mod timeline;
 pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
+pub use speed::PlaybackSpeed;
 mod render;
 mod source;
 mod worker;
@@ -278,8 +280,9 @@ pub struct PlaybackMetadata {
 }
 
 /// Acknowledged final clock snapshot, sampled after the output stream retires.
-/// Position is selected-source-relative; listened time remains cumulative across
-/// seeks, device restarts and original/processed audition switches.
+/// Position is selected-source-relative; listened time is track time heard, so
+/// playback speed does not change it, and remains cumulative across seeks,
+/// device restarts and original/processed audition switches.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AudioSnapshot {
     pub generation: u64,
@@ -362,6 +365,8 @@ pub enum AudioCommand {
         revision: u64,
     },
     Volume(f32),
+    /// Pitch-preserving speed; a change restarts output at the audible position.
+    Speed(PlaybackSpeed),
     /// Apply library track ReplayGain to playback only, independently of master volume.
     ReplayGain {
         enabled: bool,
@@ -394,6 +399,7 @@ impl AudioCommand {
                 | Self::Audition { .. }
                 | Self::GraphAudition { .. }
                 | Self::Seek { .. }
+                | Self::Speed(_)
                 | Self::Pause(_)
                 | Self::Stop
                 | Self::StopAndSnapshot(_)

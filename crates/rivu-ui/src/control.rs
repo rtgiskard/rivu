@@ -12,7 +12,8 @@ pub enum SurfaceStyle {
 }
 
 impl SurfaceStyle {
-    pub(crate) fn fill(self, color: u32, alpha: f32) -> gpui::Rgba {
+    /// Resolve a fill using full opacity on solid surfaces and `alpha` on materials.
+    pub fn fill(self, color: u32, alpha: f32) -> gpui::Rgba {
         match self {
             Self::Opaque => rgb(color),
             Self::Translucent => rgb(color).alpha(alpha),

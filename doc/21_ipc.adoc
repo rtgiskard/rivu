@@ -487,6 +487,8 @@ and output-device preference may lag live controls: current values are
 `system.selected_device`. These controls do not advance the Configuration token.
 Apply and persistence merge them with settings at Core's checkpoint boundary;
 clients must not treat `configuration.config` as a live-control snapshot.
+`playback.speed` is a live control without a configuration counterpart: Core
+starts each session at `1.0` and never saves it.
 Runtime `SystemState` contains no configuration payload. Both section schemas
 are versioned positional contracts; lengths and optional fields are in the body.
 Full configuration encoding borrows fields from the shared immutable snapshot;
@@ -1364,7 +1366,7 @@ Saving rather than falsely reporting cancellation.
 Optimization likewise has one physical worker and retains its original reply
 until completion. During Saving or optimization, database requests are rejected
 promptly, not queued behind maintenance. Published state/task status and existing
-playback volume, seek, pause/resume, stop, and cancellation remain serviceable.
+playback volume, speed, seek, pause/resume, stop, and cancellation remain serviceable.
 Playback accounting coalesces in one active or retired record; EOF navigation
 waits for maintenance and retains later pause/stop intent. Failed retired-record
 persistence does not gate independent controls. Deferred writes must settle
@@ -1382,8 +1384,9 @@ playback, and destination conflicts are rechecked. Shutdown joins the worker.
 
 Interactive playback changes use execution-time intent commands:
 `AdjustVolume { delta }` adds a finite signed delta to the core's current volume
-and clamps the result to 0..1; `CycleRepeat` cycles Off → All → One → Off;
-`ToggleShuffle` flips the core's current setting. Queued commands are applied in
+and clamps the result to 0..1; `AdjustSpeed { delta }` adds to the current playback
+speed, rounds to hundredths and clamps to 0.5..2; `CycleRepeat` cycles Off → All →
+One → Off; `ToggleShuffle` flips the core's current setting. Queued commands are applied in
 order rather than deriving absolute targets from a frontend's earlier snapshot.
 `Next` and `Previous` likewise preserve Playing, Paused, or Stopped as observed
 by Core when executing the command, not a caller's published snapshot. Playing
@@ -1406,7 +1409,8 @@ duration. A different current occurrence or stopped playback makes it a no-op.
 `SeekQueue { queue_id, seconds }` retains an absolute target bound to one occurrence;
 interactive start/end seeks use it, with the end captured from that occurrence's
 known duration. Neither command can seek a replacement occurrence of the same track.
-CLI `Seek` and `Volume`, and MPRIS absolute properties, retain their absolute semantics.
+CLI `Seek`, `Volume` and `Speed`, and MPRIS absolute properties, retain their absolute
+semantics; `Speed { value }` outside 0.5..2 is rejected rather than clamped.
 Audio admission has a separate 64-command queue and 128 worker-event slots.
 Ordinary audio admission never waits for capacity: a full queue returns an
 unsuccessful acknowledgement explicitly stating that the command was not queued.

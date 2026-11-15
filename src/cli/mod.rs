@@ -173,6 +173,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         Action::Playback(PlaybackAction::Volume { percent }) => Command::Volume {
             value: f32::from(percent) / 100.0,
         },
+        Action::Playback(PlaybackAction::Speed { value }) => Command::Speed { value },
         Action::Playback(PlaybackAction::Shuffle { mode }) => Command::Shuffle {
             enabled: matches!(mode, Switch::On),
         },

@@ -346,6 +346,25 @@ impl Core {
                     value: (self.preferences.live().volume + delta).clamp(0.0, 1.0),
                 });
             }
+            Command::Speed { value } => {
+                let speed = audio::PlaybackSpeed::new(value).with_context(|| {
+                    format!(
+                        "Speed must be between {} and {}",
+                        audio::PlaybackSpeed::MIN,
+                        audio::PlaybackSpeed::MAX
+                    )
+                })?;
+                self.engine.send(AudioCommand::Speed(speed))?;
+                self.preferences.set_speed(value);
+            }
+            Command::AdjustSpeed { delta } => {
+                ensure!(delta.is_finite(), "Speed delta must be finite");
+                // Hundredths keep repeated steps on exact presets such as 1.25.
+                let value = ((self.preferences.live().speed + delta) * 100.0).round() / 100.0;
+                return self.apply_command(Command::Speed {
+                    value: value.clamp(audio::PlaybackSpeed::MIN, audio::PlaybackSpeed::MAX),
+                });
+            }
             Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
             Command::EnqueueSources {
                 other_tracks,

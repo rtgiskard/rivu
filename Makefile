@@ -20,6 +20,7 @@ build:
 
 lint:
 	cargo fmt --all -- --check
+	clang-format --dry-run --Werror crates/rivu-audio/src/speed/stretch.cc
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 test: test-rust test-python

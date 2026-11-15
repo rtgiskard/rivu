@@ -5,6 +5,8 @@ pub(super) struct LiveControls {
     pub(super) shuffle: bool,
     pub(super) repeat: RepeatMode,
     pub(super) output_device: Option<String>,
+    /// Session-only playback speed; neither saved nor restored from Config.
+    pub(super) speed: f64,
 }
 
 /// Runtime preferences own desired values; published DTOs are observations only.
@@ -23,6 +25,7 @@ impl Preferences {
             shuffle: settings.shuffle,
             repeat: settings.repeat,
             output_device: settings.output_device.clone(),
+            speed: 1.0,
         };
         Self {
             settings,
@@ -42,6 +45,10 @@ impl Preferences {
 
     pub(super) fn set_volume(&mut self, volume: f32) {
         self.live.volume = volume;
+    }
+
+    pub(super) fn set_speed(&mut self, speed: f64) {
+        self.live.speed = speed;
     }
 
     pub(super) fn set_shuffle(&mut self, shuffle: bool) {
@@ -78,6 +85,7 @@ impl Preferences {
             state.configuration.config = Arc::clone(&self.settings);
         }
         state.playback.volume = self.live.volume;
+        state.playback.speed = self.live.speed;
         state.playback.shuffle = self.live.shuffle;
         state.playback.repeat = self.live.repeat;
         if state.system.selected_device != self.live.output_device {

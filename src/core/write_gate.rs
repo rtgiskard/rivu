@@ -52,6 +52,8 @@ impl Core {
             }
             Command::Volume { .. }
             | Command::AdjustVolume { .. }
+            | Command::Speed { .. }
+            | Command::AdjustSpeed { .. }
             | Command::Seek { .. }
             | Command::SeekQueue { .. }
             | Command::SeekRelative { .. }

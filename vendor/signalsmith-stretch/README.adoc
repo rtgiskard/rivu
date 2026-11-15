@@ -1,0 +1,12 @@
+= Signalsmith Stretch (vendored)
+
+Header-only sources used by `rivu-audio` for pitch-preserving playback speed.
+
+* `signalsmith-stretch.h`: https://github.com/Signalsmith-Audio/signalsmith-stretch[Signalsmith Stretch]
+  `main` at `88061fd` (1.4.0 with the Linear 0.6.6 pin), MIT
+* `signalsmith-linear/{fft,stft}.h`: https://github.com/Signalsmith-Audio/linear[Signalsmith Linear]
+  tag `0.6.6`, MIT
+
+Copied unmodified from the upstream repositories; only the headers reachable from
+`signalsmith-stretch.h` are kept. Linear's root-level headers are the include
+targets, not its `include/` forwarding copies.

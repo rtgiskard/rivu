@@ -44,6 +44,8 @@ pub enum Action {
     Previous,
     VolumeDown,
     VolumeUp,
+    SpeedDown,
+    SpeedUp,
     Repeat,
     Shuffle,
     SeekBackward,
@@ -182,6 +184,11 @@ static BINDINGS: &[Binding] = &[
     binding!("p", "p", 0, PLAYBACK, Previous, "keyboard-next-previous"),
     binding!("[", "[", 0, PLAYBACK, VolumeDown, "keyboard-volume-pair"),
     binding!("]", "]", 0, PLAYBACK, VolumeUp, "keyboard-volume-pair"),
+    // GPUI reports shifted punctuation without Shift; terminals may include it.
+    binding!("{", "{", 0, PLAYBACK, SpeedDown, "keyboard-speed-pair"),
+    binding!("{", "{", SHIFT, PLAYBACK, SpeedDown, "keyboard-speed-pair"),
+    binding!("}", "}", 0, PLAYBACK, SpeedUp, "keyboard-speed-pair"),
+    binding!("}", "}", SHIFT, PLAYBACK, SpeedUp, "keyboard-speed-pair"),
     binding!("r", "r", 0, PLAYBACK, Repeat, "keyboard-repeat"),
     binding!("s", "s", 0, PLAYBACK, Shuffle, "keyboard-shuffle"),
     binding!(
@@ -518,6 +525,8 @@ pub fn playback_command(
         Action::Shuffle => Some(Command::ToggleShuffle),
         Action::VolumeUp => Some(Command::AdjustVolume { delta: 0.05 }),
         Action::VolumeDown => Some(Command::AdjustVolume { delta: -0.05 }),
+        Action::SpeedUp => Some(Command::AdjustSpeed { delta: 0.05 }),
+        Action::SpeedDown => Some(Command::AdjustSpeed { delta: -0.05 }),
         _ => None,
     }
 }
@@ -1050,5 +1059,61 @@ mod tests {
             ));
         }
         assert!(playback_command(Action::First, &state, Some(7)).is_none());
+    }
+
+    #[test]
+    fn speed_and_volume_pairs_adjust_playback_outside_search_entry() {
+        for context in [
+            Context::Gui,
+            Context::GuiLibrary,
+            Context::GuiQueue,
+            Context::TuiQueue,
+            Context::TuiTree,
+            Context::TuiSearchResults,
+        ] {
+            for (key, shift, action) in [
+                ("[", false, Action::VolumeDown),
+                ("]", false, Action::VolumeUp),
+                ("{", false, Action::SpeedDown),
+                ("{", true, Action::SpeedDown),
+                ("}", false, Action::SpeedUp),
+                ("}", true, Action::SpeedUp),
+            ] {
+                let modifiers = Modifiers {
+                    shift,
+                    ..Default::default()
+                };
+                assert_eq!(resolve(key, modifiers, context), Some(action));
+                assert_eq!(resolve(key, modifiers, Context::TuiSearchQuery), None);
+            }
+            assert_eq!(
+                resolve(
+                    "{",
+                    Modifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                    context
+                ),
+                None
+            );
+        }
+        let state = PlaybackState::default();
+        for (action, volume, speed) in [
+            (Action::VolumeDown, Some(-0.05), None),
+            (Action::VolumeUp, Some(0.05), None),
+            (Action::SpeedDown, None, Some(-0.05)),
+            (Action::SpeedUp, None, Some(0.05)),
+        ] {
+            match playback_command(action, &state, None) {
+                Some(Command::AdjustVolume { delta }) => assert_eq!(Some(delta), volume),
+                Some(Command::AdjustSpeed { delta }) => assert_eq!(Some(delta), speed),
+                other => panic!("unexpected command for {action:?}: {other:?}"),
+            }
+        }
+        let label = help_rows(&[Context::TuiQueue])
+            .find(|row| row.description == "keyboard-speed-pair")
+            .map(|row| row.label());
+        assert_eq!(label.as_deref(), Some("{ / }"));
     }
 }

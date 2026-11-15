@@ -13,6 +13,17 @@ fn main() {
             .expect("PipeWire 1.2 or newer development files required");
     }
 
+    // The stretcher is header-only: its headers are the implementation.
+    println!("cargo:rerun-if-changed=src/speed/stretch.cc");
+    println!("cargo:rerun-if-changed=../../vendor/signalsmith-stretch");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++14")
+        .opt_level(3)
+        .include("../../vendor/signalsmith-stretch")
+        .file("src/speed/stretch.cc")
+        .compile("rivu-stretch");
+
     #[cfg(feature = "ffmpeg")]
     generate_ffmpeg_bindings();
 }

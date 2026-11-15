@@ -53,6 +53,33 @@ fn queue_replacement_confirmation_uses_status_row_without_hiding_notices() {
 }
 
 #[test]
+fn status_row_shows_speed_only_when_not_normal() {
+    let ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    let mut state = TuiSnapshot::default();
+    let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+    for (speed, expected) in [(1.0, None), (1.25, Some("1.25×")), (0.5, Some("0.50×"))] {
+        state.playback.speed = speed;
+        terminal
+            .draw(|frame| draw_status(frame, frame.area(), &state, &ui, colors))
+            .unwrap();
+        let rendered = terminal_text(&terminal);
+        match expected {
+            Some(text) => {
+                assert!(rendered.contains(&format!("󰑖  {text}")), "{rendered}");
+                let buffer = terminal.backend().buffer();
+                let marker = (0..buffer.area.width)
+                    .map(|x| &buffer[(x, 0)])
+                    .find(|cell| cell.symbol() == "×")
+                    .expect("speed marker is visible");
+                assert_eq!(marker.fg, colors.accent);
+            }
+            None => assert!(!rendered.contains('×'), "{rendered}"),
+        }
+    }
+}
+
+#[test]
 fn current_error_overrides_retained_scan_but_not_active_scan_or_notice() {
     use rivu_protocol::model::{ScanPhase, ScanProgress};
 

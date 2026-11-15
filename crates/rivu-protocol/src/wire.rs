@@ -581,6 +581,12 @@ pub enum WireCommand {
         track_id: i64,
         value: Option<f64>,
     },
+    Speed {
+        value: f64,
+    },
+    AdjustSpeed {
+        delta: f64,
+    },
 }
 
 pub fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -1169,6 +1175,8 @@ impl From<Command> for WireCommand {
             Command::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
             Command::Volume { value } => Self::Volume { value },
             Command::AdjustVolume { delta } => Self::AdjustVolume { delta },
+            Command::Speed { value } => Self::Speed { value },
+            Command::AdjustSpeed { delta } => Self::AdjustSpeed { delta },
             Command::CycleRepeat => Self::CycleRepeat,
             Command::ToggleShuffle => Self::ToggleShuffle,
             Command::SeekRelative { queue_id, delta } => Self::SeekRelative { queue_id, delta },
@@ -1498,6 +1506,8 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
             WireCommand::Volume { value } => Self::Volume { value },
             WireCommand::AdjustVolume { delta } => Self::AdjustVolume { delta },
+            WireCommand::Speed { value } => Self::Speed { value },
+            WireCommand::AdjustSpeed { delta } => Self::AdjustSpeed { delta },
             WireCommand::CycleRepeat => Self::CycleRepeat,
             WireCommand::ToggleShuffle => Self::ToggleShuffle,
             WireCommand::SeekRelative { queue_id, delta } => Self::SeekRelative { queue_id, delta },

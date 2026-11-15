@@ -87,6 +87,11 @@ pub(super) enum PlaybackAction {
         #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
         percent: u8,
     },
+    /// Set playback speed as a multiplier, 0.5..2.0.
+    Speed {
+        #[arg(value_parser = parse_finite_speed)]
+        value: f64,
+    },
     Shuffle {
         #[arg(value_enum)]
         mode: Switch,
@@ -563,6 +568,17 @@ fn parse_nonnegative_seconds(value: &str) -> Result<f64, String> {
     }
 }
 
+fn parse_finite_speed(value: &str) -> Result<f64, String> {
+    let speed = value
+        .parse::<f64>()
+        .map_err(|_| "expected speed as a multiplier")?;
+    if speed.is_finite() {
+        Ok(speed)
+    } else {
+        Err("speed must be finite".to_owned())
+    }
+}
+
 fn parse_gain(value: &str) -> Result<f32, String> {
     let gain = value.parse::<f32>().map_err(|_| "expected gain in dB")?;
     if gain.is_finite() && (-96.0..=24.0).contains(&gain) {
@@ -879,6 +895,12 @@ mod tests {
             assert!(parse_and_validate(&["rivu", "playback", "volume", value]).is_ok());
         }
         assert!(parse_and_validate(&["rivu", "playback", "volume", "101"]).is_err());
+        for value in ["0.5", "1.25", "2"] {
+            assert!(parse_and_validate(&["rivu", "playback", "speed", value]).is_ok());
+        }
+        for value in ["NaN", "inf", "fast"] {
+            assert!(parse_and_validate(&["rivu", "playback", "speed", value]).is_err());
+        }
         assert!(parse_and_validate(&["rivu", "playback", "seek", "0"]).is_ok());
         assert!(
             parse_and_validate(&[

@@ -28,6 +28,7 @@ core-optimization = Database optimization completed
     Reclaimed total: { $reclaimed } bytes
 core-state-track = { $status }: { $artist } — { $title }  { $position }/{ $duration } s  volume { $volume }%
 core-state-empty = { $status } · { $tracks } tracks · { $queued } queued
+core-state-speed = Playback speed: { $speed }×
 core-ffmpeg = FFmpeg extension audio decoding: { $status }
 core-scan-progress = Scan: { $phase } · { $processed }/{ $total } · { $errors } errors
 core-scan-library-committed = Library changes saved (commit confirmed).

@@ -28,6 +28,7 @@ core-optimization = 数据库优化完成
     共释放：{ $reclaimed } 字节
 core-state-track = { $status }：{ $artist } — { $title }  { $position }/{ $duration } 秒  音量 { $volume }%
 core-state-empty = { $status } · { $tracks } 首 · 队列 { $queued } 首
+core-state-speed = 播放速度：{ $speed }×
 core-ffmpeg = FFmpeg 扩展音频解码：{ $status }
 core-scan-progress = 扫描：{ $phase } · { $processed }/{ $total } · { $errors } 个错误
 core-scan-library-committed = 音乐库修改已保存（提交已确认）。

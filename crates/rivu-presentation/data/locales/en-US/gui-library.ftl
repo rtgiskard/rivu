@@ -327,6 +327,7 @@ gl-played-at = { $time }{ $paused ->
 
 gl-seek-position = Playback position
 gl-volume-level = Volume
+gl-playback-speed = Playback speed
 
 gl-file-missing-suffix = { " · " }File missing
 

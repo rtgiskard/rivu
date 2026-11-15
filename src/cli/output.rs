@@ -555,6 +555,16 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
             )
         )?;
     }
+    if playback.playback.speed != 1.0 {
+        writeln!(
+            output,
+            "{}",
+            i18n.format(
+                "core-state-speed",
+                &[("speed", format!("{:.2}", playback.playback.speed).into())]
+            )
+        )?;
+    }
     if let Some(state) = playback.playback.audio_output.as_deref() {
         writeln!(output, "{}:", i18n.text("audio-output"))?;
         for (label, value) in rivu_presentation::audio_output::output_rows(state, i18n) {

@@ -1,0 +1,50 @@
+---
+BasedOnStyle: LLVM
+
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+
+UseTab: AlignWithSpaces
+LineEnding: LF
+InsertNewlineAtEOF: true
+
+---
+Language: Cpp
+Standard: Latest
+
+AlignArrayOfStructures: Left
+AlignConsecutiveAssignments:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+  AlignCompound: true
+  PadOperators: true
+AlignConsecutiveBitFields:
+  Enabled: true
+AlignConsecutiveDeclarations:
+  Enabled: true
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+  AlignCompound: true
+  PadOperators: true
+AlignEscapedNewlines: DontAlign
+AllowShortBlocksOnASingleLine: Empty
+
+BreakArrays: false
+BreakAfterAttributes: Always
+BreakAfterReturnType: ExceptShortType
+BreakBeforeBraces: Attach
+
+DerivePointerAlignment: false
+EmptyLineBeforeAccessModifier: LogicalBlock
+PointerAlignment: Right
+ReferenceAlignment: Pointer
+RemoveEmptyLinesInUnwrappedLines: true
+
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+...

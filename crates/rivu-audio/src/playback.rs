@@ -5,6 +5,7 @@ use super::{
     graph::GraphRunner,
     output::{Output, OutputError, OutputOptions},
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
+    speed::{PlaybackSpeed, SpeedStage},
     timeline::{mapped_span, published_range, record_mapping, remaining_frames},
 };
 use crate::capture::{PcmAudioIdentity, PcmControl, PcmProducer};
@@ -47,11 +48,14 @@ pub(super) struct PlaybackOptions {
     pub(super) source_info: Option<MediaInfo>,
     pub(super) listened_seconds: f64,
     pub(super) graph: Option<GraphRunner>,
+    pub(super) speed: PlaybackSpeed,
 }
 
 pub(super) struct Playback {
     source: Source,
     output: Output,
+    // After every processing and analysis tap, before the output ring.
+    speed: SpeedStage,
     equalizer: Equalizer,
     graph: Option<GraphRunner>,
     graph_skip_frames: usize,
@@ -79,6 +83,7 @@ pub(super) struct Playback {
     generation: u64,
     metadata: Arc<PlaybackMetadata>,
     base_position: f64,
+    // Track seconds heard before this output segment, at each segment's speed.
     prior_heard: f64,
     eof: bool,
     paused: bool,
@@ -215,6 +220,18 @@ impl VisualizationCapture {
             _ => producer.discontinuity(),
         }
     }
+
+    /// Stretched audio has no per-sample source position, and Before PCM has no
+    /// one-to-one output frame. Publish what is heard, whichever signal is
+    /// selected, with media advancing linearly at the playback speed.
+    fn audible_tap(&mut self, (base, step): (f64, f64)) -> impl FnMut(u64, &[f32]) + '_ {
+        move |output_frame, pcm| {
+            if self.sync_tap().is_some() {
+                let producer = self.producer.as_mut().expect("active tap producer");
+                producer.push_mapped(output_frame, base + output_frame as f64 * step, step, pcm);
+            }
+        }
+    }
 }
 
 impl Playback {
@@ -241,6 +258,7 @@ impl Playback {
             source_info,
             listened_seconds,
             graph,
+            speed,
         } = options;
         let channels = source.layout().len();
         if let Some(info) = &source_info
@@ -298,6 +316,7 @@ impl Playback {
         let source_loudness =
             diagnostics::SourceLoudness::new(&source, source_info.is_none() || graph.is_some());
         Ok(Self {
+            speed: SpeedStage::new(speed, channels, source.info().sample_rate)?,
             source,
             output,
             equalizer,
@@ -382,7 +401,7 @@ impl Playback {
             // The callback can confirm more audible frames while retiring. Resume
             // from that final cursor, not a snapshot taken before a decoder seek.
             let output_heard = self.output.close();
-            let position = self.base_position + output_heard;
+            let position = self.base_position + self.speed.source_seconds(output_heard);
             self.source.seek(position)?;
             (position, output_heard)
         };
@@ -391,7 +410,7 @@ impl Playback {
             &self.source,
             self.source_info.is_none() || self.graph.is_some(),
         );
-        let heard = self.prior_heard + output_heard;
+        let heard = self.prior_heard + self.speed.source_seconds(output_heard);
         self.equalizer.reset();
         if let Some(graph) = &mut self.graph {
             graph.reset();
@@ -411,6 +430,8 @@ impl Playback {
         self.graph_media = (0, position);
         self.source_eof = false;
         let output = create(&self.source, self.paused)?;
+        // Until both succeed, closing still measures the retired segment at its speed.
+        self.speed.restart()?;
         self.output = output;
         self.pending.clear();
         self.pending_tap = PendingTap::None;
@@ -554,10 +575,22 @@ impl Playback {
     }
 
     pub(super) fn heard(&self) -> f64 {
-        self.prior_heard + self.output.heard()
+        self.prior_heard + self.speed.source_seconds(self.output.heard())
     }
     pub(super) fn position(&self) -> f64 {
-        self.base_position + self.output.position()
+        self.base_position + self.speed.source_seconds(self.output.position())
+    }
+
+    /// Request a speed; true when the output must restart to apply it.
+    pub(super) fn set_speed(&mut self, speed: PlaybackSpeed) -> bool {
+        self.speed.set(speed);
+        self.speed.speed() != speed
+    }
+
+    /// Media seconds at output frame zero of this segment, and per output frame.
+    fn audible_media(&self) -> (f64, f64) {
+        let rate = f64::from(self.source.info().sample_rate);
+        (self.base_position, self.speed.speed().get() / rate)
     }
     pub(super) fn refill_delay(&self) -> std::time::Duration {
         self.output.refill_delay(self.eof)
@@ -577,6 +610,7 @@ impl Playback {
         self.visualization.sync_tap();
         let channels = self.source.layout().len();
         let sample_rate = self.source.info().sample_rate;
+        let media = self.audible_media();
         // Concurrent callback consumption belongs to the next refill, not this
         // prefix. Both submitted frames and decoded packets bound this round.
         let mut remaining_frames = self.output.vacant_frames().min(MAX_REFILL_FRAMES);
@@ -656,7 +690,8 @@ impl Playback {
                         );
                         let samples = &frames[range.start * channels..range.end * channels];
                         self.source_loudness.push(samples);
-                        if self.visualization.signal == VisualizationSignal::Before {
+                        let stretching = self.speed.stretching();
+                        if self.visualization.signal == VisualizationSignal::Before && !stretching {
                             let limit = frames.len() / channels
                                 + graph
                                     .latency_frames()
@@ -674,7 +709,10 @@ impl Playback {
                         // pipeline, including the unsubmitted pending suffix.
                         // Measure it once here, never again in submit_pending.
                         self.source_loudness.push(frames);
-                        if self.visualization.signal == VisualizationSignal::Before && !borrowed {
+                        if self.visualization.signal == VisualizationSignal::Before
+                            && !borrowed
+                            && !self.speed.stretching()
+                        {
                             self.visualization.stage_before(
                                 position,
                                 frames,
@@ -687,7 +725,11 @@ impl Playback {
                         // Settled disabled EQ keeps the original borrowed fast path.
                         let prefix = frames.len().min(remaining_frames * channels);
                         let output_frame = self.output.submitted();
-                        let count = self.output.push(&frames[..prefix]);
+                        let count = self.speed.push(
+                            &mut self.output,
+                            &frames[..prefix],
+                            &mut self.visualization.audible_tap(media),
+                        );
                         self.pending_tap = PendingTap::Direct(self.visualization.signal);
                         self.pending_discontinuity = discontinuity;
                         if count != 0 {
@@ -698,14 +740,16 @@ impl Playback {
                             }
                             self.pending_discontinuity = false;
                         }
-                        self.visualization.submit_mapped_tap(
-                            self.pending_tap,
-                            position,
-                            output_frame,
-                            (start_seconds, f64::from(sample_rate).recip()),
-                            &frames[..count * channels],
-                            channels,
-                        );
+                        if !self.speed.stretching() {
+                            self.visualization.submit_mapped_tap(
+                                self.pending_tap,
+                                position,
+                                output_frame,
+                                (start_seconds, f64::from(sample_rate).recip()),
+                                &frames[..count * channels],
+                                channels,
+                            );
+                        }
                         self.pending_start = start_seconds + count as f64 / sample_rate as f64;
                         self.pending_position = position + count as u64;
                         remaining_frames -= count;
@@ -746,7 +790,12 @@ impl Playback {
                 }
             }
         }
-        if self.eof && self.offset_frames == self.pending.len() / channels {
+        if self.eof
+            && self.offset_frames == self.pending.len() / channels
+            && self
+                .speed
+                .finish(&mut self.output, &mut self.visualization.audible_tap(media))
+        {
             self.output.finish_input();
             self.visualization.reset_tap();
             self.graph_gaps = VecDeque::new();
@@ -786,26 +835,31 @@ impl Playback {
             }
         }
         let output_frame = self.output.submitted();
-        let count = self
-            .output
-            .push(&self.pending[start * channels..end * channels]);
+        let media = self.audible_media();
+        let count = self.speed.push(
+            &mut self.output,
+            &self.pending[start * channels..end * channels],
+            &mut self.visualization.audible_tap(media),
+        );
         if count != 0 && self.pending_discontinuity {
             if let Some(producer) = &mut self.visualization.producer {
                 producer.discontinuity();
             }
             self.pending_discontinuity = false;
         }
-        self.visualization.submit_mapped_tap(
-            self.pending_tap,
-            self.pending_position + start as u64,
-            output_frame,
-            (
-                media_start,
-                f64::from(self.source.info().sample_rate).recip(),
-            ),
-            &self.pending[start * channels..(start + count) * channels],
-            channels,
-        );
+        if !self.speed.stretching() {
+            self.visualization.submit_mapped_tap(
+                self.pending_tap,
+                self.pending_position + start as u64,
+                output_frame,
+                (
+                    media_start,
+                    f64::from(self.source.info().sample_rate).recip(),
+                ),
+                &self.pending[start * channels..(start + count) * channels],
+                channels,
+            );
+        }
         self.offset_frames += count;
         count
     }
@@ -858,6 +912,7 @@ impl Playback {
         !self.paused
             && self.eof
             && self.offset_frames == self.pending.len() / self.source.layout().len()
+            && self.speed.idle()
             && self.output.drained()
     }
     pub(super) fn close(&mut self) -> super::AudioSnapshot {
@@ -866,8 +921,8 @@ impl Playback {
         let final_output_heard = self.output.close();
         super::AudioSnapshot {
             generation: self.generation,
-            position_seconds: self.base_position + final_output_heard,
-            listened_seconds: self.prior_heard + final_output_heard,
+            position_seconds: self.base_position + self.speed.source_seconds(final_output_heard),
+            listened_seconds: self.prior_heard + self.speed.source_seconds(final_output_heard),
         }
     }
 }
@@ -1551,6 +1606,7 @@ pub(super) mod tests {
         );
         let source_loudness = diagnostics::SourceLoudness::new(&source, true);
         let playback = Playback {
+            speed: SpeedStage::new(PlaybackSpeed::NORMAL, source.layout().len(), rate).unwrap(),
             source,
             output,
             equalizer,
@@ -2200,6 +2256,102 @@ pub(super) mod tests {
         assert!(data.iter().all(|sample| *sample == 0.0));
         assert!(playback.finished());
         assert_eq!(playback.heard(), 2.0);
+    }
+
+    /// Apply `speed` by restarting at `target`; returns the new test device.
+    fn restart_at_speed(
+        playback: &mut Playback,
+        speed: f64,
+        target: f64,
+    ) -> impl FnMut(&mut [f32], u64) + use<> {
+        playback.set_speed(PlaybackSpeed::new(speed).unwrap());
+        let mut render = None;
+        playback
+            .restart_output_with(Some(target), |source, paused| {
+                let (output, device) = crate::output::test_backend_with_capacity(
+                    8_000,
+                    paused,
+                    source.layout(),
+                    8_000,
+                );
+                render = Some(device);
+                Ok(output)
+            })
+            .unwrap();
+        render.unwrap()
+    }
+
+    #[test]
+    fn speed_keeps_position_and_heard_time_in_track_time() {
+        let file = pcm_samples(16_000);
+        let (mut playback, _) = test_playback_selected(file.path(), None);
+        playback.set_visualization_enabled(false);
+        let mut render = restart_at_speed(&mut playback, 2.0, 1.0);
+        let mut data = [0.0; 400];
+        let mut millis = 0;
+        while !playback.finished() {
+            playback.fill().unwrap();
+            render(&mut data, millis);
+            millis += 50;
+            assert!(millis < 10_000, "2x playback of 1s must finish");
+        }
+        // One track second at 2x: position reaches the end and that whole second
+        // counts as heard, so play-count thresholds do not depend on speed.
+        assert_eq!(playback.position(), 2.0);
+        assert_eq!(playback.heard(), 1.0);
+        let snapshot = playback.close();
+        assert_eq!(snapshot.position_seconds, 2.0);
+        assert_eq!(snapshot.listened_seconds, 1.0);
+    }
+
+    #[test]
+    fn stretched_capture_publishes_heard_audio_at_its_output_frames() {
+        let file = pcm_samples(16_000);
+        for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+            let (mut playback, _) = test_playback_selected(file.path(), None);
+            let (_worker, mut captured) = attach_capture(&mut playback, signal);
+            let mut render = restart_at_speed(&mut playback, 0.5, 1.0);
+            let mut data = [0.0; 400];
+            let mut millis = 0;
+            let mut frames = 0_u64;
+            while !playback.finished() {
+                playback.fill().unwrap();
+                while let Some(sample) = captured.try_pop() {
+                    // One published sample per output frame, media at half speed.
+                    assert_eq!(sample.header.output_frame, frames, "{signal:?}");
+                    let media = 1.0 + frames as f64 * 0.5 / 8_000.0;
+                    assert!((sample.header.media_start - media).abs() < 1e-9);
+                    assert_eq!(sample.header.media_step, 0.5 / 8_000.0);
+                    frames += 1;
+                }
+                render(&mut data, millis);
+                millis += 50;
+                assert!(millis < 20_000, "0.5x playback of 1s must finish");
+            }
+            // One source second at 0.5x plays, and is captured as, 16000 frames.
+            assert_eq!(frames, 16_000, "{signal:?}");
+        }
+    }
+
+    #[test]
+    fn failed_speed_restart_keeps_the_retired_segment_speed() {
+        let file = pcm_samples(16_000);
+        let (mut playback, mut render) = test_playback_selected(file.path(), None);
+        playback.set_visualization_enabled(false);
+        playback.fill().unwrap();
+        let mut data = [0.0; 800];
+        render(&mut data, 0);
+        render(&mut data, 100);
+        assert!(playback.set_speed(PlaybackSpeed::new(2.0).unwrap()));
+        assert!(
+            playback
+                .restart_output_with(None, |_, _| Err(anyhow::anyhow!("device lost")))
+                .is_err()
+        );
+        // Audio heard at 1.0x still maps one-to-one onto source time.
+        let snapshot = playback.close();
+        assert!(snapshot.listened_seconds > 0.0);
+        assert_eq!(snapshot.position_seconds, snapshot.listened_seconds);
     }
 
     #[test]

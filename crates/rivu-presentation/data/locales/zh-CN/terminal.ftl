@@ -49,6 +49,7 @@ terminal-favorite = 已收藏
 keyboard-favorite = 收藏／取消收藏
 keyboard-next-previous = 下一首／上一首
 keyboard-volume-pair = 音量 -/+5%
+keyboard-speed-pair = 速度 -/+0.05×
 keyboard-seek-pair = 后退／前进 5 秒
 keyboard-seek-edges = 曲首／曲尾
 keyboard-move-pair = 上移／下移

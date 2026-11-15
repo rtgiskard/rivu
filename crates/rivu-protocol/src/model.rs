@@ -417,6 +417,8 @@ pub struct PlaybackState {
     pub stopped_source_generation: Option<u64>,
     /// Latest runtime output facts; retained after stop, replaced on source admission.
     pub audio_output: Option<Arc<AudioOutputState>>,
+    /// Pitch-preserving playback speed for this Core session; never persisted.
+    pub speed: f64,
 }
 
 /// Identity of a task whose owner-committed terminal outcome can be awaited.
@@ -563,6 +565,7 @@ impl Default for PlaybackState {
             seek_revision: 0,
             stopped_source_generation: None,
             audio_output: None,
+            speed: 1.0,
         }
     }
 }
@@ -766,6 +769,14 @@ pub enum Command {
     },
     AdjustVolume {
         delta: f32,
+    },
+    /// Set the session playback speed; Core rejects values outside its range.
+    Speed {
+        value: f64,
+    },
+    /// Adjust the session playback speed, clamped to Core's range.
+    AdjustSpeed {
+        delta: f64,
     },
     Enqueue {
         track_ids: Vec<i64>,

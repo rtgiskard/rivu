@@ -1412,3 +1412,28 @@ fn unrelated_album_query_failure_preserves_command_results_and_scan_identity() {
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
+
+#[test]
+fn speed_is_a_session_control_stepped_in_hundredths_within_range() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0));
+    core.command(Command::Speed { value: 1.5 }).unwrap();
+    for _ in 0..3 {
+        core.command(Command::AdjustSpeed { delta: -0.05 }).unwrap();
+    }
+    // Rounding keeps repeated steps on the value a user reads, not 1.3499999.
+    assert_eq!(core.preferences.live().speed, 1.35);
+    core.command(Command::AdjustSpeed { delta: 5.0 }).unwrap();
+    assert_eq!(core.preferences.live().speed, 2.0);
+    for value in [0.25, 2.5, f64::NAN] {
+        assert!(core.command(Command::Speed { value }).is_err(), "{value}");
+    }
+    assert!(
+        core.command(Command::AdjustSpeed {
+            delta: f64::INFINITY
+        })
+        .is_err()
+    );
+    assert_eq!(core.preferences.live().speed, 2.0);
+    core.publish();
+    assert_eq!(core.state.playback.speed, 2.0);
+}

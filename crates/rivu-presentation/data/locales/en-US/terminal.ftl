@@ -52,6 +52,7 @@ terminal-favorite = Favorite
 keyboard-favorite = Toggle favorite
 keyboard-next-previous = Next / previous
 keyboard-volume-pair = Volume -/+5%
+keyboard-speed-pair = Speed -/+0.05×
 keyboard-seek-pair = Seek -/+5s
 keyboard-seek-edges = Track start / end
 keyboard-move-pair = Move up / down

@@ -3,6 +3,7 @@
 //! Owned executor tasks cancel publication, drain accepted replies with a
 //! deadline, then close the connection before application executor retirement.
 //! Playback changes come from the core subscription, never a polling loop.
+use rivu_audio::PlaybackSpeed;
 use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
 
 use crate::{
@@ -611,19 +612,28 @@ impl Player {
         request(&self.handle, Command::Repeat { mode }).await
     }
 
-    #[zbus(property(emits_changed_signal = "const"))]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn rate(&self) -> f64 {
-        1.0
+        self.handle.mpris_snapshot().playback.speed
     }
 
     #[zbus(property)]
-    fn set_rate(&self, value: f64) -> fdo::Result<()> {
-        if value != 1.0 {
-            return Err(fdo::Error::NotSupported(
-                "Rivu supports only playback Rate 1.0".into(),
-            ));
+    async fn set_rate(&self, value: f64) -> fdo::Result<()> {
+        if !value.is_finite() {
+            return Err(fdo::Error::InvalidArgs("Rate must be finite".into()));
         }
-        Ok(())
+        // MPRIS requires Rate 0.0 to act as Pause; other values outside
+        // MinimumRate..=MaximumRate saturate like Volume does.
+        if value == 0.0 {
+            return request(&self.handle, Command::Pause).await;
+        }
+        request(
+            &self.handle,
+            Command::Speed {
+                value: value.clamp(PlaybackSpeed::MIN, PlaybackSpeed::MAX),
+            },
+        )
+        .await
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
@@ -671,12 +681,12 @@ impl Player {
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn minimum_rate(&self) -> f64 {
-        1.0
+        PlaybackSpeed::MIN
     }
 
     #[zbus(property(emits_changed_signal = "const"))]
     fn maximum_rate(&self) -> f64 {
-        1.0
+        PlaybackSpeed::MAX
     }
 
     #[zbus(property)]
@@ -1005,6 +1015,9 @@ async fn publish_changes(
     }
     if previous.playback.volume != current.playback.volume {
         changed.insert("Volume", f64::from(current.playback.volume).into());
+    }
+    if previous.playback.speed != current.playback.speed {
+        changed.insert("Rate", current.playback.speed.into());
     }
     if refresh_metadata(previous, current, metadata, artwork) {
         changed.insert("Metadata", Variant::from(metadata_map(metadata.as_ref())));
@@ -1936,6 +1949,17 @@ mod tests {
                     assert_eq!(
                         f64::try_from(next_property(&mut signals, "Volume").await).unwrap(),
                         0.25
+                    );
+                    assert!(
+                        runtime
+                            .handle
+                            .request_ack(Command::Speed { value: 1.25 })
+                            .await
+                            .is_success()
+                    );
+                    assert_eq!(
+                        f64::try_from(next_property(&mut signals, "Rate").await).unwrap(),
+                        1.25
                     );
                     Some(blocked)
                 };

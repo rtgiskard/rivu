@@ -42,6 +42,9 @@ chain including monitor EQ. The audio worker writes the selected native-channel
 signal once into a bounded shared-memory window. The GUI reads it directly and
 folds channels into logical stereo for `rivu-analysis`, outside both playback and
 paint callbacks. There is one FFT path, not parallel before/after analyzers.
+At a playback speed other than 1×, the window instead carries the stretched output
+for both settings, with media time advancing at that speed; see
+link:04_playback.adoc#playback-speed[Playback speed].
 Each block carries its admitted output-frame position. GUI ingestion stops before
 a block starting more than 1024 frames ahead of the observed audible cursor and
 resumes on PCM or cursor notifications, without clock polling or deadline
