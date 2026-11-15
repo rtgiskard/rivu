@@ -291,7 +291,7 @@ audio-session-underruns = Rivu supply underruns (session)
 audio-last-underrun = Last underrun
 audio-wait = Waiting (unconfirmed supply / startup)
 audio-buffer = Buffered audio (current / minimum)
-audio-peaks = Sample peaks (source tag / recent / hold)
+audio-peaks = Sample peaks (recent / hold / source tag)
 audio-overs = Frames above full scale
 audio-output-note = Segment loudness; reference target: -18 LUFS. Headroom = −recent peak in dBFS. True peaks and device processing are not measured.
 audio-output-empty = No output diagnostics yet

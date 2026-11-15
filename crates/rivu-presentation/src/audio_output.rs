@@ -12,7 +12,7 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
     let peak = |value: Option<f64>| match value {
         Some(value) if value > 0.0 => format!("{:.2} dBFS", 20.0 * value.log10()),
         Some(_) => i18n.text("audio-silence").to_owned(),
-        None => unknown.to_owned(),
+        None => "-".to_owned(),
     };
     let ms = |frames: u64| frames as f64 * 1000.0 / f64::from(state.stream.sample_rate.max(1));
     let metrics = &state.metrics;
@@ -78,6 +78,12 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
         ),
     );
     add(
+        "audio-master-gain",
+        state
+            .master_gain_db
+            .map_or_else(|| i18n.text("audio-silence").to_owned(), |v| db(Some(v))),
+    );
+    add(
         "audio-replaygain",
         format!(
             "{} · {} → {} · {}: {}",
@@ -89,25 +95,18 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
         ),
     );
     add(
-        "audio-master-gain",
-        state
-            .master_gain_db
-            .map_or_else(|| i18n.text("audio-silence").to_owned(), |v| db(Some(v))),
-    );
-    add(
         "audio-peaks",
         format!(
             "{} / {} / {}",
+            peak(metrics.sample_peak.map(f64::from)),
+            peak(metrics.sample_peak_hold.map(f64::from)),
             if gain.processed_source {
                 i18n.text("audio-processed-peak-unknown").to_owned()
             } else {
                 peak(gain.source_peak)
-            },
-            peak(metrics.sample_peak.map(f64::from)),
-            peak(metrics.sample_peak_hold.map(f64::from))
+            }
         ),
     );
-    add("audio-overs", metrics.over_range_frames.to_string());
     add(
         "audio-source-loudness",
         match state.source_loudness_lufs.filter(|value| value.is_finite()) {
@@ -115,6 +114,7 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
             None => "- / -".to_owned(),
         },
     );
+    add("audio-overs", metrics.over_range_frames.to_string());
     add(
         "audio-buffer",
         format!(
