@@ -535,7 +535,7 @@ impl Settings {
                         .child(visual_switch(
                             &self.i18n,
                             "settings-pipewire-auto-mix",
-                            "󱀞",
+                            "󰃸",
                             self.tr("settings-pipewire-channel-remix"),
                             remix,
                             cx,

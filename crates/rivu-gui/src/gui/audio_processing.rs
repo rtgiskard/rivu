@@ -2915,7 +2915,7 @@ impl AudioProcessing {
         selected_audio = selected_audio.child(
             IconButton::new(
                 ("processing-bypass", panel),
-                "",
+                "󰑪",
                 self.tr("processing-workspace-enable"),
             )
             .surface(crate::gui::appearance::material::surface(cx))
