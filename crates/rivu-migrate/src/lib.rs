@@ -13,6 +13,7 @@ use std::{
 };
 
 mod catalog_order;
+mod replaygain;
 mod target_schema;
 mod track_tags;
 
@@ -136,6 +137,11 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
             schema_version: 2 | 4,
         } => target_schema::validate_tag_source(&connection)
             .context("Validating database schema structure")?,
+        database::DatabaseState::Versioned { schema_version: 6 } => {
+            target_schema::validate_replaygain_source(&connection)
+                .context("Validating database schema structure")?;
+            6
+        }
         _ => {
             target_schema::validate(&connection).context("Validating database schema structure")?;
             database::SCHEMA_VERSION
@@ -218,10 +224,13 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
                 if plan.schema_version == 2 {
                     catalog_order::apply(transaction)?;
                 }
-                track_tags::apply(transaction)
+                if plan.schema_version != 6 {
+                    track_tags::apply(transaction)?;
+                }
+                replaygain::apply(transaction)
             })?;
             report.resources.push(format!(
-                "Database {}: migrated to schema {}; effective tags and catalog order preserved",
+                "Database {}: migrated to schema {}; tags and catalog order preserved, ReplayGain tags will refresh on rescan",
                 plan.path.display(),
                 database::SCHEMA_VERSION
             ));

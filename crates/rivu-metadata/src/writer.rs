@@ -44,7 +44,8 @@ fn serialize_path<S: serde::Serializer>(
 }
 
 /// `None` leaves a field untouched; an empty string removes a text field.
-/// For numbers, `Some(None)` clears and `Some(Some(n))` sets a positive value.
+/// For numeric fields, `Some(None)` clears and `Some(Some(n))` sets a value.
+/// Track/disc numbers are positive; ReplayGain track gain is finite.
 #[derive(Clone, Debug, Default)]
 pub struct TagPatch {
     pub title: Option<String>,
@@ -53,6 +54,7 @@ pub struct TagPatch {
     pub release_date: Option<String>,
     pub track_number: Option<Option<u32>>,
     pub disc_number: Option<Option<u32>>,
+    pub replaygain_track_gain: Option<Option<f64>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -164,6 +166,9 @@ fn validate_patch(patch: &TagPatch) -> Result<()> {
     {
         ensure!(number > 0, "Track and disc numbers must be positive");
     }
+    if let Some(Some(value)) = patch.replaygain_track_gain {
+        ensure!(value.is_finite(), "ReplayGain gain must be finite");
+    }
     Ok(())
 }
 
@@ -203,6 +208,12 @@ fn patch_tag(tag: &mut Tag, patch: &TagPatch) {
         match value {
             Some(value) => tag.set_disk(value),
             None => tag.remove_disk(),
+        }
+    }
+    if let Some(value) = patch.replaygain_track_gain {
+        tag.remove_key(ItemKey::ReplayGainTrackGain);
+        if let Some(value) = value {
+            tag.insert_text(ItemKey::ReplayGainTrackGain, format!("{value} dB"));
         }
     }
 }
@@ -340,6 +351,12 @@ fn validate_requested(after: &crate::Tags, patch: &TagPatch) -> Result<()> {
             );
         }
     }
+    if let Some(value) = patch.replaygain_track_gain {
+        ensure!(
+            after.replaygain_track_gain == value,
+            "Writer did not preserve a requested ReplayGain value"
+        );
+    }
     Ok(())
 }
 
@@ -413,7 +430,7 @@ fn same_bytes(a: &mut File, b: &mut File, mut hasher: Option<&mut blake3::Hasher
     }
 }
 
-/// Normalize to one native tag, patch six descriptive fields, and atomically
+/// Normalize to one native tag, patch descriptive and ReplayGain fields, and atomically
 /// replace a same-directory temporary copy without transcoding audio or backups.
 /// Conversion can discard unsupported native-only fields; requested values are
 /// read back and validated before replacement.

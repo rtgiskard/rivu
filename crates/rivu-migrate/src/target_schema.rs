@@ -61,6 +61,21 @@ pub(super) fn validate_tag_source(conn: &Connection) -> Result<i64> {
     Ok(version)
 }
 
+pub(super) fn validate_replaygain_source(conn: &Connection) -> Result<()> {
+    ensure!(
+        matches!(
+            database::inspect(conn)?,
+            database::DatabaseState::Versioned { schema_version: 6 }
+        ),
+        "ReplayGain migration requires schema 6"
+    );
+    database::validate_common_structure(conn)?;
+    let fresh = Connection::open_in_memory()?;
+    database::create_current(&fresh)?;
+    fresh.execute_batch("ALTER TABLE tracks DROP COLUMN replaygain_track_gain;")?;
+    validate_objects(conn, &fresh)
+}
+
 fn validate_objects(conn: &Connection, fresh: &Connection) -> Result<()> {
     const OBJECTS: &str = "SELECT type,name,tbl_name,sql FROM sqlite_schema
         WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name";

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 pub use rivu_format::tags::{TagEncoding, TagValues};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tags {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -29,6 +29,7 @@ pub struct Tags {
     pub release_date: Option<String>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
+    pub replaygain_track_gain: Option<f64>,
 }
 
 use anyhow::{Result, ensure};
@@ -78,6 +79,20 @@ fn positive_number(tag: &Tag, key: ItemKey) -> Option<u32> {
         .filter(|n| *n > 0)
 }
 
+fn replaygain_number(tag: &Tag) -> Option<f64> {
+    let value = first(tag, ItemKey::ReplayGainTrackGain)?;
+    let value = if value
+        .as_bytes()
+        .get(value.len().saturating_sub(2)..)?
+        .eq_ignore_ascii_case(b"db")
+    {
+        value[..value.len() - 2].trim_end()
+    } else {
+        value
+    };
+    value.parse::<f64>().ok().filter(|value| value.is_finite())
+}
+
 fn fill_missing(result: &mut Tags, tag: &Tag) {
     if result.title.is_none() {
         result.title = first(tag, ItemKey::TrackTitle).map(str::to_owned);
@@ -99,6 +114,9 @@ fn fill_missing(result: &mut Tags, tag: &Tag) {
     }
     if result.disc_number.is_none() {
         result.disc_number = positive_number(tag, ItemKey::DiscNumber);
+    }
+    if result.replaygain_track_gain.is_none() {
+        result.replaygain_track_gain = replaygain_number(tag);
     }
 }
 

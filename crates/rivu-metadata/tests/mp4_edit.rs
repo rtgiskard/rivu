@@ -45,11 +45,13 @@ fn explicit_patch_keeps_unrelated_native_items_without_backup() {
         &path,
         &rivu_metadata::TagPatch {
             title: Some("edited title".into()),
+            replaygain_track_gain: Some(Some(-6.5)),
             ..Default::default()
         },
     )
     .unwrap();
     assert!(report.changed());
+    assert_eq!(report.tags.replaygain_track_gain, Some(-6.5));
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     let parsed = Mp4File::read_from(
         &mut BufReader::new(File::open(&path).unwrap()),

@@ -42,7 +42,7 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
     }
     conn.execute(
         "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
-        [database::SCHEMA_VERSION],
+        [6],
     )?;
-    super::target_schema::validate(conn)
+    super::target_schema::validate_replaygain_source(conn)
 }

@@ -64,6 +64,8 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         .context("Unsupported library database: missing catalog order")?;
     conn.prepare("SELECT title,artist,album FROM tracks LIMIT 0")
         .context("Unsupported library database: missing tag values")?;
+    conn.prepare("SELECT replaygain_track_gain FROM tracks LIMIT 0")
+        .context("Unsupported library database: missing ReplayGain values")?;
     Ok(())
 }
 
@@ -311,7 +313,7 @@ pub fn ensure_current(conn: &Connection) -> Result<()> {
         validate_structure(conn)
     }
 }
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
@@ -329,7 +331,8 @@ const TRACK_TABLE: &str = "CREATE TABLE tracks(
     bits_per_sample INTEGER,release_date TEXT,
     favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
     relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),
-    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
+    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2)),
+    replaygain_track_gain REAL
 );";
 
 const TRACK_INDEXES: &str = "

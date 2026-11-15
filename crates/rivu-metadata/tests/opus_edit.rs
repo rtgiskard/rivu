@@ -106,6 +106,7 @@ fn opus_edit_transaction_updates_tags_and_keeps_audio_without_backup() {
         &path,
         &TagPatch {
             title: Some("Updated".into()),
+            replaygain_track_gain: Some(Some(-6.5)),
             ..Default::default()
         },
     )
@@ -119,4 +120,5 @@ fn opus_edit_transaction_updates_tags_and_keeps_audio_without_backup() {
         .unwrap()
         .unwrap();
     assert_eq!(tags.title.as_deref(), Some("Updated"));
+    assert_eq!(tags.replaygain_track_gain, Some(-6.5));
 }

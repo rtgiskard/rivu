@@ -89,6 +89,141 @@ fn summary_preserves_precision_first_value_and_positive_numbers() {
 }
 
 #[test]
+fn replaygain_reads_db_suffixes_and_rejects_invalid_values() {
+    for (gain, expected_gain) in [
+        (" -7.25 dB ", Some(-7.25)),
+        ("+3.0 DB", Some(3.0)),
+        ("0", Some(0.0)),
+        ("NaN", None),
+        ("inf dB", None),
+        ("1.0 loud", None),
+    ] {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&flac(&[&format!("REPLAYGAIN_TRACK_GAIN={gain}")], None))
+            .unwrap();
+        let tags = read_tags(&mut file).unwrap().unwrap();
+        assert_eq!(tags.replaygain_track_gain, expected_gain);
+    }
+}
+
+#[test]
+fn replaygain_missing_track_gain_is_none() {
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&flac(&[], None)).unwrap();
+    assert_eq!(
+        read_tags(&mut file).unwrap().unwrap().replaygain_track_gain,
+        None
+    );
+}
+
+#[test]
+fn descriptive_edits_preserve_existing_replaygain_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gain.flac");
+    fs::write(
+        &path,
+        flac(
+            &[
+                "TITLE=Old",
+                "REPLAYGAIN_TRACK_GAIN=-6.25 dB",
+                "REPLAYGAIN_TRACK_PEAK=0.9",
+                "REPLAYGAIN_ALBUM_GAIN=-5 dB",
+                "REPLAYGAIN_ALBUM_PEAK=1.1",
+            ],
+            None,
+        ),
+    )
+    .unwrap();
+    let before = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    edit_file(
+        &path,
+        &TagPatch {
+            title: Some("New".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    assert_eq!(after.replaygain_track_gain, before.replaygain_track_gain);
+    for gain in [Some(-2.5), None] {
+        edit_file(
+            &path,
+            &TagPatch {
+                replaygain_track_gain: Some(gain),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+        assert_eq!(after.replaygain_track_gain, gain);
+        let saved = fs::read(&path).unwrap();
+        for value in [
+            "REPLAYGAIN_TRACK_PEAK=0.9",
+            "REPLAYGAIN_ALBUM_GAIN=-5 dB",
+            "REPLAYGAIN_ALBUM_PEAK=1.1",
+        ] {
+            assert!(
+                saved
+                    .windows(value.len())
+                    .any(|bytes| bytes == value.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn replaygain_writes_and_clears_native_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, bytes) in [
+        ("gain.flac", flac(&[], None)),
+        ("gain.wav", tagged_wav(&frame(b"TIT2", b"\x03Title"), false)),
+        ("gain.mp3", tagged_mp3(1, 2)),
+    ] {
+        let path = dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        let report = edit_file(
+            &path,
+            &TagPatch {
+                replaygain_track_gain: Some(Some(-7.123456789)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.tags.replaygain_track_gain, Some(-7.123456789));
+        let report = edit_file(
+            &path,
+            &TagPatch {
+                replaygain_track_gain: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.tags.replaygain_track_gain, None);
+    }
+}
+
+#[test]
+fn invalid_replaygain_patch_does_not_replace_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gain.flac");
+    let original = flac(&["TITLE=Original"], None);
+    fs::write(&path, &original).unwrap();
+    for patch in [
+        TagPatch {
+            replaygain_track_gain: Some(Some(f64::NAN)),
+            ..Default::default()
+        },
+        TagPatch {
+            replaygain_track_gain: Some(Some(f64::INFINITY)),
+            ..Default::default()
+        },
+    ] {
+        assert!(edit_file(&path, &patch).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+}
+
+#[test]
 fn unsupported_content_has_no_tags_or_artwork() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(b"unsupported container").unwrap();
@@ -723,6 +858,7 @@ fn six_field_patch_preserves_date_precision_and_clears_aliases() {
                     release_date: Some(date.into()),
                     track_number: Some(Some(12)),
                     disc_number: Some(Some(2)),
+                    ..TagPatch::default()
                 },
             )
             .unwrap();
@@ -735,6 +871,7 @@ fn six_field_patch_preserves_date_precision_and_clears_aliases() {
                     release_date: Some(date.into()),
                     track_number: Some(12),
                     disc_number: Some(2),
+                    ..Tags::default()
                 }
             );
             let cleared = edit_file(
@@ -746,6 +883,7 @@ fn six_field_patch_preserves_date_precision_and_clears_aliases() {
                     release_date: Some(String::new()),
                     track_number: Some(None),
                     disc_number: Some(None),
+                    ..TagPatch::default()
                 },
             )
             .unwrap();

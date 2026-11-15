@@ -34,6 +34,38 @@ fn format_version(connection: &Connection) -> i64 {
 }
 
 #[test]
+fn replaygain_migration_preserves_schema_six_user_state_and_initializes_absent_tags() {
+    let (_directory, options) = version_two_fixture();
+    let path = options.data_dir.join("library.db");
+    let conn = Connection::open(&path).unwrap();
+    catalog_order::apply(&conn).unwrap();
+    track_tags::apply(&conn).unwrap();
+    assert_eq!(format_version(&conn), 6);
+    let tracks = track_snapshot(&conn);
+    let occurrences = occurrence_snapshot(&conn);
+    let albums = album_snapshot(&conn);
+    let checked = execute(&options, Mode::Check).unwrap();
+    assert!(checked.needs_changes);
+    assert!(checked.backups.is_empty());
+    assert_eq!(format_version(&conn), 6);
+    assert_eq!(track_snapshot(&conn), tracks);
+    let applied = execute(&options, Mode::Apply).unwrap();
+    assert_eq!(applied.backups.len(), 1);
+    let backup = Connection::open(&applied.backups[0].path).unwrap();
+    assert_eq!(format_version(&backup), 6);
+    assert_eq!(track_snapshot(&backup), tracks);
+    let mut expected = tracks;
+    for track in &mut expected {
+        track.extend(std::iter::repeat_n(rusqlite::types::Value::Null, 1));
+    }
+    assert_eq!(track_snapshot(&conn), expected);
+    assert_eq!(occurrence_snapshot(&conn), occurrences);
+    assert_eq!(album_snapshot(&conn), albums);
+    target_schema::validate(&conn).unwrap();
+    assert!(execute(&options, Mode::Apply).unwrap().backups.is_empty());
+}
+
+#[test]
 fn storage_estimate_rejects_unrepresentable_sizes() {
     assert!(database_storage_bytes(u64::MAX, 4096).is_err());
     assert!(database_storage_bytes(1, u64::MAX).is_err());
@@ -458,10 +490,11 @@ fn occurrence_snapshot(conn: &Connection) -> Vec<(i64, i64, i64, i64)> {
 
 fn track_snapshot(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
     let mut statement = conn.prepare("SELECT * FROM tracks ORDER BY id").unwrap();
-    let columns = statement.column_count();
     statement
         .query_map([], |row| {
-            (0..columns).map(|column| row.get(column)).collect()
+            (0..row.as_ref().column_count())
+                .map(|column| row.get(column))
+                .collect()
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -476,7 +509,7 @@ fn effective_track_snapshot(conn: &Connection) -> Vec<Vec<rusqlite::types::Value
         COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,
         play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,
         probe_version,bitrate_bps,track_number,disc_number,bitrate_exact,bits_per_sample,
-        release_date,favorite,relocation_independent,decoder_hint FROM tracks ORDER BY id",
+        release_date,favorite,relocation_independent,decoder_hint,NULL FROM tracks ORDER BY id",
         )
         .unwrap();
     let columns = statement.column_count();
@@ -900,6 +933,7 @@ fn failed_catalog_migration_rolls_back_schema_version_and_data() {
     let error = apply_database_change(&options, &mut report, |transaction| {
         catalog_order::apply(transaction)?;
         track_tags::apply(transaction)?;
+        replaygain::apply(transaction)?;
         transaction.execute_batch(
             "CREATE TABLE unexpected(value TEXT);
              UPDATE tracks SET title='must roll back' WHERE id=1;",
@@ -984,7 +1018,7 @@ fn schema_four_tag_cutover_preserves_effective_empty_values_sequences_and_audio(
         format_version(&Connection::open(&applied.backups[0].path).unwrap()),
         4
     );
-    assert_eq!(format_version(&conn), 6);
+    assert_eq!(format_version(&conn), database::SCHEMA_VERSION);
     assert_eq!(track_snapshot(&conn), tracks);
     assert_eq!(occurrence_snapshot(&conn), occurrences);
     assert_eq!(album_snapshot(&conn), albums);
@@ -1068,7 +1102,7 @@ fn real_migrations_reclaim_deleted_pages_collect_statistics_and_truncate_wal() {
         assert!(!applied.needs_changes);
         assert_eq!(applied.backups.len(), 1);
         assert_eq!(applied.backups[0].status, BackupStatus::Complete);
-        assert_eq!(format_version(&conn), 6);
+        assert_eq!(format_version(&conn), database::SCHEMA_VERSION);
         assert_eq!(track_snapshot(&conn), effective_tracks);
         assert_eq!(
             conn.query_row("PRAGMA freelist_count", [], |row| row.get::<_, i64>(0))
@@ -1136,7 +1170,8 @@ fn blocked_post_migration_checkpoint_reports_committed_state_and_keeps_backup() 
     let error = apply_database_change(&options, &mut report, |transaction| {
         transaction.busy_timeout(std::time::Duration::ZERO)?;
         catalog_order::apply(transaction)?;
-        track_tags::apply(transaction)
+        track_tags::apply(transaction)?;
+        replaygain::apply(transaction)
     })
     .unwrap_err();
     let message = format!("{error:#}");
@@ -1153,7 +1188,7 @@ fn blocked_post_migration_checkpoint_reports_committed_state_and_keeps_backup() 
     assert_eq!(format_version(&backup), 2);
     target_schema::validate_tag_source(&backup).unwrap();
     let committed = Connection::open(&path).unwrap();
-    assert_eq!(format_version(&committed), 6);
+    assert_eq!(format_version(&committed), database::SCHEMA_VERSION);
     target_schema::validate(&committed).unwrap();
     // The old reader still sees its snapshot; no automatic backup restore occurs.
     assert_eq!(format_version(&reader), 2);
