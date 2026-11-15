@@ -1503,6 +1503,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
                 disc_number: None,
                 bits_per_sample: None,
                 release_date: None,
+                replaygain_track_gain: None,
             },
         })
         .collect::<Vec<_>>();

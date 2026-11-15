@@ -2,6 +2,61 @@ use super::*;
 use crate::store::tracks::TrackEditImpact;
 
 #[test]
+fn replaygain_database_edit_validates_values_clears_and_preserves_other_metadata() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.conn.execute_batch("INSERT INTO tracks(id,path,title,album,play_count,favorite) VALUES(1,'one','Title','Album',7,1)").unwrap();
+    let original = store.track(1).unwrap().unwrap();
+    let impact = store.set_replaygain(1, Some(-9.5)).unwrap();
+    assert!(impact.changed && impact.library && impact.albums);
+    assert!(!impact.counts && !impact.queue && !impact.history && !impact.member_facts);
+    let mut expected = original.clone();
+    expected.replaygain_track_gain = Some(-9.5);
+    assert_eq!(store.track(1).unwrap().unwrap(), expected);
+    assert!(!store.set_replaygain(1, Some(-9.5)).unwrap().changed);
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(store.set_replaygain(1, Some(invalid)).is_err());
+    }
+    assert!(store.set_replaygain(1, Some(3.0)).unwrap().changed);
+    assert_eq!(
+        store.track(1).unwrap().unwrap().replaygain_track_gain,
+        Some(3.0)
+    );
+    assert!(store.set_replaygain(1, None).unwrap().changed);
+    assert_eq!(store.track(1).unwrap().unwrap(), original);
+    assert!(store.set_replaygain(99, None).is_err());
+}
+
+#[test]
+fn verified_tag_sync_replaces_replaygain_atomically() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch("INSERT INTO tracks(id,path,title) VALUES(1,'one','Title')")
+        .unwrap();
+    let tags = rivu_format::tags::TagValues {
+        title: "Title".into(),
+        replaygain_track_gain: Some(-8.0),
+        ..Default::default()
+    };
+    let impact = store.sync_track_tags(1, &tags).unwrap();
+    assert!(impact.changed && impact.library);
+    let track = store.track(1).unwrap().unwrap();
+    assert_eq!(track.replaygain_track_gain, tags.replaygain_track_gain);
+    assert!(!store.sync_track_tags(1, &tags).unwrap().changed);
+    store
+        .sync_track_tags(
+            1,
+            &rivu_format::tags::TagValues {
+                title: "Title".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let track = store.track(1).unwrap().unwrap();
+    assert_eq!(track.replaygain_track_gain, None);
+}
+
+#[test]
 fn track_edit_history_impact_uses_effective_title_and_persisted_membership() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store

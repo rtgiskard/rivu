@@ -525,6 +525,7 @@ impl Source {
             track_number: None,
             disc_number: None,
             release_date: None,
+            replaygain_track_gain: None,
         };
         let position = ((start * f64::from(rate)).round() as u64).min(pcm.frames());
         Ok(Self {
@@ -948,6 +949,7 @@ impl Source {
             disc_number: None,
             bits_per_sample: source_bits_per_sample(&params),
             release_date: None,
+            replaygain_track_gain: None,
             codec,
             channels: params
                 .channels
@@ -1318,6 +1320,7 @@ impl Source {
                     track_number: self.info.track_number,
                     disc_number: self.info.disc_number,
                     release_date: self.info.release_date.clone(),
+                    replaygain_track_gain: self.info.replaygain_track_gain,
                 };
                 let mut source = Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
                     &path, file, tags, cancelled,

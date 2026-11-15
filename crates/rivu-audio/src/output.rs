@@ -130,11 +130,11 @@ struct OutputShared {
     // The same audible cursor backs playback accounting and PCM observation.
     pcm: Arc<PcmControl>,
     timing_error: AtomicU32,
-    // Linear amplitude gain; conversion happens outside the realtime callback.
-    volume: AtomicU32,
+    // Combined master/source amplitude gain, prepared outside the realtime callback.
+    gain: AtomicU32,
 }
 impl OutputShared {
-    fn new(volume: f32, paused: bool, pcm: &Arc<PcmControl>) -> Self {
+    fn new(gain: f32, paused: bool, pcm: &Arc<PcmControl>) -> Self {
         let (wakeup, notifications) = bounded(1);
         Self {
             paused: AtomicBool::new(paused),
@@ -144,7 +144,7 @@ impl OutputShared {
             refill_armed: AtomicBool::new(false),
             pcm: Arc::clone(pcm),
             timing_error: AtomicU32::new(0),
-            volume: AtomicU32::new(crate::volume::gain(volume).to_bits()),
+            gain: AtomicU32::new(gain.to_bits()),
         }
     }
 
@@ -235,7 +235,7 @@ impl PlaybackClock {
 
 pub(super) struct OutputOptions<'a> {
     pub(super) device: Option<&'a str>,
-    pub(super) volume: f32,
+    pub(super) gain: f32,
     pub(super) paused: bool,
     pub(super) auto_mix: bool,
     pub(super) metadata: Arc<PlaybackMetadata>,
@@ -283,7 +283,7 @@ impl Output {
             .try_reserve_exact(scratch_samples)
             .context("Cannot allocate audio output callback buffer")?;
         scratch.resize(scratch_samples, 0.0);
-        let shared = Arc::new(OutputShared::new(options.volume, options.paused, analyzer));
+        let shared = Arc::new(OutputShared::new(options.gain, options.paused, analyzer));
         let (error_send, errors) = bounded(4);
         analyzer.reset(rate, source_layout);
         let callback = OutputCallback {
@@ -322,10 +322,8 @@ impl Output {
         &self.errors
     }
 
-    pub(super) fn set_volume(&self, volume: f32) {
-        self.shared
-            .volume
-            .store(crate::volume::gain(volume).to_bits(), Ordering::Release);
+    pub(super) fn set_gain(&self, gain: f32) {
+        self.shared.gain.store(gain.to_bits(), Ordering::Release);
     }
 
     pub(super) fn set_metadata(&self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
@@ -472,7 +470,7 @@ impl OutputCallback {
         {
             let _ = self.shared.wakeup.try_send(());
         }
-        let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
+        let gain = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
         let source_channels = self.source_channels;
         // Snapshot availability: valid frames form one prefix, even if the
         // producer refills concurrently after an underflow.
@@ -506,15 +504,15 @@ impl OutputCallback {
             let scratch = &mut self.scratch[..samples];
             let consumed = self.consumer.pop_slice(scratch);
             debug_assert_eq!(consumed, samples);
-            // Decoder PCM is finite and normalized volume gives gain in [0, 1].
-            // Mapping and attenuation cannot introduce non-finite samples.
+            // ReplayGain may boost finite PCM beyond f32's representable range.
+            // Preserve ordinary overs; only saturate floating-point overflow.
             for (output, frame) in block
                 .chunks_exact_mut(self.channels)
                 .zip(scratch.chunks_exact(source_channels))
             {
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
-                        Some(source) => frame[*source] * volume,
+                        Some(source) => (frame[*source] * gain).clamp(-f32::MAX, f32::MAX),
                         None => 0.0,
                     };
                 }
@@ -1582,7 +1580,7 @@ mod pcm_tests {
             .into_iter()
             .enumerate()
         {
-            output.set_volume(level);
+            output.set_gain(crate::volume::gain(level));
             assert_eq!(output.push(&[0.5, -0.25]), 1);
             let mut data = [1.0_f32; 2];
             callback.render(&mut data, timestamp(millis as u64, millis as u64 + 20));
@@ -1596,7 +1594,7 @@ mod pcm_tests {
     fn float_output_preserves_overs_and_applies_gain_before_device_conversion() {
         let (mut output, mut callback, _analyzer) = test_output(1000, false);
         for (index, volume) in [1.0, 0.9, 0.5, 0.0].into_iter().enumerate() {
-            output.set_volume(volume);
+            output.set_gain(crate::volume::gain(volume));
             let samples = [4.0, -3.0, f32::MAX, -f32::MAX];
             assert_eq!(output.push(&samples), 2);
             let mut data = [0.0; 4];
@@ -1607,6 +1605,16 @@ mod pcm_tests {
                 assert!(data[0] > 1.0 && data[1] < -1.0);
             }
         }
+    }
+
+    #[test]
+    fn replaygain_boost_preserves_overs_but_never_overflows_finite_pcm() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        output.set_gain(2.0);
+        assert_eq!(output.push(&[0.75, -0.75, f32::MAX, -f32::MAX]), 2);
+        let mut data = [0.0; 4];
+        callback.render(&mut data, timestamp(0, 20));
+        assert_eq!(data, [1.5, -1.5, f32::MAX, -f32::MAX]);
     }
 
     #[test]

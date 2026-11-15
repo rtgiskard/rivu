@@ -2007,6 +2007,7 @@ fn cue_playlist_import_preserves_repeated_segments_in_order() {
             disc_number: None,
             bits_per_sample: None,
             release_date: None,
+            replaygain_track_gain: None,
         },
     });
     let segments = (1..=2)

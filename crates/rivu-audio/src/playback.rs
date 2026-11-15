@@ -37,6 +37,7 @@ pub(super) struct PlaybackOptions {
     pub(super) paused: bool,
     pub(super) device: Option<String>,
     pub(super) volume: f32,
+    pub(super) replaygain_enabled: bool,
     pub(super) pipewire_auto_mix: bool,
     pub(super) visualization_enabled: bool,
     pub(super) equalizer: Arc<EqualizerConfig>,
@@ -62,6 +63,8 @@ pub(super) struct Playback {
     source_eof: bool,
     // Audition keeps the selected source's metadata/timeline, not PCM metadata.
     source_info: Option<MediaInfo>,
+    replaygain_gain: f32,
+    replaygain_enabled: bool,
     pending: Vec<f32>,
     pending_start: f64,
     pending_position: u64,
@@ -225,6 +228,7 @@ impl Playback {
             paused,
             device,
             volume,
+            replaygain_enabled,
             pipewire_auto_mix,
             visualization_enabled,
             equalizer,
@@ -255,12 +259,13 @@ impl Playback {
             source.info().sample_rate,
         );
         analyzer.set_generation(generation);
+        let replaygain_gain = crate::volume::replaygain(&metadata, replaygain_enabled);
         let output = Output::new(
             source.info().sample_rate,
             source.layout(),
             OutputOptions {
                 device: device.as_deref(),
-                volume,
+                gain: crate::volume::gain(volume) * replaygain_gain,
                 paused,
                 auto_mix: pipewire_auto_mix,
                 metadata: Arc::clone(&metadata),
@@ -292,6 +297,8 @@ impl Playback {
             graph_media: (0, start),
             source_eof: false,
             source_info,
+            replaygain_gain,
+            replaygain_enabled,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             pending_start: start,
             pending_position: 0,
@@ -329,13 +336,14 @@ impl Playback {
         analyzer: &Arc<PcmControl>,
     ) -> Result<()> {
         let metadata = Arc::clone(&self.metadata);
+        let gain = crate::volume::gain(volume) * self.replaygain_gain;
         self.restart_output_with(target, |source, paused| {
             Output::new(
                 source.info().sample_rate,
                 source.layout(),
                 OutputOptions {
                     device,
-                    volume,
+                    gain,
                     paused,
                     auto_mix,
                     metadata,
@@ -442,7 +450,14 @@ impl Playback {
     }
 
     pub(super) fn set_volume(&self, volume: f32) {
-        self.output.set_volume(volume);
+        self.output
+            .set_gain(crate::volume::gain(volume) * self.replaygain_gain);
+    }
+
+    pub(super) fn set_replaygain(&mut self, enabled: bool, volume: f32) {
+        self.replaygain_enabled = enabled;
+        self.replaygain_gain = crate::volume::replaygain(&self.metadata, enabled);
+        self.set_volume(volume);
     }
 
     pub(super) fn set_equalizer(&mut self, config: &EqualizerConfig) -> Result<()> {
@@ -467,10 +482,15 @@ impl Playback {
         self.render_source.clone()
     }
 
-    pub(super) fn set_metadata(&mut self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
+    pub(super) fn set_metadata(
+        &mut self,
+        metadata: Arc<PlaybackMetadata>,
+        volume: f32,
+    ) -> Result<()> {
         if self.metadata != metadata {
             self.output.set_metadata(Arc::clone(&metadata))?;
             self.metadata = metadata;
+            self.set_replaygain(self.replaygain_enabled, volume);
         }
         Ok(())
     }
@@ -825,6 +845,60 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn replaygain_audition_preserves_analysis_taps_and_export_pcm() {
+        let file = pcm_samples(320);
+        let original: Vec<_> = (0..320).map(|index| index as f32 / 32768.0).collect();
+        for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+            let (mut playback, mut render) = test_playback_selected(file.path(), None);
+            let mut source_info = playback.source.info().clone();
+            source_info.replaygain_track_gain = Some(-40.0);
+            playback.source_info = Some(source_info);
+            playback
+                .set_metadata(
+                    Arc::new(PlaybackMetadata {
+                        replaygain_track_gain: Some(12.041199826559248),
+                        ..Default::default()
+                    }),
+                    0.75,
+                )
+                .unwrap();
+            playback.set_replaygain(true, 0.75);
+            let (_worker, mut captured) = attach_capture(&mut playback, signal);
+            playback.fill().unwrap();
+            let weights = crate::channels::analysis_weights(playback.source.layout());
+            for sample in &original {
+                assert_eq!(
+                    captured.try_pop().unwrap().samples,
+                    [sample * weights[0][0], sample * weights[0][1]]
+                );
+            }
+            assert!(captured.try_pop().is_none());
+            let mut audible = [0.0; 320];
+            render(&mut audible, 0);
+            let gain = crate::volume::gain(0.75) * 4.0;
+            for (actual, expected) in audible.iter().zip(&original) {
+                assert_eq!(*actual, expected * gain);
+            }
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let mut exported = Vec::new();
+            crate::render_stream(&playback.render_snapshot(), 1, false, &cancelled, |event| {
+                if let crate::RenderEvent::Pcm { samples, .. } = event {
+                    exported.extend_from_slice(samples);
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(exported, original);
+            // An explicit library clear must not revive the selected source's -40 dB tag.
+            playback.set_metadata(Arc::default(), 0.75).unwrap();
+            assert_eq!(playback.output.push(&[0.25]), 1);
+            let mut cleared = [0.0];
+            render(&mut cleared, 40);
+            assert_eq!(cleared, [0.25 * crate::volume::gain(0.75)]);
+        }
+    }
+
+    #[test]
     fn late_capture_and_pause_resume_restart_capture_coordinates() {
         use rivu_format::config::processing_graph::GraphPort;
         for processing in 0..3 {
@@ -1160,6 +1234,8 @@ pub(super) mod tests {
             graph_media: (0, 0.0),
             source_eof: false,
             source_info: None,
+            replaygain_gain: 1.0,
+            replaygain_enabled: false,
             pending: Vec::new(),
             pending_start: 0.0,
             pending_position: 0,

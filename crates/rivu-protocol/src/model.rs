@@ -96,6 +96,7 @@ pub struct Track {
     pub disc_number: Option<u32>,
     pub bits_per_sample: Option<u32>,
     pub release_date: Option<String>,
+    pub replaygain_track_gain: Option<f64>,
     pub favorite: bool,
     pub decoder_hint: DecoderHint,
     pub missing: bool,
@@ -892,6 +893,10 @@ pub enum Command {
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
         release_date: Option<String>,
+    },
+    SetReplayGain {
+        track_id: i64,
+        value: Option<f64>,
     },
     /// Explicit file read; never updates database metadata.
     LoadSourceTags {

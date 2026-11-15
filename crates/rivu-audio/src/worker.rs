@@ -154,6 +154,7 @@ pub(super) struct Worker {
     opening: Option<Opening>,
     device: Option<String>,
     volume: f32,
+    replaygain_enabled: bool,
     media_read_buffer_len: usize,
     visualization_enabled: bool,
     ffmpeg_enabled: bool,
@@ -187,6 +188,7 @@ impl Worker {
             opening: None,
             device: None,
             volume: 0.7,
+            replaygain_enabled: false,
             media_read_buffer_len,
             visualization_enabled: true,
             ffmpeg_enabled: false,
@@ -290,6 +292,12 @@ impl Worker {
                 self.volume = volume;
                 if let Some(playback) = &self.playback {
                     playback.set_volume(volume);
+                }
+            }
+            AudioCommand::ReplayGain(enabled) => {
+                self.replaygain_enabled = enabled;
+                if let Some(playback) = self.playback.as_mut() {
+                    playback.set_replaygain(enabled, self.volume);
                 }
             }
             AudioCommand::Equalizer(config) => {
@@ -418,7 +426,7 @@ impl Worker {
                     opening.metadata = metadata;
                 } else if let Some(playback) = self.playback.as_mut()
                     && playback.generation() == generation
-                    && let Err(error) = playback.set_metadata(metadata)
+                    && let Err(error) = playback.set_metadata(metadata, self.volume)
                 {
                     self.fail(error);
                 }
@@ -583,6 +591,7 @@ impl Worker {
                         paused: opening.paused,
                         device: self.device.clone(),
                         volume: self.volume,
+                        replaygain_enabled: self.replaygain_enabled,
                         pipewire_auto_mix: self.pipewire_auto_mix,
                         visualization_enabled: self.visualization_enabled,
                         equalizer: Arc::clone(&self.equalizer),
@@ -807,6 +816,82 @@ mod tests {
     use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
     use futures::channel::oneshot;
+
+    #[test]
+    fn replaygain_live_updates_preserve_master_volume_and_clear_missing_values() {
+        let file = crate::playback::tests::pcm();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let (playback, mut render) =
+            crate::playback::tests::test_playback_selected(file.path(), None);
+        worker.playback = Some(playback);
+        worker.command(AudioCommand::Volume(0.5));
+        worker.command(AudioCommand::Metadata {
+            generation: 1,
+            metadata: Arc::new(PlaybackMetadata {
+                replaygain_track_gain: Some(-6.020599913279624),
+                ..Default::default()
+            }),
+        });
+        worker.playback.as_mut().unwrap().fill().unwrap();
+        for step in 0..8 {
+            let expected_source_gain = match step {
+                0 => 1.0, // Startup is off despite tagged metadata.
+                1 => {
+                    worker.command(AudioCommand::ReplayGain(true));
+                    0.5
+                }
+                2 => {
+                    worker.command(AudioCommand::Volume(0.75));
+                    0.5
+                }
+                3 => {
+                    worker.command(AudioCommand::Metadata {
+                        generation: 1,
+                        metadata: Arc::new(PlaybackMetadata {
+                            replaygain_track_gain: Some(12.041199826559248),
+                            ..Default::default()
+                        }),
+                    });
+                    4.0
+                }
+                4 => {
+                    worker.command(AudioCommand::ReplayGain(false));
+                    1.0
+                }
+                5 => {
+                    worker.command(AudioCommand::ReplayGain(true));
+                    4.0
+                }
+                6 => {
+                    worker.command(AudioCommand::Metadata {
+                        generation: 1,
+                        metadata: Arc::default(),
+                    });
+                    1.0
+                }
+                _ => {
+                    worker.command(AudioCommand::Metadata {
+                        generation: 0,
+                        metadata: Arc::new(PlaybackMetadata {
+                            replaygain_track_gain: Some(-6.020599913279624),
+                            ..Default::default()
+                        }),
+                    });
+                    1.0
+                }
+            };
+            let expected_master = if step < 2 { 0.5 } else { 0.75 };
+            assert_eq!(worker.volume, expected_master);
+            let gain = crate::volume::gain(expected_master) * expected_source_gain;
+            let mut samples = [0.0; 16];
+            render(&mut samples, step * 2);
+            for (offset, sample) in samples.into_iter().enumerate() {
+                let original = (step as usize * 16 + offset) as f32 / 32768.0;
+                assert_eq!(sample, original * gain, "step={step}, offset={offset}");
+            }
+        }
+        assert!(events.is_empty());
+    }
 
     #[test]
     fn failure_kinds_follow_provenance_through_context_not_error_messages() {
@@ -1773,6 +1858,7 @@ mod tests {
             title: "Edited CUE title".into(),
             artist: "Library artist".into(),
             album: "Library album".into(),
+            ..Default::default()
         });
         let target = 1.0 / 8000.0;
         for command in [

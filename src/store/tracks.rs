@@ -149,6 +149,7 @@ struct TrackTagPatch<'a> {
     release_date: Option<&'a str>,
     track_number: Option<Option<u32>>,
     disc_number: Option<Option<u32>>,
+    replaygain: Option<Option<f64>>,
 }
 
 #[derive(Debug, Default)]
@@ -1004,8 +1005,46 @@ impl Store {
                 release_date,
                 track_number: None,
                 disc_number: None,
+                replaygain: None,
             },
         )
+    }
+
+    /// Edit one library value only; a later scan replaces it with the file's tag.
+    pub fn set_replaygain(&self, id: i64, value: Option<f64>) -> Result<TrackEditImpact> {
+        anyhow::ensure!(
+            value.is_none_or(f64::is_finite),
+            "ReplayGain must be finite"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        let (changed, representative): (bool, bool) = tx
+            .query_row(
+                &format!(
+                    "SELECT replaygain_track_gain IS NOT ?2, {} FROM tracks AS t WHERE id=?1",
+                    super::albums::representative("t")
+                ),
+                params![id, value],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .with_context(|| format!("track {id} does not exist"))?;
+        if changed {
+            tx.execute(
+                "UPDATE tracks SET replaygain_track_gain=?2,probe_version=0 WHERE id=?1",
+                params![id, value],
+            )?;
+        }
+        tx.commit()?;
+        if changed {
+            self.track_cache.borrow_mut().entries.remove(&id);
+        }
+        Ok(TrackEditImpact {
+            changed,
+            library: changed,
+            albums: changed && representative,
+            playlists: Some(Vec::new()),
+            ..Default::default()
+        })
     }
 
     /// Persist verified facts from a successful physical tag rewrite.
@@ -1076,6 +1115,7 @@ impl Store {
                 release_date: Some(tags.release_date.as_deref().unwrap_or("")),
                 track_number: Some(tags.track_number),
                 disc_number: Some(tags.disc_number),
+                replaygain: Some(tags.replaygain_track_gain),
             },
         )
     }
@@ -1089,7 +1129,12 @@ impl Store {
             release_date,
             track_number,
             disc_number,
+            replaygain,
         } = patch;
+        anyhow::ensure!(
+            replaygain.flatten().is_none_or(f64::is_finite),
+            "ReplayGain must be finite"
+        );
         let tx = self.conn.unchecked_transaction()?;
         let decoder_hint = decoder_hint.map(|hint| match hint {
             DecoderHint::Auto => 0,
@@ -1106,7 +1151,9 @@ impl Store {
             track_number.is_some(),
             track_number.flatten(),
             disc_number.is_some(),
-            disc_number.flatten()
+            disc_number.flatten(),
+            replaygain.is_some(),
+            replaygain.flatten(),
         ];
         let (mut impact, playlist_values_changed, numbers_changed) = tx
             .query_row(
@@ -1115,7 +1162,8 @@ impl Store {
                  OR (?2 IS NOT NULL AND ?2 IS NOT artist)
                  OR (?3 IS NOT NULL AND ?3 IS NOT album)),
                 ((?4 IS NOT NULL AND ?4 IS NOT decoder_hint)
-                 OR (?6 IS NOT NULL AND NULLIF(?6,'') IS NOT release_date)),
+                 OR (?6 IS NOT NULL AND NULLIF(?6,'') IS NOT release_date)
+                 OR (?11 AND ?12 IS NOT replaygain_track_gain)),
                 ((decoder_hint<>0) IS NOT (COALESCE(?4,decoder_hint)<>0)),
                 (last_played IS NOT NULL AND ?1 IS NOT NULL AND ?1 IS NOT title),
                 ((?7 AND ?8 IS NOT track_number) OR (?9 AND ?10 IS NOT disc_number))
@@ -1178,14 +1226,17 @@ impl Store {
              album=COALESCE(?3,album),decoder_hint=COALESCE(?4,decoder_hint),
              release_date=CASE WHEN ?6 IS NULL THEN release_date ELSE NULLIF(?6,'') END,
              track_number=CASE WHEN ?7 THEN ?8 ELSE track_number END,
-             disc_number=CASE WHEN ?9 THEN ?10 ELSE disc_number END
+             disc_number=CASE WHEN ?9 THEN ?10 ELSE disc_number END,
+             probe_version=CASE WHEN ?11 AND ?12 IS NOT replaygain_track_gain THEN 0 ELSE probe_version END,
+             replaygain_track_gain=CASE WHEN ?11 THEN ?12 ELSE replaygain_track_gain END
              WHERE id=?5 AND
              ((?1 IS NOT NULL AND title IS NOT ?1) OR
               (?2 IS NOT NULL AND artist IS NOT ?2) OR
               (?3 IS NOT NULL AND album IS NOT ?3) OR
               (?4 IS NOT NULL AND decoder_hint IS NOT ?4) OR
               (?6 IS NOT NULL AND release_date IS NOT NULLIF(?6,'')) OR
-              (?7 AND track_number IS NOT ?8) OR (?9 AND disc_number IS NOT ?10))",
+              (?7 AND track_number IS NOT ?8) OR (?9 AND disc_number IS NOT ?10)
+              OR (?11 AND ?12 IS NOT replaygain_track_gain))",
             values,
         )?;
         tx.commit()?;
@@ -1749,6 +1800,7 @@ mod request_tests {
             release_date: Some("2026-11-14".into()),
             track_number: Some(17),
             disc_number: Some(2),
+            replaygain_track_gain: None,
         };
         let impact = store.sync_track_tags(1, &tags)?;
         assert!(

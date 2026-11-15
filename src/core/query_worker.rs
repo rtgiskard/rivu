@@ -1027,6 +1027,7 @@ mod tests {
             track_number: old_track.track_number,
             disc_number: old_track.disc_number,
             release_date: old_track.release_date.clone(),
+            ..Default::default()
         };
         let source = rivu_metadata::WrittenSource {
             fingerprint: *blake3::hash(b"saved source with identical tags").as_bytes(),

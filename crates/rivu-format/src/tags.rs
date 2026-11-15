@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TagValues {
     pub title: String,
     pub artist: String,
@@ -8,6 +8,8 @@ pub struct TagValues {
     pub release_date: Option<String>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
+    #[serde(default)]
+    pub replaygain_track_gain: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

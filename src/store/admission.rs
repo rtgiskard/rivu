@@ -39,7 +39,7 @@ impl Store {
         ))?;
         {
             let mut existing = tx.prepare_cached("SELECT id FROM tracks INDEXED BY tracks_path WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1")?;
-            let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
+            let mut stage = tx.prepare("INSERT INTO external_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)")?;
             for (ordinal, record) in admission.records().iter().enumerate() {
                 let path = record
                     .path
@@ -81,6 +81,7 @@ impl Store {
                     media.disc_number,
                     media.bits_per_sample,
                     media.release_date,
+                    media.replaygain_track_gain,
                 ])?;
             }
         }
@@ -165,6 +166,7 @@ mod tests {
                 disc_number: None,
                 bits_per_sample: Some(16),
                 release_date: None,
+                replaygain_track_gain: None,
             },
         }
     }
@@ -174,6 +176,28 @@ mod tests {
             paths.iter().map(|path| record(path)).collect(),
             occurrences,
         )
+    }
+
+    #[test]
+    fn external_admission_refreshes_replaygain_and_observes_current_track_changes() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut source = record("/current.wav");
+        source.media.replaygain_track_gain = Some(-6.0);
+        let admission = ExternalAdmission::from_test_records(vec![source.clone()], vec![0]);
+        store.admit_external_queue(&admission, None, None).unwrap();
+        let entry = store.queue_ids().unwrap()[0];
+        let id = store.queue_track_id(entry).unwrap();
+        let track = store.track(id).unwrap().unwrap();
+        assert_eq!(track.replaygain_track_gain, Some(-6.0));
+        source.media.replaygain_track_gain = None;
+        let admission = ExternalAdmission::from_test_records(vec![source], vec![0]);
+        let (_, impact, _) = store
+            .admit_external_queue(&admission, None, Some(entry))
+            .unwrap();
+        assert!(impact.library);
+        assert_eq!(impact.current_track, Some(true));
+        let cleared = store.track(id).unwrap().unwrap();
+        assert_eq!(cleared.replaygain_track_gain, None);
     }
 
     #[test]

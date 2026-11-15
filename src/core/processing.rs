@@ -1037,6 +1037,7 @@ impl Core {
                 disc_number: track.disc_number,
                 bits_per_sample: track.bits_per_sample,
                 release_date: track.release_date.clone(),
+                replaygain_track_gain: track.replaygain_track_gain,
                 codec: track.codec.clone(),
                 channels: status.channels.unwrap_or(track.channels),
                 sample_rate: status.sample_rate.unwrap_or(track.sample_rate),

@@ -117,6 +117,7 @@ impl Core {
                 current.title != track.title
                     || current.artist != track.artist
                     || current.album != track.album
+                    || current.replaygain_track_gain != track.replaygain_track_gain
             })
         {
             self.engine.send(AudioCommand::Metadata {
@@ -193,6 +194,38 @@ impl Core {
             decoder_hint,
             release_date.as_deref(),
         )?;
+        self.finish_track_edit(track_id, impact)
+    }
+
+    pub(in crate::core) fn set_replaygain(
+        &mut self,
+        track_id: i64,
+        value: Option<f64>,
+    ) -> Result<()> {
+        if let Some(value) = value {
+            anyhow::ensure!(value.is_finite(), "ReplayGain values must be finite");
+        }
+        if self
+            .transport
+            .session
+            .as_ref()
+            .is_some_and(|playback| playback.track_id == track_id)
+        {
+            let stored = self.track(track_id)?;
+            if stored.replaygain_track_gain != value {
+                // Reject a busy live update before committing the database edit.
+                self.engine.ensure_command_capacity(1)?;
+            }
+        }
+        let impact = self.store.set_replaygain(track_id, value)?;
+        self.finish_track_edit(track_id, impact)
+    }
+
+    fn finish_track_edit(
+        &mut self,
+        track_id: i64,
+        impact: crate::store::TrackEditImpact,
+    ) -> Result<()> {
         let impacts = crate::store::CatalogChanges {
             changed: impact.changed,
             library: impact.library,

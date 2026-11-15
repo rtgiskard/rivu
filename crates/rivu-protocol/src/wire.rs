@@ -17,7 +17,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 40;
+pub const PROTOCOL_VERSION: u8 = 41;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -572,6 +572,10 @@ pub enum WireCommand {
     },
     MutateConfig {
         change: WireConfigMutation,
+    },
+    SetReplayGain {
+        track_id: i64,
+        value: Option<f64>,
     },
 }
 
@@ -1326,6 +1330,7 @@ impl From<Command> for WireCommand {
                 decoder_hint,
                 release_date,
             },
+            Command::SetReplayGain { track_id, value } => Self::SetReplayGain { track_id, value },
             Command::LoadSourceTags { track_id, encoding } => {
                 Self::LoadSourceTags { track_id, encoding }
             }
@@ -1652,6 +1657,9 @@ impl TryFrom<WireCommand> for Command {
                 decoder_hint,
                 release_date,
             },
+            WireCommand::SetReplayGain { track_id, value } => {
+                Self::SetReplayGain { track_id, value }
+            }
             WireCommand::LoadSourceTags { track_id, encoding } => {
                 Self::LoadSourceTags { track_id, encoding }
             }

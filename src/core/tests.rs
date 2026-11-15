@@ -81,6 +81,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
                         disc_number: None,
                         bits_per_sample: None,
                         release_date: None,
+                        replaygain_track_gain: None,
                     },
                 })
                 .collect::<Vec<_>>())
@@ -453,6 +454,7 @@ fn started_event(core: &Core, duration: Option<f64>) -> AudioEvent {
             disc_number: None,
             bits_per_sample: None,
             release_date: None,
+            replaygain_track_gain: None,
         },
     }
 }

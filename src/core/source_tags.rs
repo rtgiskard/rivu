@@ -58,6 +58,7 @@ pub(super) fn track_tags(track: &Track) -> TagValues {
         release_date: track.release_date.clone(),
         track_number: track.track_number,
         disc_number: track.disc_number,
+        replaygain_track_gain: track.replaygain_track_gain,
     }
 }
 
@@ -69,6 +70,7 @@ fn source_values(tags: rivu_metadata::Tags) -> TagValues {
         release_date: tags.release_date,
         track_number: tags.track_number,
         disc_number: tags.disc_number,
+        replaygain_track_gain: tags.replaygain_track_gain,
     }
 }
 
@@ -121,6 +123,7 @@ impl Core {
                             release_date: Some(tags.release_date.unwrap_or_default()),
                             track_number: Some(tags.track_number),
                             disc_number: Some(tags.disc_number),
+                            replaygain_track_gain: Some(tags.replaygain_track_gain),
                         };
                         let (report, source) = rivu_metadata::edit_file_with_source(&path, &patch)?;
                         Ok(SourceTagFinished {
@@ -163,6 +166,10 @@ impl Core {
         tags: &TagValues,
         expected: &TagValues,
     ) -> Result<()> {
+        ensure!(
+            tags.replaygain_track_gain.is_none_or(f64::is_finite),
+            "ReplayGain must be finite"
+        );
         ensure!(
             track_tags(&self.track(track_id)?) == *expected,
             "Database tags changed; reload the details before synchronizing"
@@ -286,6 +293,7 @@ impl Core {
                 | Command::OptimizeDatabase
                 | Command::RemoveMissingTracks => true,
                 Command::EditTrack { track_id, .. }
+                | Command::SetReplayGain { track_id, .. }
                 | Command::KeepTrackIndependent { track_id } => *track_id == pending.track_id,
                 Command::RemoveTracks { track_ids } => track_ids.contains(&pending.track_id),
                 _ => false,
@@ -309,6 +317,7 @@ impl Core {
             | Command::OptimizeDatabase
             | Command::RemoveMissingTracks => true,
             Command::EditTrack { track_id, .. }
+            | Command::SetReplayGain { track_id, .. }
             | Command::SyncTrackTags { track_id, .. }
             | Command::KeepTrackIndependent { track_id } => *track_id == task.track.id,
             Command::RemoveTracks { track_ids } => track_ids.contains(&task.track.id),

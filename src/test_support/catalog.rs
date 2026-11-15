@@ -43,6 +43,7 @@ impl CatalogFixture {
                             disc_number: None,
                             bits_per_sample: None,
                             release_date: None,
+                            replaygain_track_gain: None,
                             codec: "PCM_S16LE".into(),
                             channels: 1,
                             sample_rate: 8000,

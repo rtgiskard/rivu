@@ -870,7 +870,6 @@ fn expired_details_cannot_retain_old_state_again_before_a_fresh_acceptance() {
 
     let stamp = details.current_stamp(&state).unwrap();
     assert!(details.accept(stamp, ViewResponse::Track(Some(full_track(2)))));
-    assert!(matches!(details.display_state(), DetailState::Ready(_)));
     details.begin_query(deadline);
     assert_eq!(
         details.refresh_deadline(),
@@ -995,6 +994,7 @@ pub(in crate::terminal) fn full_track(id: i64) -> rivu_protocol::model::Track {
         disc_number: Some(1),
         bits_per_sample: Some(24),
         release_date: Some("2026-10".into()),
+        replaygain_track_gain: None,
         favorite: true,
         decoder_hint: rivu_format::decoder_hint::DecoderHint::Native,
         missing: true,

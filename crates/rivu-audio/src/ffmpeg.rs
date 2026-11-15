@@ -754,6 +754,7 @@ impl Decoder {
             disc_number: None,
             bits_per_sample,
             release_date: None,
+            replaygain_track_gain: None,
             codec: codec_text,
             channels: 0,
             sample_rate: 0,
@@ -1079,6 +1080,7 @@ impl Decoder {
                 track_number: self.info.track_number,
                 disc_number: self.info.disc_number,
                 release_date: self.info.release_date.clone(),
+                replaygain_track_gain: self.info.replaygain_track_gain,
             };
             let mut replacement = Self::from_input(input, tags, cancelled)?;
             replacement.packet_stats.invalidate();

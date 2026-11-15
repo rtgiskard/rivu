@@ -175,6 +175,7 @@ impl Core {
             config.visualization_signal != previous.visualization_signal,
             !config.processing_bypassed && config.equalizer != previous.equalizer,
             config.ffmpeg_enabled != previous.ffmpeg_enabled,
+            config.replaygain_enabled != previous.replaygain_enabled,
         ];
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
@@ -190,6 +191,7 @@ impl Core {
             signal_changed,
             equalizer_changed,
             ffmpeg_changed,
+            replaygain_changed,
         ] = changed;
         let ffmpeg_status = if !config.ffmpeg_enabled {
             "disabled".to_owned()
@@ -242,6 +244,10 @@ impl Core {
             if ffmpeg_changed {
                 self.engine
                     .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+            }
+            if replaygain_changed {
+                self.engine
+                    .send(AudioCommand::ReplayGain(config.replaygain_enabled))?;
             }
             self.engine.send(AudioCommand::OutputSettings {
                 request,

@@ -71,6 +71,7 @@ fn track(path: std::path::PathBuf) -> Track {
         disc_number: None,
         bits_per_sample: Some(32),
         release_date: None,
+        replaygain_track_gain: None,
         favorite: false,
         decoder_hint: DecoderHint::Native,
         missing: false,
@@ -90,15 +91,15 @@ fn finite_pcm_preserves_cue_relative_positions_and_lossless_requested_ranges() {
         (0..24_000).flat_map(|frame| [frame as f32 / 32_768.0, -(frame as f32) / 65_536.0]),
     )
     .unwrap();
-    let track = Arc::new(track(path));
+    let track = track(path);
     let (handle, queries) = CoreHandle::test_query_port();
     let (_tasks, service) = audio_service(directory.path(), handle);
     async_io::block_on(timeout(Duration::from_secs(10), async {
         for range in [None, Some(PlaybackRange { start_seconds: 0.25, end_seconds: Some(0.75) })] {
             let (mut stream, mut bytes) = connect(directory.path()).await;
-            request(&mut stream, &Request::Read { expected: ExpectedSource::from(track.as_ref()), source: None, signal: VisualizationSignal::Before, range }, &mut bytes).await;
+            request(&mut stream, &Request::Read { expected: ExpectedSource::from(&track), source: None, signal: VisualizationSignal::Before, range }, &mut bytes).await;
             let authority = async {
-                queries.receive().await.respond(QueryResponse { revisions: Default::default(), result: Ok(ViewResponse::Track(Some(track.as_ref().clone()))) });
+                queries.receive().await.respond(QueryResponse { revisions: Default::default(), result: Ok(ViewResponse::Track(Some(track.clone()))) });
             };
             let receive = async {
                 let start = read_frame::<Response>(&mut stream, &mut bytes).await.unwrap();
@@ -385,7 +386,6 @@ fn cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns
     track.cue = None;
     track.duration = Some(100.0);
     track.channels = 1;
-    let track = Arc::new(track);
     let (handle, queries) = CoreHandle::test_query_port();
     let tasks = crate::execution::TaskRuntime::with_blocking_limit(1).unwrap();
     let service =
@@ -395,7 +395,7 @@ fn cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns
         request(
             &mut stream,
             &Request::Read {
-                expected: ExpectedSource::from(track.as_ref()),
+                expected: ExpectedSource::from(&track),
                 source: None,
                 signal: VisualizationSignal::Before,
                 range: None,
@@ -406,7 +406,7 @@ fn cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns
         let authority = async {
             queries.receive().await.respond(QueryResponse {
                 revisions: Default::default(),
-                result: Ok(ViewResponse::Track(Some(track.as_ref().clone()))),
+                result: Ok(ViewResponse::Track(Some(track.clone()))),
             });
         };
         let (result, ()) =

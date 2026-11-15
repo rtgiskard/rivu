@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn replaygain_defaults_false_and_persists_both_toggle_states() {
+    let original = "# preserve\n[playback]\nvolume_percent = 45\n";
+    let mut baseline = from_toml(original).unwrap();
+    assert!(!Config::default().replaygain_enabled);
+    assert!(!baseline.replaygain_enabled);
+    let mut saved = original.to_owned();
+    for enabled in [true, false] {
+        let mut config = baseline.clone();
+        config.replaygain_enabled = enabled;
+        saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+        assert!(saved.contains("# preserve"));
+        assert_eq!(from_toml(&saved).unwrap(), config);
+        assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+        baseline = config;
+    }
+    assert!(from_toml("[playback]\nreplaygain_enabled = 1").is_err());
+}
+
+#[test]
 fn preset_overrides_and_deletions_survive_configuration_reload() {
     let original = "[equalizer]\nenabled = true\npreamp_db = -8.0\n";
     let baseline = from_toml(original).unwrap();

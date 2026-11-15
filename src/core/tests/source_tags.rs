@@ -27,6 +27,7 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
             release_date: Some("2024-03".into()),
             track_number: Some(Some(3)),
             disc_number: Some(Some(2)),
+            replaygain_track_gain: Some(Some(-4.5)),
             ..Default::default()
         },
     )
@@ -41,6 +42,7 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     let loaded = ack.source_tags.unwrap();
     assert_eq!(loaded.title, "File title");
     assert_eq!(loaded.release_date.as_deref(), Some("2024-03"));
+    assert_eq!(loaded.replaygain_track_gain, Some(-4.5));
     assert_eq!(core.track(1).unwrap(), before);
     core.command(Command::SyncTrackTags {
         track_id: 1,
@@ -54,6 +56,27 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     assert_eq!(after.favorite, before.favorite);
     assert_eq!(after.decoder_hint, before.decoder_hint);
     assert_eq!(after.cue, before.cue);
+}
+
+#[test]
+fn bulk_sync_rejects_nonfinite_replaygain_without_changing_any_field() {
+    let (_directory, mut core) = fixture();
+    let before = core.track(1).unwrap();
+    let expected = source_tags::track_tags(&before);
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut tags = expected.clone();
+        tags.title = "Must not persist".into();
+        tags.replaygain_track_gain = Some(invalid);
+        assert!(
+            core.command(Command::SyncTrackTags {
+                track_id: 1,
+                tags,
+                expected: Box::new(expected.clone()),
+            })
+            .is_err()
+        );
+        assert_eq!(core.track(1).unwrap(), before);
+    }
 }
 
 #[test]
@@ -89,6 +112,7 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
         release_date: Some("2024-03-09".into()),
         track_number: Some(7),
         disc_number: Some(2),
+        replaygain_track_gain: Some(-4.5),
     };
     core.command(Command::SaveSourceTags {
         track_id: 1,
@@ -236,6 +260,38 @@ fn failed_source_fact_commit_can_retry_without_rewriting_the_file() {
     connection
         .execute_batch("DROP TRIGGER reject_facts;")
         .unwrap();
+    let source_facts = || {
+        connection
+            .query_row(
+                "SELECT fingerprint,file_size,modified_ns,probe_version FROM tracks WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<Vec<u8>>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let facts_before_retry = source_facts();
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid_tags = tags.clone();
+        invalid_tags.replaygain_track_gain = Some(invalid);
+        assert!(
+            core.command(Command::SyncTrackTags {
+                track_id: 1,
+                tags: invalid_tags,
+                expected: Box::new(source_tags::track_tags(&before)),
+            })
+            .is_err()
+        );
+        assert!(core.pending_written_source.is_some());
+        assert_eq!(source_facts(), facts_before_retry);
+        assert_eq!(core.track(1).unwrap(), before);
+    }
     core.command(Command::SyncTrackTags {
         track_id: 1,
         tags: tags.clone(),

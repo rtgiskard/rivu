@@ -20,6 +20,8 @@ pub struct MediaInfo {
     pub bits_per_sample: Option<u32>,
     /// Original date precision is retained (e.g. year, year-month, or full date).
     pub release_date: Option<String>,
+    /// Existing track ReplayGain tag in dB.
+    pub replaygain_track_gain: Option<f64>,
     pub codec: String,
     pub channels: u16,
     pub sample_rate: u32,
@@ -38,5 +40,6 @@ impl MediaInfo {
         self.track_number = tags.track_number;
         self.disc_number = tags.disc_number;
         self.release_date = tags.release_date;
+        self.replaygain_track_gain = tags.replaygain_track_gain;
     }
 }

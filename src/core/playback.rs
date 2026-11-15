@@ -320,6 +320,7 @@ impl Core {
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
+            replaygain_track_gain: track.replaygain_track_gain,
         })
     }
 

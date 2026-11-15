@@ -129,6 +129,7 @@ pub(crate) fn artwork_track(path: PathBuf) -> Track {
         disc_number: None,
         bits_per_sample: Some(16),
         release_date: None,
+        replaygain_track_gain: None,
         favorite: false,
         decoder_hint: Default::default(),
         missing: false,

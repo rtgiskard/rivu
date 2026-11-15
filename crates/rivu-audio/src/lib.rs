@@ -264,11 +264,13 @@ use worker::Worker;
 const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
 
 /// Authoritative library/display metadata, independent of decoder source tags.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlaybackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// Authoritative library track gain in dB, including explicit absence after an edit.
+    pub replaygain_track_gain: Option<f64>,
 }
 
 /// Acknowledged final clock snapshot, sampled after the output stream retires.
@@ -356,6 +358,8 @@ pub enum AudioCommand {
         revision: u64,
     },
     Volume(f32),
+    /// Apply library track ReplayGain to playback only, independently of master volume.
+    ReplayGain(bool),
     /// Prepared and applied on the audio worker, never in the device callback.
     Equalizer(Arc<rivu_dsp::equalizer::config::EqualizerConfig>),
     OutputSettings {

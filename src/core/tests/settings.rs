@@ -783,6 +783,116 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
 }
 
 #[test]
+fn startup_sends_configured_replaygain_state() {
+    for enabled in [false, true] {
+        let (_directory, mut core) = fixture();
+        edit_preferences(&mut core, |config| config.replaygain_enabled = enabled);
+        let (commands, audio) = async_channel::bounded(16);
+        let _idle_commands = core.engine.replace_commands(commands);
+
+        core.initialize_state();
+
+        let replaygain: Vec<_> = std::iter::from_fn(|| audio.try_recv().ok())
+            .filter_map(|queued| match queued.command {
+                AudioCommand::ReplayGain(enabled) => Some(enabled),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replaygain, [enabled]);
+    }
+}
+
+#[test]
+fn replaygain_apply_updates_audio_only_when_changed_even_with_processing_bypassed() {
+    let (_directory, mut core) = fixture();
+    edit_preferences(&mut core, |config| config.processing_bypassed = true);
+    let (commands, audio) = async_channel::bounded(2);
+    let _idle_commands = core.engine.replace_commands(commands);
+
+    for (enabled, changed) in [(true, true), (true, false), (false, true)] {
+        let baseline = core.preferences.checkpoint();
+        let mut draft = baseline.clone();
+        draft.replaygain_enabled = enabled;
+        core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &baseline, &draft,
+        ))))
+        .unwrap();
+
+        assert_eq!(core.preferences.settings().replaygain_enabled, enabled);
+        assert_eq!(
+            Config::load(&core.state.configuration.config_path)
+                .unwrap()
+                .replaygain_enabled,
+            enabled
+        );
+        if changed {
+            assert!(matches!(
+                audio.try_recv().unwrap().command,
+                AudioCommand::ReplayGain(actual) if actual == enabled
+            ));
+        }
+        assert!(matches!(
+            audio.try_recv().unwrap().command,
+            AudioCommand::OutputSettings { .. }
+        ));
+        assert!(audio.is_empty());
+    }
+}
+
+#[test]
+fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
+    for available in 0..=2 {
+        let (_directory, mut core) = fixture();
+        core.flush_config().unwrap();
+        let baseline = core.preferences.checkpoint();
+        let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
+        let (commands, audio) = async_channel::bounded(2);
+        for _ in 0..2 - available {
+            commands
+                .try_send(audio::QueuedAudioCommand::test_unfenced(
+                    AudioCommand::Volume(0.5),
+                ))
+                .unwrap();
+        }
+        let _idle_commands = core.engine.replace_commands(commands);
+        let mut draft = baseline.clone();
+        draft.replaygain_enabled = true;
+
+        let result = core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &baseline, &draft,
+        ))));
+
+        if available < 2 {
+            result.unwrap_err();
+            assert_eq!(core.preferences.checkpoint(), baseline);
+            assert_eq!(core.output_settings_request, 0);
+            assert_eq!(
+                std::fs::read(&core.state.configuration.config_path).unwrap(),
+                saved
+            );
+            assert_eq!(audio.len(), 2 - available);
+        } else {
+            result.unwrap();
+            assert_eq!(core.preferences.checkpoint(), draft);
+            assert_eq!(
+                Config::load(&core.state.configuration.config_path).unwrap(),
+                draft
+            );
+            assert_eq!(core.output_settings_request, 1);
+            assert!(matches!(
+                audio.try_recv().unwrap().command,
+                AudioCommand::ReplayGain(true)
+            ));
+            assert!(matches!(
+                audio.try_recv().unwrap().command,
+                AudioCommand::OutputSettings { .. }
+            ));
+            assert!(audio.is_empty());
+        }
+    }
+}
+
+#[test]
 fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validation() {
     let (_directory, mut core) = fixture();
     let (commands, receive) = async_channel::bounded(4);
@@ -1380,13 +1490,21 @@ fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let baseline = core.preferences.settings().clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
-    core.mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
-        &baseline, &draft,
-    ))))
-    .unwrap_err();
+    draft.replaygain_enabled = true;
+    let error = core
+        .mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
+            &baseline, &draft,
+        ))))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Configuration saved, but audio application failed")
+    );
     core.publish();
     let visible = &core.shared.read().clone();
     assert_eq!(visible.configuration.config.scan_max_depth, 7);
+    assert!(visible.configuration.config.replaygain_enabled);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
         *visible.configuration.config
@@ -1406,6 +1524,7 @@ fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     config.repeat = RepeatMode::All;
     config.visualization_enabled = false;
     config.ffmpeg_enabled = false;
+    config.replaygain_enabled = true;
     config.query_batch_size = 32;
     config.output_device = Some("configured-output".into());
     Arc::make_mut(&mut core.state.system.devices).push("configured-output".into());

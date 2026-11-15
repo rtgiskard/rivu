@@ -624,6 +624,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         scan_min_duration_seconds: 45,
         output_device: Some("USB DAC".to_owned()),
         volume: 0.25,
+        replaygain_enabled: true,
         shuffle: true,
         repeat: RepeatMode::All,
         play_count_threshold_percent: 35.5,

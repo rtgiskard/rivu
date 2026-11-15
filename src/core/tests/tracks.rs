@@ -598,6 +598,165 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
 }
 
 #[test]
+fn replaygain_load_uses_database_values_and_started_file_tags_do_not_overwrite_them() {
+    let (_directory, mut core) = fixture();
+    crate::test_support::write_i16_wav(&core.track(1).unwrap().path, 1, 8_000, [123]).unwrap();
+    core.command(Command::SetReplayGain {
+        track_id: 1,
+        value: Some(-8.5),
+    })
+    .unwrap();
+    let audio = recording_audio(&mut core);
+    core.start_with_status(1, QueueHistory::Preserve, PlaybackStatus::Playing)
+        .unwrap();
+    assert!(matches!(
+        audio.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AudioCommand::StopAndSnapshot(_)
+    ));
+    let AudioCommand::Load { metadata, .. } = audio.recv_timeout(Duration::from_secs(2)).unwrap()
+    else {
+        panic!("starting playback must load database ReplayGain metadata");
+    };
+    assert_eq!(metadata.replaygain_track_gain, Some(-8.5));
+
+    let mut event = started_event(&core, Some(10.0));
+    let AudioEvent::Started { info, .. } = &mut event else {
+        unreachable!();
+    };
+    info.replaygain_track_gain = Some(9.0);
+    core.audio_event(event).unwrap();
+    let stored = core.track(1).unwrap();
+    assert_eq!(stored.replaygain_track_gain, Some(-8.5));
+}
+
+#[test]
+fn replaygain_audio_delivery_failure_keeps_committed_edit_for_projection_recovery() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let (commands, audio) = async_channel::bounded(1);
+    drop(audio);
+    let _idle_commands = core.engine.replace_commands(commands);
+    assert!(
+        core.command(Command::SetReplayGain {
+            track_id: 1,
+            value: Some(-6.0),
+        })
+        .is_err()
+    );
+    assert_eq!(core.track(1).unwrap().replaygain_track_gain, Some(-6.0));
+    assert_eq!(
+        core.state.current_track().unwrap().replaygain_track_gain,
+        None
+    );
+    assert!(core.projections.current_track);
+
+    let (commands, audio) = async_channel::bounded(1);
+    let _failed_commands = core.engine.replace_commands(commands);
+    core.refresh_current_track().unwrap();
+    assert_eq!(
+        core.state.current_track().unwrap().replaygain_track_gain,
+        Some(-6.0)
+    );
+    assert!(!core.projections.current_track);
+    assert!(matches!(
+        audio.try_recv().unwrap().command,
+        AudioCommand::Metadata { metadata, .. }
+            if metadata.replaygain_track_gain == Some(-6.0)
+    ));
+}
+
+#[test]
+fn replaygain_edits_refresh_live_metadata_without_restarting_playback() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let generation = core.transport.generation;
+    let playback = core.state.playback.clone();
+    let (commands, audio) = async_channel::bounded(1);
+    let _idle_commands = core.engine.replace_commands(commands);
+    for value in [Some(-7.25), Some(6.0), Some(0.0), None] {
+        core.command(Command::SetReplayGain { track_id: 1, value })
+            .unwrap();
+        let AudioCommand::Metadata {
+            generation: actual,
+            metadata,
+        } = audio.try_recv().unwrap().command
+        else {
+            panic!("ReplayGain edits must update the loaded source metadata");
+        };
+        assert_eq!(actual, generation);
+        assert_eq!(metadata.replaygain_track_gain, value);
+        let stored = core.track(1).unwrap();
+        assert_eq!(stored.replaygain_track_gain, value);
+        assert_eq!(core.state.current_track().unwrap(), &stored);
+        assert_eq!(core.transport.generation, generation);
+        assert_eq!(core.state.playback, playback);
+        assert!(audio.is_empty());
+
+        // Repeating a value neither invalidates observations nor resends audio.
+        let revisions = core.state.query_revisions();
+        core.command(Command::SetReplayGain { track_id: 1, value })
+            .unwrap();
+        assert_eq!(core.state.query_revisions(), revisions);
+        assert!(audio.is_empty());
+    }
+}
+
+#[test]
+fn replaygain_edits_reject_invalid_values_before_mutating_or_sending_audio() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let stored = core.track(1).unwrap();
+    let revisions = core.state.query_revisions();
+    let (commands, audio) = async_channel::bounded(1);
+    let _idle_commands = core.engine.replace_commands(commands);
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            core.command(Command::SetReplayGain {
+                track_id: 1,
+                value: Some(value),
+            })
+            .is_err()
+        );
+        assert_eq!(core.track(1).unwrap(), stored);
+        assert_eq!(core.state.query_revisions(), revisions);
+        assert!(audio.is_empty());
+    }
+    assert!(
+        core.command(Command::SetReplayGain {
+            track_id: 999,
+            value: None,
+        })
+        .is_err()
+    );
+    assert_eq!(core.state.query_revisions(), revisions);
+}
+
+#[test]
+fn replaygain_live_edit_rejects_busy_audio_before_database_commit() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let stored = core.track(1).unwrap();
+    let revisions = core.state.query_revisions();
+    let (commands, audio) = async_channel::bounded(1);
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
+    let _idle_commands = core.engine.replace_commands(commands);
+    assert!(
+        core.command(Command::SetReplayGain {
+            track_id: 1,
+            value: Some(-6.0),
+        })
+        .is_err()
+    );
+    assert_eq!(core.track(1).unwrap(), stored);
+    assert_eq!(core.state.query_revisions(), revisions);
+    assert_eq!(audio.len(), 1);
+}
+
+#[test]
 fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
     for title_first in [true, false] {
         let (_directory, mut core) = fixture();

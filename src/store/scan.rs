@@ -12,16 +12,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
-pub(super) const PROBE_VERSION: i64 = 2;
+pub(super) const PROBE_VERSION: i64 = 3;
 
-pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date";
+pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
 
 // Keep both identity selectors on the same projection without allocating SQL.
 macro_rules! effective_source_select {
     ($identity:literal) => {
         concat!(
-            "SELECT path,fingerprint,title,artist,album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date FROM tracks WHERE id=",
+            "SELECT path,fingerprint,title,artist,album,duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,cue_end_frame,missing,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain FROM tracks WHERE id=",
             $identity
         )
     };
@@ -31,7 +31,7 @@ pub(super) use effective_source_select;
 // Observe source facts without decoding Track or unrelated user-state fields.
 pub(super) fn effective_source_from_row(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<[rusqlite::types::Value; 20]> {
+) -> rusqlite::Result<[rusqlite::types::Value; 21]> {
     let mut values = std::array::from_fn(|_| rusqlite::types::Value::Null);
     for (column, value) in values.iter_mut().enumerate() {
         *value = row.get(column)?;
@@ -45,7 +45,7 @@ fn staged_fields(cue: bool) -> impl Iterator<Item = &'static str> {
         .chain(CUE_FIELDS.split(',').filter(move |_| cue))
 }
 
-// Source facts, including all six tags, replace the previous scan snapshot.
+// Source facts, including descriptive and ReplayGain tags, replace the previous scan snapshot.
 // Preferences, history and references stay owned by the retained track.
 pub(super) fn write_source_assignments(sql: &mut String, cue: bool) {
     use std::fmt::Write;
@@ -62,7 +62,7 @@ pub(super) fn staged_table_schema(prefix: &str, cue: bool) -> String {
         ""
     };
     format!(
-        "{prefix},path TEXT NOT NULL,fingerprint BLOB,file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,bits_per_sample INTEGER,release_date TEXT{cue}"
+        "{prefix},path TEXT NOT NULL,fingerprint BLOB,file_size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,album TEXT NOT NULL,duration REAL,codec TEXT NOT NULL,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,probe_version INTEGER NOT NULL,bitrate_bps INTEGER,bitrate_exact INTEGER NOT NULL,track_number INTEGER,disc_number INTEGER,bits_per_sample INTEGER,release_date TEXT,replaygain_track_gain REAL{cue}"
     )
 }
 
@@ -122,7 +122,8 @@ pub(super) fn staged_library_column(cue: bool) -> String {
     } else {
         ""
     };
-    format!("COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
+    format!(
+        "COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
         OR t.fingerprint IS NOT s.fingerprint OR t.file_size IS NOT s.file_size
         OR t.title IS NOT s.title
         OR t.artist IS NOT s.artist
@@ -131,7 +132,10 @@ pub(super) fn staged_library_column(cue: bool) -> String {
         OR t.sample_rate IS NOT s.sample_rate OR t.missing IS NOT 0
         OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact
         OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number
-        OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date {cue}),0)")
+        OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date
+        OR t.replaygain_track_gain IS NOT s.replaygain_track_gain
+        {cue}),0)"
+    )
 }
 
 pub(super) fn staged_count_column() -> &'static str {
@@ -163,7 +167,9 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
     };
     let full = format!(
         "{visible} OR t.fingerprint IS NOT s.fingerprint
-        OR t.release_date IS NOT s.release_date {cue_values}"
+        OR t.release_date IS NOT s.release_date
+        OR t.replaygain_track_gain IS NOT s.replaygain_track_gain
+        {cue_values}"
     );
     let old_album = super::albums::eligible_member("t");
     let new_album = rivu_format::database::eligible_title("s.album");
@@ -347,7 +353,8 @@ fn relocation_key<'a>(
 const KNOWN_COLUMNS: &str = "file_size,modified_ns,fingerprint,title,artist,album,
     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-    bits_per_sample,release_date,bitrate_exact,id,path";
+    bits_per_sample,release_date,bitrate_exact,replaygain_track_gain,
+    id,path";
 
 fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
     Ok(KnownFile {
@@ -370,6 +377,7 @@ fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
                 disc_number: r.get(17)?,
                 bits_per_sample: r.get(18)?,
                 release_date: r.get(19)?,
+                replaygain_track_gain: r.get(21)?,
             })
         } else {
             None
@@ -399,8 +407,8 @@ fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSc
         cue,
     } = known_file_from_row(r)?;
     Ok(StoredScanFile {
-        track_id: r.get(21)?,
-        path: PathBuf::from(r.get::<_, String>(22)?),
+        track_id: r.get(22)?,
+        path: PathBuf::from(r.get::<_, String>(23)?),
         size,
         modified_ns,
         fingerprint,
@@ -499,7 +507,7 @@ impl Store {
         "SELECT file_size,modified_ns,fingerprint,title,artist,album,
                 duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
                 cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-                bits_per_sample,release_date,bitrate_exact
+                bits_per_sample,release_date,bitrate_exact,replaygain_track_gain
          FROM tracks WHERE id=COALESCE(
             (SELECT id FROM tracks INDEXED BY tracks_path
              WHERE path=?1 AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END = 0 ORDER BY id LIMIT 1),
@@ -529,7 +537,8 @@ impl Store {
              SELECT t.file_size,t.modified_ns,t.fingerprint,t.title,t.artist,t.album,
                     t.duration,t.codec,t.channels,t.sample_rate,t.cue_sheet,t.cue_number,
                     t.cue_start_frame,t.cue_end_frame,t.probe_version,t.bitrate_bps,t.track_number,
-                    t.disc_number,t.bits_per_sample,t.release_date,t.bitrate_exact,r.ordinal
+                    t.disc_number,t.bits_per_sample,t.release_date,t.bitrate_exact,
+                    t.replaygain_track_gain,r.ordinal
              FROM requested AS r
              CROSS JOIN tracks AS t
              WHERE t.id=COALESCE(
@@ -545,7 +554,7 @@ impl Store {
         let mut result = (0..paths.len()).map(|_| None).collect::<Vec<_>>();
         let mut rows = query.query([encoded])?;
         while let Some(row) = rows.next()? {
-            let ordinal = usize::try_from(row.get::<_, i64>(21)?)
+            let ordinal = usize::try_from(row.get::<_, i64>(22)?)
                 .context("Known source lookup returned an invalid ordinal")?;
             let slot = result
                 .get_mut(ordinal)
@@ -976,9 +985,10 @@ impl Store {
             "INSERT INTO temp.scan_stage(
                 resolved_id,path,fingerprint,file_size,modified_ns,title,artist,album,
                 duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,
-                track_number,disc_number,bits_per_sample,release_date,cue_sheet,cue_number,
+                track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain,
+                cue_sheet,cue_number,
                 cue_start_frame,cue_end_frame
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )?;
         let mut skipped_short_tracks = 0;
         for r in &records {
@@ -1050,6 +1060,7 @@ impl Store {
                 m.disc_number,
                 m.source.bits_per_sample,
                 m.release_date,
+                m.source.replaygain_track_gain,
                 sheet,
                 number,
                 start,
@@ -1197,11 +1208,11 @@ mod import_tests {
         let store = Store::open(Path::new(":memory:"))?;
         store.conn.execute_batch(
             "INSERT INTO tracks(id,path,probe_version) VALUES
-                (1,'/prepared.wav',2),(2,'/unprepared.wav',2);
-             INSERT INTO tracks(id,path,probe_version,missing) VALUES (4,'/missing.wav',2,1);
+                (1,'/prepared.wav',3),(2,'/unprepared.wav',3);
+             INSERT INTO tracks(id,path,probe_version,missing) VALUES (4,'/missing.wav',3,1);
              INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,probe_version)
-                VALUES (3,'/prepared.wav','/sheet.cue',7,0,2),
-                       (5,'/prepared.wav','/sheet.cue',8,0,2);",
+                VALUES (3,'/prepared.wav','/sheet.cue',7,0,3),
+                       (5,'/prepared.wav','/sheet.cue',8,0,3);",
         )?;
         let known = store.known_source(Path::new("/prepared.wav"))?.unwrap();
         let source = Arc::new(ScanRecord {
@@ -1269,8 +1280,8 @@ mod import_tests {
             let id = 100 + offset;
             let path = PathBuf::from(format!("/unique-{offset}.wav"));
             store.conn.execute(
-                "INSERT INTO tracks(id,path,probe_version) VALUES(?1,?2,2)",
-                params![id, path.to_str()],
+                "INSERT INTO tracks(id,path,probe_version) VALUES(?1,?2,?3)",
+                params![id, path.to_str(), PROBE_VERSION],
             )?;
             result.records.push(Arc::new(ScanRecord {
                 path: path.clone(),

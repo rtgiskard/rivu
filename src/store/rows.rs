@@ -52,9 +52,9 @@ pub(super) fn cue_from_row(
         .transpose()
 }
 
-pub(super) const TRACK_COLUMNS: &str = "id,path,title,artist,album,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint,bitrate_exact";
+pub(super) const TRACK_COLUMNS: &str = "id,path,title,artist,album,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint,bitrate_exact,replaygain_track_gain";
 /// Number of columns decoded by `track_from_row`; appended row payloads start here.
-pub(super) const TRACK_COLUMN_COUNT: usize = 25;
+pub(super) const TRACK_COLUMN_COUNT: usize = 26;
 
 pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
@@ -74,6 +74,7 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         disc_number: r.get(18)?,
         bits_per_sample: r.get(19)?,
         release_date: r.get(20)?,
+        replaygain_track_gain: r.get(25)?,
         favorite: r.get(21)?,
         decoder_hint: match r.get::<_, i64>(23)? {
             0 => DecoderHint::Auto,

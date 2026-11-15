@@ -40,6 +40,7 @@ pub(super) fn run(
                 release_date,
                 track_number: track_number.map(|value| (value > 0).then_some(value)),
                 disc_number: disc_number.map(|value| (value > 0).then_some(value)),
+                ..Default::default()
             };
             if patch.title.is_some()
                 || patch.artist.is_some()

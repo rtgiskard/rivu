@@ -112,6 +112,7 @@ file_group!(Playback, PlaybackView {
     media_read_buffer_mib => media_read_buffer_mib: u32,
     ffmpeg_enabled => ffmpeg_enabled: bool,
     pipewire_auto_mix => pipewire_auto_mix: bool,
+    replaygain_enabled => replaygain_enabled: bool,
     processing_bypassed => processing_bypassed: bool,
 });
 

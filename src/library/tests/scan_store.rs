@@ -89,6 +89,59 @@ fn source_tag_edit_refreshes_tags_without_losing_library_state() -> Result<()> {
 }
 
 #[test]
+fn replaygain_rescan_reloads_file_tags_after_database_edits_with_current_queue() -> Result<()> {
+    for file_gain in [Some(-7.25), None] {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let audio = root.join("audio.wav");
+        wav(&audio, 150)?;
+        if file_gain.is_some() {
+            rivu_metadata::edit_file(
+                &audio,
+                &rivu_metadata::TagPatch {
+                    replaygain_track_gain: Some(file_gain),
+                    ..Default::default()
+                },
+            )?;
+        }
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+        let id = store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
+            .unwrap();
+        store.enqueue_tracks(&[id])?;
+        let entry = store.queue_page(None, 0, 10)?.rows[0].id;
+        store.set_queue_current(Some(entry))?;
+        for bulk in [false, true] {
+            if bulk {
+                let track = store.track(id)?.unwrap();
+                store.sync_track_tags(
+                    id,
+                    &rivu_format::tags::TagValues {
+                        title: track.title,
+                        artist: track.artist,
+                        album: track.album,
+                        release_date: track.release_date,
+                        track_number: track.track_number,
+                        disc_number: track.disc_number,
+                        replaygain_track_gain: Some(2.0),
+                    },
+                )?;
+            } else {
+                store.set_replaygain(id, Some(2.0))?;
+            }
+            let known = [(audio.clone(), store.known_source(&audio)?.unwrap())];
+            let rescanned = scan_paths(std::slice::from_ref(&root), &known, false)?;
+            assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
+            store.apply_scan(&rescanned)?;
+            assert_eq!(store.track(id)?.unwrap().replaygain_track_gain, file_gain);
+            assert_eq!(store.queue_state()?.current_id, Some(entry));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn successful_cue_sources_and_segments_bypass_duration_admission() -> Result<()> {
     for frames in [150, 225] {
         let directory = tempfile::tempdir()?;

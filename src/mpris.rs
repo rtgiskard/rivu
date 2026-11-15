@@ -1783,6 +1783,7 @@ mod tests {
             disc_number: None,
             bits_per_sample: None,
             release_date: None,
+            replaygain_track_gain: None,
             favorite: false,
             decoder_hint: Default::default(),
             missing: false,

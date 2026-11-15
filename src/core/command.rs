@@ -2,7 +2,7 @@ use super::queue::QueueRefresh;
 use super::*;
 use anyhow::{bail, ensure};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(super) enum CommandOutcome {
     Immediate,
     Scan(u64),
@@ -547,6 +547,7 @@ impl Core {
                 decoder_hint,
                 release_date,
             } => self.edit_track(track_id, title, artist, album, decoder_hint, release_date)?,
+            Command::SetReplayGain { track_id, value } => self.set_replaygain(track_id, value)?,
             Command::RemoveTracks { track_ids } => self.remove_tracks(track_ids)?,
             Command::RemoveHistory { track_ids } => self.remove_history(track_ids)?,
             Command::SetPlayCount {

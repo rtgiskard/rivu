@@ -1291,6 +1291,7 @@ fn failed_load_and_stale_events_neither_count_nor_record_recent() {
             disc_number: None,
             bits_per_sample: None,
             release_date: None,
+            replaygain_track_gain: None,
         },
     })
     .unwrap();

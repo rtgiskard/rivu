@@ -25,6 +25,7 @@ fn record() -> ScanRecord {
             disc_number: Some(1),
             bits_per_sample: Some(16),
             release_date: Some("2024".into()),
+            replaygain_track_gain: None,
         },
     }
 }
@@ -56,6 +57,49 @@ fn queued_scan(scan: ScanResult) -> (Store, ScanResult, i64) {
         .unwrap();
     let id = store.queue_page(None, 0, 10).unwrap().rows[0].track_id;
     (store, scan, id)
+}
+
+#[test]
+fn replaygain_scan_roundtrips_cached_sources_and_replaces_database_edits() {
+    let mut source = record();
+    source.media.replaygain_track_gain = Some(-7.25);
+    let (store, mut scan, id) = queued(source);
+    let track = store.track(id).unwrap().unwrap();
+    assert_eq!(track.replaygain_track_gain, Some(-7.25));
+    let known = store
+        .known_source(&track.path)
+        .unwrap()
+        .unwrap()
+        .media
+        .unwrap();
+    assert_eq!(known.replaygain_track_gain, track.replaygain_track_gain);
+    let batch = store
+        .known_sources(&[track.path.clone(), track.path.clone()])
+        .unwrap();
+    assert_eq!(
+        batch[1]
+            .as_ref()
+            .unwrap()
+            .media
+            .as_ref()
+            .unwrap()
+            .replaygain_track_gain,
+        Some(-7.25)
+    );
+    assert!(!store.apply_scan(&scan).unwrap().library);
+    store.set_replaygain(id, Some(2.0)).unwrap();
+    assert!(store.apply_scan(&scan).unwrap().library);
+    assert_eq!(
+        store.track(id).unwrap().unwrap().replaygain_track_gain,
+        Some(-7.25)
+    );
+    let media = &mut std::sync::Arc::make_mut(&mut scan.records[0]).media;
+    media.replaygain_track_gain = None;
+    let impact = store.apply_scan(&scan).unwrap();
+    assert!(impact.library);
+    assert_eq!(impact.current_track, None);
+    let cleared = store.track(id).unwrap().unwrap();
+    assert_eq!(cleared.replaygain_track_gain, None);
 }
 
 #[test]

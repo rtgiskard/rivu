@@ -119,6 +119,7 @@ fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
             disc_number: None,
             bits_per_sample: None,
             release_date: None,
+            replaygain_track_gain: None,
         },
     }
 }

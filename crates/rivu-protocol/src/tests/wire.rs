@@ -1191,6 +1191,20 @@ fn state_round_trip_preserves_optional_config_field_and_library_columns() {
 }
 
 #[test]
+fn replaygain_command_round_trip_preserves_values_and_clear() {
+    let mut encoded = Vec::new();
+    for value in [None, Some(-7.25), Some(0.0), Some(1.125)] {
+        assert_command_round_trip(
+            &mut encoded,
+            Command::SetReplayGain {
+                track_id: 12,
+                value,
+            },
+        );
+    }
+}
+
+#[test]
 fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
     for (title, artist, album) in [
         (Some("Title".to_owned()), None, None),
@@ -2132,6 +2146,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     draft.spectrum_db_range = None;
     draft.spectrum_bar_layout = SpectrumBarLayout::Fixed { count: 48 };
     draft.scan_max_depth = 7;
+    draft.replaygain_enabled = true;
     draft.material.enabled = false;
     draft.material.selected = rivu_format::config::MaterialPreset::Dissolve;
     let patch = ConfigPatch::between(&baseline, &draft);
@@ -2162,6 +2177,7 @@ fn settings_patch_round_trip_preserves_untouched_owner_state_and_explicit_clears
     assert_eq!(owner.scan_max_depth, 7);
     assert_eq!(owner.volume, 0.2);
     assert!(owner.shuffle);
+    assert!(owner.replaygain_enabled);
     assert_eq!(owner.material, draft.material);
 }
 

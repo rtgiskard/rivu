@@ -805,6 +805,7 @@ mod tests {
                     disc_number: None,
                     bits_per_sample: Some(16),
                     release_date: None,
+                    replaygain_track_gain: None,
                 },
             };
             let mut recent = record.clone();
