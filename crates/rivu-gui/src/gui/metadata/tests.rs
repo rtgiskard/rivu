@@ -25,6 +25,7 @@ pub(super) fn track(id: i64, title: &str) -> Track {
         disc_number: None,
         bits_per_sample: None,
         release_date: None,
+        replaygain_track_gain: None,
         favorite: false,
         decoder_hint: DecoderHint::Auto,
         missing: false,
@@ -296,6 +297,7 @@ fn file_tags() -> rivu_format::tags::TagValues {
         release_date: Some("2026-11-14".into()),
         track_number: Some(7),
         disc_number: Some(2),
+        replaygain_track_gain: Some(-4.5),
     }
 }
 
@@ -307,7 +309,7 @@ fn source_ack(ok: bool, file_saved: bool) -> crate::frontend::CommandDelivery {
 }
 
 #[test]
-fn bulk_source_commands_include_six_staged_values_and_database_expectation() {
+fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
     use source::{SourceAction, database_tags};
     let mut session = MetadataSession::default();
     let mut original = track(1, "database title");
@@ -346,6 +348,28 @@ fn bulk_source_commands_include_six_staged_values_and_database_expectation() {
     assert!(session.begin_source(SourceAction::Sync).is_none());
     assert!(session.complete_save(save));
     assert_eq!(session.track(), Some(&original));
+}
+
+#[test]
+fn staged_replaygain_value_displays_and_clears_independently() {
+    let original = track(1, "database title");
+    let mut source = source::SourceTags::default();
+    source.stage(file_tags());
+    assert_eq!(
+        source.field_text(Field::ReplayGainTrackGain, &original),
+        "-4.5"
+    );
+    source.field_saved(Field::ReplayGainTrackGain);
+    assert_eq!(
+        source.values(&original).replaygain_track_gain,
+        original.replaygain_track_gain
+    );
+    assert_eq!(source.values(&original).title, "file title");
+    let mut cleared = file_tags();
+    cleared.replaygain_track_gain = None;
+    source.stage(cleared);
+    assert_eq!(source.field_text(Field::ReplayGainTrackGain, &original), "");
+    assert_eq!(source.values(&original).replaygain_track_gain, None);
 }
 
 #[test]
@@ -646,6 +670,40 @@ fn selection_and_blur_cancel_without_submitting(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     metadata.read_with(cx, |this, _| assert!(this.edit.is_none()));
+}
+
+#[gpui::test]
+fn replaygain_invalid_input_retains_editor_and_zero_gain_is_not_cleared(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            let field = Field::ReplayGainTrackGain;
+            for text in ["NaN", "inf", "bad"] {
+                this.begin_edit(field, window, cx);
+                this.edit
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .update(cx, |input, cx| input.set_text(text, cx));
+                this.submit_field(field, cx);
+                assert!(this.edit.as_ref().unwrap().error.is_some());
+                assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), text);
+                assert!(!this.metadata.saving(field));
+            }
+            let mut source = track(1, "A");
+            source.replaygain_track_gain = Some(0.0);
+            playback(this, source, cx);
+            this.begin_edit(Field::ReplayGainTrackGain, window, cx);
+            assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), "0");
+            this.submit_field(Field::ReplayGainTrackGain, cx);
+            assert!(this.edit.is_none());
+            assert!(!this.metadata.saving(Field::ReplayGainTrackGain));
+        });
+    })
+    .unwrap();
 }
 
 #[gpui::test]

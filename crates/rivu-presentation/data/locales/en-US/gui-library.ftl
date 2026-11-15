@@ -177,11 +177,13 @@ gl-ready = Ready
 gl-track-unavailable = Track unavailable
 
 gl-metadata-saving = Saving metadata…
-gl-metadata-edit-note = Enter saves only this field to Rivu’s database; Escape or leaving cancels. File tags stay unchanged. Use the details menu for all six tag values.
+gl-metadata-edit-note = Enter saves only this field to Rivu’s database; Escape or leaving cancels. File tags stay unchanged. Use the details menu for bulk tag operations.
 
 gl-copy-value = Copy value
 gl-edit-value = Edit value
 gl-play-count-invalid = Enter a whole number from 0 to 9223372036854775807.
+gl-replaygain-track-gain = ReplayGain (dB)
+gl-replaygain-invalid = Enter a finite number. Empty clears.
 
 gl-tags-actions = Tag actions
 gl-tags-load = Load from file
@@ -200,8 +202,8 @@ gl-tags-missing = Source file missing.
 gl-tags-cue = File tags unavailable for CUE tracks.
 gl-tags-unsupported = File tags unsupported for this format.
 gl-tags-working = Working with tags…
-gl-tags-staged = File tags are staged; loading does not change the database. Enter saves one field, or use Sync to database for all six values.
-gl-tags-synced = All six tag values synced to the database. File tags are unchanged.
+gl-tags-staged = File tags are staged; loading does not change the database. Enter saves one field, or use Sync to database for all tag values.
+gl-tags-synced = Tag values synced to the database. File tags are unchanged.
 gl-tags-saved = Tags saved to the file and synced to the database.
 gl-tags-sync-only = File saved; retry database sync.
 gl-tags-file-saved-db-failed = File saved, but database sync failed: { $error }. Staged values are retained; retry Sync to database only.

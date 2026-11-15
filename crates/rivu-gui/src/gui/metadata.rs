@@ -265,6 +265,7 @@ impl Metadata {
             Field::Album => "gl-album",
             Field::ReleaseDate => "gl-release",
             Field::PlayCount => "gl-play-count",
+            Field::ReplayGainTrackGain => "gl-replaygain-track-gain",
             Field::DecoderHint => unreachable!(),
         });
         let input = cx.new(|cx| Input::new(name, baseline.clone(), "", cx).embedded());
@@ -335,6 +336,23 @@ impl Metadata {
                     return;
                 }
             },
+            Field::ReplayGainTrackGain => {
+                let text = text.trim();
+                let value = if text.is_empty() {
+                    None
+                } else {
+                    match text.parse::<f64>() {
+                        Ok(value) if value.is_finite() => Some(value),
+                        _ => {
+                            let error = self.tr("gl-replaygain-invalid").to_string();
+                            self.edit.as_mut().unwrap().error = Some(error);
+                            cx.notify();
+                            return;
+                        }
+                    }
+                };
+                SavedValue::ReplayGain(value)
+            }
             Field::DecoderHint => return,
         };
         if !self.save_value(value, Some(serial), cx) {
@@ -1273,7 +1291,11 @@ impl Metadata {
                 .chain(&tags)
                 .flat_map(|fields| fields.iter().map(|field| &field.0))
                 .chain(edit_labels.iter().flatten())
-                .chain([&self.tr("gl-decoder-hint"), &track_kind.0])
+                .chain([
+                    &self.tr("gl-decoder-hint"),
+                    &self.tr("gl-replaygain-track-gain"),
+                    &track_kind.0,
+                ])
                 .map(|label| {
                     let run = gpui::TextRun {
                         len: label.len(),
@@ -1506,6 +1528,13 @@ impl Metadata {
                                 tags,
                                 label_widths,
                                 copy_hint.clone(),
+                                cx,
+                            ))
+                            .child(self.panel_field(
+                                theme,
+                                Field::ReplayGainTrackGain,
+                                self.tr("gl-replaygain-track-gain"),
+                                label_widths[0],
                                 cx,
                             ))
                             .child(metadata_row(

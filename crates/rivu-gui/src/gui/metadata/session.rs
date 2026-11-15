@@ -17,9 +17,10 @@ pub(super) enum Field {
     ReleaseDate,
     PlayCount,
     DecoderHint,
+    ReplayGainTrackGain,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum SavedValue {
     Title(String),
     Artist(String),
@@ -27,6 +28,7 @@ pub(super) enum SavedValue {
     ReleaseDate(String),
     PlayCount(u64),
     DecoderHint(DecoderHint),
+    ReplayGain(Option<f64>),
 }
 
 impl SavedValue {
@@ -38,6 +40,7 @@ impl SavedValue {
             Self::ReleaseDate(_) => Field::ReleaseDate,
             Self::PlayCount(_) => Field::PlayCount,
             Self::DecoderHint(_) => Field::DecoderHint,
+            Self::ReplayGain(_) => Field::ReplayGainTrackGain,
         }
     }
 
@@ -49,10 +52,17 @@ impl SavedValue {
             Self::ReleaseDate(value) => value != track.release_date.as_deref().unwrap_or_default(),
             Self::PlayCount(value) => *value != track.play_count,
             Self::DecoderHint(value) => *value != track.decoder_hint,
+            Self::ReplayGain(value) => *value != track.replaygain_track_gain,
         }
     }
 
     fn command(&self, track_id: i64) -> Command {
+        if let Self::ReplayGain(value) = self {
+            return Command::SetReplayGain {
+                track_id,
+                value: *value,
+            };
+        }
         if let Self::PlayCount(play_count) = self {
             return Command::SetPlayCount {
                 track_id,
@@ -237,6 +247,7 @@ impl MetadataSession {
                     && previous.release_date == next.release_date
                     && previous.track_number == next.track_number
                     && previous.disc_number == next.disc_number
+                    && previous.replaygain_track_gain == next.replaygain_track_gain
             }
             (None, None) => true,
             _ => false,
@@ -277,7 +288,7 @@ impl MetadataSession {
         Some((token, command))
     }
 
-    /// Rebase only the six tag fields, never playback bookkeeping or preferences.
+    /// Rebase only source tag fields, never playback bookkeeping or preferences.
     pub(super) fn commit_tags(&mut self, token: SourceToken, tags: &TagValues) {
         if self.database_serial != token.database_serial {
             return;
@@ -289,6 +300,7 @@ impl MetadataSession {
                 && track.release_date == tags.release_date
                 && track.track_number == tags.track_number
                 && track.disc_number == tags.disc_number
+                && track.replaygain_track_gain == tags.replaygain_track_gain
             {
                 return;
             }
@@ -300,6 +312,7 @@ impl MetadataSession {
             track.release_date.clone_from(&tags.release_date);
             track.track_number = tags.track_number;
             track.disc_number = tags.disc_number;
+            track.replaygain_track_gain = tags.replaygain_track_gain;
         }
     }
 

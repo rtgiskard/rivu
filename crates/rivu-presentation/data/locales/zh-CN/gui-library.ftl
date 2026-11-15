@@ -177,11 +177,13 @@ gl-ready = 就绪
 gl-track-unavailable = 曲目不可用
 
 gl-metadata-saving = 正在保存元数据…
-gl-metadata-edit-note = Enter 仅将当前字段保存到 Rivu 数据库；Escape 或离开输入框取消。不改文件标签。六项标签的整体操作位于详情菜单。
+gl-metadata-edit-note = Enter 仅将当前字段保存到 Rivu 数据库；Escape 或离开输入框取消。不改文件标签。标签的整体操作位于详情菜单。
 
 gl-copy-value = 复制值
 gl-edit-value = 编辑值
 gl-play-count-invalid = 请输入 0 至 9223372036854775807 之间的整数。
+gl-replaygain-track-gain = ReplayGain（dB）
+gl-replaygain-invalid = 请输入有限数值；留空清除。
 
 gl-tags-actions = 标签操作
 gl-tags-load = 从文件加载
@@ -200,8 +202,8 @@ gl-tags-missing = 源文件缺失。
 gl-tags-cue = CUE 曲目不支持文件标签。
 gl-tags-unsupported = 此格式不支持文件标签。
 gl-tags-working = 正在处理标签…
-gl-tags-staged = 文件标签已暂存；加载操作不改动数据库。Enter 保存单个字段，或通过“同步到数据库”保存全部六项标签。
-gl-tags-synced = 六项标签已同步到数据库，文件标签未改动。
+gl-tags-staged = 文件标签已暂存；加载操作不改动数据库。Enter 保存单个字段，或通过“同步到数据库”保存全部标签。
+gl-tags-synced = 标签已同步到数据库，文件标签未改动。
 gl-tags-saved = 标签已保存到文件并同步到数据库。
 gl-tags-sync-only = 文件已保存，请重试同步数据库。
 gl-tags-file-saved-db-failed = 文件已保存，但数据库同步失败：{ $error }。暂存值已保留，请仅重试“同步到数据库”。

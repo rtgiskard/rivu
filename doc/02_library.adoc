@@ -445,16 +445,24 @@ does not transcode audio or change CUE boundaries. Declared text encoding is
 respected: incorrectly labeled legacy bytes are not automatically repaired, and
 lost text cannot be reconstructed.
 
+[[inline-track-details-edits]]
 === Inline Track details edits
 
-Hover Title, Artist, Album, Release date, Track number, Disc number or Play count
-for Edit and Copy. Enter saves that database field; Escape or leaving the input
-cancels unsubmitted text. Empty text clears a field; unknown values display as `—`.
+Hover Title, Artist, Album, Release date, Track number, Disc number, Play count,
+or ReplayGain for Edit and Copy. Enter saves that database field; Escape
+or leaving the input cancels unsubmitted text. Empty text clears a field; unknown
+values display as `—`.
 
 Play count accepts integers from `0` to `9223372036854775807`. Setting it does not
 change last-played time or reset the current playback's already-counted state;
 pending playback statistics are recovered first. Decoder guidance is available
 beside its dropdown.
+
+ReplayGain stores one finite track gain in dB. Empty clears it; `0` means no gain.
+Scanning reads `REPLAYGAIN_TRACK_GAIN` alongside other source metadata. Rescans
+refresh it from the file, including clearing removed tags, and can replace database
+edits. No loudness analysis is performed. Playback behavior:
+link:04_playback.adoc#replaygain[ReplayGain].
 
 Only one inline field is edited at a time. Same-track refreshes preserve its input;
 a failed save retains the input and an error for correction or retry. Selecting a
@@ -468,8 +476,10 @@ replace a newer editor or another track's details. A refresh failure does not un
 a saved edit; see <<database-edits,Database edits>>. Decoder hint saves immediately,
 independently of text edits, and applies on the next track open or full waveform request.
 
-The header menu loads file tags into the six displayed tag fields, synchronizes
-those fields to the database, or saves them to the source file and then the database.
+The header menu loads file tags into the displayed tag fields, including ReplayGain,
+synchronizes them to the database, or saves them to the source file and then the
+database. Clearing ReplayGain removes `REPLAYGAIN_TRACK_GAIN`; album and peak tags
+are left untouched. Existing file-format support and write safeguards apply.
 Loading alone changes neither store. Explicit legacy decoding applies only to
 Latin-1-labelled ID3 text; Unicode fields are preserved. Check the loaded text
 before saving. CUE subtracks do not support file-tag operations.

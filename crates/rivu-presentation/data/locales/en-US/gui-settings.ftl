@@ -149,6 +149,7 @@ settings-write-logs-to-disk = Write logs to disk
 settings-relocation-help = Audio files are never deleted
 settings-review-candidates = Review candidates…
 settings-confirm-queue-replace = Confirm before replacing the queue
+settings-replaygain = ReplayGain
 settings-audio = Audio
 settings-on = On
 settings-off = Off

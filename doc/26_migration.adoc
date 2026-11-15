@@ -9,11 +9,12 @@ without rewriting either. `apply` upgrades supported databases only after a
 completed SQLite backup; current resources are no-ops and need no backup.
 
 [[supported-source-formats]]
-Supported database upgrades are `2 → 4 → 6` and `4 → 6`. Format 4 adds playlist
-ordering; format 6 replaces raw/override tag columns with their resolved values.
-Track IDs, playback statistics, list references and queue state are preserved.
-Subsequent rescans may replace stored tags. Format 5 and unknown schema objects
-are rejected.
+Supported database upgrades are `2 → 4 → 6 → 7`, `4 → 6 → 7`, and `6 → 7`.
+Format 4 adds playlist ordering; format 6 replaces raw/override tag columns with
+resolved values; format 7 adds one nullable ReplayGain track-gain field. Existing
+rows start without a value; scan the library to read source tags. Track IDs,
+playback statistics, list references and queue state are preserved. Subsequent
+rescans may replace stored tags. Format 5 and unknown schema objects are rejected.
 
 Missing default resources are reported without creation. With explicit
 `--data-dir`, a missing `library.db` is an error; `--config` alone does not select
@@ -36,6 +37,10 @@ together and restart Core; mismatched versions are rejected before decoding.
 Clients must use `MutateConfig` Settings patches or dedicated commands instead;
 see link:21_ipc.adoc#configuration-mutations[configuration mutations]. On-disk
 configuration and database formats are unchanged; no disk migration is needed.
+
+Protocol 41 adds the ReplayGain setting, track gain, and single-field edits. Upgrade
+Core and frontends together. Source-tag operations include track gain; database
+format 7 is required, while configuration remains compatible.
 
 To inspect or upgrade a supported database before application startup, stop Rivu
 and run the tool with the intended data directory and configuration:

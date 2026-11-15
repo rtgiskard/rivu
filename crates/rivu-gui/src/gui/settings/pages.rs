@@ -430,6 +430,18 @@ impl Settings {
                 .child(
                     visual_switch(
                         &self.i18n,
+                        "settings-replaygain",
+                        "󰕾",
+                        self.tr("settings-replaygain"),
+                        self.model.draft.replaygain_enabled,
+                        cx,
+                        |config| config.replaygain_enabled = !config.replaygain_enabled,
+                    )
+                    .self_start(),
+                )
+                .child(
+                    visual_switch(
+                        &self.i18n,
                         "settings-confirm-queue-replace",
                         "󰁨",
                         self.tr("settings-confirm-queue-replace"),

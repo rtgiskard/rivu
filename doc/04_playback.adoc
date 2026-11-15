@@ -17,6 +17,22 @@ Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
 link:01_config.adoc#volume[Volume configuration] for fractional values and
 <<keyboard-controls,Keyboard controls>> for relative volume steps.
 
+[[replaygain]]
+=== ReplayGain
+
+Enable ReplayGain in Playback settings or with `playback.replaygain_enabled = true`.
+Playback applies the library's single track gain in dB. Missing or invalid gain
+leaves playback unchanged. Album gain and peak tags are not used; positive gain
+can clip. This is a fixed adjustment, not dynamic compression or a loudness scan.
+
+The switch and edits to the playing track take effect without restarting playback;
+master volume remains independent. ReplayGain is playback-only and does not change
+source samples, stored files, or processing exports. Scanning and explicit file-tag
+operations are described under link:02_library.adoc#inline-track-details-edits[Track details].
+
+=== Playback navigation
+
+
 `playback play` resumes a paused decoder. When stopped, it opens the selected
 queue occurrence from the beginning, or the first occurrence if none is selected;
 an empty queue is an error. Stop resets the position to zero but retains queue

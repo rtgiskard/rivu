@@ -60,6 +60,7 @@ fn field_bit(field: Field) -> u8 {
         Field::Artist => 2,
         Field::Album => 4,
         Field::ReleaseDate => 8,
+        Field::ReplayGainTrackGain => 64,
         Field::PlayCount | Field::DecoderHint => 0,
     }
 }
@@ -72,6 +73,7 @@ pub(super) fn database_tags(track: &Track) -> TagValues {
         release_date: track.release_date.clone(),
         track_number: track.track_number,
         disc_number: track.disc_number,
+        replaygain_track_gain: track.replaygain_track_gain,
     }
 }
 
@@ -105,6 +107,10 @@ impl SourceTags {
                 .unwrap_or_default(),
             Field::PlayCount => track.play_count.to_string(),
             Field::DecoderHint => String::new(),
+            Field::ReplayGainTrackGain => staged
+                .map_or(track.replaygain_track_gain, |v| v.replaygain_track_gain)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -136,6 +142,9 @@ impl SourceTags {
                 .clone(),
             track_number,
             disc_number,
+            replaygain_track_gain: self
+                .staged_field(Field::ReplayGainTrackGain)
+                .map_or(track.replaygain_track_gain, |v| v.replaygain_track_gain),
         }
     }
 
@@ -170,7 +179,10 @@ impl SourceTags {
 
     pub fn stage(&mut self, values: TagValues) {
         self.generation = self.generation.wrapping_add(1);
-        self.overlay = Some(Overlay { values, fields: 63 });
+        self.overlay = Some(Overlay {
+            values,
+            fields: 127,
+        });
         self.status = Some(SourceStatus::Staged);
     }
 

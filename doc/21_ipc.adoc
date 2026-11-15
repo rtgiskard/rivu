@@ -550,8 +550,12 @@ The core merges field intents into the current track rather than replacing it
 with a client snapshot. Stored-tag and rescan behavior:
 link:02_library.adoc#database-edits[Database edits].
 
+`SetReplayGain {track_id, value}` changes one track's gain in dB. `None` clears it;
+numeric values must be finite. It does not write the source file.
+
 `LoadSourceTags` reads explicitly using the requested encoding without database
-mutation. `SyncTrackTags` commits six values against an expected database baseline.
+mutation. `SyncTrackTags` commits the displayed tag values, including ReplayGain,
+against an expected database baseline.
 `SaveSourceTags` writes the file on a worker, then synchronizes verified values.
 ACK fields `source_tags` and `source_file_saved` distinguish physical success from
 database failure; retry only synchronization after partial success.
