@@ -468,18 +468,18 @@ interpreter identity preserves the venv path, not just its resolved base binary.
 The checkout sources are under `tools/audio_processing/runtime/`; they are not
 interchangeable with a prepared bundle's worker.
 
-Keep the complete provisioned bundle together: hashed runtime sidecars/schema,
-model assets and license/dependency records. Its manifest binds bundle paths,
-interpreter hash and dependency pins. To provision verified assets offline using
-the default installed tools and the bundle's prepared interpreter:
+Keep the complete provisioned bundle together: hashed `common.py`, runtime
+sidecars/schema, model assets and license/dependency records. Its manifest binds
+bundle paths, interpreter hash and dependency pins. To provision verified assets offline using
+the installed tools and automatically retain the source bundle's interpreter:
 
 [source,shell]
 ----
-/absolute/.venv/bin/python /usr/local/share/rivu/audio_processing/provision.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
+python3 /usr/local/share/rivu/audio_processing/prepare.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
 ----
 
 Adjust `/usr/local` for the installation prefix, or use the checkout's
-`tools/audio_processing/provision.py`. The destination must be new and its parent
+`tools/audio_processing/prepare.py`. The destination must be new and its parent
 must exist. Provisioning retains the installed interpreter rather than copying
 its environment. Assets are hard-linked on the same filesystem and copied
 otherwise; treat both bundles as immutable. After runtime updates, reprovision

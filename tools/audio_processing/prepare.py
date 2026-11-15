@@ -1,166 +1,257 @@
 #!/usr/bin/env python3
-"""Explicit model preparation; only this separate command downloads artifacts.
+"""Explicit environment, model preparation and offline bundle provisioning.
 
-Run from repository root after installing the desired interpreter:
-  python tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss \
-    --interpreter "$PWD/.cache/neural/.venv/bin/python"
-  python tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim \
-    --interpreter "$PWD/.cache/neural/.venv/bin/python"
-  python tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 \
-    --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
+  python3 prepare.py moss --download --directory /abs/bundle
+  python3 prepare.py separate --weights /abs/model.safetensors --directory /abs/bundle --interpreter /abs/.venv/bin/python
+  python3 prepare.py --manifest /abs/old/manifest.json --directory /abs/new
 
-MossFormer2 SE48K checkpoint221552019bytes is pinned to the primary ModelScope
-publisher revision and SHA256; actual model card grants Apache2.0. Kim's
-912885624byte safetensors conversion is pinned to unblend's immutable revision
-and SHA256; its MIT declaration is recorded from the original trainer's pinned
-model card, not inferred from the converter's code license. Primary snapshots,
-code revisions, supplied notices and all artifact hashes are retained.
---hf-host hf-mirror.com explicitly selects a mirror for pinned Kim artifacts;
-the expected checkpoint hash and original trainer card revision do not change.
-
---weights supplies a local checkpoint instead of downloading it; preparation
-still fetches pinned factual provenance snapshots and architecture metadata.
-Directories must not already exist; failed preparation removes only its new
-directory. No operation touches media sources. Worker.py performs no download.
-
-Preparation emits absolute worker/interpreter/model_manifest paths. Explicitly
-configure all three in the app: installing the Rivu binary alone does not ship
-Python environments, models or this worker. The prepared runtime/ contains all
-worker sidecar sources/schema and works independently of app CWD/repository.
-Dependency versions and supplied license notices are recorded under resources/.
-Keep the interpreter venv symlink path; resolving it to base Python loses its
-site-packages. An existing verified model can be bundled without network using
-its prepared interpreter and provision.py --manifest OLD --directory NEW.
-
-DF3 weight-license grants are not established here: licensing is recorded
-factually, not used as a gate on explicit user candidate preparation.
-Unknown terms are never represented as redistribution permission. --proxy may
-explicitly select a local HTTP/SOCKS proxy via curl; inference stays offline.
+Python models install an isolated CPU environment with uv unless --interpreter
+selects an existing environment. Native ONNX models never install Python packages.
+Offline reprovisioning reuses the original bundle interpreter by default, keeping
+its venv symlink identity. Only explicit preparation downloads; local --weights
+still fetches factual publisher provenance and architecture snapshots. --hf-host
+selects the pinned Kim mirror; --proxy selects curl without transport fallback.
+New bundles are CWD-independent, hash every source/notice and record installed
+dependency identities. Unknown weight-license terms are not redistribution grants.
+Preparation never overwrites bundles. Failed model preparation removes its new
+bundle but retains the dependency environment for reuse.
 """
 import argparse
 from functools import partial
+import importlib.metadata
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
-import urllib.request
-from runtime.worker import digest
+import sys
 
-KIM_SHA = "03bfc70b43df1f3e92ed1e582e8b18983f8d4adcd1a7d2133ada3b2f371b3095"
-KIM_URL = "https://huggingface.co/Ryan5453/unblend/resolve/9ba75778acf1b64fc40a9ea05137a2c6af9cd1d5/melband_roformer_kim.safetensors"
-KIM_CARD = "https://huggingface.co/KimberleyJSN/melbandroformer/raw/ac9b0614ab3cd7f77219e18ba494dfd93956c348/README.md"
-KIM_CONFIG = {"dim":384,"depth":6,"stereo":True,"num_stems":1,"time_transformer_depth":1,
-              "freq_transformer_depth":1,"num_bands":60,"dim_head":64,"heads":8,"sample_rate":44100,
-              "stft_n_fft":2048,"stft_hop_length":441,"stft_win_length":2048,"mask_estimator_depth":2,
-              "mlp_expansion_factor":4}
+sys.dont_write_bytecode = True
+if __package__:
+    from . import models
+    from .common import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
+else:
+    import models
+    from common import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
 
-def download(url, target, maximum, proxy=None):
-    size = 0
-    if proxy:
-        if not shutil.which("curl"):
-            raise ValueError("explicit --proxy transport requires curl")
-        # stdout is streamed and bounded; do not echo proxy URLs or credentials.
-        with subprocess.Popen(["curl", "--fail", "--silent", "--location", "--max-time", "600",
-                               "--proxy", proxy, url], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
-            try:
-                with target.open("xb") as stream:
-                    while data := process.stdout.read(1024 * 1024):
-                        size += len(data)
-                        if size > maximum:
-                            raise ValueError("download exceeds declared artifact bound")
-                        stream.write(data)
-                if process.wait():
-                    raise ValueError("explicit proxy download failed; no direct transport fallback")
-            except BaseException:
-                process.kill()
-                process.wait()
-                raise
-    else:
-        request = urllib.request.Request(url, headers={"User-Agent":"Rivu explicit model preparation"})
-        with urllib.request.urlopen(request, timeout=60) as response, target.open("xb") as stream:
-            while data := response.read(1024 * 1024):
-                size += len(data)
-                if size > maximum:
-                    raise ValueError("download exceeds declared artifact bound")
-                stream.write(data)
-    return target
+ENVIRONMENTS = {
+    "default": ("3.12", ["torch>=2.13", "torchaudio>=2.11"], [
+        "unblend>=1.0", "numpy>=2", "scipy>=1.15", "soundfile>=0.13",
+        "einops>=0.8", "rotary-embedding-torch>=0.8", "torchinfo>=1.8", "pystoi>=0.4"]),
+    "df3": ("3.11", ["torch==2.1.2+cpu", "torchaudio==2.1.2+cpu"], [
+        "deepfilternet==0.5.6", "deepfilterlib==0.5.6", "numpy==1.26.4",
+        "scipy==1.11.4", "soundfile==0.12.1", "packaging==23.2",
+        "appdirs==1.4.4", "loguru==0.7.3", "requests==2.32.5", "sympy==1.13.3"]),
+}
+def populate(base, manifest):
+    runtime=base/"runtime"
+    runtime.mkdir()
+    source=Path(__file__).resolve().parent / "runtime"
+    for name in RUNTIME_FILES:
+        shutil.copyfile(source/name,runtime/name)
+    shutil.copyfile(Path(__file__).with_name("common.py"), base / "common.py")
+    notices=base/"resources/licenses/dependencies"
+    dependencies={}
+    for distribution in sorted(importlib.metadata.distributions(),key=lambda item:item.metadata["Name"].lower()):
+        name=distribution.metadata["Name"]
+        records=[]
+        for member in distribution.files or []:
+            parts=Path(str(member)).parts
+            info_index=next((index for index,part in enumerate(parts) if part.endswith((".dist-info",".egg-info"))),None)
+            if info_index is None:
+                continue
+            relative=Path(*parts[info_index+1:])
+            if ".." in relative.parts or not any(word in str(relative).lower() for word in ("license","copying","notice","copyright")):
+                continue
+            origin=Path(distribution.locate_file(member))
+            if not origin.is_file():
+                continue
+            target=notices/name/relative
+            target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(origin,target)
+            records.append(str(target.relative_to(base)))
+        dependencies[name]={"version":distribution.version,"license_expression":distribution.metadata.get("License-Expression"),
+                            "license_classifiers":[value for value in distribution.metadata.get_all("Classifier",[]) if value.startswith("License ::")],
+                            "notices":records,"notice_status":"bundled distribution notices" if records else "no license file supplied by this distribution; metadata is not a substitute for upstream permission"}
+    worker_notice=base/"resources/licenses/RIVU-WORKER-NOTICE.txt"
+    worker_notice.parent.mkdir(parents=True,exist_ok=True)
+    worker_notice.write_text("Rivu local audio-processing worker source snapshot. This local provisioning command makes no new or separate redistribution license grant; consult the Rivu project's own terms. Third-party code and pretrained weights retain their respective recorded licenses and notices; source-code permission alone does not establish pretrained-weight permission. Models are never implicitly downloaded by inference.\n")
+    manifest["dependencies"]=dependencies
+    manifest["runtime"]={"worker":str((runtime/"worker.py").resolve()),"interpreter":os.path.abspath(sys.executable),
+                         "interpreter_sha256":digest(sys.executable),"model_manifest":str((base/"manifest.json").resolve()),
+                         "worker_notice":str(worker_notice.relative_to(base)),"cwd_independent":True,
+                         "provisioning":"explicit local bundle; installed application alone does not include Python dependencies, models or this worker"}
+    manifest["files"]={str(path.relative_to(base)):digest(path) for path in sorted(base.rglob("*"))
+                       if path.is_file() and path.name!="manifest.json" and "__pycache__" not in path.parts}
+    (base/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
+    validate_manifest(base/"manifest.json", manifest["operation"])
+    return {"worker":manifest["runtime"]["worker"],"interpreter":manifest["runtime"]["interpreter"],
+            "model_manifest":manifest["runtime"]["model_manifest"],"model":manifest["id"]}
+
+
+def relocate(value, old, new):
+    if isinstance(value,dict):
+        return {key:relocate(item,old,new) for key,item in value.items()}
+    if isinstance(value,list):
+        return [relocate(item,old,new) for item in value]
+    if isinstance(value,str) and value.startswith(str(old)+os.sep):
+        return str(new/Path(value).relative_to(old))
+    return value
+
+
+def install_environment(model, directory, temporary):
+    """Install isolated CPU dependencies; retain environments for reuse on failure."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(directory).free < 10 * 1024**3:
+        raise ValueError("reserve at least 10 GiB free before installing CPU environments")
+    uv = shutil.which("uv")
+    if not uv:
+        raise ValueError("uv is required; install uv explicitly before preparation")
+    temporary.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "TMPDIR": str(temporary)}
+    operation = "df3" if model == "df3" else "default"
+    version, torch_requirements, requirements = ENVIRONMENTS[operation]
+    target = directory / ("df3-venv" if operation == "df3" else ".venv")
+    if not target.exists():
+        subprocess.run([uv, "venv", "--managed-python", "--python", version, str(target)],
+                       env=env, stdout=sys.stderr, check=True)
+    python = str(target / "bin/python")
+    subprocess.run([uv, "pip", "install", "--python", python, "--index-url",
+                    "https://download.pytorch.org/whl/cpu", *torch_requirements],
+                   env=env, stdout=sys.stderr, check=True)
+    subprocess.run([uv, "pip", "install", "--python", python, *requirements],
+                   env=env, stdout=sys.stderr, check=True)
+    subprocess.run([uv, "pip", "check", "--python", python], env=env, stdout=sys.stderr, check=True)
+    frozen = subprocess.check_output([uv, "pip", "freeze", "--python", python], env=env, text=True)
+    lock = directory / ("df3-installed.txt" if operation == "df3" else "installed.txt")
+    lock.write_text(frozen)
+    return Path(python), lock
+
+
+def reprovision(original, target, manifest):
+    """Copy verified local artifacts without downloading or changing the source."""
+    old = original.parent
+    target.mkdir(mode=0o700)
+    try:
+        for name in manifest["files"]:
+            if name == "common.py" or name.startswith(("runtime/", "resources/licenses/")):
+                continue
+            origin, destination = old / name, target / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if name == "registry.json":
+                destination.write_text(json.dumps(relocate(read_json(origin), old, target), indent=2) + "\n")
+            elif origin.stat().st_dev == target.stat().st_dev:
+                os.link(origin, destination)
+            else:
+                shutil.copyfile(origin, destination)
+        manifest.pop("runtime", None)
+        manifest.pop("dependencies", None)
+        if manifest.get("backend") == "onnx":
+            (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            validate_artifacts(target / "manifest.json", manifest["operation"])
+            return {"model_manifest": str(target / "manifest.json"), "backend": "onnx"}
+        return populate(target, manifest)
+    except BaseException:
+        shutil.rmtree(target)
+        raise
+
+
+def provision(args, parser):
+    original = args.manifest.resolve()
+    raw = read_json(original)
+    manifest = validate_artifacts(original, raw["operation"])
+    target = args.directory.resolve()
+    native = manifest.get("backend") == "onnx"
+    if not native:
+        interpreter = args.interpreter or Path(manifest.get("runtime", {}).get("interpreter", sys.executable))
+        if not interpreter.is_absolute() or not interpreter.is_file():
+            parser.error("provisioning requires an existing absolute Python interpreter")
+        if not args.populate_new and not args.provision_in_process and os.path.abspath(sys.executable) != str(interpreter):
+            return json.loads(subprocess.check_output([
+                str(interpreter), str(Path(__file__).resolve()), "--manifest", str(original),
+                "--directory", str(target), "--provision-in-process"], text=True))
+        check_packages(manifest)
+    if args.populate_new:
+        if native or target != original.parent or (target / "runtime").exists():
+            parser.error("internal populate requires newly prepared Python directory without runtime")
+        try:
+            return populate(target, manifest)
+        except BaseException:
+            shutil.rmtree(target)
+            raise
+    if target.exists() or not target.parent.is_dir():
+        parser.error("directory must not exist and parent must already exist")
+    return reprovision(original, target, manifest)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model", choices=("separate", "df3", "moss", "ul_unas", "gtcrn"))
+    parser.add_argument("model", nargs="?", choices=("moss", "separate", "df3", "ul_unas", "gtcrn"))
     parser.add_argument("--directory", type=Path, required=True)
-    parser.add_argument("--interpreter", type=Path, help="Python models only: absolute prepared venv executable; preserve its symlink")
-    parser.add_argument("--weights", type=Path)
+    parser.add_argument("--manifest", type=Path, help="offline reprovisioning of verified local model artifacts")
+    parser.add_argument("--interpreter", type=Path, help="existing absolute Python executable; preserve its venv symlink")
+    parser.add_argument("--environment-directory", type=Path, help="isolated dependency root; default: BUNDLE.environment")
+    parser.add_argument("--temporary-directory", type=Path, help="dependency extraction/build cache; default: BUNDLE_PARENT/.cache/neural")
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--weights", type=Path)
     parser.add_argument("--hf-host", choices=("huggingface.co", "hf-mirror.com"), default="huggingface.co")
-    parser.add_argument("--license-evidence", type=Path, help="DF3 only: optional supplied weight-license evidence; no permission is inferred")
-    parser.add_argument("--proxy", help="explicit preparation-only curl proxy (e.g. socks5h://[::1]:22224); never used by inference")
+    parser.add_argument("--license-evidence", type=Path, help="DF3 only: retained supplied weight-license evidence")
+    parser.add_argument("--proxy", help="explicit preparation-only curl proxy; no direct transport fallback")
+    parser.add_argument("--populate-new", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--provision-in-process", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    fetch = partial(download, proxy=args.proxy)
-    native = args.model in ("ul_unas", "gtcrn")
-    if not native and (args.interpreter is None or not args.interpreter.is_absolute() or not args.interpreter.is_file()):
-        parser.error("Python models require --interpreter naming an existing absolute prepared Python executable")
+    if args.manifest:
+        if args.model or args.download or args.weights or args.environment_directory:
+            parser.error("--manifest is offline reprovisioning, not model installation/preparation")
+        result = provision(args, parser)
+        print(json.dumps({"environment_directory": None, "installed_lock": None, **result}))
+        return
+    if not args.model or args.populate_new or args.provision_in_process:
+        parser.error("choose a model or --manifest")
+    if args.download == bool(args.weights):
+        parser.error("choose exactly one of --download or --weights")
     target = args.directory.resolve()
-    if target.exists():
-        parser.error("directory must not exist (preparation never overwrites)")
+    if target.exists() or not target.parent.is_dir():
+        parser.error("directory must not exist and parent must already exist")
     if shutil.disk_usage(target.parent).free < 2 * 1024**3:
         parser.error("reserve 2 GiB free before preparing models")
-    if not args.download and not args.weights:
-        parser.error("supply --weights or explicitly opt into --download")
-    if args.download and args.weights:
-        parser.error("choose exactly one of --download or --weights")
+    native = args.model in ("ul_unas", "gtcrn")
+    if not native and args.interpreter and (not args.interpreter.is_absolute() or not args.interpreter.is_file()):
+        parser.error("--interpreter must name an existing absolute Python executable")
+    environment = lock = None
     target.mkdir(mode=0o700)
     try:
-        if args.model == "separate":
-            checkpoint = target / "model.safetensors"
-            if args.download:
-                fetch(KIM_URL.replace("huggingface.co", args.hf_host) + "?download=true", checkpoint, 912885624)
-            else:
-                shutil.copyfile(args.weights, checkpoint)
-            if checkpoint.stat().st_size != 912885624 or digest(checkpoint) != KIM_SHA:
-                raise ValueError("Kim safetensors differs from pinned unblend 1.0.0 checkpoint")
-            # Always retain the real pinned primary card, including for supplied
-            # weights. Never synthesize a license declaration as evidence.
-            fetch(KIM_CARD.replace("huggingface.co", args.hf_host), target / "weight-license.txt", 65536)
-            registry = {"version":1,"models":{"melband_roformer_kim":{
-                "architecture":"mel_band_roformer", "license":"MIT", "sources":["vocals","other"],
-                "samplerate":44100,"segment_samples":352800,"config":KIM_CONFIG,
-                "checkpoint":{"format":"safetensors","path":str(checkpoint),"sha256":KIM_SHA,"size_bytes":912885624}}}}
-            (target / "registry.json").write_text(json.dumps(registry, indent=2)+"\n")
-            manifest = {"version":1,"operation":"separate","id":"melband_roformer_kim",
-                        "packages":["unblend", "torch", "torchaudio", "torchcodec", "numpy", "scipy", "soundfile"],
-                        "provenance":{"weights":KIM_URL,"weight_license":KIM_CARD,"transport_host":args.hf_host,
-                                      "code":"https://github.com/Ryan5453/unblend/tree/64fd0216b9f0309c9d055457002d6910dc245950",
-                                      "code_license":"MIT", "weights_license":"MIT"}}
-        elif args.model == "df3":
-            from df3 import prepare
-            manifest = prepare(args, target, fetch)
-        elif args.model == "moss":
-            from runtime.mossformer import prepare
-            manifest = prepare(args, target, fetch)
-        elif native:
-            from onnx_speech import prepare
-            manifest = prepare(args, target, fetch)
+        if not native and args.interpreter is None:
+            environment = Path(os.path.abspath(args.environment_directory or target.with_name(target.name + ".environment")))
+            if environment == target or environment.is_relative_to(target):
+                raise ValueError("environment directory must be outside the immutable model bundle")
+            temporary = args.temporary_directory or target.parent / ".cache/neural"
+            args.interpreter, lock = install_environment(args.model, environment, Path(os.path.abspath(temporary)))
+        fetch = partial(models.download, proxy=args.proxy)
+        manifest = models.prepare_model(args, target, fetch)
         if args.model in ("moss", "separate"):
-            # Bind the selected environment, not historical installer versions.
             manifest["packages"] = json.loads(subprocess.check_output([
                 str(args.interpreter), "-c",
                 "import importlib.metadata as m, json, sys; print(json.dumps({name:m.version(name) for name in sys.argv[1:]}))",
                 *manifest["packages"],
             ], text=True))
         manifest["license_evidence"] = "weight-license.txt"
-        manifest["files"] = {str(path.relative_to(target)):digest(path) for path in sorted(target.rglob("*")) if path.is_file()}
-        (target / "manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
+        manifest["files"] = {str(path.relative_to(target)): digest(path) for path in sorted(target.rglob("*")) if path.is_file()}
+        (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         if native:
-            print(json.dumps({"model_manifest": str(target / "manifest.json"), "backend": "onnx"}))
+            validate_artifacts(target / "manifest.json", manifest["operation"])
+            result = {"model_manifest": str(target / "manifest.json"), "backend": "onnx"}
         else:
-            provisioned = subprocess.run([str(args.interpreter), str(Path(__file__).with_name("provision.py").resolve()),
-                                         "--manifest", str(target / "manifest.json"), "--directory", str(target), "--populate-new"],
-                                        stdout=subprocess.PIPE, text=True, check=True)
-            print(provisioned.stdout.strip())
+            result = json.loads(subprocess.check_output([
+                str(args.interpreter), str(Path(__file__).resolve()), "--manifest", str(target / "manifest.json"),
+                "--directory", str(target), "--populate-new"], text=True))
+        print(json.dumps({**result, "environment_directory": str(environment) if environment else None,
+                          "installed_lock": str(lock) if lock else None}))
     except BaseException:
-        shutil.rmtree(target)
+        if target.exists():
+            shutil.rmtree(target)
         raise
+
 
 if __name__ == "__main__":
     main()

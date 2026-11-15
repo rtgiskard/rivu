@@ -10,7 +10,8 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import unittest
-from runtime.worker import VERSION, RUNTIME_FILES, WorkerError, canonical_digest, deny_network, digest, resample_exact, validate_artifacts, validate_manifest, validate_request
+from runtime.worker import VERSION, deny_network, resample_exact, validate_request
+from common import RUNTIME_FILES, WorkerError, canonical_digest, digest, validate_artifacts, validate_manifest
 from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +27,8 @@ def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provena
     runtime.mkdir(exist_ok=True)
     for name in RUNTIME_FILES:
         (runtime / name).write_bytes((Path(__file__).parent / "runtime" / name).read_bytes())
+    shared = base / "common.py"
+    shared.write_bytes((Path(__file__).parent / "common.py").read_bytes())
     evidence = base / "weight-license.txt"
     evidence.write_text("Factual test provenance; no permission grant.")
     manifest = {"version":1, "operation":operation, "id":model, "packages":{"fixture":"1"},
@@ -35,7 +38,7 @@ def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provena
                            "worker_notice":"weight-license.txt", "cwd_independent":True},
                 "dependencies":{"fixture":{"version":"1", "notices":["weight-license.txt"],
                     "license_expression":None, "license_classifiers":[], "notice_status":"test evidence"}},
-                "files":{str(path.relative_to(base)):digest(path) for path in [evidence, *(runtime / name for name in RUNTIME_FILES)]}}
+                "files":{str(path.relative_to(base)):digest(path) for path in [evidence, shared, *(runtime / name for name in RUNTIME_FILES)]}}
     (base / "manifest.json").write_text(json.dumps(manifest))
     return manifest
 
@@ -185,7 +188,7 @@ class ProvisionTests(unittest.TestCase):
         from contextlib import redirect_stdout
         from email.message import Message
         from types import SimpleNamespace
-        import provision
+        import prepare
 
         metadata = Message()
         metadata["Name"] = "fixture"
@@ -200,28 +203,84 @@ class ProvisionTests(unittest.TestCase):
             manifest_path.write_text(json.dumps({"version":1, "operation":"speech", "id":"MossFormer2_SE_48K",
                 "packages":{"fixture":"1"}, "license_evidence":"weight-license.txt",
                 "files":{"weight-license.txt":digest(evidence)}}))
-            with patch("provision.importlib.metadata.distributions", return_value=[distribution]), \
-                 patch("runtime.worker.importlib.metadata.version", return_value="1"), redirect_stdout(io.StringIO()):
+            with patch("prepare.importlib.metadata.distributions", return_value=[distribution]), \
+                 patch("common.importlib.metadata.version", return_value="1"), redirect_stdout(io.StringIO()):
                 construction = manifest_path.read_bytes()
                 bundled = root / "bundled"
-                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                with patch.object(sys, "argv", ["prepare.py", "--manifest", str(manifest_path),
                                                "--directory", str(bundled)]):
-                    provision.main()
+                    prepare.main()
                 self.assertEqual(validate_manifest(bundled / "manifest.json", "speech")["id"], "MossFormer2_SE_48K")
                 self.assertEqual(manifest_path.read_bytes(), construction)
-                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                with patch.object(sys, "argv", ["prepare.py", "--manifest", str(manifest_path),
                                                "--directory", str(source), "--populate-new"]):
-                    provision.main()
+                    prepare.main()
                 self.assertEqual(validate_manifest(manifest_path, "speech")["id"], "MossFormer2_SE_48K")
                 before = manifest_path.read_bytes()
                 target = root / "reprovisioned"
-                with patch.object(sys, "argv", ["provision.py", "--manifest", str(manifest_path),
+                with patch.object(sys, "argv", ["prepare.py", "--manifest", str(manifest_path),
                                                "--directory", str(target)]):
-                    provision.main()
+                    prepare.main()
             current = validate_manifest(target / "manifest.json", "speech")
             self.assertEqual(current["runtime"]["worker"], str(target / "runtime/worker.py"))
             self.assertEqual(manifest_path.read_bytes(), before)
             self.assertEqual((target / "weight-license.txt").read_bytes(), evidence.read_bytes())
+
+class PreparationTests(unittest.TestCase):
+    def test_native_cli_never_installs_environment_and_emits_nullable_paths(self):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        import prepare
+        for model, model_id in (("gtcrn", "GTCRN"), ("ul_unas", "UL_UNAS")):
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "bundle"
+                def construct(args, base, fetch):
+                    self.assertEqual(args.model, model)
+                    (base / "model.onnx").write_bytes(b"fixture graph")
+                    (base / "weight-license.txt").write_text("factual provenance")
+                    return {"version":1, "operation":"speech", "id":model_id, "backend":"onnx", "model":"model.onnx"}
+                stdout = io.StringIO()
+                with patch.object(sys, "argv", ["prepare.py", model, "--directory", str(target), "--download"]), \
+                     patch.object(prepare.models, "prepare_model", side_effect=construct), \
+                     patch.object(prepare, "install_environment", side_effect=AssertionError("native environment install")), \
+                     patch.object(prepare.subprocess, "check_output", side_effect=AssertionError("native Python subprocess")), \
+                     patch.object(prepare.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)), redirect_stdout(stdout):
+                    prepare.main()
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result["model_manifest"], str(target / "manifest.json"))
+                self.assertIsNone(result["environment_directory"])
+                self.assertIsNone(result["installed_lock"])
+                self.assertNotIn("interpreter", result)
+                self.assertEqual(validate_artifacts(target / "manifest.json", "speech")["id"], model_id)
+
+    def test_failed_preparation_removes_new_bundle_but_preserves_environment(self):
+        import sys
+        from types import SimpleNamespace
+        import prepare
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target, environment = root / "bundle", root / "environment"
+                if existing:
+                    environment.mkdir()
+                    (environment / "sentinel").write_text("user environment")
+                def install(*args):
+                    environment.mkdir(exist_ok=True)
+                    return Path(sys.executable), environment / "installed.txt"
+                with patch.object(sys, "argv", ["prepare.py", "moss", "--directory", str(target), "--download",
+                                               "--environment-directory", str(environment)]), \
+                     patch.object(prepare, "install_environment", side_effect=install), \
+                     patch.object(prepare.models, "prepare_model", side_effect=ValueError("artifact failure")), \
+                     patch.object(prepare.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
+                    with self.assertRaisesRegex(ValueError, "artifact failure"):
+                        prepare.main()
+                self.assertFalse(target.exists())
+                self.assertTrue(environment.exists())
+                if existing:
+                    self.assertEqual((environment / "sentinel").read_text(), "user environment")
+
 
 class ProtocolTests(unittest.TestCase):
     def request(self):
@@ -339,6 +398,7 @@ class ProtocolTests(unittest.TestCase):
                 lambda value: value["runtime"].update(model_manifest="/different/manifest.json"),
                 lambda value: value["runtime"].update(interpreter_sha256="0" * 64),
                 lambda value: value["files"].pop("runtime/worker.py"),
+                lambda value: value["files"].pop("common.py"),
                 lambda value: value["dependencies"]["fixture"].update(version="2"),
                 lambda value: value["dependencies"]["fixture"].update(notices=["missing.txt"]),
             )
@@ -453,7 +513,7 @@ class ExplicitExportTests(unittest.TestCase):
             def infer(samples):
                 return samples * -0.5 + np.float32(0.125)
             with patch("runtime.worker.build_engine", return_value=(8000, infer)), \
-                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
+                 patch("common.importlib.metadata.version", return_value="1"), \
                  patch("runtime.worker.deny_network"), patch("runtime.worker.CORE_SECONDS", 1), patch.dict(os.environ):
                 process_export(request, lambda *args, **kwargs: None)
             output, rate = sf.read(base / "result/speech.wav", dtype="float32", always_2d=True)
@@ -479,10 +539,10 @@ class ExplicitExportTests(unittest.TestCase):
                            "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                            "device":"cuda", "parameters":{"wet_mix":0}}
                 events = []
-                with patch("runtime.worker.check_packages", side_effect=AssertionError("packages loaded")), \
+                with patch("common.check_packages", side_effect=AssertionError("packages loaded")), \
                      patch("runtime.worker.build_engine", side_effect=AssertionError("model loaded")), \
                      patch("runtime.worker.resample_exact", side_effect=AssertionError("resampled")), \
-                     patch("runtime.worker.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
+                     patch("common.importlib.metadata.version", side_effect=AssertionError("dependency queried")), \
                      patch("runtime.worker.deny_network"), patch("runtime.worker.CORE_SECONDS", 1), patch.dict(os.environ), \
                      patch.object(sf.SoundFile, "read", autospec=True, side_effect=sf.SoundFile.read) as reads:
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
@@ -529,7 +589,7 @@ class ExplicitExportTests(unittest.TestCase):
                     request = {**export_request(), "input_path":str(source),
                                "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                                "parameters":parameters}
-                    with patch("runtime.worker.check_packages"), \
+                    with patch("common.check_packages"), \
                          patch("runtime.worker.build_engine", side_effect=AssertionError("model loaded")), \
                          patch("runtime.worker.deny_network"), patch.dict(os.environ):
                         with self.assertRaisesRegex(WorkerError, "multichannel downmix"):
@@ -683,7 +743,7 @@ class ExplicitExportTests(unittest.TestCase):
                     frames=2**28 + 1, seek=reader.seek, read=reader.read)
             with patch("runtime.worker.build_engine", return_value=(48000, inspect_outputs)), \
                  patch("runtime.worker.deny_network"), patch.dict(os.environ), \
-                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
+                 patch("common.importlib.metadata.version", return_value="1"), \
                  patch.object(FileInput, "__init__", advertise_long_source), \
                  patch("export.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
                 with self.assertRaises(InspectedOutputs):
@@ -719,7 +779,7 @@ class ExplicitExportTests(unittest.TestCase):
             # reporting and the export adapter's JSONL serializer are real.
             with patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * 0.5)), \
                  patch.object(worker, "deny_network"), patch.object(worker, "CORE_SECONDS", 1), \
-                 patch("runtime.worker.importlib.metadata.version", return_value="1"), \
+                 patch("common.importlib.metadata.version", return_value="1"), \
                  patch.dict(os.environ), patch.object(sys, "argv", ["export.py", "--request", str(request_path)]), \
                  redirect_stdout(stdout):
                 self.assertEqual(export.main(), 0)

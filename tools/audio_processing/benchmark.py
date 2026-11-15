@@ -12,11 +12,13 @@ import subprocess
 import sys
 import time
 if __package__:
-    from .runtime.worker import EVENT_VERSION, digest, read_json
+    from .runtime.worker import EVENT_VERSION
+    from .common import digest, read_json
     from ..audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
-    from runtime.worker import EVENT_VERSION, digest, read_json
+    from runtime.worker import EVENT_VERSION
+    from common import digest, read_json
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
     from audio_quality.evaluate import load_identified, require_alignment

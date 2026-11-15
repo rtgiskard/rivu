@@ -1,6 +1,6 @@
 //! Official streaming GTCRN / UL-UNAS graphs with complete final-hop synthesis.
 //!
-//! Reference revisions, notices and hashes live in `tools/audio_processing/onnx_speech.py`.
+//! Reference revisions, notices and hashes live in `tools/audio_processing/models.py`.
 //! FFT512/hop256 is centered with reflection padding; GTCRN uses sqrt(periodic
 //! Hann), UL-UNAS periodic Hann. The last hop is completed with samples reflected
 //! against the original signal length: ceil(N/256)+1 centered spectra, with at

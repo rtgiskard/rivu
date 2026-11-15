@@ -6,7 +6,7 @@ CARGO_TARGET_DIR ?= .cache/target
 PACKAGE_NAME := rivu-linux-$(shell uname -m)
 DIST_DIR ?= .cache/dist
 PROCESSING_RESOURCE_DIR := $(DESTDIR)$(PREFIX)/share/rivu/audio_processing
-PROCESSING_SOURCES := install.py prepare.py provision.py onnx_speech.py df3.py
+PROCESSING_SOURCES := prepare.py models.py common.py
 PROCESSING_RUNTIME := $(wildcard tools/audio_processing/runtime/*.py tools/audio_processing/runtime/*.schema.json)
 
 export CARGO_TARGET_DIR

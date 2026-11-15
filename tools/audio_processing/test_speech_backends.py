@@ -95,7 +95,8 @@ class RealSpeechBackendTests(unittest.TestCase):
 import os
 from pathlib import Path
 import numpy as np
-from runtime.worker import build_engine, check_packages, deny_network, validate_manifest
+from runtime.worker import build_engine, deny_network
+from common import check_packages, validate_manifest
 path = Path(os.environ["RIVU_SPEECH_MANIFEST"]).resolve()
 manifest = validate_manifest(path, "speech")
 check_packages(manifest)

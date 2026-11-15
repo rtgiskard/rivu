@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from runtime import worker
+import common
 from test_worker import bundle_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,16 +49,16 @@ class FramingTests(unittest.TestCase):
         wire = b"\x11\x04\x00\x00\x00abcd"
         self.assertEqual(worker.read_frame(Fragmented(wire)), (17, bytearray(b"abcd")))
         for end in range(len(wire)):
-            with self.subTest(end=end), self.assertRaisesRegex(worker.WorkerError, "truncated"):
+            with self.subTest(end=end), self.assertRaisesRegex(common.WorkerError, "truncated"):
                 worker.read_frame(Fragmented(wire[:end]))
-        with self.assertRaisesRegex(worker.WorkerError, "64 KiB"):
+        with self.assertRaisesRegex(common.WorkerError, "64 KiB"):
             worker.read_frame(Fragmented(b"\x00\x01\x00\x01\x00"))
         payload = b"x" * 65536
         self.assertEqual(worker.read_frame(Fragmented(b"\x11\x00\x00\x01\x00" + payload)), (17, payload))
         output = io.BytesIO()
         worker.write_frame(output, 17, b"abcd")
         self.assertEqual(output.getvalue(), wire)
-        with self.assertRaisesRegex(worker.WorkerError, "64 KiB"):
+        with self.assertRaisesRegex(common.WorkerError, "64 KiB"):
             worker.write_frame(output, 17, payload + b"x")
         self.assertEqual(output.getvalue(), wire)
 
@@ -69,7 +70,7 @@ class FramingTests(unittest.TestCase):
             {"channels":3}, {"channels":True}, {"sample_rate":7999}, {"sample_rate":192001},
             {"sample_rate":8000.0}, {"frames":4*60*60*8000+1}, {"operation":"separate"},
         ):
-            with self.subTest(fields=fields), self.assertRaises(worker.WorkerError):
+            with self.subTest(fields=fields), self.assertRaises(common.WorkerError):
                 worker.validate_request({**request, **fields})
         for fields in ({"frames":1}, {"frames":4*60*60*8000},
                        {"sample_rate":192000, "channels":2, "frames":4*60*60*192000},
@@ -101,21 +102,21 @@ class FramingTests(unittest.TestCase):
                 source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_PCM, memoryview(audio).cast("B"))+ending),
                                             {"frames":8,"channels":1})
                 source.window(0, 8)
-                with self.assertRaises(worker.WorkerError):
+                with self.assertRaises(common.WorkerError):
                     source.finish()
         source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_PCM, b"\0"*36)), {"frames":8,"channels":1})
-        with self.assertRaisesRegex(worker.WorkerError, "exceeds"):
+        with self.assertRaisesRegex(common.WorkerError, "exceeds"):
             source.window(0, 8)
         for payload in (b"", b"\0"*3):
             source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_PCM, payload)), {"frames":8,"channels":1})
-            with self.subTest(payload=payload), self.assertRaisesRegex(worker.WorkerError, "aligned input PCM"):
+            with self.subTest(payload=payload), self.assertRaisesRegex(common.WorkerError, "aligned input PCM"):
                 source.window(0, 8)
 
     def test_window_capacity_is_checked_before_allocation(self):
         source = worker.StreamInput(io.BytesIO(), {"frames":100,"channels":2})
         with patch.object(worker, "MAX_WINDOW_BYTES", 32), \
              patch("numpy.empty", side_effect=AssertionError("allocated window")) as allocate:
-            with self.assertRaises(worker.WorkerError) as error:
+            with self.assertRaises(common.WorkerError) as error:
                 source.window(0, 100)
             self.assertEqual(error.exception.code, "memory_capacity")
             allocate.assert_not_called()
@@ -133,10 +134,10 @@ class FramingTests(unittest.TestCase):
             if name == "numpy":
                 raise AssertionError("dry stream loaded NumPy")
             return original_import(name, *args, **kwargs)
-        with patch.object(worker, "validate_manifest", return_value={"id":"DeepFilterNet3"}), \
+        with patch.object(common, "validate_manifest", return_value={"id":"DeepFilterNet3"}), \
              patch.object(worker, "validate_execution") as execution, \
              patch.object(source, "window", side_effect=AssertionError("dry PCM window")), \
-             patch.object(worker, "check_packages", side_effect=AssertionError("dry model packages")), \
+             patch.object(common, "check_packages", side_effect=AssertionError("dry model packages")), \
              patch.object(builtins, "__import__", side_effect=guarded_import):
             worker._process_validated(request, source,
                 lambda *_: self.fail("dry stream wrote PCM"),
@@ -159,14 +160,14 @@ class FramingTests(unittest.TestCase):
                 events, outputs = [], {}
                 def write(stem, samples):
                     outputs.setdefault(stem, []).append(samples.copy())
-                with patch.object(worker, "validate_manifest", return_value=manifest), \
+                with patch.object(common, "validate_manifest", return_value=manifest), \
                      patch.object(worker, "validate_execution"), \
-                     patch.object(worker, "canonical_digest", return_value="model-hash"), \
-                     patch.object(worker, "check_packages"), patch.object(worker, "deny_network"), \
+                     patch.object(common, "canonical_digest", return_value="model-hash"), \
+                     patch.object(common, "check_packages"), patch.object(worker, "deny_network"), \
                      patch.object(worker, "CORE_SECONDS", 1), patch.object(worker, "CONTEXT_SECONDS", 1), \
                      patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * np.float32(0.5))), \
-                     patch.object(worker, "digest", side_effect=AssertionError("export hash I/O")), \
-                     patch.object(worker.hashlib, "sha256", side_effect=AssertionError("stream PCM hashing")), \
+                     patch.object(common, "digest", side_effect=AssertionError("export hash I/O")), \
+                     patch.object(common.hashlib, "sha256", side_effect=AssertionError("stream PCM hashing")), \
                      patch.object(worker.importlib.metadata, "version", side_effect=AssertionError("export package evidence")), \
                      patch.object(worker.time, "perf_counter", side_effect=AssertionError("export wall timing")), \
                      patch.object(worker.time, "process_time", side_effect=AssertionError("export CPU timing")), \
@@ -243,7 +244,7 @@ class StreamEntrypointTests(unittest.TestCase):
                 self.assertEqual(events[-1]["type"], "error")
                 models = [event["model"] for event in events if "model" in event]
                 self.assertEqual(models, [] if corrupted else [
-                    {"id":manifest["id"], "sha256":worker.canonical_digest(manifest)}])
+                    {"id":manifest["id"], "sha256":common.canonical_digest(manifest)}])
 
     def test_real_subprocess_rejects_other_worker_and_interpreter(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -279,7 +280,7 @@ class StreamEntrypointTests(unittest.TestCase):
                        "channels":2,"frames":8000+37,"model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             completed = subprocess.run([sys.executable, "-B", str(base / "runtime/worker.py"), "--stream"],
-                                       input=input_stream(request, b""), capture_output=True, cwd=base, timeout=30)
+                                       input=input_stream(request, b""), capture_output=True, cwd=base.parent, timeout=30)
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             events = self.read_events(completed.stdout)
             for event in events[:-1]:
@@ -313,6 +314,7 @@ import os, sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, sys.argv[1])
 import worker
+import common
 import numpy as np
 mutations = []
 def audit(event, args):
@@ -330,8 +332,8 @@ dry, failure = sys.argv[2] == "True", sys.argv[3]
 def check_packages(manifest):
     if dry:
         raise AssertionError("dry processing loaded model dependencies")
-worker.check_packages = check_packages
-worker.importlib.metadata.version = lambda name: "1"
+common.check_packages = check_packages
+common.importlib.metadata.version = lambda name: "1"
 def infer(samples):
     if dry:
         raise AssertionError("dry processing invoked inference")

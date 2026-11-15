@@ -20,11 +20,14 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
-from runtime.worker import validate_manifest, check_packages, deny_network, digest
 if __package__:
     from .export import FileInput
+    from .common import validate_manifest, check_packages, digest
+    from .runtime.worker import deny_network
 else:
     from export import FileInput
+    from common import validate_manifest, check_packages, digest
+    from runtime.worker import deny_network
 
 
 def load_source(path):

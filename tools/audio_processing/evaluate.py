@@ -33,13 +33,15 @@ import sys
 import time
 if __package__:
     from .benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
-    from .runtime.worker import EVENT_VERSION, digest, read_json
+    from .runtime.worker import EVENT_VERSION
+    from .common import digest, read_json
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
-    from runtime.worker import EVENT_VERSION, digest, read_json
+    from runtime.worker import EVENT_VERSION
+    from common import digest, read_json
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_identified, require_alignment

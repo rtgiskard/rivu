@@ -29,16 +29,12 @@ impl SetupModel {
 }
 
 #[derive(Deserialize)]
-struct Installed {
-    interpreter: PathBuf,
-    installed_lock: PathBuf,
-}
-
-#[derive(Deserialize)]
 struct Prepared {
     model_manifest: PathBuf,
     worker: Option<PathBuf>,
     interpreter: Option<PathBuf>,
+    environment_directory: Option<PathBuf>,
+    installed_lock: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -176,7 +172,7 @@ pub(super) fn run(data_dir: &Path, setup: ProcessingSetup, json: bool) -> Result
             weights.display()
         );
     }
-    let mut interpreter = setup.interpreter.map(super::client_path).transpose()?;
+    let interpreter = setup.interpreter.map(super::client_path).transpose()?;
     if let Some(interpreter) = &interpreter {
         ensure!(
             interpreter.is_file(),
@@ -191,30 +187,6 @@ pub(super) fn run(data_dir: &Path, setup: ProcessingSetup, json: bool) -> Result
             .context("Bundle directory needs a parent")?,
     )
     .context("Creating bundle parent directory")?;
-    let mut environment_directory = None;
-    let mut installed_lock = None;
-    if !setup.model.native() && interpreter.is_none() {
-        let mut environment = directory.as_os_str().to_os_string();
-        environment.push(".environment");
-        let environment = PathBuf::from(environment);
-        let installed: Installed = script_result(
-            Process::new("python3")
-                .arg(scripts.join("install.py"))
-                .arg(if matches!(setup.model, SetupModel::Df3) {
-                    "df3"
-                } else {
-                    "default"
-                })
-                .arg("--directory")
-                .arg(&environment)
-                .arg("--temporary-directory")
-                .arg(data_dir.join(".cache/neural")),
-            "dependency installation",
-        )?;
-        interpreter = Some(installed.interpreter);
-        installed_lock = Some(installed.installed_lock);
-        environment_directory = Some(environment);
-    }
     let mut command = Process::new("python3");
     command
         .arg(scripts.join("prepare.py"))
@@ -235,9 +207,17 @@ pub(super) fn run(data_dir: &Path, setup: ProcessingSetup, json: bool) -> Result
         command.arg("--download");
     }
     if !setup.model.native() {
-        command
-            .arg("--interpreter")
-            .arg(interpreter.context("Missing Python interpreter")?);
+        if let Some(interpreter) = interpreter {
+            command.arg("--interpreter").arg(interpreter);
+        } else {
+            let mut environment = directory.as_os_str().to_os_string();
+            environment.push(".environment");
+            command
+                .arg("--environment-directory")
+                .arg(environment)
+                .arg("--temporary-directory")
+                .arg(data_dir.join(".cache/neural"));
+        }
     }
     let prepared: Prepared = script_result(&mut command, "model preparation")?;
     let activation = if setup.activate {
@@ -248,8 +228,8 @@ pub(super) fn run(data_dir: &Path, setup: ProcessingSetup, json: bool) -> Result
     let result = SetupResult {
         model: setup.model.name(),
         directory,
-        environment_directory,
-        installed_lock,
+        environment_directory: prepared.environment_directory,
+        installed_lock: prepared.installed_lock,
         model_manifest: prepared.model_manifest,
         worker: prepared.worker,
         interpreter: prepared.interpreter,

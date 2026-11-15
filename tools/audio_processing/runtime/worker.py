@@ -18,7 +18,6 @@ complement and unclipped samples are unchanged. No network/device fallback.
 """
 import argparse
 from contextlib import redirect_stdout
-import hashlib
 import importlib.metadata
 import json
 import math
@@ -30,6 +29,11 @@ import time
 import struct
 
 sys.dont_write_bytecode = True
+if __package__ and "." in __package__:
+    from .. import common
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import common
 VERSION = 4
 EVENT_VERSION = 4
 CORE_SECONDS = 24
@@ -39,131 +43,51 @@ MAX_FRAME_BYTES = 65536
 MAX_WINDOW_BYTES = 128 * 1024**2
 JSON_FRAME, INPUT_PCM, INPUT_END = 0, 1, 2
 STEM_KINDS = {"speech":17, "vocals":18, "accompaniment":19}
-RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
 
-class WorkerError(Exception):
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
-
-def require(condition, code, message):
-    if not condition:
-        raise WorkerError(code, message)
-
-def digest(path):
-    h = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
-
-def canonical_digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-def absolute_path(value, field):
-    require(isinstance(value, str) and Path(value).is_absolute(), "invalid_request", field + " must be an absolute local path")
-    return Path(value).resolve()
-
-def read_json(path):
-    require(path.stat().st_size <= 1024 * 1024, "invalid_request", "JSON exceeds 1 MiB")
-    return json.loads(path.read_text())
 
 def validate_request(request):
-    require(isinstance(request, dict), "invalid_request", "request must be an object")
+    common.require(isinstance(request, dict), "invalid_request", "request must be an object")
     allowed = {"version", "task_id", "operation", "sample_rate", "channels", "frames", "model_manifest", "device", "threads", "parameters"}
-    require(not (set(request) - allowed), "invalid_request", "unknown request fields: " + str(sorted(set(request) - allowed)))
-    require(request.get("version") == VERSION, "invalid_request", f"version must be {VERSION}")
-    require(isinstance(request.get("task_id"), str) and 0 < len(request["task_id"]) <= 128, "invalid_request", "task_id must be 1..128 characters")
-    require(request.get("operation") in ("speech", "separate"), "invalid_request", "operation must be speech or separate")
-    require(request.get("device", "cpu") in ("cpu", "cuda"), "invalid_request", "device must be cpu or cuda")
-    require(type(request.get("threads", 4)) is int and 1 <= request.get("threads", 4) <= 8, "invalid_request", "threads must be 1..8")
+    common.require(not (set(request) - allowed), "invalid_request", "unknown request fields: " + str(sorted(set(request) - allowed)))
+    common.require(request.get("version") == VERSION, "invalid_request", f"version must be {VERSION}")
+    common.require(isinstance(request.get("task_id"), str) and 0 < len(request["task_id"]) <= 128, "invalid_request", "task_id must be 1..128 characters")
+    common.require(request.get("operation") in ("speech", "separate"), "invalid_request", "operation must be speech or separate")
+    common.require(request.get("device", "cpu") in ("cpu", "cuda"), "invalid_request", "device must be cpu or cuda")
+    common.require(type(request.get("threads", 4)) is int and 1 <= request.get("threads", 4) <= 8, "invalid_request", "threads must be 1..8")
     parameters = request.get("parameters", {})
-    require(isinstance(parameters, dict), "invalid_request", "parameters must be an object")
+    common.require(isinstance(parameters, dict), "invalid_request", "parameters must be an object")
     bounds = {"wet_mix":(0,1), "attenuation_limit_db":(0,100)} if request["operation"] == "speech" else {"overlap":(0,0.875)}
     allowed_parameters = set(bounds) | ({"post_filter"} if request["operation"] == "speech" else set())
-    require(not (set(parameters)-allowed_parameters), "invalid_request", "unknown operation parameters")
+    common.require(not (set(parameters)-allowed_parameters), "invalid_request", "unknown operation parameters")
     for name, (low, high) in bounds.items():
         if name in parameters:
             value = parameters[name]
-            require(type(value) in (int, float) and math.isfinite(value) and low <= value <= high,
+            common.require(type(value) in (int, float) and math.isfinite(value) and low <= value <= high,
                     "invalid_request", name + " outside supported finite range")
-    require("post_filter" not in parameters or type(parameters["post_filter"]) is bool,
+    common.require("post_filter" not in parameters or type(parameters["post_filter"]) is bool,
             "invalid_request", "post_filter must be boolean")
-    absolute_path(request.get("model_manifest"), "model_manifest")
+    common.absolute_path(request.get("model_manifest"), "model_manifest")
     rate, channels, frames = (request.get(key) for key in ("sample_rate", "channels", "frames"))
-    require(type(rate) is int and 8000 <= rate <= 192000, "input_rate", "supported source rates: 8000..192000 Hz")
-    require(type(channels) is int and channels in ((2,) if request["operation"] == "separate" else (1, 2)),
+    common.require(type(rate) is int and 8000 <= rate <= 192000, "input_rate", "supported source rates: 8000..192000 Hz")
+    common.require(type(channels) is int and channels in ((2,) if request["operation"] == "separate" else (1, 2)),
             "input_channels", "separation requires stereo; speech supports mono/stereo; multichannel downmix is never implicit")
-    require(type(frames) is int and 0 < frames <= MAX_SECONDS * rate, "input_duration", "input must be nonempty and <=4 hours")
+    common.require(type(frames) is int and 0 < frames <= MAX_SECONDS * rate, "input_duration", "input must be nonempty and <=4 hours")
     return request
 
-def validate_artifacts(path, operation):
-    """Validate model construction inputs, never authorize inference."""
-    manifest = read_json(path)
-    require(isinstance(manifest, dict) and manifest.get("version") == 1 and manifest.get("operation") == operation,
-            "model_manifest", "manifest version/operation mismatch")
-    allowed_models = ("melband_roformer_kim",) if operation == "separate" else ("DeepFilterNet3", "MossFormer2_SE_48K")
-    require(manifest.get("id") in allowed_models, "model_manifest", "unsupported model id for operation")
-    packages = manifest.get("packages")
-    require(isinstance(packages, dict) and packages and all(isinstance(name, str) and name and isinstance(version, str) and version
-            for name, version in packages.items()), "model_manifest", "exact model dependency pins required")
-    require(isinstance(manifest.get("files"), dict) and manifest["files"], "model_manifest", "manifest has no hashed files")
-    base = path.parent.resolve()
-    for name, checksum in manifest["files"].items():
-        require(isinstance(name, str) and name and not Path(name).is_absolute() and ".." not in Path(name).parts,
-                "model_manifest", "artifact names must be bundle-relative")
-        candidate = (base / name).resolve()
-        require(candidate.is_relative_to(base) and candidate.is_file(), "model_missing", "missing/nonlocal model artifact: " + name)
-        require(isinstance(checksum, str) and digest(candidate) == checksum, "model_hash", "SHA256 mismatch: " + name)
-    require(manifest.get("license_evidence") in manifest["files"], "model_license", "hashed factual weight-license/provenance record required; not a permission gate")
-    return manifest
-
-def validate_manifest(path, operation):
-    """Admit only a complete current provisioned bundle to inference."""
-    manifest = validate_artifacts(path, operation)
-    base = path.parent.resolve()
-    runtime = manifest.get("runtime")
-    require(isinstance(runtime, dict), "model_runtime", "provisioned runtime metadata required; run prepare.py or provision.py")
-    require(runtime.get("worker") == str(base / "runtime/worker.py") and runtime.get("model_manifest") == str(path.resolve())
-            and runtime.get("cwd_independent") is True, "model_runtime", "runtime paths must identify this bundle")
-    interpreter = runtime.get("interpreter")
-    require(isinstance(interpreter, str) and Path(interpreter).is_absolute() and Path(interpreter).is_file(),
-            "model_runtime", "provisioned interpreter missing")
-    require(runtime.get("interpreter_sha256") == digest(interpreter), "model_runtime", "provisioned interpreter SHA256 mismatch")
-    for name in RUNTIME_FILES:
-        require("runtime/" + name in manifest["files"], "model_runtime", "hashed runtime sidecar required: " + name)
-    require(runtime.get("worker_notice") in manifest["files"], "model_runtime", "hashed worker notice required")
-    dependencies = manifest.get("dependencies")
-    require(isinstance(dependencies, dict) and dependencies, "model_dependencies", "provisioned dependency metadata required")
-    normalized = {}
-    for name, record in dependencies.items():
-        require(isinstance(name, str) and name and isinstance(record, dict) and isinstance(record.get("version"), str)
-                and record["version"] and isinstance(record.get("notices"), list)
-                and isinstance(record.get("notice_status"), str) and record["notice_status"]
-                and isinstance(record.get("license_classifiers"), list) and "license_expression" in record,
-                "model_dependencies", "incomplete dependency metadata")
-        require(all(isinstance(notice, str) and notice in manifest["files"] for notice in record["notices"]),
-                "model_dependencies", "dependency notices must be hashed bundle artifacts")
-        normalized[name.lower().replace("_", "-").replace(".", "-")] = record["version"]
-    for name, version in manifest["packages"].items():
-        recorded = normalized.get(name.lower().replace("_", "-").replace(".", "-"))
-        require(recorded is not None and recorded.split("+")[0] == version.split("+")[0],
-                "model_dependencies", "dependency metadata does not match model pin: " + name)
-    return manifest
 
 def validate_execution(manifest):
     """Bind admitted metadata to this executing worker and Python environment."""
     runtime = manifest["runtime"]
-    require(Path(__file__).resolve() == Path(runtime["worker"]).resolve(),
+    common.require(Path(__file__).resolve() == Path(runtime["worker"]).resolve(),
             "model_runtime", "executing worker differs from provisioned worker")
     # Resolving a venv interpreter symlink would erase its environment identity.
-    require(os.path.abspath(sys.executable) == runtime["interpreter"],
+    common.require(os.path.abspath(sys.executable) == runtime["interpreter"],
             "model_runtime", "executing interpreter differs from provisioned interpreter")
 
 
 def deny_network():
     def blocked(*args, **kwargs):
-        raise WorkerError("network_forbidden", "inference worker is offline; run explicit preparation separately")
+        raise common.WorkerError("network_forbidden", "inference worker is offline; run explicit preparation separately")
     socket.create_connection = blocked
     socket.socket.connect = blocked
     socket.socket.connect_ex = blocked
@@ -172,13 +96,6 @@ def deny_network():
     socket.gethostbyname_ex = blocked
     socket.socket.sendto = blocked
 
-def check_packages(manifest):
-    for name, expected in manifest["packages"].items():
-        try:
-            actual = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
-            raise WorkerError("dependency_missing", f"install {name}=={expected} with install.py") from None
-        require(actual.split("+")[0] == expected.split("+")[0], "dependency_version", f"{name}: expected {expected}, found {actual}")
 
 def resample_exact(audio, source_rate, target_rate):
     """Zero-phase polyphase FIR; output at t=0, no uncompensated filter delay."""
@@ -192,7 +109,7 @@ def build_engine(manifest, base, device, controls=None):
     controls = controls or {}
     import numpy as np
     import torch
-    require(device != "cuda" or torch.cuda.is_available(), "device_unavailable", "CUDA requested but unavailable; no CPU fallback")
+    common.require(device != "cuda" or torch.cuda.is_available(), "device_unavailable", "CUDA requested but unavailable; no CPU fallback")
     torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
     torch.set_num_interop_threads(1)
     torch.manual_seed(0)
@@ -226,7 +143,7 @@ def build_engine(manifest, base, device, controls=None):
         model, initial_state, _ = init_df(str(base / "DeepFilterNet3"), log_file=None, log_level="ERROR",
                                          post_filter=controls.get("post_filter", False))
         parameters = ModelParams()
-        require(parameters.sr == 48000, "model_manifest", "DeepFilterNet3 config must be 48 kHz")
+        common.require(parameters.sr == 48000, "model_manifest", "DeepFilterNet3 config must be 48 kHz")
         def run(audio):
             state = DF(sr=48000, fft_size=parameters.fft_size, hop_size=parameters.hop_size,
                        nb_bands=parameters.nb_erb, min_nb_erb_freqs=parameters.min_nb_freqs)
@@ -236,12 +153,12 @@ def build_engine(manifest, base, device, controls=None):
         return 48000, run
 
 def read_exact(stream, count):
-    require(0 <= count <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
+    common.require(0 <= count <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
     data = bytearray(count)
     offset = 0
     while offset < count:
         chunk = stream.read(count-offset)
-        require(bool(chunk), "protocol", "truncated frame")
+        common.require(bool(chunk), "protocol", "truncated frame")
         data[offset:offset+len(chunk)] = chunk
         offset += len(chunk)
     return data
@@ -254,7 +171,7 @@ def read_frame(stream):
 
 
 def write_frame(stream, kind, payload):
-    require(len(payload) <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
+    common.require(len(payload) <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
     stream.write(struct.pack("<BI", kind, len(payload)))
     stream.write(payload)
     stream.flush()
@@ -272,9 +189,9 @@ class StreamInput:
 
     def window(self, left, right):
         import numpy as np
-        require(self.left <= left <= self.right <= right <= self.frames, "protocol", "nonsequential input window")
+        common.require(self.left <= left <= self.right <= right <= self.frames, "protocol", "nonsequential input window")
         size = (right-left)*self.channels*4
-        require(size <= MAX_WINDOW_BYTES, "memory_capacity", "model context window exceeds 128 MiB")
+        common.require(size <= MAX_WINDOW_BYTES, "memory_capacity", "model context window exceeds 128 MiB")
         audio = np.empty((right-left, self.channels), dtype="<f4")
         retained = self.right-left
         if retained:
@@ -284,10 +201,10 @@ class StreamInput:
         while offset < len(target):
             if not self.pending:
                 kind, payload = read_frame(self.stream)
-                require(kind == INPUT_PCM and len(payload) and len(payload) % (self.channels*4) == 0,
+                common.require(kind == INPUT_PCM and len(payload) and len(payload) % (self.channels*4) == 0,
                         "protocol", "expected aligned input PCM")
                 self.received += len(payload)//(self.channels*4)
-                require(self.received <= self.frames, "protocol", "input exceeds declared frames")
+                common.require(self.received <= self.frames, "protocol", "input exceeds declared frames")
                 self.pending = memoryview(payload)
             count = min(len(target)-offset, len(self.pending))
             target[offset:offset+count] = self.pending[:count]
@@ -298,11 +215,11 @@ class StreamInput:
 
     def finish(self):
         expected = 0 if self.reuse_input else self.frames
-        require(self.right == expected and self.received == expected and not self.pending,
+        common.require(self.right == expected and self.received == expected and not self.pending,
                 "protocol", "input frame count mismatch")
         kind, payload = read_frame(self.stream)
-        require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
-        require(not self.stream.read(1), "protocol", "unexpected data after input end marker")
+        common.require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
+        common.require(not self.stream.read(1), "protocol", "unexpected data after input end marker")
         self.buffer = None
 
 
@@ -311,13 +228,13 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
     rate, channels, frames = (request[key] for key in ("sample_rate", "channels", "frames"))
     manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
-    manifest = validate_manifest(manifest_path, request["operation"])
+    manifest = common.validate_manifest(manifest_path, request["operation"])
     if not collect_report:
         validate_execution(manifest)
-    model = {"id":manifest["id"], "sha256":canonical_digest(manifest)}
+    model = {"id":manifest["id"], "sha256":common.canonical_digest(manifest)}
     emit("progress", stage="inspect", completed=1, total=1, model=model)
     controls = request.get("parameters", {})
-    require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
+    common.require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
     if dry and not collect_report:
         source.finish()
@@ -325,7 +242,7 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
              frames=frames, model=model)
         return None
     if not dry:
-        check_packages(manifest)
+        common.check_packages(manifest)
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[key] = str(request.get("threads", 4))
     os.environ["HF_HUB_OFFLINE"] = os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -346,7 +263,7 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
     core_seconds, context_seconds = (8, 2) if manifest["id"] == "MossFormer2_SE_48K" else (CORE_SECONDS, CONTEXT_SECONDS)
     if dry:
         core_seconds, context_seconds = CORE_SECONDS, 0
-    require((core_seconds+2*context_seconds)*rate*channels*4 <= MAX_WINDOW_BYTES,
+    common.require((core_seconds+2*context_seconds)*rate*channels*4 <= MAX_WINDOW_BYTES,
             "memory_capacity", "model context window exceeds 128 MiB")
     if collect_report:
         block_times = []
@@ -364,7 +281,7 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
         audio = source.window(left, right)
         if collect_report:
             sample_io_seconds += time.perf_counter()-io_start
-        require(audio.shape == (right-left, channels) and audio.dtype == np.dtype("float32") and np.isfinite(audio).all(),
+        common.require(audio.shape == (right-left, channels) and audio.dtype == np.dtype("float32") and np.isfinite(audio).all(),
                 "input_samples", "input changed/truncated or contains nonfinite samples")
         if collect_report:
             block_start = time.perf_counter()
@@ -383,13 +300,13 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
                 inferred = infer(converted)
             if collect_report:
                 inference_seconds += time.perf_counter()-phase_start
-            require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
+            common.require(inferred.shape == converted.shape and np.isfinite(inferred).all(), "inference_output", "model returned wrong length/channels or nonfinite samples")
             if collect_report:
                 phase_start = time.perf_counter()
             restored = resample_exact(inferred, model_rate, rate)
             if collect_report:
                 resampling_seconds += time.perf_counter()-phase_start
-            require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
+            common.require(len(restored) >= len(audio), "alignment", "resampler returned insufficient source frames")
             restored = restored[:len(audio)]
             result = restored[offset:offset+end-begin].astype("float32", copy=False)
             if request["operation"] == "speech":
@@ -399,7 +316,7 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
             del converted, inferred, restored
         for stem in stems:
             chunk = original-result if stem == "accompaniment" else result
-            require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
+            common.require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
             if collect_report:
                 io_start = time.perf_counter()
             # Transport copies at most 64 KiB, even for a strided model result.
@@ -427,10 +344,10 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
     report = {"outputs":dict.fromkeys(stems, True), "sample_rate":rate, "channels":channels, "frames":frames,
               "model":{**model, "files":manifest["files"],
                        "provenance":manifest.get("provenance", {})},
-              "source_sha256":source_hash, "request_sha256":canonical_digest(request),
-              "worker_sha256":digest(__file__), "python":sys.version, "packages":manifest["packages"],
-              "implementation_sha256":{path.name:digest(path) for path in sorted(Path(__file__).parent.glob("*.py"))},
-              "interpreter":{"path":sys.executable,"sha256":digest(sys.executable)},
+              "source_sha256":source_hash, "request_sha256":common.canonical_digest(request),
+              "worker_sha256":common.digest(__file__), "python":sys.version, "packages":manifest["packages"],
+              "implementation_sha256":{path.name:common.digest(path) for path in [Path(common.__file__), *sorted(Path(__file__).parent.glob("*.py"))]},
+              "interpreter":{"path":sys.executable,"sha256":common.digest(sys.executable)},
               "installed_packages":{} if dry else {name:importlib.metadata.version(name) for name in manifest["packages"]},
               "device":"cpu" if dry else request.get("device", "cpu"), "threads":request.get("threads", 4),
               "processing":{"core_seconds":core_seconds,"context_seconds":context_seconds,
@@ -463,7 +380,7 @@ def main():
         write_frame(output, JSON_FRAME, payload)
     try:
         kind, payload = read_frame(sys.stdin.buffer)
-        require(kind == JSON_FRAME, "protocol", "first frame must be a JSON request")
+        common.require(kind == JSON_FRAME, "protocol", "first frame must be a JSON request")
         request = json.loads(payload)
         candidate_id = request.get("task_id") if isinstance(request, dict) else None
         task_id = candidate_id if isinstance(candidate_id, str) and 0 < len(candidate_id) <= 128 else ""
@@ -476,7 +393,7 @@ def main():
             _process_validated(request, source, write_pcm, emit, collect_report=False)
         return 0
     except Exception as exc:
-        emit("error", code=exc.code if isinstance(exc, WorkerError) else "worker_failure", message=str(exc)[:8192])
+        emit("error", code=exc.code if isinstance(exc, common.WorkerError) else "worker_failure", message=str(exc)[:8192])
         return 1
 
 
