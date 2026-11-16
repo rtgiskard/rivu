@@ -65,7 +65,6 @@ pub(super) fn visual_labels(i18n: &Localizer) -> Arc<VisualLabels> {
             .into(),
         no_spectrum: text("visual-no-spectrum"),
         no_spectrogram: text("visual-no-spectrogram"),
-        waveform_loading: text("waveform-loading"),
         visual_error: i18n
             .format("visual-error", &[("error", "{error}".into())])
             .into(),

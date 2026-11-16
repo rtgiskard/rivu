@@ -504,10 +504,11 @@ with stronger hover and selection fills. Disabling preserves surface transparenc
 text, icons and keyboard focus borders are not faded. Scroll-edge gradients also
 follow the host surface instead of covering materials with opaque tint. These
 interaction fills are independent of the panel-opacity parameter. Menus, dialogs
-and input fields remain opaque. Floating row and album actions share a local
-blurred backdrop and translucent theme fill while materials are enabled; their
-text and icons remain sharp. Without materials their backdrop is opaque and is
-not sampled or blurred. These action containers do not change the row's text layout.
+and input fields remain opaque. Floating row actions share a local blurred
+backdrop and translucent theme fill while materials are enabled; their text and
+icons remain sharp. Without materials their backdrop is opaque and is not sampled
+or blurred. These action containers do not change the row's text layout.
+Album-card actions are bare icons without a backdrop.
 
 The GUI projects the saved preferences into its material state. Factory defaults
 are compiled from
@@ -975,8 +976,8 @@ not a renderer-independent API or a promise of compatibility with arbitrary GPUI
 versions. `make lint` and `make build` include the component package;
 `cargo test -p rivu-ui` runs its interaction and viewport regression tests.
 
-Run `make ui-demo` (or `cargo run -p rivu-ui --example showcase --features showcase`)
-on Wayland. This opt-in package example installs host appearance, retains controls
+Run `make ui-demo` (or `cargo run -p rivu-ui --example showcase`) on Wayland.
+This package example installs host appearance, retains controls
 and subscriptions, and demonstrates filtering, choice, disabled controls and
 error recovery without pretending to perform database/network work. It uses the
 same pinned GPUI and normal build/font prerequisites. Font-size controls are

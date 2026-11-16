@@ -356,7 +356,7 @@ and link:doc/23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 |Workspace and standalone-crate feature combinations listed in link:Makefile[Makefile]
 |`make test-python`
 |Synthetic audio-processing worker and evaluation tests; no model downloads
-|`cargo test --locked -p rivu-ui --features showcase --example showcase`
+|`cargo test --locked -p rivu-ui --example showcase`
 |Showcase dropdown keyboard regression
 |`cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac`
 |Local decoder/metadata patch regressions outside the workspace

@@ -521,8 +521,6 @@ gl-selection-stale-action = The selection changed while waiting. Select the desi
 
 gl-metadata-load-failed = Could not load track details
 
-gl-metadata-save-failed = Could not save metadata
-
 gl-folder-count = { $count } { $count ->
         [one] folder
        *[other] folders
@@ -542,8 +540,6 @@ gl-rescan-path = Rescan { $path }
 
 gl-playlist-name-required = Enter a playlist name.
 
-gl-playlist-save-failed = Could not save playlist.
-
 gl-playlist-new-title = New playlist
 
 gl-playlist-create = Create playlist
@@ -561,8 +557,6 @@ gl-name = Name
 gl-playlist-name-cancel = Cancel playlist name editing
 
 gl-library-tree-changed = Library tree changed while selecting; select the range again.
-
-gl-library-changed = Library changed while selecting; select the range again.
 
 gl-library-range-response = Unexpected library range query response.
 

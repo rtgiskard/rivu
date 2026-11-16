@@ -476,8 +476,6 @@ gl-selection-stale-action = 等待期间选择已改变，请重新选择曲目�
 
 gl-metadata-load-failed = 无法加载曲目详情
 
-gl-metadata-save-failed = 无法保存元数据
-
 gl-folder-count = { $count } 个文件夹
 
 gl-unavailable = 不可用
@@ -493,8 +491,6 @@ gl-retry-other-counts = 重新统计其它曲目
 gl-rescan-path = 重新扫描 { $path }
 
 gl-playlist-name-required = 请输入播放列表名称。
-
-gl-playlist-save-failed = 无法保存播放列表。
 
 gl-playlist-new-title = 新建播放列表
 
@@ -513,8 +509,6 @@ gl-name = 名称
 gl-playlist-name-cancel = 取消编辑播放列表名称
 
 gl-library-tree-changed = 选择期间目录树已改变，请重新选择范围。
-
-gl-library-changed = 选择期间音乐库已改变，请重新选择范围。
 
 gl-library-range-response = 音乐库范围查询返回了意外结果。
 

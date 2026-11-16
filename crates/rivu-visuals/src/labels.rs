@@ -14,7 +14,6 @@ pub struct VisualLabels {
     pub oscilloscope_scale: SharedString,
     pub no_spectrum: SharedString,
     pub no_spectrogram: SharedString,
-    pub waveform_loading: SharedString,
     pub visual_error: SharedString,
     pub waveform_error: SharedString,
     pub density_range: SharedString,

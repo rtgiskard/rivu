@@ -695,8 +695,8 @@ Core's manager serves MPRIS; the desktop manager serves its windows. A reopened
 desktop process starts a fresh lookup cache, independently of visualization
 enablement. Cache-only reads perform no filesystem I/O. Extraction runs on
 background executors and rejects non-regular sources; even a regular-file probe
-can block. GUI defaults and the installed application icon share one embedded SVG;
-MPRIS lazily exports those same SVG bytes in the background.
+can block. GUI and MPRIS defaults share one embedded fallback SVG, separate from
+the application icon; MPRIS lazily exports those same SVG bytes in the background.
 
 Logical identity is track ID, fingerprint, and path. Concurrent CUE identities can
 share physical probing of the same path/fingerprint without sharing completion

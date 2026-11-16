@@ -1299,13 +1299,9 @@ impl Waveform {
     }
 
     fn manual_message(&self, i18n: &VisualLabels) -> Option<SharedString> {
-        if self.manual.is_some() {
-            Some(i18n.waveform_loading.clone())
-        } else {
-            self.manual_error
-                .as_ref()
-                .map(|error| i18n.waveform_error(error.as_ref()).into())
-        }
+        self.manual_error
+            .as_ref()
+            .map(|error| i18n.waveform_error(error.as_ref()).into())
     }
 
     fn seek_from_position(
@@ -2567,7 +2563,6 @@ mod tests {
         let mut waveform = preview(frame(vec![Some(0.25), None]));
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        assert!(waveform.manual_message(&VisualLabels::default()).is_some());
         assert!(waveform.finish_full(generation, Err(anyhow::anyhow!("decode failed"))));
         assert!(
             waveform

@@ -4,10 +4,6 @@ version = "0.2.0"
 edition = "2024"
 description = "Reusable GPUI controls with host-provided appearance"
 
-[features]
-default = []
-showcase = []
-
 [dependencies]
 rivu-format = { path = "../rivu-format", default-features = false }
 gpui.workspace = true
@@ -16,7 +12,6 @@ unicode-segmentation = "1.13.3"
 [[example]]
 name = "showcase"
 path = "examples/showcase.rs"
-required-features = ["showcase"]
 
 [dev-dependencies]
 rivu-presentation = { path = "../rivu-presentation" }
