@@ -8,5 +8,5 @@ pub mod theme;
 pub mod time;
 pub mod track;
 
-/// Application icon and fallback artwork shared by presentation owners.
-pub static DEFAULT_ARTWORK_SVG: &[u8] = include_bytes!("../data/icons/rivu.svg");
+/// Square fallback cover shared by GUI and MPRIS, separate from the application icon.
+pub static DEFAULT_ARTWORK_SVG: &[u8] = include_bytes!("../data/artwork/default.svg");

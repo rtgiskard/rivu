@@ -591,17 +591,23 @@ impl ArtworkView {
 
     /// Measure the actual laid-out image surface, not an estimated panel width.
     pub(super) fn measured_image(&self, consumer: u64, cx: &App) -> Option<gpui::AnyElement> {
-        self.measured_image_with_limit(consumer, None, cx)
+        self.measured_image_with_limit(consumer, None, gpui::px(0.), cx)
     }
 
-    pub(super) fn measured_thumbnail(&self, consumer: u64, cx: &App) -> Option<gpui::AnyElement> {
-        self.measured_image_with_limit(consumer, Some(560), cx)
+    pub(super) fn measured_thumbnail(
+        &self,
+        consumer: u64,
+        corner_radius: Pixels,
+        cx: &App,
+    ) -> Option<gpui::AnyElement> {
+        self.measured_image_with_limit(consumer, Some(560), corner_radius, cx)
     }
 
     fn measured_image_with_limit(
         &self,
         consumer: u64,
         max_side: Option<u32>,
+        corner_radius: Pixels,
         cx: &App,
     ) -> Option<gpui::AnyElement> {
         let image = self.image(cx)?;
@@ -615,6 +621,7 @@ impl ArtworkView {
                     let mut image = image
                         .size_full()
                         .object_fit(gpui::ObjectFit::Contain)
+                        .rounded(corner_radius)
                         .into_any_element();
                     let _ = image.prepaint_as_root(
                         bounds.origin,

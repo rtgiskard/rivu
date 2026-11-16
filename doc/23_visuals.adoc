@@ -626,6 +626,10 @@ frame-pacing changes preserve the rotation angle. Style controls, per-panel
 persistence, defaults, and the frame-rate range are documented in
 link:01_config.adoc#artwork[Artwork].
 
+The default cover is separate from the application icon, retaining decorative
+rings and a full square composition. GUI styles apply the same corner treatment
+to real and default covers; MPRIS leaves clipping and corners to the media host.
+
 Artwork uses the shared window frame gate described under
 <<independent-analysis-and-display-clocks,Independent analysis and display clocks>>,
 and the same `interface.animation_fps` cap. This caps animation requests, not overall

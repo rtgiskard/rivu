@@ -830,7 +830,7 @@ impl AlbumBrowser {
         }
     }
 
-    fn card(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn card(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         let current = self.model.albums().get(index).is_some();
         let Some(album) = self.model.albums().display(index) else {
@@ -849,11 +849,20 @@ impl AlbumBrowser {
         let drag_key = key.clone();
         let drag_snapshots = self.snapshots.clone();
         let hover_key = key.clone();
+        let corner_radius = self.grid_layout.artwork_size * 0.04;
         let image = self
             .covers
             .views
             .get(&index)
-            .and_then(|cover| cover.view.measured_thumbnail(0, cx));
+            .and_then(|cover| cover.view.measured_thumbnail(0, corner_radius, cx))
+            .unwrap_or_else(|| {
+                self.default_artwork
+                    .read(cx)
+                    .image(theme, self.grid_layout.artwork_size, window)
+                    .size_full()
+                    .rounded(corner_radius)
+                    .into_any_element()
+            });
         let directory = key.directory.to_string_lossy().into_owned();
         let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();
@@ -971,10 +980,8 @@ impl AlbumBrowser {
                     .w_full()
                     .h(self.grid_layout.artwork_size)
                     .flex_shrink_0()
-                    .map(|view| match image {
-                        Some(image) => view.child(div().absolute().size_full().child(image)),
-                        None => view.child(self.default_artwork.clone()),
-                    })
+                    .overflow_hidden()
+                    .child(div().absolute().size_full().child(image))
                     .child(
                         div()
                             .absolute()
@@ -1388,7 +1395,7 @@ impl Render for AlbumBrowser {
                 "album-grid",
                 self.model.albums().len().div_ceil(columns),
                 &self.grid_scroll,
-                cx.processor(move |this, range: Range<usize>, _, cx| {
+                cx.processor(move |this, range: Range<usize>, window, cx| {
                     range
                         .map(|grid_row| {
                             let start = grid_row * columns;
@@ -1401,7 +1408,7 @@ impl Render for AlbumBrowser {
                                 .h(layout.row_height)
                                 .pb_2();
                             for index in start..end {
-                                cards = cards.child(this.card(index, cx));
+                                cards = cards.child(this.card(index, window, cx));
                             }
                             cards
                         })
