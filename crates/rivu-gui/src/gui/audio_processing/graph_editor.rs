@@ -2574,16 +2574,22 @@ mod tests {
             ));
             this.pending = 0;
             this.send(
-                Command::ProcessingGraphExport {
-                    id: 1,
-                    node: GraphPort { node: 1, port: 0 },
-                    path: "new.wav".into(),
+                Command::AudioExport {
+                    request: rivu_protocol::model::AudioExportRequest {
+                        source: rivu_protocol::model::AudioExportSource::Frozen {
+                            id: 1,
+                            target: GraphPort { node: 1, port: 0 },
+                        },
+                        path: "/new.wav".into(),
+                        encoding: Default::default(),
+                        monitor_eq: None,
+                    },
                 },
                 cx,
             );
             assert!(matches!(
                 this.commands.pop_front().unwrap().command,
-                Command::ProcessingGraphExport { .. }
+                Command::AudioExport { .. }
             ));
         });
     }

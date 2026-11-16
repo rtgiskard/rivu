@@ -1,5 +1,17 @@
 use super::*;
 
+impl Core {
+    /// Default-encoded frozen-run export, as `rivu processing graph export` requests it.
+    fn processing_graph_export(&mut self, id: u64, node: GraphPort, path: PathBuf) -> Result<u64> {
+        self.audio_export(AudioExportRequest {
+            source: AudioExportSource::Frozen { id, target: node },
+            path,
+            encoding: AudioExportEncoding::default(),
+            monitor_eq: None,
+        })
+    }
+}
+
 pub(super) fn source(directory: &Path) -> Vec<f32> {
     let samples = (0..4096)
         .flat_map(|i| {
@@ -4176,10 +4188,16 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
     complete(&mut core);
     let export = processing_command_ack(
         &mut core,
-        Command::ProcessingGraphExport {
-            id: 1,
-            node: graph_port(1, 0),
-            path: directory.path().join("ack-export.wav"),
+        Command::AudioExport {
+            request: AudioExportRequest {
+                source: AudioExportSource::Frozen {
+                    id: 1,
+                    target: graph_port(1, 0),
+                },
+                path: directory.path().join("ack-export.wav"),
+                encoding: AudioExportEncoding::default(),
+                monitor_eq: None,
+            },
         },
     );
     assert_eq!(export.processing_id, Some(4));

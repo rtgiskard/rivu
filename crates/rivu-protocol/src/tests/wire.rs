@@ -1928,11 +1928,6 @@ fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_pa
             id: u64::MAX,
             node: port,
         },
-        Command::ProcessingGraphExport {
-            id: 91,
-            node: port,
-            path: "/rendered outputs/音楽 -6 dB.wav".into(),
-        },
     ];
     commands.extend(
         [

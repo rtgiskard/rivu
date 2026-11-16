@@ -991,11 +991,6 @@ pub enum Command {
         id: u64,
         node: GraphPort,
     },
-    ProcessingGraphExport {
-        id: u64,
-        node: GraphPort,
-        path: PathBuf,
-    },
     AudioExport {
         request: AudioExportRequest,
     },

@@ -292,10 +292,16 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
             } => {
                 session.bind_instance(id.instance_id)?;
                 wait = requested;
-                Command::ProcessingGraphExport {
-                    id: id.id,
-                    node: GraphPort { node, port },
-                    path: super::client_path(path)?,
+                Command::AudioExport {
+                    request: AudioExportRequest {
+                        source: AudioExportSource::Frozen {
+                            id: id.id,
+                            target: GraphPort { node, port },
+                        },
+                        path: super::client_path(path)?,
+                        encoding: AudioExportEncoding::default(),
+                        monitor_eq: None,
+                    },
                 }
             }
         },

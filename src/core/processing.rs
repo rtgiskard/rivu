@@ -273,20 +273,6 @@ impl Core {
         self.start_with_status(queue_id, history, status)
     }
 
-    pub(in crate::core) fn processing_graph_export(
-        &mut self,
-        id: u64,
-        node: GraphPort,
-        path: PathBuf,
-    ) -> Result<u64> {
-        self.audio_export(AudioExportRequest {
-            source: AudioExportSource::Frozen { id, target: node },
-            path,
-            encoding: AudioExportEncoding::default(),
-            monitor_eq: None,
-        })
-    }
-
     pub(in crate::core) fn audio_export(&mut self, request: AudioExportRequest) -> Result<u64> {
         request.encoding.validate()?;
         if let Some(eq) = &request.monitor_eq {

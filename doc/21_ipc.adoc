@@ -1564,28 +1564,25 @@ and execution algorithms belong to link:27_audio_processing.adoc[Audio processin
 
 `ProcessingGraphAudition { id, node: {node,port} }` takes the retained `graph_run_id`,
 not an export task ID. It selects retained PCM directly, or queues a new preparation
-task using the frozen snapshot when that output has
-no cache. `ProcessingGraphExport { id, node: {node,port}, path }` starts a distinct,
-cancellable offline task using that same graph and original source. Existing
-cached PCM is copied without re-decoding or running DSP again; an unrendered port
-executes only its ancestor closure. Queued operations acknowledge the new task ID.
-Destinations are
-absolute paths to new WAV files; existing files are never overwritten. Only a
-successful terminal task sets `graph_exported_path`: an accepted request is not
-an exported file. Cancelled or stale-source tasks publish neither partial PCM nor
-partial export files. `CancelProcessing` also stops the selected live audition,
-but only while its run and playback generation still match.
+task using the frozen snapshot when that output has no cache. `AudioExport` with a
+`frozen` source exports it. Cancelled or stale-source tasks publish neither partial
+PCM nor partial export files. `CancelProcessing` also stops the selected live
+audition, but only while its run and playback generation still match.
 
 `AudioExport { request }` starts a processing task for encoded export without
 changing playback. `request.source` is `original { track_id }`,
 `graph { track_id, target, revision }`, or `frozen { id, target }`. A current graph
-request checks its revision; a frozen request uses the retained run's snapshot.
+request checks its revision; a frozen request uses the retained run's snapshot, and
+an unrendered frozen port executes only its ancestor closure. Existing cached PCM is
+encoded without re-decoding or running DSP again.
 `monitor_eq` is an optional complete EQ snapshot applied after the selected
 source, independently of playback controls. `encoding` specifies the format,
 optional sample rate/channel conversion, PCM precision, bitrate and compression
-level; `path` names a new absolute destination. The captured request is published
-in `settings.audio_export`. Completion and cancellation use existing processing
-tasks and `graph_exported_path`; accepted requests do not imply completed files.
+level; `path` names a new absolute destination, and existing files are never
+overwritten. The captured request is published in `settings.audio_export`.
+Queued requests acknowledge the new task ID; completion and cancellation use
+existing processing tasks. Only a successful terminal task sets
+`graph_exported_path`: an accepted request is not an exported file.
 See link:27_audio_processing.adoc#encoded-export[Encoded export] for encoding and
 quality boundaries.
 

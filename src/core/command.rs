@@ -265,11 +265,6 @@ impl Core {
                     .processing_graph_audition(id, node)
                     .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
             }
-            Command::ProcessingGraphExport { id, node, path } => {
-                return self
-                    .processing_graph_export(id, node, path)
-                    .map(CommandOutcome::Processing);
-            }
             Command::AudioExport { request } => {
                 return self.audio_export(request).map(CommandOutcome::Processing);
             }
