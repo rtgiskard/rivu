@@ -233,7 +233,8 @@ struct RevealRows {
     actions: [gpui::FocusHandle; 2],
     after: gpui::FocusHandle,
     bounds: RevealBounds,
-    overlay: bool,
+    full_height: bool,
+    surface: crate::SurfaceStyle,
 }
 
 impl Render for RevealRows {
@@ -261,9 +262,14 @@ impl Render for RevealRows {
                 })
                 .relative()
                 .child(reveal_bounds(index * 4 + 2, self.bounds.clone()));
-            let reveal = if self.overlay {
-                crate::row::hover_actions(theme, ("action-reveal", index), "reveal-test-row", false)
-                    .child(action)
+            let reveal = if self.full_height {
+                crate::row::hover_actions(
+                    theme,
+                    ("action-reveal", index),
+                    "reveal-test-row",
+                    self.surface,
+                )
+                .child(action)
             } else {
                 crate::row::hover_reveal(("action-reveal", index), "reveal-test-row", action)
                     .relative()
@@ -312,7 +318,12 @@ fn assert_reveal_paint(window: &Window, expected: [Option<u32>; 2]) {
 
 #[test]
 fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
-    for overlay in [false, true] {
+    for (full_height, surface) in [
+        (false, crate::SurfaceStyle::Opaque),
+        (false, crate::SurfaceStyle::Translucent),
+        (true, crate::SurfaceStyle::Opaque),
+        (true, crate::SurfaceStyle::Translucent),
+    ] {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
         let scope = cx.update(FocusScope::new);
@@ -337,7 +348,8 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
                 actions,
                 after,
                 bounds,
-                overlay,
+                full_height,
+                surface,
             }
         });
         let handle = window.into();
@@ -360,7 +372,7 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
             assert!(text.right() <= row.right());
             assert!(text.top() >= row.top());
             assert!(text.bottom() <= row.bottom());
-            if overlay {
+            if full_height {
                 assert_eq!(reveal.size.height, row.size.height);
                 assert_eq!(text.right(), row.right());
             } else {
@@ -447,7 +459,7 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
         cx.update_window(handle, |_, window, _| {
             assert!(
                 before.is_focused(window),
-                "overlay={overlay}, root={}, actions={:?}, after={}",
+                "full_height={full_height}, root={}, actions={:?}, after={}",
                 scope.handle().is_focused(window),
                 actions.each_ref().map(|action| action.is_focused(window)),
                 after.is_focused(window)
@@ -464,7 +476,10 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
         ] {
             press(&mut cx, handle, key);
             cx.update_window(handle, |_, window, _| {
-                assert!(focused.is_focused(window), "{key}, overlay={overlay}");
+                assert!(
+                    focused.is_focused(window),
+                    "{key}, full_height={full_height}"
+                );
                 assert_reveal_paint(window, expected);
             })
             .unwrap();
@@ -671,7 +686,13 @@ impl Render for RowActionFocus {
         let actions = match self.region {
             0 => crate::row_action_region("action-region").child(action),
             1 => crate::hover_reveal("action-region", "action-row", action),
-            _ => crate::hover_actions(theme, "action-region", "action-row", false).child(action),
+            _ => crate::hover_actions(
+                theme,
+                "action-region",
+                "action-row",
+                crate::SurfaceStyle::Opaque,
+            )
+            .child(action),
         };
         let drag_starts = self.drag_starts.clone();
         crate::column()

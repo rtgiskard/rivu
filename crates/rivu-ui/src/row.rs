@@ -297,33 +297,32 @@ fn hover_reveal_surface(id: impl Into<ElementId>, group: &'static str) -> Statef
         .focus_visible_within(|style| style.opacity(1.))
 }
 
-// Out-of-flow actions leave the full text width available until the row is hovered.
+/// Separate floating actions from row content without filtering their foreground.
+pub fn floating_action_surface(
+    theme: &rivu_format::palette::Palette,
+    surface: crate::SurfaceStyle,
+    actions: Stateful<Div>,
+) -> Stateful<Div> {
+    actions
+        .bg(surface.fill(theme.control, 0.35))
+        .when(surface == crate::SurfaceStyle::Translucent, |actions| {
+            actions.backdrop_blur(gpui::px(6.))
+        })
+}
+
+/// Reveal floating actions without reserving space in the row's text layout.
 pub fn hover_actions(
-    theme: &'static rivu_format::palette::Palette,
+    theme: &rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     group: &'static str,
-    selected: bool,
+    surface: crate::SurfaceStyle,
 ) -> Stateful<Div> {
-    hover_reveal_surface(id, group)
+    floating_action_surface(theme, surface, hover_reveal_surface(id, group))
         .absolute()
         .right_0()
         .top_0()
         .h_full()
         .gap_0()
-        .bg(row_background(
-            theme,
-            selected,
-            false,
-            crate::SurfaceStyle::Opaque,
-        ))
-        .group_hover(group, move |style| {
-            style.opacity(1.).bg(row_background(
-                theme,
-                selected,
-                true,
-                crate::SurfaceStyle::Opaque,
-            ))
-        })
 }
 
 #[cfg(test)]

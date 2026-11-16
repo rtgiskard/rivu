@@ -468,8 +468,13 @@ impl AudioProcessing {
                     },
                 )
                 .debug_selector(move || format!("audio-export-source-{panel}-{graph}"))
-                .when(selected, |view| {
-                    view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                .map(|view| {
+                    rivu_ui::active_control(
+                        theme,
+                        view,
+                        selected,
+                        crate::gui::appearance::material::surface(cx),
+                    )
                 }),
                 graph && graph_output.is_none() && !selected,
             ));
@@ -590,8 +595,13 @@ impl AudioProcessing {
                 )
                 .debug_selector(move || format!("audio-export-eq-{panel}"))
                 .self_start()
-                .when(has_eq, |view| {
-                    view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                .map(|view| {
+                    rivu_ui::active_control(
+                        theme,
+                        view,
+                        has_eq,
+                        crate::gui::appearance::material::surface(cx),
+                    )
                 }),
             )
             .child(caption(theme, self.tr("processing-export-eq-help")));
@@ -634,8 +644,13 @@ impl AudioProcessing {
                     },
                 )
                 .debug_selector(move || format!("audio-export-format-{panel}-{name}"))
-                .when(self.export.encoding.format == format, |view| {
-                    view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                .map(|view| {
+                    rivu_ui::active_control(
+                        theme,
+                        view,
+                        self.export.encoding.format == format,
+                        crate::gui::appearance::material::surface(cx),
+                    )
                 }),
                 !available,
             ));
@@ -677,8 +692,13 @@ impl AudioProcessing {
                             },
                         )
                         .debug_selector(move || format!("audio-export-bits-{panel}-{value}"))
-                        .when(self.export.encoding.pcm_bits == value, |view| {
-                            view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                        .map(|view| {
+                            rivu_ui::active_control(
+                                theme,
+                                view,
+                                self.export.encoding.pcm_bits == value,
+                                crate::gui::appearance::material::surface(cx),
+                            )
                         }),
                     );
                 }
@@ -762,6 +782,7 @@ impl AudioProcessing {
                     ("audio-export-advanced", panel),
                     self.tr("processing-export-advanced"),
                     self.export.advanced,
+                    crate::gui::appearance::material::surface(cx),
                     cx,
                 ),
                 cx,
@@ -790,8 +811,13 @@ impl AudioProcessing {
                         },
                     )
                     .debug_selector(move || format!("audio-export-channels-{panel}-{value:?}"))
-                    .when(self.export.encoding.channels == value, |view| {
-                        view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                    .map(|view| {
+                        rivu_ui::active_control(
+                            theme,
+                            view,
+                            self.export.encoding.channels == value,
+                            crate::gui::appearance::material::surface(cx),
+                        )
                     }),
                 );
             }

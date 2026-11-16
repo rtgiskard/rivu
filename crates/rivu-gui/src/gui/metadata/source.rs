@@ -391,6 +391,7 @@ impl Metadata {
                     "󰇘",
                     self.tr("gl-tags-actions"),
                 )
+                .surface(crate::gui::appearance::material::surface(cx))
                 .enabled(enabled)
                 .build(
                     IconButtonStyle::Surface,

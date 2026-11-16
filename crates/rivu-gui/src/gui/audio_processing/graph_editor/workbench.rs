@@ -111,12 +111,14 @@ impl AudioProcessing {
         panel: u64,
         region: &'static str,
         body: Div,
+        cx: &App,
     ) -> AnyElement {
         let scroll = self.context.scroll.borrow_mut().content((region, panel));
         scrollable_area(
             (region, panel),
             div().id((region, panel)).size_full().child(body),
             &scroll,
+            crate::gui::appearance::material::surface(cx),
         )
         .into_any_element()
     }
@@ -190,12 +192,13 @@ impl AudioProcessing {
         let toolbar = self.graph_toolbar(panel, selected, parameters_visible, cx);
         let body = if !wide && parameters_visible {
             let inspector = self.graph_inspector(panel, window, cx);
-            self.processing_scroll(panel, "processing-inspector", inspector)
+            self.processing_scroll(panel, "processing-inspector", inspector, cx)
         } else {
             let graph = self.graph_canvas_workspace(panel, window, cx);
             if wide && parameters_visible {
                 let inspector = self.graph_inspector(panel, window, cx);
-                let inspector = self.processing_scroll(panel, "processing-inspector", inspector);
+                let inspector =
+                    self.processing_scroll(panel, "processing-inspector", inspector, cx);
                 row()
                     .size_full()
                     .min_h_0()
@@ -566,7 +569,8 @@ impl AudioProcessing {
                         )),
                 );
             }
-            let connections = self.processing_scroll(panel, "processing-connections", connections);
+            let connections =
+                self.processing_scroll(panel, "processing-connections", connections, cx);
             view = view.child(div().h(rems(7.)).flex_shrink_0().child(connections));
         }
         view
@@ -653,14 +657,20 @@ impl AudioProcessing {
                     SharedString::from(format!("execute-{panel}-{output}")),
                     self.tr(label),
                     hint,
+                    crate::gui::appearance::material::surface(cx),
                     cx,
                     move |this, _, cx| this.graph_run_target(output, cx),
                 )
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .debug_selector(move || format!("execute-{panel}-{output}"))
-                .when(output, |view| {
-                    view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
+                .map(|view| {
+                    rivu_ui::active_control(
+                        theme,
+                        view,
+                        output,
+                        crate::gui::appearance::material::surface(cx),
+                    )
                 }),
                 busy || no_input || target.is_none() || audition_blocked,
             ));
@@ -802,7 +812,8 @@ impl AudioProcessing {
         let select = ChoiceSelect::new(
             SharedString::from(format!("workbench-menu-{panel}-{}", menu as u8)),
             label,
-        );
+        )
+        .surface(crate::gui::appearance::material::surface(cx));
         let select = if menu == WorkbenchMenu::Add {
             select
         } else {

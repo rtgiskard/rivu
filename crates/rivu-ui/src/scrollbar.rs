@@ -42,6 +42,7 @@ pub fn scrollable_area(
     id: impl Into<ElementId>,
     viewport: gpui::Stateful<gpui::Div>,
     scroll: &Rc<gpui::ScrollHandle>,
+    surface: crate::SurfaceStyle,
 ) -> impl IntoElement {
     scrollable(
         id,
@@ -52,6 +53,7 @@ pub fn scrollable_area(
             .track_scroll(scroll),
         ScrollSource::Area(scroll.clone()),
         None,
+        surface,
     )
 }
 
@@ -60,12 +62,14 @@ pub(super) fn scrollable_list(
     child: impl IntoElement,
     scroll: &UniformListScrollHandle,
     edge_fade_color: Option<u32>,
+    surface: crate::SurfaceStyle,
 ) -> impl IntoElement {
     scrollable(
         id,
         child,
         ScrollSource::List(scroll.clone()),
         edge_fade_color,
+        surface,
     )
 }
 
@@ -74,6 +78,7 @@ fn scrollable(
     child: impl IntoElement,
     scroll: ScrollSource,
     edge_fade_color: Option<u32>,
+    surface: crate::SurfaceStyle,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -99,6 +104,7 @@ fn scrollable(
         .child(Scrollbar {
             scroll,
             edge_fade_color,
+            surface,
         })
 }
 
@@ -163,8 +169,8 @@ impl Geometry {
 }
 
 // Paint after the list has resolved scrolling, without a hitbox or an offscreen
-// content texture. The opaque endpoint matches the host surface.
-fn paint_scroll_edges(color: u32, geometry: Geometry, offset: Pixels, window: &mut Window) {
+// content texture. The endpoint follows the host surface's transparency.
+fn paint_scroll_edges(color: gpui::Rgba, geometry: Geometry, offset: Pixels, window: &mut Window) {
     let viewport = geometry.viewport;
     let height = (window.rem_size() * 0.75).min(viewport.size.height / 4.);
     if geometry.max_offset <= px(0.) || height <= px(0.) || viewport.size.width <= px(0.) {
@@ -181,12 +187,11 @@ fn paint_scroll_edges(color: u32, geometry: Geometry, offset: Pixels, window: &m
     ] {
         let opacity = (distance / height).clamp(0., 1.);
         if opacity > 0. {
-            let color = rgb(color);
             window.paint_quad(fill(
                 Bounds::new(point(viewport.left(), y), size(viewport.size.width, height)),
                 linear_gradient(
                     angle,
-                    linear_color_stop(color.alpha(opacity), 0.),
+                    linear_color_stop(color.alpha(color.a * opacity), 0.),
                     linear_color_stop(color.alpha(0.), 1.),
                 ),
             ));
@@ -267,6 +272,7 @@ impl ScrollbarState {
 struct Scrollbar {
     scroll: ScrollSource,
     edge_fade_color: Option<u32>,
+    surface: crate::SurfaceStyle,
 }
 
 struct FrameState {
@@ -373,7 +379,8 @@ impl Element for Scrollbar {
             let state = frame.state.read(cx);
             let offset = self.scroll.handle().offset().y;
             paint_scroll_edges(
-                self.edge_fade_color.unwrap_or(theme.panel),
+                self.surface
+                    .fill(self.edge_fade_color.unwrap_or(theme.panel), 0.35),
                 state.geometry,
                 offset,
                 window,
@@ -572,7 +579,7 @@ mod tests {
                         .collect::<Vec<_>>()
                 })
                 .size_full()
-                .scrollbar("scroll"),
+                .scrollbar("scroll", crate::SurfaceStyle::Opaque),
             )
         }
     }

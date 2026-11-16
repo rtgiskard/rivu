@@ -34,6 +34,11 @@ impl WindowView {
                 "",
                 self.tr("shell-copy-message"),
             )
+            .surface(if is_error {
+                rivu_ui::SurfaceStyle::Opaque
+            } else {
+                appearance::material::surface(cx)
+            })
             .build_with(
                 IconButtonStyle::Quiet,
                 IconButtonDensity::Compact,

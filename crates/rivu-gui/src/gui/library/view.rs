@@ -461,21 +461,7 @@ impl Library {
                             .relative()
                             .overflow_hidden()
                             .child(tree_guides(theme, this.library.tree(), index))
-                            .child(name_content)
-                            .when_some(scan, |view, scan| {
-                                view.child(
-                                    rivu_ui::hover_actions(
-                                        theme,
-                                        gpui::ElementId::named_usize("library-scan-overlay", index),
-                                        "library-track-row",
-                                        selected,
-                                    )
-                                        .when(retry_counts, |view| view.opacity(1.))
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(scan),
-                                )
-                            });
+                            .child(name_content);
                         let menu_node = id.clone();
                         let menu_root = path.filter(|path| this.state.system.config.library_roots.contains(path)).cloned();
                         let located = matches!(entry, DirectoryRow::Track(track)
@@ -488,13 +474,6 @@ impl Library {
                             .overflow_hidden()
                             .group("library-track-row")
                             .relative()
-                            .when(focused_index == Some(index) || located, |view| {
-                                view.child(
-                                    div().absolute().inset_0()
-                                        .border_1()
-                                        .border_color(gpui::rgb(theme.accent)),
-                                )
-                            })
                             .when(located, |view| view.bg(rivu_ui::row_background(theme, false, true, crate::gui::appearance::material::surface(cx))))
                             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 if !this.library_row_current(&menu_scope, index, &menu_node) { cx.stop_propagation(); return; }
@@ -524,6 +503,19 @@ impl Library {
                                 },
                                 |view, columns| view.child(columns),
                             )
+                            .when_some(scan, |view, scan| {
+                                view.child(
+                                    rivu_ui::hover_actions(
+                                        theme,
+                                        gpui::ElementId::named_usize("library-scan-actions", index),
+                                        "library-track-row",
+                                        crate::gui::appearance::material::surface(cx),
+                                    )
+                                    .when(retry_counts, |view| view.opacity(1.))
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(scan),
+                                )
+                            })
                             .when_some(
                                 match entry {
                                     DirectoryRow::Track(track) => Some((track.id, track.favorite)),
@@ -531,7 +523,7 @@ impl Library {
                                 },
                                 |view, (track_id, favorite)| {
                                     view.child(
-                                        rivu_ui::hover_actions(theme, ("library-track-actions", track_id as u64), "library-track-row", selected).child(this.track_favorite_toggle(
+                                        rivu_ui::hover_actions(theme, ("library-track-actions", track_id as u64), "library-track-row", crate::gui::appearance::material::surface(cx)).child(this.track_favorite_toggle(
                                             gpui::ElementId::NamedInteger("library-tree-favorite".into(), track_id as u64),
                                             track_id,
                                             favorite,
@@ -539,7 +531,14 @@ impl Library {
                                         )),
                                     )
                                 },
-                            ),
+                            )
+                            .when(focused_index == Some(index) || located, |view| {
+                                view.child(
+                                    div().absolute().inset_0()
+                                        .border_1()
+                                        .border_color(gpui::rgb(theme.accent)),
+                                )
+                            }),
                             {
                                 let entry = visible.row;
                                 let i18n = Arc::clone(&this.i18n);
@@ -651,7 +650,7 @@ impl Library {
             })
             .h_full()
             .min_h_0()
-            .w_full().scrollbar(("library-directory-scrollbar", panel_id)),
+            .w_full().scrollbar(("library-directory-scrollbar", panel_id), crate::gui::appearance::material::surface(cx)),
         );
         view.into_any_element()
     }

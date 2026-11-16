@@ -2334,6 +2334,7 @@ impl EqualizerEditor {
                     self.response_channel + 1
                 ),
             )
+            .surface(crate::gui::appearance::material::surface(cx))
             .build(
                 self,
                 |this| Some(&mut this.channel_choices),

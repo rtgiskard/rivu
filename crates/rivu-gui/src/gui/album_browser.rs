@@ -894,8 +894,7 @@ impl AlbumBrowser {
                 IconButtonGroup::new(IconButtonStyle::Bare, IconButtonDensity::Compact)
                     .surface(crate::gui::appearance::material::surface(cx))
                     .button(
-                        IconButton::new(("play-album", index), "", self.tr("gl-play-album"))
-                            .surface(crate::gui::appearance::material::surface(cx)),
+                        IconButton::new(("play-album", index), "", self.tr("gl-play-album")),
                         cx,
                         move |this, window, cx| {
                             this.dismissed_actions = Some(play_key.clone());
@@ -905,8 +904,7 @@ impl AlbumBrowser {
                         },
                     )
                     .button(
-                        IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album"))
-                            .surface(crate::gui::appearance::material::surface(cx)),
+                        IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album")),
                         cx,
                         move |this, window, cx| {
                             this.dismissed_actions = Some(enqueue_key.clone());
@@ -1306,11 +1304,8 @@ impl Render for AlbumBrowser {
                                             theme,
                                             ("album-track-actions", id as u64),
                                             "album-track-row",
-                                            false,
+                                            crate::gui::appearance::material::surface(cx),
                                         )
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
                                         .on_click(|_, _, cx| cx.stop_propagation())
                                         .child(
                                             IconButtonGroup::new(
@@ -1323,9 +1318,6 @@ impl Render for AlbumBrowser {
                                                     ("album-track-play", id as u64),
                                                     "",
                                                     this.tr("gl-play-track"),
-                                                )
-                                                .surface(
-                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -1337,9 +1329,6 @@ impl Render for AlbumBrowser {
                                                     ("album-track-add", id as u64),
                                                     "󰐕",
                                                     this.tr("gl-enqueue-track"),
-                                                )
-                                                .surface(
-                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -1366,7 +1355,10 @@ impl Render for AlbumBrowser {
                     }
                 })
                 .size_full()
-                .scrollbar("album-tracks-scrollbar")
+                .scrollbar(
+                    "album-tracks-scrollbar",
+                    crate::gui::appearance::material::surface(cx),
+                )
                 .into_any_element()
             }
         } else if self.model.albums().is_empty() {
@@ -1391,6 +1383,7 @@ impl Render for AlbumBrowser {
             let generation = self.model.generation();
             let demand_owner = cx.weak_entity();
             let measure_owner = cx.weak_entity();
+            let surface = crate::gui::appearance::material::surface(cx);
             VirtualList::new(
                 "album-grid",
                 self.model.albums().len().div_ceil(columns),
@@ -1426,7 +1419,7 @@ impl Render for AlbumBrowser {
                 });
             })
             .size_full()
-            .scrollbar_with("album-grid-scrollbar", |list| {
+            .scrollbar_with("album-grid-scrollbar", surface, |list| {
                 div()
                     .relative()
                     .size_full()

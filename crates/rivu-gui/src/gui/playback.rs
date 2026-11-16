@@ -377,8 +377,7 @@ impl Playback {
                             ("previous", panel_id),
                             "󰒮",
                             self.context.tr("gl-previous-track"),
-                        )
-                        .surface(crate::gui::appearance::material::surface(cx)),
+                        ),
                         cx,
                         |this, _, cx| this.send(Command::Previous, cx),
                         |button| {
@@ -409,8 +408,7 @@ impl Playback {
                                     },
                                 ),
                             ),
-                        )
-                        .surface(crate::gui::appearance::material::surface(cx)),
+                        ),
                         cx,
                         |this, _, cx| this.send(Command::Toggle, cx),
                         |button| {
@@ -427,8 +425,7 @@ impl Playback {
                         },
                     )
                     .button_with(
-                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track"))
-                            .surface(crate::gui::appearance::material::surface(cx)),
+                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
                         cx,
                         |this, _, cx| this.send(Command::Next, cx),
                         |button| {

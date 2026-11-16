@@ -2448,6 +2448,7 @@ impl Settings {
                             .h_full()
                             .child(self.sidebar(cx).w_full().flex_shrink_0()),
                         &sidebar_scroll,
+                        rivu_ui::SurfaceStyle::Opaque,
                     )),
             );
         }
@@ -2464,6 +2465,7 @@ impl Settings {
                     .h_full()
                     .child(content.flex_shrink_0().p_2()),
                 &scroll,
+                rivu_ui::SurfaceStyle::Opaque,
             )),
         );
         let feedback = if self.model.applying() {

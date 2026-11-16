@@ -24,6 +24,7 @@ pub struct SearchLabels {
 pub struct SearchField {
     labels: SearchLabels,
     debounce: Duration,
+    surface: fn(&App) -> crate::SurfaceStyle,
     input: Entity<Input>,
     focus_handle: FocusHandle,
     expanded: bool,
@@ -39,7 +40,13 @@ pub struct SearchField {
 impl EventEmitter<SearchEvent> for SearchField {}
 
 impl SearchField {
-    pub fn new(labels: SearchLabels, debounce: Duration, cx: &mut Context<Self>) -> Self {
+    /// Resolve the collapsed button's surface at render time; the expanded input stays solid.
+    pub fn new(
+        labels: SearchLabels,
+        debounce: Duration,
+        surface: fn(&App) -> crate::SurfaceStyle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             Input::new(labels.name.clone(), "", labels.placeholder.clone(), cx).embedded()
         });
@@ -52,6 +59,7 @@ impl SearchField {
         Self {
             labels,
             debounce,
+            surface,
             input,
             focus_handle: cx.focus_handle(),
             expanded: false,
@@ -202,12 +210,14 @@ impl Render for SearchField {
                 .h(height)
                 .flex_shrink_0()
                 .child(
-                    IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone()).build(
-                        IconButtonStyle::Surface,
-                        IconButtonDensity::Regular,
-                        cx,
-                        |this, window, cx| this.toggle(window, cx),
-                    ),
+                    IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone())
+                        .surface((self.surface)(cx))
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| this.toggle(window, cx),
+                        ),
                 )
                 .into_any_element();
         }
@@ -310,6 +320,51 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn collapsed_search_tracks_live_host_surface(cx: &mut TestAppContext) {
+        struct HostSurface(crate::SurfaceStyle);
+        impl Global for HostSurface {}
+
+        cx.update(|cx| {
+            crate::theme::init_test(cx);
+            cx.set_global(HostSurface(crate::SurfaceStyle::Opaque));
+        });
+        let window = cx.add_window(|_, cx| {
+            SearchField::new(
+                labels(),
+                Duration::ZERO,
+                |cx| cx.global::<HostSurface>().0,
+                cx,
+            )
+        });
+        for surface in [
+            crate::SurfaceStyle::Translucent,
+            crate::SurfaceStyle::Opaque,
+            crate::SurfaceStyle::Translucent,
+        ] {
+            cx.update(|cx| {
+                cx.set_global(HostSurface(surface));
+                cx.refresh_windows();
+            });
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let expected: Hsla = rgb(crate::theme::palette(cx).control).into();
+                let fill = window
+                    .painted_quads()
+                    .iter()
+                    .filter_map(|quad| quad.background.as_solid())
+                    .find(|color| {
+                        color.h == expected.h && color.s == expected.s && color.l == expected.l
+                    })
+                    .expect("collapsed search must paint its control surface");
+                assert!(fill.a > 0.);
+                assert_eq!(fill.a == 1., surface == crate::SurfaceStyle::Opaque);
+            })
+            .unwrap();
+        }
+    }
+
     fn observed_search_window(
         cx: &mut TestAppContext,
         delay: Duration,
@@ -320,7 +375,9 @@ mod tests {
         Subscription,
     ) {
         cx.update(crate::theme::init_test);
-        let window = cx.add_window(move |_, cx| SearchField::new(labels(), delay, cx));
+        let window = cx.add_window(move |_, cx| {
+            SearchField::new(labels(), delay, |_| crate::SurfaceStyle::Opaque, cx)
+        });
         let search = window.root(cx).unwrap();
         let published = Rc::new(RefCell::new(Vec::new()));
         let subscription = cx.update(|cx| {
@@ -361,7 +418,16 @@ mod tests {
     fn expanding_search_in_a_column_does_not_take_the_content_height() {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
-        let search = cx.update(|cx| cx.new(|cx| SearchField::new(labels(), Duration::ZERO, cx)));
+        let search = cx.update(|cx| {
+            cx.new(|cx| {
+                SearchField::new(
+                    labels(),
+                    Duration::ZERO,
+                    |_| crate::SurfaceStyle::Opaque,
+                    cx,
+                )
+            })
+        });
         let remaining = Rc::new(RefCell::new(None));
         let window = cx.add_window({
             let search = search.clone();
@@ -400,7 +466,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
         let delay = Duration::from_millis(100);
-        let search = cx.update(|cx| cx.new(|cx| SearchField::new(labels(), delay, cx)));
+        let search = cx.update(|cx| {
+            cx.new(|cx| SearchField::new(labels(), delay, |_| crate::SurfaceStyle::Opaque, cx))
+        });
         let outside = cx.update(|cx| cx.focus_handle());
         let window = cx.add_window({
             let search = search.clone();

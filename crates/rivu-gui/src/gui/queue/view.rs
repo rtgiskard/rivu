@@ -438,9 +438,14 @@ impl Queue {
                                         row.child(caption(theme, this.tr("gl-missing")))
                                     })
                                     .when(this.queue_locate_emphasized(id), |row| {
-                                        row.border_1()
-                                            .border_color(rgb(theme.accent))
-                                            .bg(rgb(theme.highlight))
+                                        row.border_1().border_color(rgb(theme.accent)).bg(
+                                            rivu_ui::row_background(
+                                                theme,
+                                                this.model.contains(&id),
+                                                true,
+                                                crate::gui::appearance::material::surface(cx),
+                                            ),
+                                        )
                                     })
                                     .when(active_id == Some(id), |row| {
                                         row.border_color(rgb(theme.accent))
@@ -452,11 +457,8 @@ impl Queue {
                                             theme,
                                             ("queue-entry-actions", id),
                                             "queue-track-row",
-                                            this.model.contains(&id),
+                                            crate::gui::appearance::material::surface(cx),
                                         )
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
                                         .child(
                                             IconButtonGroup::new(
                                                 IconButtonStyle::Quiet,
@@ -468,9 +470,6 @@ impl Queue {
                                                     ("queue-entry-play", id),
                                                     "",
                                                     this.tr("gl-play-queue-entry"),
-                                                )
-                                                .surface(
-                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -501,9 +500,6 @@ impl Queue {
                                                     ("queue-entry-remove", id),
                                                     "",
                                                     this.tr("gl-remove-queue"),
-                                                )
-                                                .surface(
-                                                    crate::gui::appearance::material::surface(cx),
                                                 ),
                                                 cx,
                                                 move |this, _, cx| {
@@ -526,9 +522,6 @@ impl Queue {
                                                     "",
                                                     this.tr("gl-entry-up"),
                                                 )
-                                                .surface(crate::gui::appearance::material::surface(
-                                                    cx,
-                                                ))
                                                 .enabled(position > 0),
                                                 cx,
                                                 move |this, _, cx| {
@@ -555,9 +548,6 @@ impl Queue {
                                                     "",
                                                     this.tr("gl-entry-down"),
                                                 )
-                                                .surface(crate::gui::appearance::material::surface(
-                                                    cx,
-                                                ))
                                                 .enabled(can_move_down),
                                                 cx,
                                                 move |this, _, cx| {
@@ -717,7 +707,10 @@ impl Queue {
                 .h_full()
                 .min_h_0()
                 .w_full()
-                .scrollbar(("queue-scrollbar", panel_id))
+                .scrollbar(
+                    ("queue-scrollbar", panel_id),
+                    crate::gui::appearance::material::surface(cx),
+                )
                 .map(|view| crate::gui::appearance::texture_styles::list_fade(view, cx)),
             ))
             .into_any_element()

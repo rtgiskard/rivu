@@ -377,6 +377,7 @@ impl WindowView {
                                 "keyboard-help-scrollbar",
                                 column().id("keyboard-help-scroll").size_full().child(rows),
                                 self.shell.help_scroll(),
+                                rivu_ui::SurfaceStyle::Opaque,
                             )),
                     )
                     .child(caption(theme, self.tr("shell-keyboard-help-navigation")))

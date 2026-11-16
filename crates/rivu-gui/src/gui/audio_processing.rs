@@ -1860,6 +1860,7 @@ impl AudioProcessing {
             .as_ref()
             .is_some_and(|popup| popup.panel == panel && !popup.manage);
         let trigger = rivu_ui::ChoiceSelect::new(("eq-presets", panel), label)
+            .surface(crate::gui::appearance::material::surface(cx))
             .build(
                 self,
                 move |this| {
@@ -2422,6 +2423,7 @@ impl AudioProcessing {
                         ("neural-advanced", panel),
                         self.tr("processing-runtime-options"),
                         open,
+                        crate::gui::appearance::material::surface(cx),
                         cx,
                     ),
                     cx,
@@ -2634,8 +2636,14 @@ impl AudioProcessing {
             )
             .gap_1()
             .child(icon("", cx))
-            .bg(rgb(theme.selected))
-            .text_color(rgb(theme.accent)),
+            .map(|view| {
+                rivu_ui::active_control(
+                    theme,
+                    view,
+                    true,
+                    crate::gui::appearance::material::surface(cx),
+                )
+            }),
             busy || !supported || !model_ready || self.pending > 0 || drafts,
         ));
         let mut content = column().gap_1().child(actions);
@@ -2989,7 +2997,7 @@ impl AudioProcessing {
                     Page::Export => self.export_view(panel, cx),
                     Page::Graph | Page::Results => unreachable!(),
                 };
-                self.processing_scroll(panel, "processing-page-body", body.p_2())
+                self.processing_scroll(panel, "processing-page-body", body.p_2(), cx)
             }
         };
         let mut footer = column().min_w_0().gap_1();

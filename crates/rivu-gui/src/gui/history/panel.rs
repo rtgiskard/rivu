@@ -70,6 +70,8 @@ impl History {
             HistorySort::Title => ("history-sort-title", panel_id),
             HistorySort::Plays => ("history-sort-plays", panel_id),
         };
+        let theme = rivu_ui::theme::palette(cx);
+        let surface = crate::gui::appearance::material::surface(cx);
         sortable_header(
             id,
             label,
@@ -82,6 +84,7 @@ impl History {
                 cx.notify();
             },
         )
+        .hover(move |style| style.bg(surface.fill(theme.highlight, 0.55)))
         .px(window.rem_size() * 0.5 - px(1.))
         .py_1()
         .rounded_sm()
@@ -321,7 +324,7 @@ impl History {
                                                 theme,
                                                 ("history-track-actions", id as u64),
                                                 "history-track-row",
-                                                selected,
+                                                crate::gui::appearance::material::surface(cx),
                                             )
                                             .child(
                                                 this.track_favorite_toggle(
@@ -416,7 +419,10 @@ impl History {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .scrollbar(("history-scrollbar", panel_id)),
+                    .scrollbar(
+                        ("history-scrollbar", panel_id),
+                        crate::gui::appearance::material::surface(cx),
+                    ),
                 ),
             ))
             .into_any_element()

@@ -60,15 +60,19 @@ impl VirtualList {
         self
     }
 
-    /// Match edge fades to the host's opaque surface; defaults to the panel color.
+    /// Match edge-fade hue to the host surface; defaults to the panel color.
     pub fn edge_fade_color(mut self, color: u32) -> Self {
         self.edge_fade_color = Some(color);
         self
     }
 
     /// Adds the standard reserved scrollbar gutter, using the owner's stable interaction ID.
-    pub fn scrollbar(self, id: impl Into<ElementId>) -> impl IntoElement {
-        self.scrollbar_with(id, |list| list)
+    pub fn scrollbar(
+        self,
+        id: impl Into<ElementId>,
+        surface: crate::SurfaceStyle,
+    ) -> impl IntoElement {
+        self.scrollbar_with(id, surface, |list| list)
     }
 
     /// Wraps the viewport before adding its scrollbar gutter. This keeps host measurement or
@@ -76,11 +80,12 @@ impl VirtualList {
     pub fn scrollbar_with<E: IntoElement>(
         self,
         id: impl Into<ElementId>,
+        surface: crate::SurfaceStyle,
         wrap: impl FnOnce(Self) -> E,
     ) -> impl IntoElement {
         let scroll = self.scroll.clone();
         let edge_fade_color = self.edge_fade_color;
-        crate::scrollbar::scrollable_list(id, wrap(self), &scroll, edge_fade_color)
+        crate::scrollbar::scrollable_list(id, wrap(self), &scroll, edge_fade_color, surface)
             .into_any_element()
     }
 }

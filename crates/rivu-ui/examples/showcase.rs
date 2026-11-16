@@ -120,6 +120,7 @@ impl Showcase {
                     clear: "Clear search".into(),
                 },
                 Duration::from_millis(150),
+                |_| rivu_ui::SurfaceStyle::Opaque,
                 cx,
             )
         });
@@ -497,7 +498,7 @@ impl Render for Showcase {
                         list_row(colors,("row",index),false,row_height,rivu_ui::SurfaceStyle::Opaque)
                             .child(row_tooltip(two_line_text(colors,title.clone(),detail.clone()).id(("text",index)),title,detail)).into_any_element()
                     }).collect::<Vec<_>>()
-                })).h(rems(12.)).flex_shrink_0().w_full().scrollbar("example-scroll")
+                })).h(rems(12.)).flex_shrink_0().w_full().scrollbar("example-scroll", rivu_ui::SurfaceStyle::Opaque)
             });
         let mut root = self
             .scope

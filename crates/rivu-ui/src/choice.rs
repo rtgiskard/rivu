@@ -238,6 +238,7 @@ pub struct ChoiceSelect {
     id: ElementId,
     label: SharedString,
     hint: Option<SharedString>,
+    surface: crate::SurfaceStyle,
 }
 
 impl ChoiceSelect {
@@ -246,11 +247,17 @@ impl ChoiceSelect {
             id: id.into(),
             label: label.into(),
             hint: None,
+            surface: crate::SurfaceStyle::Opaque,
         }
     }
 
     pub fn with_hint(mut self, hint: impl Into<SharedString>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn surface(mut self, surface: crate::SurfaceStyle) -> Self {
+        self.surface = surface;
         self
     }
 
@@ -271,9 +278,17 @@ impl ChoiceSelect {
                 self.label,
                 expanded,
                 hint,
+                self.surface,
                 cx,
             ),
-            None => crate::dropdown_trigger(palette(cx), self.id, self.label, expanded, cx),
+            None => crate::dropdown_trigger(
+                palette(cx),
+                self.id,
+                self.label,
+                expanded,
+                self.surface,
+                cx,
+            ),
         }
         .role(Role::ComboBox)
         .capture_key_down(cx.listener(move |owner, event, window, cx| {
@@ -382,7 +397,7 @@ impl ChoicePopup {
         .h_full()
         .w_full()
         .edge_fade_color(palette(cx).control)
-        .scrollbar(self.scrollbar_id);
+        .scrollbar(self.scrollbar_id, crate::SurfaceStyle::Opaque);
         deferred(
             anchored()
                 .position(self.anchor.bottom_left())

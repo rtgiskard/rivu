@@ -31,6 +31,7 @@ pub(in crate::gui) fn new_search(
             clear: i18n.text("search-clear").to_owned().into(),
         },
         rivu_protocol::model::SEARCH_DEBOUNCE,
+        crate::gui::appearance::material::surface,
         cx,
     )
 }

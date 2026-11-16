@@ -752,39 +752,41 @@ impl Metadata {
             .or_insert_with(|| Rc::new(Cell::new(None)))
             .clone();
         let measure = bounds.clone();
-        let trigger = ChoiceSelect::new(("metadata-decoder", panel), label).build(
-            self,
-            move |this| (this.hint_panel == Some(panel)).then_some(&mut this.hint_choices),
-            cx,
-            move |this, _, cx| {
-                if !enabled
-                    || this.metadata.source.busy()
-                    || this.metadata.editor_identity() != identity
-                {
-                    return;
-                }
-                if this.hint_panel == Some(panel) {
-                    this.close_hint(cx);
-                    return;
-                }
-                this.hint_panel = Some(panel);
-                this.hint_choices.open(
-                    [
-                        ChoiceItem::new(DecoderHint::Auto, this.tr("gl-auto")),
-                        ChoiceItem::new(DecoderHint::Native, this.tr("gl-native")),
-                        ChoiceItem::new(DecoderHint::Ffmpeg, "FFmpeg"),
-                    ],
-                    match hint {
-                        DecoderHint::Auto => 0,
-                        DecoderHint::Native => 1,
-                        DecoderHint::Ffmpeg => 2,
-                    },
-                );
-                cx.notify();
-            },
-            Self::choose_hint,
-            |this, _, cx| this.close_hint(cx),
-        );
+        let trigger = ChoiceSelect::new(("metadata-decoder", panel), label)
+            .surface(crate::gui::appearance::material::surface(cx))
+            .build(
+                self,
+                move |this| (this.hint_panel == Some(panel)).then_some(&mut this.hint_choices),
+                cx,
+                move |this, _, cx| {
+                    if !enabled
+                        || this.metadata.source.busy()
+                        || this.metadata.editor_identity() != identity
+                    {
+                        return;
+                    }
+                    if this.hint_panel == Some(panel) {
+                        this.close_hint(cx);
+                        return;
+                    }
+                    this.hint_panel = Some(panel);
+                    this.hint_choices.open(
+                        [
+                            ChoiceItem::new(DecoderHint::Auto, this.tr("gl-auto")),
+                            ChoiceItem::new(DecoderHint::Native, this.tr("gl-native")),
+                            ChoiceItem::new(DecoderHint::Ffmpeg, "FFmpeg"),
+                        ],
+                        match hint {
+                            DecoderHint::Auto => 0,
+                            DecoderHint::Native => 1,
+                            DecoderHint::Ffmpeg => 2,
+                        },
+                    );
+                    cx.notify();
+                },
+                Self::choose_hint,
+                |this, _, cx| this.close_hint(cx),
+            );
         let trigger = trigger
             .bg(gpui::transparent_black())
             .border_color(gpui::transparent_black())
@@ -796,7 +798,8 @@ impl Metadata {
             .min_w(gpui::rems(4.))
             .ml(-px(1.))
             .when(self.hint_panel == Some(panel), |trigger| {
-                trigger.bg(rgb(theme.highlight))
+                trigger
+                    .bg(crate::gui::appearance::material::surface(cx).fill(theme.highlight, 0.55))
             });
         let mut content = column().gap_1().child(
             row()

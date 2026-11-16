@@ -41,10 +41,10 @@ pub fn active_control(
     surface: SurfaceStyle,
 ) -> Stateful<Div> {
     control.when(active, |view| {
-        view.bg(surface.fill(theme.selected, 0.86))
+        view.bg(surface.fill(theme.selected, 0.65))
             .text_color(rgb(theme.accent))
             .group_hover("control", move |style| {
-                style.bg(surface.fill(theme.selected_hover, 0.94))
+                style.bg(surface.fill(theme.selected_hover, 0.75))
             })
     })
 }
@@ -71,11 +71,11 @@ fn control_surface(
         .text_sm()
         .text_color(rgb(theme.text))
         .cursor_pointer()
-        .bg(surface.fill(theme.control, 0.88))
+        .bg(surface.fill(theme.control, 0.35))
         .border_1()
-        .border_color(rgb(theme.border))
+        .border_color(surface.fill(theme.border, 0.30))
         .group_hover("control", move |style| {
-            style.bg(surface.fill(theme.highlight, 0.94))
+            style.bg(surface.fill(theme.highlight, 0.55))
         })
 }
 
@@ -135,23 +135,18 @@ pub fn button_on_surface<T: 'static>(
     activate_control(button_style(theme, id, label, surface), cx, action)
 }
 
-/// Text button whose accessible label and tooltip carry distinct information.
+/// Text button on an explicit surface, with distinct accessible label and tooltip.
 pub fn button_with_hint<T: 'static>(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     hint: impl Into<SharedString>,
+    surface: SurfaceStyle,
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     activate_control(
-        text_button_surface(
-            theme,
-            id,
-            label.into(),
-            Some(hint.into()),
-            SurfaceStyle::Opaque,
-        ),
+        text_button_surface(theme, id, label.into(), Some(hint.into()), surface),
         cx,
         action,
     )
@@ -413,14 +408,14 @@ impl IconButton {
             control
         } else {
             let background = if self.selected && self.selected_fill {
-                self.surface.fill(theme.selected, 0.86)
+                self.surface.fill(theme.selected, 0.65)
             } else if style == IconButtonStyle::Surface {
-                self.surface.fill(theme.control, 0.88)
+                self.surface.fill(theme.control, 0.35)
             } else {
                 gpui::transparent_black().into()
             };
             let border = if style == IconButtonStyle::Surface {
-                rgb(theme.structure_border).into()
+                self.surface.fill(theme.structure_border, 0.30).into()
             } else {
                 gpui::transparent_black()
             };
@@ -513,10 +508,12 @@ pub fn disabled_control(
     control: Stateful<Div>,
     disabled: bool,
 ) -> Stateful<Div> {
-    control.when(disabled, |view| {
+    control.when(disabled, |mut view| {
+        // Disabling changes the border tone, not the host surface's opacity.
+        let border_alpha = view.style().border_color.map_or(1., |color| color.a);
         disable_control_interaction(
             view.text_color(rgb(theme.disabled))
-                .border_color(rgb(theme.structure_border))
+                .border_color(rgb(theme.structure_border).alpha(border_alpha))
                 .group_hover("control", |style| style),
         )
     })
@@ -573,9 +570,10 @@ pub fn dropdown_trigger(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     expanded: bool,
+    surface: SurfaceStyle,
     cx: &gpui::App,
 ) -> Stateful<Div> {
-    dropdown_trigger_surface(theme, id, label.into(), expanded, None, cx)
+    dropdown_trigger_surface(theme, id, label.into(), expanded, None, surface, cx)
 }
 
 /// Explicit trigger information takes priority over truncated-label completion.
@@ -585,9 +583,18 @@ pub fn dropdown_trigger_with_hint(
     label: impl Into<SharedString>,
     expanded: bool,
     hint: impl Into<SharedString>,
+    surface: SurfaceStyle,
     cx: &gpui::App,
 ) -> Stateful<Div> {
-    dropdown_trigger_surface(theme, id, label.into(), expanded, Some(hint.into()), cx)
+    dropdown_trigger_surface(
+        theme,
+        id,
+        label.into(),
+        expanded,
+        Some(hint.into()),
+        surface,
+        cx,
+    )
 }
 
 fn dropdown_trigger_surface(
@@ -596,10 +603,11 @@ fn dropdown_trigger_surface(
     label: SharedString,
     expanded: bool,
     hint: Option<SharedString>,
+    surface: SurfaceStyle,
     cx: &gpui::App,
 ) -> Stateful<Div> {
     let complete_label = hint.is_none();
-    control_surface(theme, id, SurfaceStyle::Opaque)
+    control_surface(theme, id, surface)
         .role(Role::Button)
         .aria_label(label.clone())
         .aria_value(label.clone())
@@ -695,10 +703,18 @@ mod tests {
                     "control",
                     TOOLTIP_LABEL,
                     "Additional explanation",
+                    SurfaceStyle::Opaque,
                     cx,
                     |_, _, _| {},
                 ),
-                "empty-hint" => button_with_hint("control", TOOLTIP_LABEL, "", cx, |_, _, _| {}),
+                "empty-hint" => button_with_hint(
+                    "control",
+                    TOOLTIP_LABEL,
+                    "",
+                    SurfaceStyle::Opaque,
+                    cx,
+                    |_, _, _| {},
+                ),
                 "icon" => IconButton::new("control", "♥", "Favorite").build(
                     IconButtonStyle::Surface,
                     IconButtonDensity::Compact,
@@ -716,18 +732,32 @@ mod tests {
                 "choice" => {
                     crate::row::dropdown_row(theme, "control", false, TOOLTIP_LABEL, gpui::px(32.))
                 }
-                "trigger" => dropdown_trigger(theme, "control", TOOLTIP_LABEL, false, cx),
+                "trigger" => dropdown_trigger(
+                    theme,
+                    "control",
+                    TOOLTIP_LABEL,
+                    false,
+                    SurfaceStyle::Opaque,
+                    cx,
+                ),
                 "trigger-hint" => dropdown_trigger_with_hint(
                     theme,
                     "control",
                     TOOLTIP_LABEL,
                     false,
                     "Trigger explanation",
+                    SurfaceStyle::Opaque,
                     cx,
                 ),
-                "trigger-empty-hint" => {
-                    dropdown_trigger_with_hint(theme, "control", TOOLTIP_LABEL, false, "", cx)
-                }
+                "trigger-empty-hint" => dropdown_trigger_with_hint(
+                    theme,
+                    "control",
+                    TOOLTIP_LABEL,
+                    false,
+                    "",
+                    SurfaceStyle::Opaque,
+                    cx,
+                ),
                 "select-hint" => crate::ChoiceSelect::new("control", TOOLTIP_LABEL)
                     .with_hint("Select explanation")
                     .build::<_, ()>(

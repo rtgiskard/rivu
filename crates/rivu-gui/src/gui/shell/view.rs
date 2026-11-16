@@ -289,6 +289,7 @@ impl Render for WindowView {
             cx.notify();
         });
         let tools = IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+            .surface(appearance::material::surface(cx))
             .button_with(
                 IconButton::new(
                     "layout",

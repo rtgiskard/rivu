@@ -499,11 +499,15 @@ syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
 Workspace rows, tabs and buttons receive an explicit opaque or translucent
 interaction surface from the host. Enabled materials leave idle rows and tabs
 clear and use theme-colored translucent hover and selection fills; active tabs
-also retain an accent underline. Button fills remain denser than row highlights.
-Text, icons and focus borders are not faded, and interaction fills do not follow
-the panel-opacity parameter. Inline action shields remain opaque so underlying
-titles cannot show through their controls. Floating surfaces and input fields
-keep their solid materials independently of workspace effects.
+also retain an accent underline. Buttons use light fills and subdued borders,
+with stronger hover and selection fills. Disabling preserves surface transparency;
+text, icons and keyboard focus borders are not faded. Scroll-edge gradients also
+follow the host surface instead of covering materials with opaque tint. These
+interaction fills are independent of the panel-opacity parameter. Menus, dialogs
+and input fields remain opaque. Floating row and album actions share a local
+blurred backdrop and translucent theme fill while materials are enabled; their
+text and icons remain sharp. Without materials their backdrop is opaque and is
+not sampled or blurred. These action containers do not change the row's text layout.
 
 The GUI projects the saved preferences into its material state. Factory defaults
 are compiled from

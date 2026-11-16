@@ -252,6 +252,7 @@ impl AudioProcessing {
                         "processing-result-show-details"
                     }),
                     self.results.task_details,
+                    crate::gui::appearance::material::surface(cx),
                     cx,
                 ),
                 cx,
@@ -310,7 +311,7 @@ impl AudioProcessing {
                 .child(self.graph_task_summary(panel, cx))
                 .child(self.graph_task_status(panel, cx))
         };
-        let body = self.processing_scroll(panel, "processing-results", results.p_2());
+        let body = self.processing_scroll(panel, "processing-results", results.p_2(), cx);
         column().size_full().min_h_0().child(body)
     }
     pub(super) fn graph_task_summary(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {

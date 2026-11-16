@@ -1347,19 +1347,24 @@ impl Playlists {
                         let context_name = name.clone();
                         let drag_label = name.clone();
                         let catalog_revision = this.state.library.playlist_revision;
+                        let drop_background = rivu_ui::row_background(
+                            theme,
+                            this.browser.playlists().selected() == Some(id),
+                            true,
+                            crate::gui::appearance::material::surface(cx),
+                        );
                         row
                         .child(
                             hover_actions(
                                 theme,
                                 ("playlist-catalog-actions", id as u64),
                                 "playlist-catalog-row",
-                                this.browser.playlists().selected() == Some(id),
+                                crate::gui::appearance::material::surface(cx),
                             )
-                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(
                                     IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact).surface(crate::gui::appearance::material::surface(cx))
                                         .button(
-                                            IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).surface(crate::gui::appearance::material::surface(cx)).enabled(playable),
+                                            IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).enabled(playable),
                                             cx,
                                             move |this, window, cx| {
                                         if !playable {
@@ -1376,7 +1381,7 @@ impl Playlists {
                                     },
                                         )
                                         .button(
-                                            IconButton::new(("playlist-row-menu", id as u64), "󰇙", this.tr("gl-playlist-actions")).surface(crate::gui::appearance::material::surface(cx)),
+                                            IconButton::new(("playlist-row-menu", id as u64), "󰇙", this.tr("gl-playlist-actions")),
                                             cx,
                                             move |this, window, cx| {
                                         this.focus_layout(window, cx);
@@ -1464,11 +1469,11 @@ impl Playlists {
                                 })
                             }
                         })
-                        .drag_over::<LibraryDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
-                        .drag_over::<super::ContentDrag>(|style, _, _, _| {
-                            style.bg(rgb(theme.highlight))
+                        .drag_over::<LibraryDrag>(move |style, _, _, _| style.bg(drop_background))
+                        .drag_over::<super::ContentDrag>(move |style, _, _, _| {
+                            style.bg(drop_background)
                         })
-                        .drag_over::<ListDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
+                        .drag_over::<ListDrag>(move |style, _, _, _| style.bg(drop_background))
                         .children([false, true].into_iter().map(|after| {
                             let owner = cx.weak_entity();
                             let highlight_owner = owner.clone();
@@ -1519,7 +1524,10 @@ impl Playlists {
                 .into_any_element()
         } else {
             catalog
-                .scrollbar(("playlist-catalog-scrollbar", panel_id))
+                .scrollbar(
+                    ("playlist-catalog-scrollbar", panel_id),
+                    crate::gui::appearance::material::surface(cx),
+                )
                 .into_any_element()
         };
         let mut lists = column()
@@ -1639,11 +1647,8 @@ impl Playlists {
                                     theme,
                                     ("playlist-track-actions", id as u64),
                                     "playlist-track-row",
-                                    this.browser.playlists().track_selection.contains(id),
+                                    crate::gui::appearance::material::surface(cx),
                                 )
-                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
                                 .child(
                                     IconButtonGroup::new(
                                         IconButtonStyle::Quiet,
@@ -1655,8 +1660,7 @@ impl Playlists {
                                             ("playlist-entry-play", id as u64),
                                             "",
                                             this.tr("gl-play-track"),
-                                        )
-                                        .surface(crate::gui::appearance::material::surface(cx)),
+                                        ),
                                         cx,
                                         move |this, _, cx| {
                                             this.send(Command::Play { track_id }, cx)
@@ -1683,8 +1687,7 @@ impl Playlists {
                                             ("playlist-entry-remove", id as u64),
                                             "",
                                             this.tr("gl-remove-playlist"),
-                                        )
-                                        .surface(crate::gui::appearance::material::surface(cx)),
+                                        ),
                                         cx,
                                         move |this, _, cx| {
                                             this.refresh(cx);
@@ -2015,7 +2018,10 @@ impl Playlists {
                     .into_any_element()
             } else {
                 entries
-                    .scrollbar(("playlist-entries-scrollbar", panel_id))
+                    .scrollbar(
+                        ("playlist-entries-scrollbar", panel_id),
+                        crate::gui::appearance::material::surface(cx),
+                    )
                     .into_any_element()
             };
             lists = lists.child(
@@ -2056,7 +2062,15 @@ impl Playlists {
                                     })
                                 }
                             })
-                            .drag_over::<ListDrag>(|style, _, _, _| style.bg(rgb(theme.highlight))),
+                            .drag_over::<ListDrag>({
+                                let background = rivu_ui::row_background(
+                                    theme,
+                                    false,
+                                    true,
+                                    crate::gui::appearance::material::surface(cx),
+                                );
+                                move |style, _, _, _| style.bg(background)
+                            }),
                     ),
             );
         }
