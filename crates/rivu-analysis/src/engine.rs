@@ -1561,9 +1561,9 @@ mod tests {
                 }
                 analyzer.transform();
                 assert!((analyzer.visualizer.band_rms[band] - 0.5 / 2.0_f32.sqrt()).abs() < 0.0001);
-                for other in 0..3 {
+                for (other, &rms) in analyzer.visualizer.band_rms.iter().enumerate() {
                     if other != band {
-                        assert!(analyzer.visualizer.band_rms[other] < 0.0001);
+                        assert!(rms < 0.0001);
                     }
                 }
                 analyzer.reset();

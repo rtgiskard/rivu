@@ -805,9 +805,12 @@ impl Denoiser {
                 let p = self.smoothed_power[k].max(MIN_POWER);
                 let mut background = 0.0;
                 let mut neighbors = 0;
-                for j in k.saturating_sub(8)..=(k + 8).min(bins - 1) {
+                let start = k.saturating_sub(8);
+                let end = (k + 8).min(bins - 1);
+                for (offset, &power) in self.smoothed_power[start..=end].iter().enumerate() {
+                    let j = start + offset;
                     if k.abs_diff(j) > 2 {
-                        background += self.smoothed_power[j];
+                        background += power;
                         neighbors += 1;
                     }
                 }
@@ -916,9 +919,12 @@ impl Denoiser {
         for k in 0..bins {
             let mut total = 0.0;
             let mut weights = 0.0;
-            for j in k.saturating_sub(radius)..=(k + radius).min(bins - 1) {
+            let start = k.saturating_sub(radius);
+            let end = (k + radius).min(bins - 1);
+            for (offset, &gain) in self.target_gain[start..=end].iter().enumerate() {
+                let j = start + offset;
                 let weight = (radius + 1 - k.abs_diff(j)) as f32;
-                total += weight * self.target_gain[j];
+                total += weight * gain;
                 weights += weight;
             }
             let target = if self.config.mode == DenoiseMode::Adaptive {
