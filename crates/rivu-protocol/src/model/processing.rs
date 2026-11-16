@@ -11,8 +11,8 @@ use std::path::PathBuf;
 pub enum AudioExportFormat {
     Wav,
     Flac,
-    Mp3,
     Opus,
+    Mp3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,11 +103,11 @@ impl AudioExportEncoding {
         );
         if matches!(
             self.format,
-            AudioExportFormat::Mp3 | AudioExportFormat::Opus
+            AudioExportFormat::Opus | AudioExportFormat::Mp3
         ) {
             anyhow::ensure!(
                 channels <= 2,
-                "MP3/Opus export requires an explicit mono/stereo conversion for multichannel sources"
+                "Opus/MP3 export requires an explicit mono/stereo conversion for multichannel sources"
             );
         }
         if self.format == AudioExportFormat::Opus {

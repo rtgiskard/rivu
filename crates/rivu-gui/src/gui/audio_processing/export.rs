@@ -31,10 +31,10 @@ pub(super) struct ExportState {
 
 fn format_name(format: AudioExportFormat) -> &'static str {
     match format {
-        AudioExportFormat::Wav => "WAV",
-        AudioExportFormat::Flac => "FLAC",
-        AudioExportFormat::Mp3 => "MP3",
-        AudioExportFormat::Opus => "Opus",
+        AudioExportFormat::Wav => "wav",
+        AudioExportFormat::Flac => "flac",
+        AudioExportFormat::Opus => "opus",
+        AudioExportFormat::Mp3 => "mp3",
     }
 }
 
@@ -164,7 +164,7 @@ impl AudioProcessing {
                     self.page == Page::Export
                         && matches!(
                             self.export.encoding.format,
-                            AudioExportFormat::Mp3 | AudioExportFormat::Opus
+                            AudioExportFormat::Opus | AudioExportFormat::Mp3
                         )
                 }
                 FieldKey::ExportCompression => {
@@ -263,7 +263,7 @@ impl AudioProcessing {
         };
         if matches!(
             encoding.format,
-            AudioExportFormat::Mp3 | AudioExportFormat::Opus
+            AudioExportFormat::Opus | AudioExportFormat::Mp3
         ) {
             encoding.bitrate_kbps = self
                 .text(FieldKey::ExportBitrate, cx)
@@ -378,7 +378,7 @@ impl AudioProcessing {
                 self.tr("processing-export-compression"),
                 encoding.compression
             ),
-            AudioExportFormat::Mp3 | AudioExportFormat::Opus => {
+            AudioExportFormat::Opus | AudioExportFormat::Mp3 => {
                 format!("{} kb/s", encoding.bitrate_kbps)
             }
         };
@@ -613,8 +613,8 @@ impl AudioProcessing {
         for format in [
             AudioExportFormat::Wav,
             AudioExportFormat::Flac,
-            AudioExportFormat::Mp3,
             AudioExportFormat::Opus,
+            AudioExportFormat::Mp3,
         ] {
             let available = self.export_format_available(format);
             let name = format_name(format);
@@ -699,7 +699,7 @@ impl AudioProcessing {
                     );
                 }
             }
-            AudioExportFormat::Mp3 | AudioExportFormat::Opus => {
+            AudioExportFormat::Opus | AudioExportFormat::Mp3 => {
                 encoding = encoding.child(
                     self.field_view(
                         panel,
@@ -1056,7 +1056,7 @@ mod tests {
             .unwrap();
         }
         draw(cx, handle);
-        click(cx, handle, "audio-export-format-7-MP3");
+        click(cx, handle, "audio-export-format-7-mp3");
         assert!(
             VisualTestContext::from_window(handle, cx)
                 .debug_bounds("audio-export-bitrate-7")
@@ -1070,7 +1070,7 @@ mod tests {
         owner.read_with(cx, |this, cx| {
             assert_eq!(this.text(FieldKey::ExportPath, cx), "out.mp3")
         });
-        click(cx, handle, "audio-export-format-7-FLAC");
+        click(cx, handle, "audio-export-format-7-flac");
         owner.read_with(cx, |this, _| {
             assert_eq!(this.export.encoding.format, AudioExportFormat::Mp3)
         });

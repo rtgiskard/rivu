@@ -106,18 +106,18 @@ fn checked(code: c_int, operation: &str) -> Result<c_int> {
 }
 fn codec_name(format: AudioExportFormat) -> &'static CStr {
     match format {
-        AudioExportFormat::Flac => c"flac",
-        AudioExportFormat::Mp3 => c"libmp3lame",
-        AudioExportFormat::Opus => c"libopus",
         AudioExportFormat::Wav => c"pcm_f32le",
+        AudioExportFormat::Flac => c"flac",
+        AudioExportFormat::Opus => c"libopus",
+        AudioExportFormat::Mp3 => c"libmp3lame",
     }
 }
 fn muxer_name(format: AudioExportFormat) -> &'static CStr {
     match format {
-        AudioExportFormat::Flac => c"flac",
-        AudioExportFormat::Mp3 => c"mp3",
-        AudioExportFormat::Opus => c"opus",
         AudioExportFormat::Wav => c"wav",
+        AudioExportFormat::Flac => c"flac",
+        AudioExportFormat::Opus => c"opus",
+        AudioExportFormat::Mp3 => c"mp3",
     }
 }
 pub fn export_encoder_available(format: AudioExportFormat) -> bool {
@@ -528,7 +528,7 @@ impl AudioEncoder {
             );
             if matches!(
                 options.format,
-                AudioExportFormat::Mp3 | AudioExportFormat::Opus
+                AudioExportFormat::Opus | AudioExportFormat::Mp3
             ) {
                 ensure!(
                     ctx.bit_rate == i64::from(options.bitrate_kbps) * 1000,
@@ -786,8 +786,8 @@ mod tests {
         for (format, bits) in [
             (AudioExportFormat::Flac, 16),
             (AudioExportFormat::Flac, 24),
-            (AudioExportFormat::Mp3, 32),
             (AudioExportFormat::Opus, 32),
+            (AudioExportFormat::Mp3, 32),
         ] {
             if !export_encoder_available(format) {
                 continue;

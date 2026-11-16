@@ -31,8 +31,8 @@ impl Core {
                     [
                         AudioExportFormat::Wav,
                         AudioExportFormat::Flac,
-                        AudioExportFormat::Mp3,
                         AudioExportFormat::Opus,
+                        AudioExportFormat::Mp3,
                     ]
                     .into_iter()
                     .filter(|format| audio::export_encoder_available(*format))

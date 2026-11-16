@@ -156,31 +156,36 @@ output are not automatically applied again. Playback volume, ReplayGain and
 temporary playback bypass do not become export processing. No normalization or
 limiter is added. Source files are never rewritten.
 
-WAV supports 16/24-bit integer or 32-bit float PCM; FLAC supports 16/24-bit integer
-PCM and a compression level. MP3 exposes a constant bitrate; Opus exposes a target
-bitrate. FLAC is lossless
+Encoding choices appear as `wav`, `flac`, `opus`, `mp3`, in that order.
+wav supports 16/24-bit integer or 32-bit float PCM; flac supports 16/24-bit integer
+PCM and a compression level. opus exposes a target bitrate; mp3 exposes a constant
+bitrate. flac is lossless
 relative to the quantized integer samples, not the pre-quantization floating-point
-processing result. Use float WAV to retain finite floating-point samples,
+processing result. Use float wav to retain finite floating-point samples,
 including peaks above full scale. Integer conversion uses triangular dither;
 integer and lossy export reject out-of-range samples instead of silently clipping.
 
 Sample rate and channel layout are preserved unless conversion is explicitly
 selected. Channel conversion offers mono or stereo. A codec's unsupported rate or
-layout is an error, not permission to downmix automatically. MP3 and Opus exports
-support mono/stereo; multichannel inputs require an explicit conversion. Opus
-uses 48 kHz; other source rates require explicitly selecting 48 kHz. MP3 also
+layout is an error, not permission to downmix automatically. opus and mp3 exports
+support mono/stereo; multichannel inputs require an explicit conversion. opus
+uses 48 kHz; other source rates require explicitly selecting 48 kHz. mp3 also
 requires a rate and constant bitrate combination supported by its encoder.
 Resampling produces `ceil(source_frames * output_rate / source_rate)` frames;
 filter boundary extension does not lengthen the exported timeline. An empty
 source remains empty, and failure to produce the required tail fails the export.
 
-Native WAV writing is available without FFmpeg. Compressed export and rate/channel
+Native wav writing is available without FFmpeg. Compressed export and rate/channel
 conversion use runtime-loaded FFmpeg libraries, including `libswresample`; no
 `ffmpeg` executable is required. Available encoders are discovered on explicit
 export-page demand, never on ordinary startup or from rendering a control.
 Missing encoders are unavailable rather than replaced with another format.
-This explicit export capability is independent of the optional FFmpeg decoding
-preference. See link:../readme.adoc#ffmpeg-and-native-only-builds[Build dependencies].
+Compressed export and rate/channel conversion require the `ffmpeg` build feature
+and the corresponding runtime libraries and encoders. Native-only builds support
+wav export without rate/channel conversion. With the build feature included,
+export remains available when `playback.ffmpeg_enabled` is false: that preference
+controls playback decoding only. See
+link:../readme.adoc#ffmpeg-and-native-only-builds[Build dependencies].
 
 Choose a new output file in an existing directory. Desktop destinations are
 absolute; CLI destinations may be relative to the invoking client's directory.

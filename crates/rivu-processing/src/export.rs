@@ -759,8 +759,8 @@ fn encoded_export_cancellation_discards_every_unpublished_file() {
     use std::sync::atomic::Ordering;
     for format in [
         AudioExportFormat::Flac,
-        AudioExportFormat::Mp3,
         AudioExportFormat::Opus,
+        AudioExportFormat::Mp3,
     ] {
         if !audio::export_encoder_available(format) {
             continue;

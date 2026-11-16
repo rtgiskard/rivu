@@ -1974,8 +1974,8 @@ fn unified_audio_export_round_trip_preserves_sources_encoding_and_eq_snapshot() 
         for format in [
             AudioExportFormat::Wav,
             AudioExportFormat::Flac,
-            AudioExportFormat::Mp3,
             AudioExportFormat::Opus,
+            AudioExportFormat::Mp3,
         ] {
             assert_command_round_trip(
                 &mut encoded,
