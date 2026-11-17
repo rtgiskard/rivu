@@ -162,8 +162,11 @@ PCM and a compression level. opus exposes a target bitrate; mp3 exposes a consta
 bitrate. flac is lossless
 relative to the quantized integer samples, not the pre-quantization floating-point
 processing result. Use float wav to retain finite floating-point samples,
-including peaks above full scale. Integer conversion uses triangular dither;
-integer and lossy export reject out-of-range samples instead of silently clipping.
+including peaks above full scale. Integer conversion uses triangular dither.
+Integer and lossy export reject samples beyond full scale (±1.0) instead of
+silently clipping. Samples between the highest integer code and full scale,
+such as a 24-bit peak written at 16 bits, are accepted. Dithered, rounded codes
+are clamped to the target bounds; error stays within 1.5 target LSB.
 
 Sample rate and channel layout are preserved unless conversion is explicitly
 selected. Channel conversion offers mono or stereo. A codec's unsupported rate or

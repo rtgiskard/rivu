@@ -82,7 +82,7 @@ enum Sink<'a> {
     Wav {
         writer: hound::WavWriter<std::io::BufWriter<&'a mut fs::File>>,
         bits: u16,
-        noise: Dither,
+        noise: audio::PcmDither,
     },
     Encoded(audio::AudioEncoder),
 }
@@ -109,7 +109,7 @@ impl Sink<'_> {
                         writer.write_sample(sample)?;
                     }
                 } else {
-                    audio::validate_integer_samples(samples, *bits)?;
+                    audio::validate_full_scale(samples)?;
                     for &sample in samples {
                         writer.write_sample(noise.quantize(sample, *bits))?;
                     }
@@ -127,27 +127,6 @@ impl Sink<'_> {
             }
             Self::Encoded(mut encoder) => encoder.finish(),
         }
-    }
-}
-
-/// Deterministic TPDF dither: two independent uniform draws per output sample.
-/// Only dither excursions at representable endpoints saturate; signal overload
-/// is rejected before quantization. State is continuous across PCM blocks.
-struct Dither(u64);
-impl Dither {
-    fn uniform(&mut self) -> f64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        let value = self.0.wrapping_mul(0x2545_f491_4f6c_dd1d);
-        (value >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
-    }
-    fn quantize(&mut self, sample: f32, bits: u16) -> i32 {
-        let scale = (1_u32 << (bits - 1)) as f64;
-        let noise = self.uniform() - self.uniform();
-        (f64::from(sample) * scale + noise)
-            .round()
-            .clamp(-scale, scale - 1.0) as i32
     }
 }
 
@@ -305,7 +284,7 @@ pub(super) fn prepare_streaming_encoded_export(
         Sink::Wav {
             writer: hound::WavWriter::new(std::io::BufWriter::new(temporary.as_file_mut()), spec)?,
             bits: options.pcm_bits,
-            noise: Dither(0x7269_7675_6469_7468),
+            noise: audio::PcmDither::default(),
         }
     } else {
         Sink::Encoded(audio::AudioEncoder::new(
@@ -666,6 +645,40 @@ mod tests {
             );
             assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn integer_export_saturates_up_to_full_scale_and_rejects_beyond() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("peak.wav");
+        let request = request(&destination, 16);
+        let cancel = AtomicBool::new(false);
+        // A 24-bit source peak lies between the highest 16-bit code and full scale.
+        let peak_24 = 8_388_607.0_f32 / 8_388_608.0;
+        let source: Vec<f32> = [peak_24, 1.0, -1.0].repeat(1024);
+        let export = |samples: &[f32]| {
+            prepare_streaming_encoded_export(
+                48_000,
+                &[audio::Channel::FrontCenter],
+                &destination,
+                Some(&request),
+                &cancel,
+                |writer| writer.write_frames(samples),
+            )
+        };
+        let (temporary, _) = export(&source).unwrap();
+        let samples = hound::WavReader::open(temporary.path())
+            .unwrap()
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for &[peak, full, negative] in samples.as_chunks::<3>().0 {
+            assert_eq!([peak, full], [i16::MAX; 2]);
+            assert!(negative <= i16::MIN + 1);
+        }
+        drop(temporary);
+        assert!(export(&[1.0 + f32::EPSILON]).is_err());
+        assert!(export(&[-1.0 - f32::EPSILON]).is_err());
     }
 
     #[test]

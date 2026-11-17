@@ -1,6 +1,6 @@
 //! Offline encoding only. Playback never enters this module.
 use super::*;
-use crate::encoding::validate_integer_samples;
+use crate::encoding::validate_full_scale;
 use anyhow::ensure;
 use rivu_protocol::model::{AudioExportEncoding, AudioExportFormat};
 use std::{ffi::c_void, os::unix::ffi::OsStrExt};
@@ -453,6 +453,7 @@ pub struct AudioEncoder {
     channels: usize,
     pts: i64,
     integer_bits: Option<u16>,
+    noise: crate::encoding::PcmDither,
     finished: bool,
 }
 impl AudioEncoder {
@@ -481,6 +482,7 @@ impl AudioEncoder {
             channels: mask.count_ones() as usize,
             pts: 0,
             integer_bits: (options.format == AudioExportFormat::Flac).then_some(options.pcm_bits),
+            noise: crate::encoding::PcmDither::default(),
             finished: false,
         };
         let path = CString::new(path.as_os_str().as_bytes())?;
@@ -589,7 +591,7 @@ impl AudioEncoder {
                 (a.frame_buffer)(this.frame, 0),
                 "allocate export frame buffer",
             )?;
-            if ctx.sample_fmt != AVSampleFormat_AV_SAMPLE_FMT_FLT {
+            if this.integer_bits.is_none() && ctx.sample_fmt != AVSampleFormat_AV_SAMPLE_FMT_FLT {
                 checked(
                     (a.swr_alloc)(
                         &mut this.conversion,
@@ -604,21 +606,6 @@ impl AudioEncoder {
                     ),
                     "allocate sample conversion",
                 )?;
-                if let Some(bits) = this.integer_bits {
-                    checked(
-                        (a.opt_int)(this.conversion.cast(), c"dither_method".as_ptr(), 2, 0),
-                        "enable triangular dither",
-                    )?;
-                    checked(
-                        (a.opt_int)(
-                            this.conversion.cast(),
-                            c"output_sample_bits".as_ptr(),
-                            i64::from(bits),
-                            0,
-                        ),
-                        "set dither precision",
-                    )?;
-                }
                 checked(
                     (a.swr_init)(this.conversion),
                     "initialize sample conversion",
@@ -633,14 +620,7 @@ impl AudioEncoder {
             samples.len().is_multiple_of(self.channels),
             "Incomplete encoder frame"
         );
-        if let Some(bits) = self.integer_bits {
-            validate_integer_samples(samples, bits)?;
-        } else {
-            ensure!(
-                samples.iter().all(|x| (-1.0..=1.0).contains(x)),
-                "Lossy export contains non-finite or overloaded samples; reduce explicit EQ output gain or choose float32 WAV"
-            );
-        }
+        validate_full_scale(samples)?;
         while !samples.is_empty() {
             let count = samples.len().min(self.pending.len() - self.used);
             self.pending[self.used..self.used + count].copy_from_slice(&samples[..count]);
@@ -662,7 +642,26 @@ impl AudioEncoder {
             let count = (self.used / self.channels) as c_int;
             (*self.frame).nb_samples = count;
             (*self.frame).pts = self.pts;
-            if self.conversion.is_null() {
+            if let Some(bits) = self.integer_bits {
+                if bits == 16 {
+                    let output = std::slice::from_raw_parts_mut(
+                        (*self.frame).data[0].cast::<i16>(),
+                        self.used,
+                    );
+                    for (out, &sample) in output.iter_mut().zip(&self.pending[..self.used]) {
+                        *out = self.noise.quantize(sample, bits) as i16;
+                    }
+                } else {
+                    let output = std::slice::from_raw_parts_mut(
+                        (*self.frame).data[0].cast::<i32>(),
+                        self.used,
+                    );
+                    for (out, &sample) in output.iter_mut().zip(&self.pending[..self.used]) {
+                        // FLAC drops the low eight bits; quantize before left alignment.
+                        *out = self.noise.quantize(sample, bits) << 8;
+                    }
+                }
+            } else if self.conversion.is_null() {
                 // The opened codec accepts our interleaved f32 representation.
                 // Only `used` samples belong to a short final frame.
                 ptr::copy_nonoverlapping(
@@ -782,6 +781,65 @@ mod tests {
     use crate::{PcmBudget, SourceRenderer};
 
     #[test]
+    fn flac_integer_quantization_is_unbiased_and_block_invariant() {
+        if !export_encoder_available(AudioExportFormat::Flac) {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        for bits in [16, 24] {
+            let scale = (1_u32 << (bits - 1)) as f32;
+            let samples = (0..65_536)
+                .map(|i| [0.0, 0.25 / scale, -0.25 / scale, 0.0][i % 4])
+                .collect::<Vec<_>>();
+            let render = |chunk_size: usize| {
+                let path = directory.path().join(format!("{bits}-{chunk_size}.flac"));
+                let options = AudioExportEncoding {
+                    format: AudioExportFormat::Flac,
+                    pcm_bits: bits,
+                    ..Default::default()
+                };
+                let mut encoder = AudioEncoder::new(&path, 48_000, 3, &options).unwrap();
+                for chunk in samples.chunks(chunk_size) {
+                    encoder.write(chunk).unwrap();
+                }
+                encoder.finish().unwrap();
+                drop(encoder);
+                let pcm = SourceRenderer::open(
+                    &path,
+                    None,
+                    rivu_format::decoder_hint::DecoderHint::Ffmpeg,
+                    1,
+                    true,
+                    &cancel,
+                )
+                .unwrap()
+                .render_pcm(PcmBudget::new(8 * 1024 * 1024), &cancel)
+                .unwrap();
+                let mut decoded = vec![0.0; samples.len()];
+                assert_eq!(pcm.frames(), (samples.len() / 2) as u64);
+                assert_eq!(pcm.read_frames(0, &mut decoded), samples.len() / 2);
+                decoded
+            };
+            let decoded = render(samples.len());
+            assert_eq!(decoded, render(74));
+            let mean_error = decoded
+                .iter()
+                .zip(&samples)
+                .map(|(&output, &input)| f64::from(output - input) * f64::from(scale))
+                .sum::<f64>()
+                / samples.len() as f64;
+            assert!(
+                mean_error.abs() < 0.02,
+                "{bits}-bit FLAC bias: {mean_error} LSB"
+            );
+            assert!(decoded.iter().zip(&samples).all(|(&output, &input)| {
+                (output * scale).fract() == 0.0 && ((output - input) * scale).abs() <= 1.5
+            }));
+        }
+    }
+
+    #[test]
     fn supported_encoders_preserve_short_tails_and_channel_identity() {
         for (format, bits) in [
             (AudioExportFormat::Flac, 16),
@@ -801,11 +859,6 @@ mod tests {
                     ..Default::default()
                 };
                 let mut encoder = AudioEncoder::new(&path, 48_000, 3, &options).unwrap();
-                assert_eq!(
-                    encoder.conversion.is_null(),
-                    unsafe { (*encoder.context).sample_fmt } == AVSampleFormat_AV_SAMPLE_FMT_FLT,
-                    "Only interleaved float encoders should bypass sample conversion"
-                );
                 let samples = (0..frames)
                     .flat_map(|i| {
                         let value = (i as f32 * 0.071).sin() * 0.25;

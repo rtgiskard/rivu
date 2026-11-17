@@ -144,7 +144,7 @@ mod bitrate;
 mod channels;
 mod encoding;
 pub use encoding::{
-    AudioEncoder, ExportConverter, export_encoder_available, validate_integer_samples,
+    AudioEncoder, ExportConverter, PcmDither, export_encoder_available, validate_full_scale,
 };
 mod graph;
 mod output;

@@ -10,15 +10,43 @@ pub fn export_encoder_available(format: AudioExportFormat) -> bool {
     format == AudioExportFormat::Wav
 }
 
-pub fn validate_integer_samples(samples: &[f32], bits: u16) -> Result<()> {
-    let maximum = 1.0 - 2_f64.powi(1 - i32::from(bits));
+/// Integer and lossy sinks accept finite samples within full scale, `-1.0..=1.0`.
+pub fn validate_full_scale(samples: &[f32]) -> Result<()> {
     ensure!(
-        samples
-            .iter()
-            .all(|&x| x.is_finite() && f64::from(x) >= -1.0 && f64::from(x) <= maximum),
-        "Integer export would clip; reduce explicit EQ output gain or choose float32 WAV"
+        samples.iter().all(|x| (-1.0..=1.0).contains(x)),
+        "Export would clip; reduce explicit EQ output gain or choose float32 WAV"
     );
     Ok(())
+}
+
+/// Deterministic TPDF dither shared by integer WAV and FLAC export.
+/// State remains continuous across blocks. Dithered, rounded codes saturate
+/// at the target bounds; quantization error stays within 1.5 target LSB.
+pub struct PcmDither(u64);
+
+impl Default for PcmDither {
+    fn default() -> Self {
+        Self(0x7269_7675_6469_7468)
+    }
+}
+
+impl PcmDither {
+    fn uniform(&mut self) -> f64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        let value = self.0.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        (value >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+    }
+
+    /// Quantize a sample already checked by `validate_full_scale`, at 16 or 24 bits.
+    pub fn quantize(&mut self, sample: f32, bits: u16) -> i32 {
+        let scale = (1_u32 << (bits - 1)) as f64;
+        let noise = self.uniform() - self.uniform();
+        (f64::from(sample) * scale + noise)
+            .round()
+            .clamp(-scale, scale - 1.0) as i32
+    }
 }
 
 #[cfg(not(feature = "ffmpeg"))]
