@@ -868,47 +868,43 @@ impl Denoiser {
         }
         let floor = self.floor;
         for k in 0..bins {
-            let power = self.power[k].max(MIN_POWER);
-            let noise = (self.noise[k] * self.config.strength).max(MIN_POWER);
-            ensure!(noise.is_finite(), "denoise noise strength overflow");
-            ensure!((noise / power).is_finite(), "denoise noise ratio overflow");
-            let mut target = match self.config.mode {
-                DenoiseMode::Off => 1.0,
-                DenoiseMode::Stationary => (1.0 - noise / power).max(0.0).sqrt(),
-                DenoiseMode::Profile => (1.0 - noise / power).max(0.0),
-                DenoiseMode::Adaptive => {
-                    let posterior_signal = (power / noise - 1.0).max(0.0);
-                    ensure!(
-                        posterior_signal.is_finite(),
-                        "denoise posterior SNR overflow"
-                    );
-                    let decision_directed =
-                        0.96 * self.previous_clean[k] / noise + 0.04 * posterior_signal;
-                    ensure!(decision_directed.is_finite(), "denoise prior SNR overflow");
-                    // Decision-directed SNR alone lags moving formants and
-                    // pitch changes: the previous bin may contain no signal.
-                    // Strong current evidence gets an instantaneous estimate;
-                    // the 3x-noise uncertainty margin keeps ordinary stochastic
-                    // excursions on the conservative decision-directed path.
-                    let prior = decision_directed.max((posterior_signal - 3.0).max(0.0));
-                    prior / (1.0 + prior)
-                }
+            let mut target = if self.config.strength == 0.0 {
+                // Unity spectral gain needs no signal/noise ratios.
+                1.0
+            } else {
+                // Finite f32 powers can have ratios beyond f32's range. Keep
+                // control arithmetic wide until it becomes a bounded gain.
+                let power = f64::from(self.power[k].max(MIN_POWER));
+                let noise = (f64::from(self.noise[k]) * f64::from(self.config.strength))
+                    .max(f64::from(MIN_POWER));
+                (match self.config.mode {
+                    DenoiseMode::Off => 1.0,
+                    DenoiseMode::Stationary => (1.0 - noise / power).max(0.0).sqrt(),
+                    DenoiseMode::Profile => (1.0 - noise / power).max(0.0),
+                    DenoiseMode::Adaptive => {
+                        let posterior_signal = (power / noise - 1.0).max(0.0);
+                        let decision_directed = 0.96 * f64::from(self.previous_clean[k]) / noise
+                            + 0.04 * posterior_signal;
+                        // Decision-directed SNR alone lags moving formants and
+                        // pitch changes: the previous bin may contain no signal.
+                        // Strong current evidence gets an instantaneous estimate;
+                        // the 3x-noise uncertainty margin keeps ordinary stochastic
+                        // excursions on the conservative decision-directed path.
+                        let prior = decision_directed.max((posterior_signal - 3.0).max(0.0));
+                        prior / (1.0 + prior)
+                    }
+                }) as f32
             };
-            ensure!(target.is_finite(), "denoise target gain overflow");
-            if self.config.strength == 0.0 {
-                target = 1.0;
-            }
             let prior_power = self.previous_power[k];
             let flux = if prior_power > MIN_POWER {
-                let flux =
-                    (self.smoothed_power[k] - prior_power) / self.smoothed_power[k].max(MIN_POWER);
-                ensure!(flux.is_finite(), "denoise spectral flux overflow");
-                flux.max(0.0)
+                // Negative flux is irrelevant; discard it before dividing by
+                // a potentially silent bin so the ratio stays in 0..=1.
+                (self.smoothed_power[k] - prior_power).max(0.0)
+                    / self.smoothed_power[k].max(MIN_POWER)
             } else {
                 0.0
             };
             target += (1.0 - target) * self.config.transient_protection * flux;
-            ensure!(target.is_finite(), "denoise transient gain overflow");
             self.target_gain[k] = target.max(floor);
             self.previous_power[k] = self.smoothed_power[k];
         }
@@ -939,10 +935,8 @@ impl Denoiser {
                 // even after the estimator identifies it as signal. The
                 // transient control accelerates recovery in proportion to
                 // new power absent from the preceding clean estimate.
-                let new_signal =
-                    (self.power[k] - self.previous_clean[k]) / self.power[k].max(MIN_POWER);
-                ensure!(new_signal.is_finite(), "denoise recovery ratio overflow");
-                let new_signal = new_signal.max(0.0);
+                let new_signal = (self.power[k] - self.previous_clean[k]).max(0.0)
+                    / self.power[k].max(MIN_POWER);
                 self.release * (1.0 - self.config.transient_protection * new_signal)
             } else {
                 self.release
@@ -1557,6 +1551,27 @@ mod tests {
                     }
                     let other = run(config.clone(), rate, channels, &input, None, 113);
                     assert_eq!(output, other);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_preserves_headroom_and_handles_loud_to_silent_transitions() {
+        let mut input = vec![16.0; 8192];
+        input.extend(vec![0.0; 16_384]);
+        for strength in [0.0, f32::MIN_POSITIVE, 1.0] {
+            let config = DenoiseConfig {
+                mode: DenoiseMode::Adaptive,
+                strength,
+                fft_size: 8192,
+                ..Default::default()
+            };
+            let output = run(config.clone(), 48_000, 1, &input, None, 4096);
+            assert_eq!(output, run(config, 48_000, 1, &input, None, 137));
+            if strength <= f32::MIN_POSITIVE {
+                for (&actual, &expected) in output.iter().zip(&input) {
+                    assert!((actual - expected).abs() < 2.0e-5);
                 }
             }
         }
