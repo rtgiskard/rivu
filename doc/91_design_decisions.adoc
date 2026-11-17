@@ -673,6 +673,24 @@ Timestamp quantization and unresolved Vorbis packet timing remain separate
 container constraints. Reconsider if a new demuxer cannot express presentation
 using timestamps and packet trims; do not add downstream format-name rules.
 
+[[DEC-028]]
+=== DEC-028: Forward output notifications on the existing PipeWire owner
+
+Status: implemented, 2026-11-18.
+
+The stream does not request `RT_PROCESS`: process callbacks dispatch on the
+existing PipeWire owner mainloop. Callbacks publish clock/error/pause state and
+coalesced worker/PCM notification intents; the owner forwards them after
+`iterate()` returns, before waiting again or deactivating a settled pause.
+Retirement forwards remaining intents after callbacks are released, including
+error exits. Notifications prompt consumers to reread state, not count events.
+
+This keeps channel locks and waker dispatch outside process without another
+thread, FD or polling source. It does not isolate the owner thread from channel
+contention. Reconsider the handoff before enabling `RT_PROCESS` or moving
+callbacks to another thread: those producers would need a cross-thread wake
+rather than relying on the current mainloop iteration to return.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

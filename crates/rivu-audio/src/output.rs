@@ -470,6 +470,8 @@ struct OutputShared {
     wakeup: crossbeam_channel::Sender<()>,
     notifications: Receiver<()>,
     refill_armed: AtomicBool,
+    worker_wake_pending: AtomicBool,
+    cursor_wake_pending: AtomicBool,
     // The same audible cursor backs playback accounting and PCM observation.
     pcm: Arc<PcmControl>,
     timing_error: AtomicU32,
@@ -487,6 +489,8 @@ impl OutputShared {
             wakeup,
             notifications,
             refill_armed: AtomicBool::new(false),
+            worker_wake_pending: AtomicBool::new(false),
+            cursor_wake_pending: AtomicBool::new(false),
             pcm: Arc::clone(pcm),
             timing_error: AtomicU32::new(0),
             gain: AtomicU32::new(gain.to_bits()),
@@ -501,8 +505,29 @@ impl OutputShared {
             .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            self.worker_wake_pending.store(true, Ordering::Release);
+        }
+    }
+
+    // Channel/waker calls stay outside process (including owner-wake failure).
+    // Swapping before delivery leaves any concurrently published intent pending.
+    fn forward_notifications(&self) {
+        if self.worker_wake_pending.swap(false, Ordering::AcqRel) {
             let _ = self.wakeup.try_send(());
         }
+        if self.cursor_wake_pending.swap(false, Ordering::AcqRel) {
+            self.pcm.notify();
+        }
+    }
+}
+
+// Declared before the loop/stream so final delivery follows callback retirement,
+// including early errors and unwinding. It never outlives this output segment.
+struct OwnerNotifications(Arc<OutputShared>);
+
+impl Drop for OwnerNotifications {
+    fn drop(&mut self) {
+        self.0.forward_notifications();
     }
 }
 
@@ -574,7 +599,7 @@ impl PlaybackClock {
         {
             self.notified_heard = self.heard;
             if shared.pcm.wants_cursor_notification() {
-                shared.pcm.notify();
+                shared.cursor_wake_pending.store(true, Ordering::Release);
             }
         }
     }
@@ -823,6 +848,7 @@ impl Output {
             && stream.wake_owner().is_err()
         {
             self.shared.fail_timing(4);
+            self.shared.forward_notifications();
         }
     }
 
@@ -928,7 +954,9 @@ impl OutputCallback {
             && self.clock.pending.is_empty()
             && !self.shared.pause_settled.swap(true, Ordering::AcqRel)
         {
-            let _ = self.shared.wakeup.try_send(());
+            self.shared
+                .worker_wake_pending
+                .store(true, Ordering::Release);
         }
         let gain = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
         let source_channels = self.source_channels;
@@ -992,7 +1020,9 @@ impl OutputCallback {
             && self.consumer.occupied_len() <= self.consumer.capacity().get() / 4
             && self.shared.refill_armed.swap(false, Ordering::AcqRel)
         {
-            let _ = self.shared.wakeup.try_send(());
+            self.shared
+                .worker_wake_pending
+                .store(true, Ordering::Release);
         }
         if let Some(start) = start {
             self.clock.pending.push_back(ScheduledFrames {
@@ -1399,6 +1429,7 @@ fn run(
     ready: &crossbeam_channel::Sender<std::result::Result<StreamFormat, String>>,
     wake: pw::channel::Receiver<()>,
 ) -> Result<()> {
+    let notifications = OwnerNotifications(Arc::clone(&callback.shared));
     let connection = Connection::new()?;
     let wake_control = control.clone();
     let control_woken = Rc::new(Cell::new(false));
@@ -1432,7 +1463,7 @@ fn run(
     callback.mapping = mapping;
     callback.channels = stream_layout.len();
     let rate = callback.rate;
-    let shared = callback.shared.clone();
+    let shared = &notifications.0;
     let names: Vec<_> = stream_layout
         .iter()
         .map(|channel| if mono { "MONO" } else { channel.short_name() })
@@ -1532,6 +1563,8 @@ fn run(
     .map_err(|error| anyhow::anyhow!("Serializing PipeWire audio format: {error:?}"))?
     .0
     .into_inner();
+    // Without RT_PROCESS, process dispatches on this mainloop. Notification
+    // intents are forwarded after iterate, with no additional self-wakeup.
     stream.connect(
         spa::utils::Direction::Output,
         None,
@@ -1563,6 +1596,7 @@ fn run(
         } else {
             pw::loop_::Timeout::Finite(deadline.saturating_duration_since(Instant::now()))
         });
+        notifications.0.forward_notifications();
         if control.stop.load(Ordering::Acquire) {
             break;
         }
@@ -1960,6 +1994,7 @@ pub(super) fn test_backend_with_capacity(
                 playback: StreamInstant::from_millis(millis + 20),
             },
         );
+        callback.shared.forward_notifications();
     })
 }
 
@@ -2607,22 +2642,29 @@ mod pcm_tests {
         while updates.try_recv().is_ok() {}
         assert_eq!(output.push(&samples), frames as usize);
         callback.render(&mut vec![0.0; samples.len()], timestamp(0, 20));
+        output.shared.forward_notifications();
         assert_eq!(pcm.state().heard_frame, 0);
         assert!(updates.try_recv().is_err());
         callback.render(&mut [], timestamp(20 + block - 1, 40 + block - 1));
+        output.shared.forward_notifications();
         assert_eq!(pcm.state().heard_frame, block - 1);
         assert!(updates.try_recv().is_err());
         callback.render(&mut [], timestamp(20 + block, 40 + block));
         assert_eq!(pcm.state().heard_frame, block);
+        assert!(updates.try_recv().is_err());
+        output.shared.forward_notifications();
         updates.try_recv().unwrap();
         callback.render(&mut [], timestamp(20 + block * 2, 40 + block * 2));
         assert_eq!(pcm.state().heard_frame, block * 2);
+        output.shared.forward_notifications();
         updates.try_recv().unwrap();
         callback.render(&mut [], timestamp(20 + frames, 40 + frames));
         assert_eq!(pcm.state().heard_frame, frames);
         assert!(output.drained());
+        output.shared.forward_notifications();
         updates.try_recv().unwrap();
         callback.render(&mut [], timestamp(21 + frames, 41 + frames));
+        output.shared.forward_notifications();
         assert!(updates.try_recv().is_err());
 
         output.pause(true);
@@ -2645,6 +2687,7 @@ mod pcm_tests {
         callback.render(&mut [], timestamp(28, 48));
         assert_eq!(pcm.state().heard_frame, 8);
         assert!(output.drained());
+        output.shared.forward_notifications();
         assert!(updates.try_recv().is_err());
     }
 
@@ -2694,12 +2737,16 @@ mod pcm_tests {
         callback.render(&mut data, timestamp(0, 20));
         output.pause(true);
         callback.render(&mut data, timestamp(21, 40));
+        output.shared.forward_notifications();
         assert_eq!(output.heard(), 0.001);
         assert!(output.notifications().try_recv().is_err());
         callback.render(&mut data, timestamp(24, 44));
         assert_eq!(output.heard(), 0.004);
+        assert!(output.notifications().try_recv().is_err());
+        output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
         callback.render(&mut data, timestamp(50, 70));
+        output.shared.forward_notifications();
         assert!(output.notifications().try_recv().is_err());
 
         output.pause(false);
@@ -2708,9 +2755,11 @@ mod pcm_tests {
         output.pause(true);
         callback.render(&mut data, timestamp(82, 102));
         assert_eq!(output.heard(), 0.006);
+        output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
         callback.render(&mut data, timestamp(81, 101));
         assert!(output.check_timing().is_err());
+        output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
     }
 
@@ -2809,6 +2858,7 @@ mod pcm_tests {
                     &mut data,
                     timestamp(elapsed.as_millis() as u64, elapsed.as_millis() as u64 + 20),
                 );
+                output.shared.forward_notifications();
                 assert!(data.iter().all(|sample| *sample == 0.25));
                 assert!(output.notifications().try_recv().is_err());
                 elapsed += delay;
@@ -2820,20 +2870,64 @@ mod pcm_tests {
     }
 
     #[test]
+    fn owner_exit_forwards_coalesced_notifications_and_final_cursor() {
+        for fail in [false, true] {
+            let (mut output, mut callback, pcm) = test_output(1000, false);
+            pcm.set_playback_active(true);
+            pcm.set_enabled(true);
+            let updates = pcm.subscribe();
+            while updates.try_recv().is_ok() {}
+            output.push(&[0.25; 128]);
+
+            let result = {
+                let _notifications = OwnerNotifications(Arc::clone(&output.shared));
+                // Refill, final cursor, pause settlement and a possible error
+                // all arrive before the owner gets another forwarding turn.
+                callback.render(&mut [0.0; 128], timestamp(0, 20));
+                callback.render(&mut [], timestamp(84, 104));
+                output.pause(true);
+                callback.render(&mut [], timestamp(85, 105));
+                if fail {
+                    callback.render(&mut [], timestamp(84, 104));
+                }
+                assert!(output.notifications().try_recv().is_err());
+                assert!(updates.try_recv().is_err());
+                drop(callback);
+                output.check_timing()
+            };
+
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(output.heard(), 0.064);
+            assert!(output.shared.pause_settled.load(Ordering::Acquire));
+            assert_eq!(output.notifications().try_recv(), Ok(()));
+            assert_eq!(updates.try_recv(), Ok(()));
+            assert_eq!(pcm.state().heard_frame, 64);
+            output.shared.forward_notifications();
+            assert!(output.notifications().try_recv().is_err());
+            assert!(updates.try_recv().is_err());
+        }
+    }
+
+    #[test]
     fn low_water_notifies_once_until_refill_and_empty_tail_is_bounded() {
         let (mut output, mut callback, _analyzer) = test_output(1000, false);
         output.push(&[0.25; 128]);
         callback.render(&mut [0.0_f32; 96], timestamp(0, 20));
+        assert!(output.notifications().try_recv().is_err());
+        output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
         assert_eq!(output.refill_delay(false), Duration::from_millis(8));
         callback.render(&mut [0.0_f32; 32], timestamp(1, 21));
+        output.shared.forward_notifications();
         assert!(output.notifications().try_recv().is_err());
         assert_eq!(output.refill_delay(false), Duration::from_millis(1));
         assert!(output.refill_delay(true) >= Duration::from_millis(10));
         output.push(&[0.5; 64]);
         callback.render(&mut [0.0_f32; 34], timestamp(2, 22));
+        output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
         callback.render(&mut [0.0_f32; 100], timestamp(3, 23));
+        output.shared.forward_notifications();
         assert!(output.notifications().try_recv().is_err());
     }
 
