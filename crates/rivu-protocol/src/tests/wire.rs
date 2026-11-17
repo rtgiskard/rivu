@@ -627,6 +627,29 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 }
 
 #[test]
+fn current_page_schema_has_contiguous_query_and_response_tags() {
+    use crate::{model::Page, response::ViewResponse};
+    assert_eq!(PROTOCOL_VERSION, 47);
+    let query = WireQuery::DirectoryPage {
+        path: std::path::PathBuf::new(),
+        query: None,
+        favorite: None,
+        missing: None,
+        offset: 7,
+        limit: 11,
+    };
+    assert_eq!(
+        postcard::to_allocvec(&query).unwrap(),
+        [1, 0, 0, 0, 0, 7, 11]
+    );
+    let response = ViewResponse::DirectoryPage(Page {
+        total: 0,
+        rows: Vec::new(),
+    });
+    assert_eq!(postcard::to_allocvec(&response).unwrap(), [3, 0, 0]);
+}
+
+#[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     use std::path::Path;
     let mut encoded = Vec::new();
@@ -805,6 +828,92 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
         };
         assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
     }
+}
+
+#[test]
+fn queue_and_duplicate_rows_have_no_derived_wire_fields() {
+    use crate::model::{DuplicateMember, LibraryRow, QueueRow, Track};
+    use rivu_format::decoder_hint::DecoderHint;
+
+    let track = Track {
+        id: 42,
+        path: "/track.wav".into(),
+        fingerprint: None,
+        cue: None,
+        title: "Track".into(),
+        artist: String::new(),
+        album: String::new(),
+        duration: None,
+        codec: "pcm".into(),
+        channels: 2,
+        sample_rate: 48000,
+        bitrate_bps: None,
+        bitrate_exact: false,
+        track_number: None,
+        disc_number: None,
+        bits_per_sample: Some(16),
+        release_date: None,
+        replaygain_track_gain: None,
+        favorite: false,
+        decoder_hint: DecoderHint::Native,
+        missing: false,
+        play_count: 0,
+        last_played: None,
+    };
+    let row = QueueRow {
+        id: 7,
+        position: 9,
+        offset: 2,
+        track: LibraryRow {
+            id: track.id,
+            path: track.path.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            duration: track.duration,
+            codec: track.codec.clone(),
+            channels: track.channels,
+            sample_rate: track.sample_rate,
+            bits_per_sample: track.bits_per_sample,
+            cue_number: None,
+            bitrate_bps: track.bitrate_bps,
+            bitrate_exact: track.bitrate_exact,
+            favorite: track.favorite,
+            missing: track.missing,
+            play_count: track.play_count,
+        },
+    };
+    let bytes = postcard::to_allocvec(&row).unwrap();
+    assert_eq!(
+        bytes,
+        postcard::to_allocvec(&(7_u64, 9_usize, 2_usize, &row.track)).unwrap()
+    );
+    assert_eq!(postcard::from_bytes::<QueueRow>(&bytes).unwrap(), row);
+    let json = serde_json::to_value(&row).unwrap();
+    assert_eq!(json.as_object().unwrap().len(), 4);
+    assert!(json.get("track_id").is_none());
+    assert_eq!(json["track"]["id"], 42);
+
+    let member = DuplicateMember {
+        track,
+        file_size: 123,
+        modified_ns: -7,
+        playlist_references: 3,
+        queue_references: 2,
+        independent: true,
+    };
+    let bytes = postcard::to_allocvec(&member).unwrap();
+    assert_eq!(
+        bytes,
+        postcard::to_allocvec(&(&member.track, 123_u64, -7_i64, 3_usize, 2_usize, true)).unwrap()
+    );
+    assert_eq!(
+        postcard::from_bytes::<DuplicateMember>(&bytes).unwrap(),
+        member
+    );
+    let json = serde_json::to_value(&member).unwrap();
+    assert_eq!(json.as_object().unwrap().len(), 6);
+    assert!(json.get("has_decoder_hint").is_none());
 }
 
 #[test]

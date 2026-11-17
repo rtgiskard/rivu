@@ -34,7 +34,7 @@ fn other_projection_is_root_complement_without_membership_or_reference_mutation(
     let playlist = store.create_playlist_with_tracks("Keep", &[1, 6]).unwrap();
     let queue = store.queue_page(None, 0, 100).unwrap();
     let playlist_rows = store.playlist_entries_page(playlist, None, 0, 100).unwrap();
-    let before = store.library_page(None, None, None, 0, 100).unwrap();
+    let before = store.track_batch(None, None, None, None, 100).unwrap();
     assert_eq!(ids(&store, &[], LibrarySort::Id), [1, 2, 3, 4, 5, 6, 7]);
     let roots = ["/music/./", "/music/deep/../", "/音楽"].map(PathBuf::from);
     assert_eq!(ids(&store, &roots, LibrarySort::Id), [3, 5, 6, 7]);
@@ -54,7 +54,7 @@ fn other_projection_is_root_complement_without_membership_or_reference_mutation(
     );
     assert_eq!(ids(&store, &[], LibrarySort::Id), [1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(
-        store.library_page(None, None, None, 0, 100).unwrap(),
+        store.track_batch(None, None, None, None, 100).unwrap(),
         before
     );
     assert_eq!(store.queue_page(None, 0, 100).unwrap(), queue);
@@ -175,7 +175,7 @@ fn other_bulk_sources_union_with_directories_and_ids_without_duplicate_members()
             .unwrap()
             .rows
             .iter()
-            .map(|row| row.track_id)
+            .map(|row| row.track.id)
             .collect::<Vec<_>>(),
         [2, 3, 4, 5, 6, 7]
     );

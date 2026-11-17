@@ -768,14 +768,12 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
         vec![
             QueueRow {
                 id: 17,
-                track_id: 0,
                 position: 0,
                 offset: 0,
                 track: track(0),
             },
             QueueRow {
                 id: 18,
-                track_id: 0,
                 position: 1,
                 offset: 1,
                 track: track(0),

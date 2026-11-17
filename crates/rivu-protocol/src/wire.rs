@@ -17,7 +17,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 46;
+pub const PROTOCOL_VERSION: u8 = 47;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -123,13 +123,6 @@ pub enum WireQuery {
         favorite: Option<bool>,
         missing: Option<bool>,
         sort: crate::model::LibrarySort,
-        offset: u64,
-        limit: u64,
-    },
-    TrackPage {
-        query: Option<String>,
-        favorite: Option<bool>,
-        missing: Option<bool>,
         offset: u64,
         limit: u64,
     },
@@ -658,19 +651,6 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
-            Query::TrackPage {
-                query,
-                favorite,
-                missing,
-                offset,
-                limit,
-            } => Self::TrackPage {
-                query,
-                favorite,
-                missing,
-                offset: offset as u64,
-                limit: limit as u64,
-            },
             Query::DirectoryPage {
                 path,
                 query,
@@ -909,19 +889,6 @@ impl TryFrom<WireQuery> for Query {
                 favorite,
                 missing,
                 sort,
-                offset: wire_usize(offset, "offset")?,
-                limit: wire_usize(limit, "limit")?,
-            },
-            WireQuery::TrackPage {
-                query,
-                favorite,
-                missing,
-                offset,
-                limit,
-            } => Self::TrackPage {
-                query,
-                favorite,
-                missing,
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },

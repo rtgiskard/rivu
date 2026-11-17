@@ -65,10 +65,9 @@ fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<boo
 fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
     Ok(QueueRow {
         id: integer(row, 0)?,
-        track_id: row.get(1)?,
-        position: integer(row, 2)?,
-        offset: integer(row, 2)?,
-        track: library_row_at(row, 3)?,
+        position: integer(row, 1)?,
+        offset: integer(row, 1)?,
+        track: library_row_at(row, 2)?,
     })
 }
 
@@ -193,7 +192,7 @@ impl Store {
         } else {
             "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3"
         };
-        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
+        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
         let mut rows = statement
             .query_map(
                 params![
@@ -226,7 +225,7 @@ impl Store {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
         let filter = search_filter!("t", "?4");
-        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
+        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (
                 cursor.cursor.position.min(i64::MAX as usize) as i64,
@@ -280,12 +279,12 @@ impl Store {
         // queue positions. Unfiltered reconciliation remains an indexed lookup.
         let sql = if query.is_some() {
             format!(
-                "WITH matched AS (SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset FROM matched q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
+                "WITH matched AS (SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset FROM matched q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
                 search_filter!("t", "?2")
             )
         } else {
             format!(
-                "SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
+                "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
             )
         };
         let mut statement = self.conn.prepare_cached(&sql)?;
@@ -554,7 +553,7 @@ mod tests {
                 .queue_page(None, 0, 10)?
                 .rows
                 .iter()
-                .map(|row| row.track_id)
+                .map(|row| row.track.id)
                 .collect::<Vec<_>>(),
             [1, 1, 3, 2]
         );
@@ -580,7 +579,7 @@ mod tests {
             expected_tracks.splice(index..index, [3, 1, 3]);
             let rows = store.queue_page(None, 0, MAX_QUERY_ROWS)?.rows;
             assert_eq!(
-                rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+                rows.iter().map(|row| row.track.id).collect::<Vec<_>>(),
                 expected_tracks
             );
             assert!(
@@ -610,7 +609,7 @@ mod tests {
                 .queue_page(None, 0, 10)?
                 .rows
                 .iter()
-                .map(|row| row.track_id)
+                .map(|row| row.track.id)
                 .collect::<Vec<_>>(),
             [1, 2, 3, 4]
         );

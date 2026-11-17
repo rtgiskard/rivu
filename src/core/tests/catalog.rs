@@ -1813,8 +1813,8 @@ fn playlist_import_and_directory_queries_preserve_configured_aliases() {
     core.enqueue(&[logical_id]).unwrap();
     let entries = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap().rows;
     let entry = entries.last().unwrap();
-    assert_eq!(entry.track_id, logical_id);
-    assert_eq!(core.track(entry.track_id).unwrap().path, logical);
+    assert_eq!(entry.track.id, logical_id);
+    assert_eq!(core.track(entry.track.id).unwrap().path, logical);
 }
 
 #[test]
@@ -1976,7 +1976,7 @@ fn m3u_playlist_and_queue_preserve_occurrence_order() {
             .unwrap()
             .rows
             .iter()
-            .map(|entry| entry.track_id)
+            .map(|entry| entry.track.id)
             .collect::<Vec<_>>(),
         [2, 1, 2, 3, 1]
     );

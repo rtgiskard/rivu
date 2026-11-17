@@ -895,39 +895,6 @@ impl Store {
         Ok(id)
     }
 
-    pub fn library_page(
-        &self,
-        query: Option<&str>,
-        favorite: Option<bool>,
-        missing: Option<bool>,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<Track>> {
-        let pattern = query
-            .filter(|value| !value.is_empty())
-            .map(str::to_lowercase);
-        let total = self.filtered_track_count(pattern.as_deref(), favorite, missing, None)?;
-        if limit == 0 {
-            return Ok(Page {
-                total,
-                rows: Vec::new(),
-            });
-        }
-        let sql = format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY id LIMIT ?4 OFFSET ?5"
-        );
-        let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
-        let offset = offset.min(i64::MAX as usize) as i64;
-        let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt
-            .query_map(
-                params![pattern, favorite, missing, limit, offset],
-                track_from_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Page { total, rows })
-    }
-
     pub fn track_batch(
         &self,
         query: Option<&str>,
@@ -2293,7 +2260,7 @@ mod request_tests {
                 queued
                     .rows
                     .iter()
-                    .map(|row| row.track_id)
+                    .map(|row| row.track.id)
                     .collect::<Vec<_>>(),
                 [included]
             );

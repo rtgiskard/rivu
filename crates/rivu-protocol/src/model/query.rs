@@ -44,13 +44,6 @@ pub enum Query {
         offset: usize,
         limit: usize,
     },
-    TrackPage {
-        query: Option<String>,
-        favorite: Option<bool>,
-        missing: Option<bool>,
-        offset: usize,
-        limit: usize,
-    },
     DirectoryPage {
         path: PathBuf,
         query: Option<String>,
@@ -266,7 +259,6 @@ pub enum QueryIdentity<'a> {
     Albums(&'a Option<String>, AlbumSort),
     AlbumTracks(&'a AlbumKey, &'a Option<String>),
     LibraryPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
-    TrackPage(&'a Option<String>, Option<bool>, Option<bool>),
     DirectoryPage(
         &'a std::path::Path,
         &'a Option<String>,
@@ -318,7 +310,6 @@ impl Query {
         let mut stamp = QueryRevisions::default();
         match self {
             Self::LibraryPage { .. }
-            | Self::TrackPage { .. }
             | Self::TrackBatch { .. }
             | Self::LibraryStats
             | Self::LibraryRootStats { .. } => stamp.library = revisions.library,
@@ -393,7 +384,6 @@ impl Query {
         if matches!(
             self,
             Self::LibraryPage { .. }
-                | Self::TrackPage { .. }
                 | Self::TrackBatch { .. }
                 | Self::Track { .. }
                 | Self::AlbumTracks { .. }
@@ -447,12 +437,6 @@ impl Query {
                 sort,
                 ..
             } => QueryIdentity::LibraryPage(query, *favorite, *missing, *sort),
-            Self::TrackPage {
-                query,
-                favorite,
-                missing,
-                ..
-            } => QueryIdentity::TrackPage(query, *favorite, *missing),
             Self::DirectoryPage {
                 path,
                 query,

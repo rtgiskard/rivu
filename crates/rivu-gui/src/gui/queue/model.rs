@@ -48,7 +48,7 @@ impl From<&QueueRow> for QueueIdentity {
     fn from(row: &QueueRow) -> Self {
         Self {
             id: row.id,
-            track_id: row.track_id,
+            track_id: row.track.id,
             position: row.position,
             offset: row.offset,
         }
@@ -840,7 +840,6 @@ mod tests {
     fn row(id: u64, position: usize) -> QueueRow {
         QueueRow {
             id,
-            track_id: 1,
             position,
             offset: position,
             track: LibraryRow {

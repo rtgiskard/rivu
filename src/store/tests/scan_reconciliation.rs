@@ -922,8 +922,8 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
         assert_eq!(after.rows.len(), before.rows.len());
         for (old, new) in before.rows.iter().zip(&after.rows) {
             assert_eq!(
-                (old.id, old.track_id, old.position),
-                (new.id, new.track_id, new.position)
+                (old.id, old.track.id, old.position),
+                (new.id, new.track.id, new.position)
             );
             assert_eq!(new.track.channels, record.media.channels);
             assert_eq!(new.track.sample_rate, record.media.sample_rate);

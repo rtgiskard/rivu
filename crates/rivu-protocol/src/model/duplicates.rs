@@ -15,7 +15,6 @@ pub struct DuplicateMember {
     pub track: Track,
     pub file_size: u64,
     pub modified_ns: i64,
-    pub has_decoder_hint: bool,
     pub playlist_references: usize,
     pub queue_references: usize,
     pub independent: bool,

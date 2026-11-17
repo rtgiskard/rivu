@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use rivu::config;
 use rivu::config::ConfigPersistence;
 use rivu_audio as audio;
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{Command, Query},
@@ -399,11 +400,13 @@ pub(super) fn run(
                                         ),
                                         (
                                             "decoder_hint",
-                                            i18n.text(if member.has_decoder_hint {
-                                                "core-yes"
-                                            } else {
-                                                "core-no"
-                                            })
+                                            i18n.text(
+                                                if member.track.decoder_hint != DecoderHint::Auto {
+                                                    "core-yes"
+                                                } else {
+                                                    "core-no"
+                                                }
+                                            )
                                             .into()
                                         ),
                                         ("plays", member.track.play_count.to_string().into()),

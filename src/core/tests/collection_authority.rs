@@ -240,7 +240,7 @@ fn collection_tokens_survive_unrelated_playlist_edits_and_repeated_transfers() {
     }
     let rows = core.store.queue_page(None, before, 20).unwrap().rows;
     assert_eq!(
-        rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+        rows.iter().map(|row| row.track.id).collect::<Vec<_>>(),
         [2, 1, 2, 1]
     );
     assert_eq!(

@@ -41,7 +41,7 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
                 "{}\t{}\t{}\t{}{}",
                 row.position,
                 row.id,
-                row.track_id,
+                row.track.id,
                 TerminalEscaped(&row.track.title),
                 if queue.current_id == Some(row.id) {
                     " *"

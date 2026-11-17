@@ -643,14 +643,12 @@ fn favorite_targets_only_selected_track_and_respects_input_ownership() {
         vec![
             QueueRow {
                 id: 17,
-                track_id: 41,
                 position: 0,
                 offset: 0,
                 track: track(41),
             },
             QueueRow {
                 id: 18,
-                track_id: 42,
                 position: 1,
                 offset: 1,
                 track: track(42),
@@ -1156,7 +1154,6 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
 pub(in crate::terminal) fn queue_row(position: usize, id: u64) -> QueueRow {
     QueueRow {
         id,
-        track_id: 7,
         position,
         offset: position,
         track: track(7),

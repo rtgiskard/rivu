@@ -520,7 +520,7 @@ fn filtered_queue_continuations_bind_rank_query_and_revision_without_expected() 
         rows.iter().map(|row| row.position).collect::<Vec<_>>(),
         [0, 1, 2, 4]
     );
-    assert_eq!(rows[1].track_id, rows[2].track_id);
+    assert_eq!(rows[1].track.id, rows[2].track.id);
     assert_ne!(rows[1].id, rows[2].id);
     let ViewResponse::QueuePage(jump) = core
         .view(&Query::QueuePage {

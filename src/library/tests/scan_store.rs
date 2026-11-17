@@ -1328,12 +1328,12 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
             moved_queue
                 .rows
                 .iter()
-                .map(|row| (row.id, row.track_id))
+                .map(|row| (row.id, row.track.id))
                 .collect::<Vec<_>>(),
             queue
                 .rows
                 .iter()
-                .map(|row| (row.id, row.track_id))
+                .map(|row| (row.id, row.track.id))
                 .collect::<Vec<_>>()
         );
         assert_eq!(store.playlist_track_ids(saved_playlist, 10)?, ids);

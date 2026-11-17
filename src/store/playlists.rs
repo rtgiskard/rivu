@@ -1813,7 +1813,7 @@ mod occurrence_tests {
                 .queue_page(None, 0, 20)?
                 .rows
                 .iter()
-                .map(|row| row.track_id)
+                .map(|row| row.track.id)
                 .collect::<Vec<_>>(),
             [3, 1, 3, 2, 1, 3, 1, 3, 2, 1]
         );

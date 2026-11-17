@@ -224,19 +224,6 @@ impl ReadView<'_> {
                 *missing,
                 *sort,
             )?),
-            Query::TrackPage {
-                query,
-                favorite,
-                missing,
-                offset,
-                limit,
-            } => ViewResponse::TrackPage(self.store.library_page(
-                query.as_deref(),
-                *favorite,
-                *missing,
-                *offset,
-                *limit,
-            )?),
             Query::DirectoryPage {
                 path,
                 query,
@@ -1487,7 +1474,14 @@ mod tests {
         // are already published. The next accepted read must replace them.
         assert_eq!(
             snapshot
-                .library_page(None, Some(true), None, 0, 0)
+                .library_view_page(
+                    None,
+                    Some(true),
+                    None,
+                    rivu_protocol::model::LibrarySort::Id,
+                    0,
+                    0,
+                )
                 .unwrap()
                 .total,
             0

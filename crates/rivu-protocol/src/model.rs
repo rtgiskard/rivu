@@ -251,7 +251,6 @@ pub const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_milli
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueRow {
     pub id: u64,
-    pub track_id: i64,
     pub position: usize,
     /// Zero-based index among the current query's matches.
     pub offset: usize,
@@ -1267,13 +1266,6 @@ mod tests {
                 favorite: None,
                 missing: None,
                 sort: LibrarySort::Id,
-                offset: 0,
-                limit: 1,
-            },
-            Query::TrackPage {
-                query: None,
-                favorite: None,
-                missing: None,
                 offset: 0,
                 limit: 1,
             },

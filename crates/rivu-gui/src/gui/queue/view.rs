@@ -404,7 +404,7 @@ impl Queue {
                                         return this.paged_loading_row(index, row_height, cx);
                                     };
                                     let id = entry.id;
-                                    let track_id = entry.track_id;
+                                    let track_id = entry.track.id;
                                     let favorite = entry.track.favorite;
                                     let position = entry.position;
                                     let can_move_down = position + 1 < this.state.queue.total;

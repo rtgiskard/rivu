@@ -55,7 +55,7 @@ fn queued_scan(scan: ScanResult) -> (Store, ScanResult, i64) {
     store
         .enqueue_sources(&["/music".into()], &[], None)
         .unwrap();
-    let id = store.queue_page(None, 0, 10).unwrap().rows[0].track_id;
+    let id = store.queue_page(None, 0, 10).unwrap().rows[0].track.id;
     (store, scan, id)
 }
 
@@ -265,7 +265,7 @@ fn short_existing_ordinary_and_cue_tracks_refresh_without_losing_identity() {
         assert_eq!(track.title, "Refreshed short track");
         assert_eq!(track.duration, Some(1.0));
         assert_eq!(track.cue, refreshed_cue);
-        assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0].track_id, id);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0].track.id, id);
     }
 }
 
@@ -603,7 +603,7 @@ fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
     assert_eq!(store.queue_state().unwrap(), state);
     let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
     assert_eq!(
-        (after.id, after.track_id, after.position),
+        (after.id, after.track.id, after.position),
         (before.id, id, before.position)
     );
     assert_eq!(after.track.title, "Changed title");
@@ -823,7 +823,7 @@ fn displayed_tag_edits_invalidate_queue_including_empty_strings() {
         assert_eq!(store.queue_state().unwrap(), state);
         let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(
-            (after.id, after.track_id, after.position),
+            (after.id, after.track.id, after.position),
             (before.id, id, before.position)
         );
         assert_eq!(after.track.title, title.unwrap_or(&before.track.title));
@@ -861,7 +861,7 @@ fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
     assert_eq!(state, initial);
     let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
     assert_eq!(row.id, page.rows[0].id);
-    assert_eq!(row.track_id, id);
+    assert_eq!(row.track.id, id);
     assert!(row.track.missing);
     assert_eq!(
         store.apply_scan(&missing).unwrap(),
@@ -1740,7 +1740,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
             .unwrap()
             .rows
             .into_iter()
-            .map(|row| (row.id, row.track_id, row.position))
+            .map(|row| (row.id, row.track.id, row.position))
             .collect::<Vec<_>>()
     };
     let entries = occurrences();

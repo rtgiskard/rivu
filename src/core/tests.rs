@@ -495,7 +495,7 @@ fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
         .unwrap()
         .rows
         .into_iter()
-        .map(|row| (row.id, row.track_id))
+        .map(|row| (row.id, row.track.id))
         .collect()
 }
 

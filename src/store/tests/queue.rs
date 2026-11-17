@@ -16,7 +16,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let last = store.queue_page(None, 199_936, 256).unwrap();
     assert_eq!(last.rows.len(), 64);
     assert_eq!(last.rows[63].position, 199_999);
-    assert_eq!(last.rows[63].track_id, 200_000);
+    assert_eq!(last.rows[63].track.id, 200_000);
     assert!(
         store
             .queue_page(None, 200_000, 256)
@@ -146,7 +146,7 @@ fn queue_dedup_compacts_original_slots_while_retaining_any_playing_occurrence() 
         let rows = store.queue_page(None, 0, 8).unwrap().rows;
         assert_eq!(
             rows.iter()
-                .map(|row| (row.id, row.track_id, row.position))
+                .map(|row| (row.id, row.track.id, row.position))
                 .collect::<Vec<_>>(),
             expected
                 .iter()

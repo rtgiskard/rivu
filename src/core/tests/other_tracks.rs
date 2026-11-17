@@ -27,7 +27,7 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
     .unwrap();
     let before = core
         .store
-        .library_page(None, None, None, 0, MAX_QUERY_ROWS)
+        .track_batch(None, None, None, None, MAX_QUERY_ROWS)
         .unwrap();
     let queue = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap();
     let roots = core.preferences.settings().library_roots.clone();
@@ -65,7 +65,7 @@ fn current_roots_change_other_projection_and_stamps_but_not_persistent_tracks() 
     assert_eq!(page(&core).total, 4);
     assert_eq!(
         core.store
-            .library_page(None, None, None, 0, MAX_QUERY_ROWS)
+            .track_batch(None, None, None, None, MAX_QUERY_ROWS)
             .unwrap(),
         before
     );
@@ -106,7 +106,7 @@ fn other_collection_source_commands_resolve_execution_time_roots() {
         .unwrap()
         .rows;
     assert_eq!(
-        rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+        rows.iter().map(|row| row.track.id).collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);

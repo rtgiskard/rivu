@@ -12,7 +12,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
     store.enqueue_sources(&directories, &[1, 1], None).unwrap();
     assert_eq!(store.queue_state().unwrap().total, 5000);
     assert_eq!(
-        store.queue_page(None, 4999, 1).unwrap().rows[0].track_id,
+        store.queue_page(None, 4999, 1).unwrap().rows[0].track.id,
         5000
     );
     let playlist = store.create_playlist("Unlimited").unwrap();
@@ -85,7 +85,14 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
     assert_eq!(store.library_stats().unwrap().total, 500);
     assert_eq!(
         store
-            .library_page(None, None, Some(true), 0, 1)
+            .library_view_page(
+                None,
+                None,
+                Some(true),
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                1,
+            )
             .unwrap()
             .total,
         0

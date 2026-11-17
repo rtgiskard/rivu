@@ -82,10 +82,10 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(added.len(), 3);
     let paths: Vec<_> = added
         .iter()
-        .map(|row| core.store.track(row.track_id).unwrap().unwrap().path)
+        .map(|row| core.store.track(row.track.id).unwrap().unwrap().path)
         .collect();
     assert_eq!(paths, vec![second.clone(), first.clone(), second]);
-    assert_eq!(added[0].track_id, added[2].track_id);
+    assert_eq!(added[0].track.id, added[2].track.id);
     assert_ne!(added[0].id, added[2].id);
     assert_eq!(
         &core.store.queue_ids().unwrap()[..before_queue.len()],

@@ -259,7 +259,6 @@ pub enum ViewResponse {
     Albums(Page<crate::model::AlbumSummary>),
     AlbumTracks(Page<LibraryRow>),
     LibraryPage(Page<LibraryRow>),
-    TrackPage(Page<Track>),
     DirectoryPage(Page<DirectoryRow>),
     PlaylistSummaries(Page<PlaylistSummary>),
     PlaylistEntries(Page<PlaylistEntryRow>),

@@ -390,7 +390,7 @@ mod tests {
             .unwrap()
             .rows
             .into_iter()
-            .map(|row| row.track_id)
+            .map(|row| row.track.id)
             .collect();
         assert_eq!(expected[0], expected[2]);
         assert_ne!(expected[0], expected[1]);
@@ -402,7 +402,7 @@ mod tests {
                 .unwrap()
                 .rows
                 .into_iter()
-                .map(|row| row.track_id)
+                .map(|row| row.track.id)
                 .collect::<Vec<_>>(),
             expected
         );
@@ -600,7 +600,7 @@ mod tests {
                 .unwrap()
                 .rows
                 .into_iter()
-                .filter(|row| row.track_id == ordinary_id)
+                .filter(|row| row.track.id == ordinary_id)
                 .count(),
             2
         );

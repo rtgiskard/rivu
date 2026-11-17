@@ -4,6 +4,7 @@
 use super::feature::FeatureContext;
 use crate::projection::GuiSnapshot;
 use gpui::{prelude::*, *};
+use rivu_format::decoder_hint::DecoderHint;
 use rivu_presentation::refresh::RefreshDeadline;
 use rivu_presentation::time::format_time;
 use rivu_protocol::query_tracking::QueryTracker;
@@ -1629,11 +1630,13 @@ impl Duplicates {
                             ),
                             (
                                 "decoder_hint",
-                                (self.context.i18n.text(if value.has_decoder_hint {
-                                    "gl-yes"
-                                } else {
-                                    "gl-no"
-                                }))
+                                (self.context.i18n.text(
+                                    if track.decoder_hint != DecoderHint::Auto {
+                                        "gl-yes"
+                                    } else {
+                                        "gl-no"
+                                    },
+                                ))
                                 .into(),
                             ),
                             ("plays", (track.play_count).into()),
@@ -2101,7 +2104,7 @@ fn member_existence(response: &QueryResponse) -> Vec<Option<bool>> {
 }
 
 fn has_target_state(member: &DuplicateMember) -> bool {
-    member.has_decoder_hint
+    member.track.decoder_hint != DecoderHint::Auto
         || member.track.favorite
         || member.track.play_count != 0
         || member.track.last_played.is_some()
@@ -2749,7 +2752,6 @@ mod tests {
                 },
                 file_size: 100,
                 modified_ns: 1,
-                has_decoder_hint: false,
                 playlist_references: 0,
                 queue_references: 0,
                 independent: false,

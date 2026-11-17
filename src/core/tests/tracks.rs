@@ -1393,7 +1393,7 @@ fn favorite_toggle_inverts_mixed_tracks_once_and_rejects_invalid_groups() {
         assert_eq!(history[0].favorite, first);
         assert_eq!(history[0].played_at, played_at);
         for row in core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap().rows {
-            let expected = match row.track_id {
+            let expected = match row.track.id {
                 1 => first,
                 2 => second,
                 _ => false,
@@ -1578,7 +1578,7 @@ fn track_removal_validates_the_set_before_stopping_playback() {
             .unwrap()
             .rows
             .iter()
-            .all(|entry| entry.track_id != 1)
+            .all(|entry| entry.track.id != 1)
     );
     assert_queue_saved(&core);
 }

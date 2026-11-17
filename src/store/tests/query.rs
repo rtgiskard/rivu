@@ -68,7 +68,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
         queue
             .rows
             .iter()
-            .map(|row| row.track_id)
+            .map(|row| row.track.id)
             .collect::<Vec<_>>(),
         [14, 21]
     );
@@ -144,10 +144,10 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
             .unwrap();
         for row in &batch.rows {
             assert_eq!(row.offset, queue_count);
-            assert_eq!(row.track_id % 7, 0);
+            assert_eq!(row.track.id % 7, 0);
             assert_eq!(
                 row.position,
-                2 * (row.track_id as usize - 1) + queue_count % 2
+                2 * (row.track.id as usize - 1) + queue_count % 2
             );
             queue_count += 1;
         }
@@ -188,7 +188,7 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
     let queue_page = store.queue_page(Some("needle"), jump, 1).unwrap();
     assert_eq!(queue_page.total, queue_count);
     assert_eq!(queue_page.rows[0].offset, jump);
-    assert_eq!(queue_page.rows[0].track_id as usize, (jump / 2 + 1) * 7);
+    assert_eq!(queue_page.rows[0].track.id as usize, (jump / 2 + 1) * 7);
     let entry_page = store
         .playlist_entries_page(1, Some("needle"), jump, 1)
         .unwrap();
@@ -231,7 +231,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
         queue_matches.extend(queue.rows);
     }
     assert_ne!(queue_matches[0].id, queue_matches[2].id);
-    assert_eq!(queue_matches[0].track_id, queue_matches[2].track_id);
+    assert_eq!(queue_matches[0].track.id, queue_matches[2].track.id);
     let mut entry_matches = Vec::new();
     for offset in [0, 2, 4] {
         let entries = store
@@ -388,7 +388,7 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
     for query in ["%_", "\\", "needle%_\\file.wav"] {
         let page = store.queue_page(Some(query), 0, 10).unwrap();
         assert_eq!(page.total, 1);
-        assert_eq!(page.rows[0].track_id, 4);
+        assert_eq!(page.rows[0].track.id, 4);
         assert_eq!(
             store
                 .playlist_entries_page(first, Some(query), 0, 10)
@@ -463,13 +463,27 @@ fn paged_totals_follow_local_writes_and_rollback() {
         .unwrap();
     let count = || {
         store
-            .library_page(Some("needle"), None, None, 0, 0)
+            .library_view_page(
+                Some("needle"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total
     };
     assert_eq!(count(), 2);
     let first = store
-        .library_page(Some("needle"), None, None, 0, 1)
+        .library_view_page(
+            Some("needle"),
+            None,
+            None,
+            rivu_protocol::model::LibrarySort::Id,
+            0,
+            1,
+        )
         .unwrap()
         .rows[0]
         .id;
@@ -509,7 +523,14 @@ fn paged_totals_follow_local_writes_and_rollback() {
     // A different predicate or projection must not inherit another scope's count.
     assert_eq!(
         store
-            .library_page(Some("other"), None, None, 0, 0)
+            .library_view_page(
+                Some("other"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         1
@@ -517,7 +538,14 @@ fn paged_totals_follow_local_writes_and_rollback() {
     store.set_favorite(&[first], true).unwrap();
     assert_eq!(
         store
-            .library_page(None, Some(true), None, 0, 0)
+            .library_view_page(
+                None,
+                Some(true),
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         1
@@ -1382,13 +1410,6 @@ fn library_pages_use_literal_unicode_search_and_database_sorting() {
         .unwrap();
     assert_eq!(literal.total, 1);
     assert_eq!(literal.rows[0].title, "ÉTÉ_100%");
-    assert_eq!(
-        store
-            .library_page(Some("été_100%"), None, None, 0, 256)
-            .unwrap()
-            .total,
-        1
-    );
     store
         .conn
         .execute(
@@ -1401,13 +1422,10 @@ fn library_pages_use_literal_unicode_search_and_database_sorting() {
             .library_view_page(Some("other world"), None, None, LibrarySort::Id, 0, 256)
             .unwrap()
             .total,
-        store
-            .library_page(Some("other world"), None, None, 0, 256)
-            .unwrap()
-            .total
+        1
     );
     let id = store
-        .library_page(Some("Other"), None, None, 0, 1)
+        .library_view_page(Some("Other"), None, None, LibrarySort::Id, 0, 1)
         .unwrap()
         .rows[0]
         .id;
@@ -1740,7 +1758,14 @@ fn reader_snapshots_preserve_unicode_search() {
     let reader = Store::open_reader(&path).unwrap();
     let snapshot = reader.read_snapshot().unwrap();
     let page = snapshot
-        .library_page(Some("äne"), None, None, 0, 1)
+        .library_view_page(
+            Some("äne"),
+            None,
+            None,
+            rivu_protocol::model::LibrarySort::Id,
+            0,
+            1,
+        )
         .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].title, "ÄNEEDLE");

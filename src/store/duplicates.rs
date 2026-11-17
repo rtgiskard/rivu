@@ -7,7 +7,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 
 const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
-    (decoder_hint<>0),
     (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id>0 AND track_id=tracks.id),
     (SELECT COUNT(*) FROM playlist_entries WHERE playlist_id=0 AND track_id=tracks.id),
     relocation_independent";
@@ -22,10 +21,9 @@ fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Duplic
         track: track_from_row(row)?,
         file_size: row.get::<_, i64>(TRACK_COLUMN_COUNT)? as u64,
         modified_ns: row.get(TRACK_COLUMN_COUNT + 1)?,
-        has_decoder_hint: row.get(TRACK_COLUMN_COUNT + 2)?,
-        playlist_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 3)? as usize,
-        queue_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 4)? as usize,
-        independent: row.get(TRACK_COLUMN_COUNT + 5)?,
+        playlist_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 2)? as usize,
+        queue_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 3)? as usize,
+        independent: row.get(TRACK_COLUMN_COUNT + 4)?,
     })
 }
 
@@ -457,7 +455,7 @@ mod tests {
         assert_eq!(members.total, 2);
         assert_eq!(members.rows[0].track.id, 1);
         assert_eq!(members.rows[0].track.title, "Custom");
-        assert!(members.rows[0].has_decoder_hint);
+        assert_eq!(members.rows[0].track.decoder_hint, DecoderHint::Native);
         assert!(members.rows[0].track.favorite);
         assert_eq!(members.rows[0].track.play_count, 1);
         assert_eq!(members.rows[0].track.last_played, Some(123));

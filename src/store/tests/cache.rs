@@ -58,7 +58,14 @@ fn writable_filtered_counts_refresh_external_commits_and_rollback() {
         .unwrap();
     let count = || {
         store
-            .library_page(Some("needle"), None, None, 0, 0)
+            .library_view_page(
+                Some("needle"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total
     };
@@ -104,7 +111,14 @@ fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
     );
     assert_eq!(
         reader
-            .library_page(Some("Source"), None, None, 0, 0)
+            .library_view_page(
+                Some("Source"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         1
@@ -118,7 +132,14 @@ fn bitrate_reader_fresh_payloads_preserve_owned_count_caches() {
     assert!(writer.upgrade_bitrate(&source, 192_000, true).unwrap());
     assert_eq!(
         reader
-            .library_page(Some("Source"), None, None, 0, 0)
+            .library_view_page(
+                Some("Source"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         1
@@ -290,7 +311,14 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
     let counts = || {
         let snapshot = reader.read_snapshot().unwrap();
         let filtered = snapshot
-            .library_page(Some("needle"), None, None, 0, 0)
+            .library_view_page(
+                Some("needle"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total;
         let duplicates = snapshot.duplicate_groups_page(0, 0).unwrap().total;
@@ -317,7 +345,14 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
         .unwrap();
     assert_eq!(
         writer
-            .library_page(Some("needle"), None, None, 0, 0)
+            .library_view_page(
+                Some("needle"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         0
@@ -325,7 +360,14 @@ fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
     transaction.rollback().unwrap();
     assert_eq!(
         writer
-            .library_page(Some("needle"), None, None, 0, 0)
+            .library_view_page(
+                Some("needle"),
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                0,
+            )
             .unwrap()
             .total,
         1
@@ -574,14 +616,28 @@ fn recurring_reader_sql_reuses_statements_across_filter_values() {
         .unwrap();
     let reader = Store::open_reader(&path).unwrap();
     reader
-        .library_page(Some("filter-0"), None, None, 0, 1)
+        .library_view_page(
+            Some("filter-0"),
+            None,
+            None,
+            rivu_protocol::model::LibrarySort::Id,
+            0,
+            1,
+        )
         .unwrap();
     let before = statement_activity(&reader);
     assert!(before.0 > 0);
     for index in 1..128 {
         assert_eq!(
             reader
-                .library_page(Some(&format!("filter-{index}")), None, None, 0, 1)
+                .library_view_page(
+                    Some(&format!("filter-{index}")),
+                    None,
+                    None,
+                    rivu_protocol::model::LibrarySort::Id,
+                    0,
+                    1,
+                )
                 .unwrap()
                 .total,
             0
