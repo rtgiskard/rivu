@@ -126,7 +126,6 @@ pub(super) struct SourceReplacement {
 }
 
 pub(super) struct PlaybackSession {
-    pub(super) track_id: i64,
     // The source admitted by Load, shared with the initial current-track projection.
     // Library refreshes may update metadata but cannot replace this session's source.
     pub(super) loaded_track: Arc<Track>,
@@ -229,7 +228,7 @@ fn accept_session_start(
     let stats = if session.history_removed || deferred {
         None
     } else {
-        Some(store.mark_played(session.track_id, played_at)?)
+        Some(store.mark_played(session.loaded_track.id, played_at)?)
     };
     // A failed initial write must not accept any listening facts.
     session.started = true;
@@ -247,7 +246,7 @@ fn persist_session_count(
     if !session.count_pending(threshold_percent) {
         return Ok(None);
     }
-    let stats = store.increment_play_count(session.track_id)?;
+    let stats = store.increment_play_count(session.loaded_track.id)?;
     // Commit precedes publication: projection failure must never recount.
     session.counted = true;
     Ok(Some(stats))
@@ -269,7 +268,7 @@ fn persist_session_activity(
         return Ok(None);
     };
     session.activity_pending = true;
-    let stats = store.mark_played(session.track_id, at)?;
+    let stats = store.mark_played(session.loaded_track.id, at)?;
     session.activity_committed_at = Some(at);
     session.activity_pending = false;
     Ok(Some(stats))
@@ -565,7 +564,7 @@ impl Core {
         // EOF resolves only unknown duration, never a seek or final snapshot.
         accept_session_end(session, duration, bitrate);
         self.state.playback.duration = session.duration;
-        let track_id = session.track_id;
+        let track_id = session.loaded_track.id;
         let bitrate = persist_session_bitrate(&self.store, session, deferred);
         self.transport.write_deferred |= session.pending_bitrate.is_some();
         if let Some((bitrate, exact)) = bitrate {
@@ -666,7 +665,6 @@ impl Core {
             })?;
             self.transport.admit_source();
             self.transport.session = Some(PlaybackSession {
-                track_id: track.id,
                 loaded_track: Arc::clone(&track),
                 source,
                 duration: track
@@ -693,7 +691,7 @@ impl Core {
         let Some(session) = self.transport.session.as_mut() else {
             return Ok(());
         };
-        let track_id = session.track_id;
+        let track_id = session.loaded_track.id;
         let stats = persist_session_count(
             &self.store,
             session,
@@ -721,7 +719,7 @@ impl Core {
                 return Err(error);
             }
         };
-        let track_id = session.track_id;
+        let track_id = session.loaded_track.id;
         self.state.playback.last_heard_at = session.last_heard_at;
         self.state.playback.duration = session.duration;
         if let Some(bitrate) = info.bitrate_bps {
@@ -826,7 +824,7 @@ impl Core {
             }
             _ => None,
         };
-        let track_id = session.track_id;
+        let track_id = session.loaded_track.id;
         let bitrate = persist_session_bitrate(&self.store, session, deferred);
         self.transport.write_deferred = true;
         if let Some(stats) = stats {
@@ -1352,7 +1350,7 @@ impl Core {
                 .map(|retired| &mut retired.stats)
                 .or(self.transport.session.as_mut());
             if let Some(session) = session {
-                let track_id = session.track_id;
+                let track_id = session.loaded_track.id;
                 // Independent writes both run before publication. A committed
                 // count is already fenced even if activity or projection fails.
                 let count = persist_session_count(&self.store, session, threshold);

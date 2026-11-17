@@ -32,7 +32,6 @@ impl MprisSnapshot {
 #[derive(Clone, Debug)]
 pub(crate) struct TraySnapshot {
     pub(crate) current_track: Option<Arc<Track>>,
-    pub(crate) current_track_id: Option<i64>,
     pub(crate) status: PlaybackStatus,
     pub(crate) shuffle: bool,
     pub(crate) repeat: RepeatMode,
@@ -44,7 +43,6 @@ impl TraySnapshot {
     pub(crate) fn from_core(state: &crate::core::CoreState) -> Self {
         Self {
             current_track: state.current_track.clone(),
-            current_track_id: state.current_track.as_ref().map(|track| track.id),
             status: state.playback.status,
             shuffle: state.playback.shuffle,
             repeat: state.playback.repeat,
@@ -63,7 +61,6 @@ impl TraySnapshot {
             _ => true,
         };
         self.status != previous.status
-            || self.current_track_id != previous.current_track_id
             || self.shuffle != previous.shuffle
             || self.repeat != previous.repeat
             || self.shutting_down != previous.shutting_down

@@ -1542,7 +1542,7 @@ fn removing_missing_tracks_preserves_session_when_only_cached_track_is_missing()
 
     core.command(Command::RemoveMissingTracks).unwrap();
     assert!(core.store.track(2).unwrap().is_none());
-    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 1);
+    assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 1);
     assert_eq!(core.transport.generation, generation);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     assert_eq!(core.state.current_track().unwrap().id, 1);

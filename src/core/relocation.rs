@@ -160,9 +160,12 @@ impl VerifiedTarget {
 impl Core {
     fn require_relocation_playback_idle(&self, source_id: i64, target_id: i64) -> Result<()> {
         ensure!(
-            !self.transport.session.as_ref().is_some_and(
-                |playback| playback.track_id == source_id || playback.track_id == target_id
-            ),
+            !self
+                .transport
+                .session
+                .as_ref()
+                .is_some_and(|playback| playback.loaded_track.id == source_id
+                    || playback.loaded_track.id == target_id),
             "Stop playback of the old file and target before relocating"
         );
         ensure!(
@@ -192,7 +195,7 @@ impl Core {
         );
         self.require_relocation_playback_idle(source_id, target_id)?;
         if self.transport.retired.as_ref().is_some_and(|retired| {
-            retired.stats.track_id == source_id || retired.stats.track_id == target_id
+            retired.stats.loaded_track.id == source_id || retired.stats.loaded_track.id == target_id
         }) {
             self.flush_deferred_playback()?;
         }

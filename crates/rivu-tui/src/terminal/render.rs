@@ -881,7 +881,7 @@ fn commit_page_viewport(ui: &mut UiState, rows: usize) {
 }
 
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
-    let colors = TerminalColors::new(state.system.ui_theme);
+    let colors = TerminalColors::new(state.configuration.ui_theme);
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().fg(colors.text).bg(colors.bg)),

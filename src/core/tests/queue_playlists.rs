@@ -2274,7 +2274,7 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     assert_eq!(core.state.queue.revision, revision);
     assert_eq!(core.transport.generation, generation);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 1);
+    assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 1);
     let source = core
         .transport
         .session

@@ -1,4 +1,4 @@
-use rivu_format::config::{Config, DEFAULT_QUERY_BATCH_SIZE, Theme};
+use rivu_format::config::Config;
 use rivu_protocol::model::{ClientSnapshot, LibrarySnapshot, PlaybackState, QueueState, Track};
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ pub struct TuiSnapshot {
     pub(crate) configuration: Arc<Config>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TuiSystemSnapshot {
     pub scanning: bool,
     pub scan_progress: Option<rivu_protocol::model::ScanProgress>,
@@ -20,23 +20,6 @@ pub struct TuiSystemSnapshot {
     pub scan_message: String,
     pub last_error: Option<String>,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
-    pub query_batch_size: u32,
-    pub ui_theme: Theme,
-}
-
-impl Default for TuiSystemSnapshot {
-    fn default() -> Self {
-        Self {
-            scanning: false,
-            scan_progress: None,
-            scan_task_id: None,
-            scan_message: String::new(),
-            last_error: None,
-            library_roots: Arc::default(),
-            query_batch_size: DEFAULT_QUERY_BATCH_SIZE,
-            ui_theme: Theme::default(),
-        }
-    }
 }
 
 impl TuiSnapshot {
@@ -60,8 +43,6 @@ impl TuiSnapshot {
                     })
                     .map(|previous| Arc::clone(&previous.system.library_roots))
                     .unwrap_or_else(|| Arc::new(state.configuration.config.library_roots.clone())),
-                query_batch_size: state.configuration.config.query_batch_size,
-                ui_theme: state.configuration.config.ui_theme,
             },
             configuration: state.configuration.config,
         }
@@ -89,8 +70,8 @@ impl TuiSnapshot {
             && self.system.scan_message == previous.system.scan_message
             && self.system.last_error == previous.system.last_error
             && self.system.library_roots == previous.system.library_roots
-            && self.system.query_batch_size == previous.system.query_batch_size
-            && self.system.ui_theme == previous.system.ui_theme
+            && self.configuration.query_batch_size == previous.configuration.query_batch_size
+            && self.configuration.ui_theme == previous.configuration.ui_theme
             && self.configuration.confirm_queue_replace
                 == previous.configuration.confirm_queue_replace
     }

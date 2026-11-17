@@ -797,12 +797,12 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
                     &state,
                     &mut page,
                     &Localizer::for_terminal("en-US"),
-                    TerminalColors::new(state.system.ui_theme),
+                    TerminalColors::new(state.configuration.ui_theme),
                 )
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let colors = TerminalColors::new(state.system.ui_theme);
+        let colors = TerminalColors::new(state.configuration.ui_theme);
         let mut markers = buffer
             .content
             .iter()
@@ -834,7 +834,7 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
 fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 12;
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.queue.selection.select(Some(8));
     load_queue(&mut tui.ui, &state);
@@ -903,7 +903,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
                 &state,
                 &mut tui.ui.queue,
                 &tui.ui.i18n,
-                TerminalColors::new(state.system.ui_theme),
+                TerminalColors::new(state.configuration.ui_theme),
             )
         })
         .unwrap();

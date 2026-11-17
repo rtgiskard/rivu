@@ -773,9 +773,14 @@ impl ArtworkView {
 
 struct ArtworkSourceInfo {
     animated: bool,
-    side: u32,
     width: u32,
     height: u32,
+}
+
+impl ArtworkSourceInfo {
+    fn longest(&self) -> u32 {
+        self.width.max(self.height)
+    }
 }
 
 struct ReplacedArtworkImage {
@@ -898,7 +903,7 @@ impl ArtworkImage {
             // supplied the exact oriented source dimensions.
             return viewport.width.max(viewport.height);
         };
-        let longest = source.side as f32;
+        let longest = source.longest() as f32;
         (viewport.width * (longest / source.width as f32))
             .max(viewport.height * (longest / source.height as f32))
     }
@@ -979,7 +984,6 @@ impl ArtworkImage {
                 result.map(|decoded| {
                     source.get_or_init(|| ArtworkSourceInfo {
                         animated: decoded.animated,
-                        side: decoded.source_side,
                         width: decoded.source_dimensions.0,
                         height: decoded.source_dimensions.1,
                     });
@@ -1147,7 +1151,7 @@ impl ImageCache for ArtworkImage {
             let side = size.width.0.max(size.height.0) as u32;
             self.source
                 .get()
-                .is_some_and(|source| source.side == side && self.target >= side)
+                .is_some_and(|source| source.longest() == side && self.target >= side)
         });
         if self.pending.is_none()
             && !native_satisfies

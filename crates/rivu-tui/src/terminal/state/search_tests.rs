@@ -30,7 +30,7 @@ fn result(request: &QueryRequest, view: ViewResponse) -> QueryResult {
 
 fn library_fixture() -> (UiState, TuiSnapshot) {
     let mut state = query_snapshot();
-    state.system.query_batch_size = 2;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 2;
     let mut ui = UiState {
         view: View::Tree(LibraryTree::new(&state.system.library_roots)),
         ..UiState::default()
@@ -152,7 +152,7 @@ fn empty_draft_waits_for_enter_and_global_track_cannot_select_a_tree_container()
 #[test]
 fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     let mut state = query_snapshot();
-    state.system.query_batch_size = 1;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 1;
     state.queue.total = 20;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     submit(&mut tui.ui, &state, "duplicate");
@@ -675,7 +675,7 @@ fn replace_query(ui: &mut UiState, state: &TuiSnapshot, query: &str) {
 fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
     for kind in 0..3 {
         let mut state = query_snapshot();
-        state.system.query_batch_size = 2;
+        Arc::make_mut(&mut state.configuration).query_batch_size = 2;
         let mut ui = UiState {
             view: match kind {
                 0 => View::Tree(LibraryTree::new(&state.system.library_roots)),
@@ -770,7 +770,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
 fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
     let mut state = query_snapshot();
     state.queue.total = 20;
-    state.system.query_batch_size = 2;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 2;
     let mut ui = UiState::default();
     replace_query(&mut ui, &state, "first");
     let first = ui.query_request(&state).unwrap();
@@ -827,7 +827,7 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
 #[test]
 fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
     let mut state = query_snapshot();
-    state.system.query_batch_size = 2;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 2;
     let mut ui = UiState {
         view: playlist_view(1),
         ..UiState::default()
@@ -894,7 +894,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
         for total in [0, 2] {
             let mut state = query_snapshot();
             state.queue.total = 20;
-            state.system.query_batch_size = 2;
+            Arc::make_mut(&mut state.configuration).query_batch_size = 2;
             let ui = UiState {
                 view: match kind {
                     0 => View::Queue,
@@ -971,7 +971,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
 
 fn container_fixture(catalog: bool) -> (UiState, TuiSnapshot) {
     let mut state = query_snapshot();
-    state.system.query_batch_size = 2;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 2;
     let view = if catalog {
         let mut rows = PagedList::default();
         rows.insert(
@@ -1062,7 +1062,7 @@ fn container_revision_refresh_preserves_identity_and_activation_in_visible_and_h
     for catalog in [false, true] {
         for hidden in [false, true] {
             let (mut ui, mut snapshot) = container_fixture(catalog);
-            snapshot.system.query_batch_size = 3;
+            Arc::make_mut(&mut snapshot.configuration).query_batch_size = 3;
             if let View::Playlists(rows) = &mut ui.view {
                 rows.insert(
                     0,
@@ -1407,7 +1407,7 @@ fn root_global_search_and_clear_never_restore_an_unreachable_container() {
 fn navigation_cancels_pending_track_and_occurrence_search_locates() {
     for kind in 0..5 {
         let mut state = query_snapshot();
-        state.system.query_batch_size = 2;
+        Arc::make_mut(&mut state.configuration).query_batch_size = 2;
         let mut ui = UiState {
             view: match kind {
                 0 => View::Queue,

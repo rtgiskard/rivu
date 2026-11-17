@@ -412,13 +412,9 @@ fn pending(core: &mut Core, queue_id: u64) {
 
     core.refresh_queue_tracks().unwrap();
     core.state.playback.status = PlaybackStatus::Playing;
-    let (track_id, duration) = {
-        let track = core.state.current_track().unwrap();
-        (track.id, track.duration)
-    };
+    let duration = core.state.current_track().unwrap().duration;
     core.state.playback.duration = duration;
     core.transport.session = Some(PlaybackSession {
-        track_id,
         loaded_track: Arc::clone(core.state.current_track.as_ref().unwrap()),
         source: core
             .playback_source(core.state.current_track().unwrap())

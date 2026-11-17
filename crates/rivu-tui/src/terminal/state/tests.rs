@@ -1050,7 +1050,7 @@ fn playback_transitions_and_track_changes_leave_footer_notices_untouched() {
 fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 200_000;
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.page_size = 4;
     tui.ui.queue.selection.select(Some(50_000));
@@ -1089,7 +1089,7 @@ fn queue_pages_keep_global_navigation_and_duplicate_occurrence_actions() {
 fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 30;
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let delayed = tui.ui.query_request(&state).unwrap();
     assert!(matches!(
@@ -1407,7 +1407,7 @@ pub(in crate::terminal) fn playlist_view(playlist_id: i64) -> View {
 
 pub(in crate::terminal) fn query_snapshot() -> TuiSnapshot {
     let mut state = TuiSnapshot::default();
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     state.queue.total = 12;
     state.queue.revision = 5;
     state.library.revision = 6;
@@ -1912,7 +1912,7 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let old = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
-    next.system.query_batch_size = 5;
+    Arc::make_mut(&mut next.configuration).query_batch_size = 5;
     next.system.library_roots = Arc::new(vec!["/two".into()]);
     tui.apply_snapshot(next.clone());
     let View::Playlists(playlists) = tui.ui.cached_playlists.as_ref().unwrap() else {
@@ -2162,7 +2162,7 @@ fn terminal_page_demand_tracks_offsets_and_rejects_old_batch_sizes() {
     let second = tui.ui.query_request(&state).unwrap();
     assert_ne!(first.demand.offset, second.demand.offset);
     let mut next = state.clone();
-    next.system.query_batch_size = 5;
+    Arc::make_mut(&mut next.configuration).query_batch_size = 5;
     tui.apply_snapshot(next.clone());
     assert!(
         !tui.ui
@@ -2220,7 +2220,7 @@ fn failed_playlist_pages_ignore_retry_keys_and_recover_after_reopening() {
 #[test]
 fn playlist_reorder_preserves_unrelated_terminal_views() {
     let mut snapshot = TuiSnapshot::default();
-    snapshot.system.query_batch_size = 3;
+    Arc::make_mut(&mut snapshot.configuration).query_batch_size = 3;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(2, 0);
     for view in [
         View::LibraryResults(PagedList::default().into()),
@@ -2255,7 +2255,7 @@ fn playlist_reorder_preserves_unrelated_terminal_views() {
 #[test]
 fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
     let mut snapshot = TuiSnapshot::default();
-    snapshot.system.query_batch_size = 1;
+    Arc::make_mut(&mut snapshot.configuration).query_batch_size = 1;
     Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(1, 0);
     let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.view = View::PlaylistDetail {
@@ -2322,7 +2322,7 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
 #[test]
 fn every_queried_view_renders_across_batches_without_resetting_scroll() {
     let mut state = TuiSnapshot::default();
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 0);
     let views = [
         View::LibraryResults(PagedList::default().into()),
@@ -2560,7 +2560,7 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
 #[test]
 fn tree_top_level_has_configured_roots_then_other_and_restores_parent() {
     let mut state = TuiSnapshot::default();
-    state.system.query_batch_size = 1;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 1;
     for roots in [
         vec![],
         vec![PathBuf::from("/music")],
@@ -2631,7 +2631,7 @@ fn tree_top_level_has_configured_roots_then_other_and_restores_parent() {
 #[test]
 fn stale_revisions_do_not_stall_navigation() {
     let mut state = TuiSnapshot::default();
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     let mut ui = UiState {
         view: View::Playlists(PagedList::default()),
         ..UiState::default()
@@ -2818,7 +2818,7 @@ fn help_owns_navigation_without_touching_the_underlying_queue() {
 fn boundary_navigation_queries_unloaded_pages_and_rejects_old_demands() {
     let mut state = TuiSnapshot::default();
     state.queue.total = 100;
-    state.system.query_batch_size = 3;
+    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     let old = tui.ui.query_request(&state).unwrap();
     tui.ui.key_action(KeyEvent::from(KeyCode::End), &state);
@@ -3529,7 +3529,7 @@ fn failed_playlist_title_survives_entry_payload_and_batch_invalidation() {
         }
         assert!(tui.ui.query_request(&state).is_none());
 
-        state.system.query_batch_size = 4;
+        Arc::make_mut(&mut state.configuration).query_batch_size = 4;
         tui.apply_snapshot(state.clone());
         for offset in [0, 4] {
             let request = tui.ui.query_request(&state).expect("entry batch resize");
@@ -3848,7 +3848,7 @@ fn iteration_details_tui(source: usize) -> TuiState {
 
 fn iteration_change_details_source(next: &mut TuiSnapshot, source: usize, page_size: bool) {
     if page_size {
-        next.system.query_batch_size += 1;
+        Arc::make_mut(&mut next.configuration).query_batch_size += 1;
     } else {
         match source {
             0 => next.queue.revision += 1,
@@ -4031,7 +4031,7 @@ fn deleted_background_playlist_cannot_retire_or_unpark_foreground_details() {
         let mut next = tui.snapshot.clone();
         Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&1);
         next.library.playlist_revision += 1;
-        next.system.query_batch_size += 1;
+        Arc::make_mut(&mut next.configuration).query_batch_size += 1;
         tui.apply_snapshot(next.clone());
         assert!(matches!(tui.ui.view, View::Playlists(_)));
         if fail {

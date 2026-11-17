@@ -1212,7 +1212,7 @@ fn accepted_load_survives_selection_save_failure_and_late_projection() {
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     assert!(core.transport.selection_pending);
-    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 2);
+    assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 2);
     assert_eq!(core.store.queue_state().unwrap().current_id, old_selection);
     assert!(matches!(
         commands.recv_timeout(Duration::from_secs(2)).unwrap(),

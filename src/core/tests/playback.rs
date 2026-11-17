@@ -1994,7 +1994,7 @@ fn stopped_decoder_snapshot_counts_once_and_fences_late_events() {
     core.audio_event(AudioEvent::DecoderStopped { snapshot })
         .unwrap();
     assert_eq!(core.transport.generation, current_generation);
-    assert_eq!(core.transport.session.as_ref().unwrap().track_id, 2);
+    assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 2);
     assert_eq!(core.state.playback.seek_revision, revision);
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
     assert_eq!(core.state.playback.position, 1.0);
@@ -2039,7 +2039,7 @@ fn count_save_failure_still_stops_and_preserves_audio_error() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
     let playback = core.transport.session.as_mut().unwrap();
-    playback.track_id = i64::MAX;
+    Arc::make_mut(&mut playback.loaded_track).id = i64::MAX;
     playback.heard = 3.0;
     let generation = core.transport.generation;
     let error = core
@@ -2314,7 +2314,7 @@ fn history_projection_failure_releases_closed_source_and_allows_next_track() {
         assert_eq!(core.state.library.history[0].play_count, 1);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.state.queue.current_id, Some(2));
-        assert_eq!(core.transport.session.as_ref().unwrap().track_id, 2);
+        assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 2);
         assert_eq!(play_count(&core, 1), 1);
         assert_eq!(core.store.track(1).unwrap().unwrap().last_played, Some(17));
         connection

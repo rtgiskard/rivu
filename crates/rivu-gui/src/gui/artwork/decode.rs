@@ -119,7 +119,6 @@ pub(super) struct DecodedArtwork {
     pub(super) image: Arc<RenderImage>,
     /// Format-level animation policy, including a one-frame GIF or WebP.
     pub(super) animated: bool,
-    pub(super) source_side: u32,
     /// Original dimensions after applying the same orientation as pixel decode.
     pub(super) source_dimensions: (u32, u32),
 }

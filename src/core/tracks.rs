@@ -75,7 +75,7 @@ impl Core {
                 .transport
                 .session
                 .as_ref()
-                .filter(|p| p.track_id == track.id)
+                .filter(|p| p.loaded_track.id == track.id)
         {
             // A rescan can change the CUE FILE, range, and duration without loading
             // a new decoder. Publish the source actually owned by this session;
@@ -112,7 +112,7 @@ impl Core {
                 .transport
                 .session
                 .as_ref()
-                .is_some_and(|playback| playback.track_id == track.id)
+                .is_some_and(|playback| playback.loaded_track.id == track.id)
             && self.state.current_track.as_ref().is_none_or(|current| {
                 current.title != track.title
                     || current.artist != track.artist
@@ -155,7 +155,7 @@ impl Core {
                 .transport
                 .session
                 .as_ref()
-                .is_some_and(|playback| playback.track_id == track_id)
+                .is_some_and(|playback| playback.loaded_track.id == track_id)
             && (title.is_some()
                 || artist.is_some()
                 || album.is_some()
@@ -209,7 +209,7 @@ impl Core {
             .transport
             .session
             .as_ref()
-            .is_some_and(|playback| playback.track_id == track_id)
+            .is_some_and(|playback| playback.loaded_track.id == track_id)
         {
             let stored = self.track(track_id)?;
             if stored.replaygain_track_gain != value {
@@ -262,7 +262,7 @@ impl Core {
             .transport
             .retired
             .as_ref()
-            .is_some_and(|retired| track_ids.contains(&retired.stats.track_id))
+            .is_some_and(|retired| track_ids.contains(&retired.stats.loaded_track.id))
         {
             self.flush_deferred_playback()?;
         }
@@ -294,7 +294,7 @@ impl Core {
                 .iter_mut()
                 .map(|retired| &mut retired.stats),
         ) {
-            if track_ids.binary_search(&playback.track_id).is_ok() {
+            if track_ids.binary_search(&playback.loaded_track.id).is_ok() {
                 playback.history_removed = true;
             }
         }
@@ -392,7 +392,7 @@ impl Core {
             .transport
             .session
             .as_ref()
-            .map(|session| session.track_id)
+            .map(|session| session.loaded_track.id)
             .or_else(|| self.state.current_track().map(|track| track.id));
         if let Some(track_id) = track_id
             && self.store.track_is_missing(track_id)?

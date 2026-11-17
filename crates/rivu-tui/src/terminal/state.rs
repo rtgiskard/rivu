@@ -43,7 +43,7 @@ impl TuiState {
 
     pub(super) fn apply_snapshot(&mut self, next: TuiSnapshot) {
         let page_size_changed =
-            self.snapshot.system.query_batch_size != next.system.query_batch_size;
+            self.snapshot.configuration.query_batch_size != next.configuration.query_batch_size;
         let queue_filter = if matches!(self.ui.view, View::Queue) {
             self.ui.search.applied_query.as_str()
         } else {
@@ -753,7 +753,7 @@ impl View {
         queue: &'a QueuePage,
         query: &'a str,
     ) -> Option<ReadDemand<'a>> {
-        let limit = state.system.query_batch_size as usize;
+        let limit = state.configuration.query_batch_size as usize;
         let available = |kind, offset, failed: Option<&ReadSpec>| {
             let filter = (!matches!(
                 kind,
@@ -1178,7 +1178,7 @@ impl UiState {
         let Some(other_present) = tree.other_present else {
             return false;
         };
-        let limit = state.system.query_batch_size as usize;
+        let limit = state.configuration.query_batch_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
             let rows: Vec<_> = tree

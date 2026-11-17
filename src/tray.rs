@@ -782,7 +782,6 @@ mod tests {
     fn background_setup_reconciles_published_baseline_and_layout_revision_stays_paired() {
         let baseline = TraySnapshot {
             current_track: None,
-            current_track_id: None,
             status: PlaybackStatus::Stopped,
             shuffle: false,
             repeat: RepeatMode::Off,

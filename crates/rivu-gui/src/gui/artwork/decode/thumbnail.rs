@@ -113,12 +113,15 @@ impl Drop for WorkspaceGuard {
 
 #[derive(Clone, Copy)]
 struct SourceInfo {
-    longest: u32,
     dimensions: (u32, u32),
     animated: bool,
 }
 
 impl SourceInfo {
+    fn longest(self) -> u32 {
+        self.dimensions.0.max(self.dimensions.1)
+    }
+
     fn from_decoder(decoder: &mut impl ImageDecoder, animated: bool) -> image::ImageResult<Self> {
         let (width, height) = decoder.dimensions();
         let dimensions = if !animated
@@ -134,7 +137,6 @@ impl SourceInfo {
             (width, height)
         };
         Ok(Self {
-            longest: width.max(height),
             dimensions,
             animated,
         })
@@ -176,7 +178,7 @@ fn cached(path: &Path, budget: Budget, tier: u32, bytes: &mut Vec<u8>) -> Option
     // Corrupt disposable thumbnails are regenerated from the admitted source.
     read_bounded(path, MAX_THUMBNAIL_BYTES, bytes).ok()?;
     let info = inspect(bytes, budget).ok()?;
-    if info.animated || info.longest != tier {
+    if info.animated || info.longest() != tier {
         return None;
     }
     let frames = decode(bytes, budget).ok()?;
@@ -402,11 +404,10 @@ fn load_in_workspace(
     let decoded = |image| super::DecodedArtwork {
         image,
         animated: info.animated,
-        source_side: info.longest,
         source_dimensions: info.dimensions,
     };
     // Do not upscale or create several equivalent files for a small source.
-    let tier = if info.animated || tier >= info.longest {
+    let tier = if info.animated || tier >= info.longest() {
         u32::MAX
     } else {
         tier
@@ -537,7 +538,6 @@ mod tests {
         )
         .unwrap();
         assert!(!loaded.animated);
-        assert_eq!(loaded.source_side, 800);
         assert_eq!(loaded.source_dimensions, (800, 400));
         let image = loaded.image;
         assert_eq!(size(&image), (256, 128));
@@ -602,7 +602,6 @@ mod tests {
             .unwrap()
         };
         let first = load_tier(&mut workspace);
-        assert_eq!(first.source_side, 800);
         assert_eq!(first.source_dimensions, (201, 800));
         assert_eq!(size(&first.image), (64, 256));
         let shared = load_tier(&mut workspace);
@@ -717,7 +716,7 @@ mod tests {
             )
             .unwrap();
             assert!(!loaded.animated);
-            assert_eq!(loaded.source_side, 120);
+            assert_eq!(loaded.source_dimensions, (120, 80));
             let image = loaded.image;
             assert_eq!(size(&image), (120, 80));
             assert_eq!(&image.as_bytes(0).unwrap()[..4], &[20, 10, 200, 128]);
@@ -825,7 +824,7 @@ mod tests {
             )
             .unwrap();
             assert!(loaded.animated);
-            assert_eq!(loaded.source_side, 2);
+            assert_eq!(loaded.source_dimensions, (2, 2));
             assert_eq!(loaded.image.frame_count(), 1);
         }
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
