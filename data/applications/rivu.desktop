@@ -1,7 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Rivu
-Comment=Local-first music player
+GenericName=Music Player
+GenericName[zh_CN]=音乐播放器
+Comment=Play and organize your local music
+Comment[zh_CN]=播放和管理本地音乐
 Exec=rivu gui %F
 Icon=rivu
 Terminal=false
