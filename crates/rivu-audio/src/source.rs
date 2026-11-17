@@ -407,9 +407,10 @@ enum Decode {
 }
 fn decoder(params: &AudioCodecParameters) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
-        return Ok(Decode::Native(
-            get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?,
-        ));
+        return Ok(Decode::Native(get_codecs().make_audio_decoder(
+            params,
+            &AudioDecoderOptions::default().gapless(params.codec != CODEC_ID_VORBIS),
+        )?));
     }
     let head = params
         .extra_data
@@ -493,6 +494,8 @@ pub(super) struct Source {
     frame_discontinuity: bool,
     discontinuity_pending: bool,
     native_pcm: Option<NativePcm>,
+    // Suppress the first Vorbis overlap block after opening or decoder reset.
+    vorbis_primer_pending: bool,
     ffmpeg_pending: Option<(Vec<f32>, f64)>,
     vorbis_timing: Option<VorbisTiming>,
     layout: Arc<[Channel]>,
@@ -554,6 +557,7 @@ impl Source {
             frame_discontinuity: false,
             discontinuity_pending: true,
             native_pcm: None,
+            vorbis_primer_pending: false,
             ffmpeg_pending: None,
             vorbis_timing: None,
             layout,
@@ -791,6 +795,7 @@ impl Source {
             frame_discontinuity: false,
             discontinuity_pending: true,
             native_pcm: None,
+            vorbis_primer_pending: false,
             ffmpeg_pending: None,
             vorbis_timing,
             layout,
@@ -1004,6 +1009,7 @@ impl Source {
             frame_discontinuity: false,
             discontinuity_pending: true,
             native_pcm: None,
+            vorbis_primer_pending: params.codec == CODEC_ID_VORBIS,
             ffmpeg_pending: None,
             vorbis_timing,
             layout: Arc::from([]),
@@ -1233,6 +1239,9 @@ impl Source {
     fn reset_traversal(&mut self) {
         self.ffmpeg_pending = None;
         self.native_pcm = None;
+        if let Decode::Native(decoder) = &self.decode {
+            self.vorbis_primer_pending = decoder.codec_params().codec == CODEC_ID_VORBIS;
+        }
         if let Some(timing) = &mut self.vorbis_timing {
             timing.seek();
         }
@@ -1702,9 +1711,6 @@ impl Source {
             packet_start += (discard / channels) as f64 / self.info.sample_rate as f64;
         }
         self.seek_target = None;
-        if self.frames.is_empty() {
-            return false;
-        }
         self.frame_start = packet_start - self.range_start;
         self.frame_discontinuity = self.discontinuity_pending;
         self.discontinuity_pending = false;
@@ -1991,20 +1997,28 @@ impl Source {
                     update_layout(audio.spec().channels(), &mut self.layout)?;
                     self.info.channels = self.layout.len() as u16;
                     let frames = audio.frames();
-                    let span = decoded_span(frames, leading, trailing, valid);
+                    // Decode the primer without implicit gapless suppression so its actual
+                    // encoded length remains available independently of container trims.
+                    let primer = std::mem::take(&mut self.vorbis_primer_pending);
+                    let span = if primer {
+                        0..0
+                    } else {
+                        decoded_span(frames, leading, trailing, valid)
+                    };
                     let (offset, end) = (span.start, span.end);
                     let represented = if self.mpeg_packets {
                         bitrate::mpeg_packet_samples(&packet.data, self.info.sample_rate)
                     } else {
                         Some(frames as u64)
                     };
+                    // Timestamp convention detection uses a zero-output primer anchor,
+                    // not the encoded duration used for bitrate statistics.
+                    let timing_frames = if primer { 0 } else { frames as u64 };
                     let trim = offset as f64 / f64::from(self.info.sample_rate);
                     let start = if let Some(timing) = &mut self.vorbis_timing {
                         timing.packet(
                             packet_start,
-                            represented
-                                .context("Vorbis sample count out of range")
-                                .context(SourceFailure)?,
+                            timing_frames,
                             trim,
                             (end - offset) * self.layout.len(),
                         )
@@ -2021,7 +2035,7 @@ impl Source {
                         interleave_audio(audio, offset..end, &mut self.frames)?;
                         self.vorbis_timing.as_mut().unwrap().buffer(
                             packet_start,
-                            represented.unwrap(),
+                            timing_frames,
                             trim,
                             &self.frames,
                         )?;
@@ -2471,6 +2485,47 @@ pub(super) mod tests {
         .unwrap();
         assert!(output.is_empty());
         assert_eq!(output.as_ptr(), allocation);
+    }
+
+    #[test]
+    fn native_vorbis_bitrate_includes_suppressed_primer() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/vorbis-bitrate.ogg"))
+            .unwrap();
+        let open =
+            || Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut inspected = open();
+        let format = inspected.format.as_mut().unwrap();
+        format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Timestamp {
+                    ts: symphonia::core::units::Timestamp::ZERO,
+                    track_id: inspected.track,
+                },
+            )
+            .unwrap();
+        let mut bytes = 0_u64;
+        let mut encoded = 0_u64;
+        let mut primer = 0_u64;
+        while let Some(packet) = format.next_packet().unwrap() {
+            if packet.track_id != inspected.track {
+                continue;
+            }
+            bytes += packet.data.len() as u64;
+            encoded += packet.dur.get() + packet.trim_start.get() + packet.trim_end.get();
+            primer += packet.trim_start.get();
+        }
+        assert!(primer > 0, "fixture must declare an overlap primer");
+        let rate = u64::from(inspected.info.sample_rate);
+        let expected = (bytes * 8 * rate + encoded / 2) / encoded;
+        let mut source = open();
+        let pcm = decode_remaining(&mut source);
+        assert!(pcm.iter().any(|sample| sample.abs() > 0.01));
+        assert_eq!(source.completed_bitrate(), Some(expected));
+        source.seek(0.0).unwrap();
+        decode_remaining(&mut source);
+        assert_eq!(source.completed_bitrate(), None);
     }
 
     // A real, seekable Ogg/Opus file without external tools or binary fixtures.
@@ -4815,8 +4870,8 @@ pub(super) mod tests {
                 let mut cluster = Vec::new();
                 for (id, payload) in children(payload) {
                     if id == 0xa3
-                        && packets == decoded_blocks
                         && let Some(padding_ns) = padding_ns
+                        && packets == if padding_ns < 0 { 0 } else { decoded_blocks }
                     {
                         let mut block = payload.to_vec();
                         // The fixtures use one-byte track numbers. SimpleBlock's
@@ -4868,6 +4923,65 @@ pub(super) mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn matroska_vorbis_primer_statistics_do_not_change_timing() {
+        for padding in [None, Some(-2_666_667)] {
+            let bytes = vorbis_excerpt(
+                include_bytes!("../tests/fixtures/vorbis-end.mka"),
+                3,
+                padding,
+            );
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(&bytes).unwrap();
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            let (pcm, spans) = capture_spans(&mut source);
+            assert_eq!(pcm.len(), 832);
+            assert_eq!(spans[0].media_start, 0.0);
+            assert!((spans[1].media_start - 128.0 / 48_000.0).abs() < 1e-9);
+            assert!(!spans[1].discontinuity);
+            assert!((spans[2].media_start - 256.0 / 48_000.0).abs() < 1e-9);
+            assert!(!spans[2].discontinuity);
+
+            let stream = MediaSourceStream::new(
+                Box::new(File::open(file.path()).unwrap()),
+                MediaSourceStreamOptions::default(),
+            );
+            let mut format = get_probe()
+                .probe(
+                    &Hint::new(),
+                    stream,
+                    FormatOptions::default(),
+                    MetadataOptions::default(),
+                )
+                .unwrap();
+            let params = format.tracks()[0]
+                .codec_params
+                .as_ref()
+                .unwrap()
+                .audio()
+                .unwrap();
+            let mut decoder = get_codecs()
+                .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(false))
+                .unwrap();
+            let mut encoded = 0_u64;
+            let mut payload = 0_u64;
+            while let Some(mut packet) = format.next_packet().unwrap() {
+                packet.trim_start = symphonia::core::units::Duration::ZERO;
+                packet.trim_end = symphonia::core::units::Duration::ZERO;
+                encoded += decoder.decode(&packet).unwrap().frames() as u64;
+                payload += packet.data.len() as u64;
+            }
+            assert_eq!(encoded, 960);
+            assert_eq!(
+                source.completed_bitrate(),
+                Some((payload * 8 * 48_000 + encoded / 2) / encoded)
+            );
+            source.seek(0.0).unwrap();
+            assert_eq!(capture_spans(&mut source).0, pcm);
         }
     }
 

@@ -661,6 +661,11 @@ all native codecs. Decoder positioning is bounded by the first packet, including
 negative lead-in and positive origins; the requested presentation target stays
 separate from that anchor. Source must not infer delay from container names or
 subtract header delay again from packet timestamps or track duration.
+Vorbis overlap priming is decoded without implicit gapless suppression so its
+actual block length remains available for encoded bitrate accounting. Source
+discards that first block after each reset; Matroska timestamp-convention
+detection still receives a zero-output primer anchor. Container trim values
+are not substitutes for encoded block length.
 
 This keeps start, duration and seek on one clock instead of maintaining a
 second Opus skip counter whose reset depends on a seek's landing timestamp.
