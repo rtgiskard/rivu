@@ -457,11 +457,23 @@ impl Queue {
                                             theme,
                                             ("queue-entry-actions", id),
                                             "queue-track-row",
+                                            this.model.contains(&id),
                                             crate::gui::appearance::material::surface(cx),
                                         )
+                                        .when(this.queue_locate_emphasized(id), |actions| {
+                                            rivu_ui::floating_action_surface(
+                                                crate::gui::appearance::material::surface(cx),
+                                                if this.model.contains(&id) {
+                                                    theme.selected_hover
+                                                } else {
+                                                    theme.highlight
+                                                },
+                                                actions,
+                                            )
+                                        })
                                         .child(
                                             IconButtonGroup::new(
-                                                IconButtonStyle::Quiet,
+                                                IconButtonStyle::RowAction,
                                                 IconButtonDensity::Compact,
                                             )
                                             .surface(crate::gui::appearance::material::surface(cx))

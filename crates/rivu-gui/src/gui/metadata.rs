@@ -798,8 +798,7 @@ impl Metadata {
             .min_w(gpui::rems(4.))
             .ml(-px(1.))
             .when(self.hint_panel == Some(panel), |trigger| {
-                trigger
-                    .bg(crate::gui::appearance::material::surface(cx).fill(theme.highlight, 0.55))
+                trigger.bg(crate::gui::appearance::material::surface(cx).fill(theme.highlight))
             });
         let mut content = column().gap_1().child(
             row()

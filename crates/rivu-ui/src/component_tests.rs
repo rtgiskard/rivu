@@ -267,6 +267,7 @@ impl Render for RevealRows {
                     theme,
                     ("action-reveal", index),
                     "reveal-test-row",
+                    false,
                     self.surface,
                 )
                 .child(action)
@@ -651,6 +652,220 @@ fn list_tree_and_dropdown_geometry_survives_text_selection_hover_and_scaling() {
     }
 }
 
+struct RowActionColors {
+    scope: FocusScope,
+    focus: [gpui::FocusHandle; 2],
+    bounds: RevealBounds,
+    selected: [bool; 2],
+    favorite: bool,
+    surface: crate::SurfaceStyle,
+}
+
+impl Render for RowActionColors {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::palette(cx);
+        let mut rows = self.scope.surface(
+            crate::column()
+                .id("row-action-colors")
+                .size_full()
+                .font(crate::theme::font(cx).clone())
+                .text_size(gpui::px(14.)),
+        );
+        for index in 0..2 {
+            let favorite = IconButton::new(("color-favorite", index), "♥", "Favorite")
+                .surface(self.surface)
+                .toggled(self.favorite)
+                .build_with(
+                    IconButtonStyle::RowAction,
+                    IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| {
+                        this.favorite = !this.favorite;
+                        cx.notify();
+                    },
+                    |control| {
+                        control
+                            .track_focus(&self.focus[index])
+                            .relative()
+                            .child(reveal_bounds(index * 4 + 1, self.bounds.clone()))
+                    },
+                );
+            let disabled = IconButton::new(("color-disabled", index), "♥", "Unavailable")
+                .surface(self.surface)
+                .toggled(true)
+                .enabled(false)
+                .build_with(
+                    IconButtonStyle::RowAction,
+                    IconButtonDensity::Compact,
+                    cx,
+                    |_, _, _| panic!("disabled action activated"),
+                    |control| {
+                        control
+                            .relative()
+                            .child(reveal_bounds(index * 4 + 2, self.bounds.clone()))
+                    },
+                );
+            rows = rows.child(
+                crate::list_row(
+                    theme,
+                    ("color-row", index),
+                    self.selected[index],
+                    gpui::px(if index == 0 { 28. } else { 32. }),
+                    self.surface,
+                )
+                .group("color-row")
+                .relative()
+                .w_64()
+                .flex_shrink_0()
+                .child(
+                    div()
+                        .w_32()
+                        .relative()
+                        .child("Row text")
+                        .child(reveal_bounds(index * 4 + 3, self.bounds.clone())),
+                )
+                .child(
+                    crate::hover_actions(
+                        theme,
+                        ("color-actions", index),
+                        "color-row",
+                        self.selected[index],
+                        self.surface,
+                    )
+                    .child(favorite)
+                    .child(disabled)
+                    .child(reveal_bounds(index * 4, self.bounds.clone())),
+                ),
+            );
+        }
+        rows
+    }
+}
+
+fn assert_row_action_color(
+    window: &Window,
+    bounds: &RevealBounds,
+    index: usize,
+    color: u32,
+    alpha: f32,
+) {
+    let measured = bounds.get();
+    let shell = measured[index * 4].scale(window.scale_factor());
+    let expected: gpui::Hsla = gpui::rgb(color).alpha(alpha).into();
+    let quads = window.painted_quads();
+    for action in [index * 4 + 1, index * 4 + 2] {
+        let button = measured[action];
+        let host = measured[index * 4];
+        assert!(button.top() - gpui::px(1.) >= host.top());
+        assert!(button.bottom() + gpui::px(1.) <= host.bottom());
+        let point = measured[action].center().scale(window.scale_factor());
+        // Exclude the wider owning row, but retain every button-sized fill over the shell.
+        let backgrounds: Vec<_> = quads
+            .iter()
+            .filter(|quad| {
+                quad.bounds.size.width <= shell.size.width
+                    && quad.bounds.contains(&point)
+                    && quad.content_mask.bounds.contains(&point)
+            })
+            .filter_map(|quad| quad.background.as_solid())
+            .filter(|color| color.a > 0.)
+            .collect();
+        assert_eq!(backgrounds, vec![expected], "row {index}, action {action}");
+    }
+}
+
+#[test]
+fn floating_row_actions_follow_selection_hover_and_focus_without_button_fills() {
+    for (surface, alpha) in [
+        (crate::SurfaceStyle::Opaque, 0.8),
+        (crate::SurfaceStyle::Translucent, 0.8 * 0.2),
+    ] {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let scope = cx.update(FocusScope::new);
+        let focus = cx.update(|cx| {
+            [
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            ]
+        });
+        let bounds = RevealBounds::default();
+        let window = cx.add_window({
+            let scope = scope.clone();
+            let focus = focus.clone();
+            let bounds = bounds.clone();
+            move |_, _| RowActionColors {
+                scope,
+                focus,
+                bounds,
+                selected: [false, true],
+                favorite: false,
+                surface,
+            }
+        });
+        let root = window.root(&mut cx).unwrap();
+        let handle = window.into();
+        draw(&mut cx, handle);
+        let theme = cx.update(|cx| *crate::theme::palette(cx));
+        for (index, color) in [(0, theme.highlight), (1, theme.selected_hover)] {
+            // Text hover and enabled/disabled action hover must paint the same host material.
+            for offset in [3, 1, 2] {
+                cx.update_window(handle, |_, window, cx| {
+                    window.simulate_mouse_move(bounds.get()[index * 4 + offset].center(), cx);
+                })
+                .unwrap();
+                draw(&mut cx, handle);
+                cx.update_window(handle, |_, window, _| {
+                    assert_row_action_color(window, &bounds, index, color, alpha);
+                })
+                .unwrap();
+            }
+            root.update(&mut cx, |this, cx| {
+                this.favorite = true;
+                cx.notify();
+            });
+            draw(&mut cx, handle);
+            cx.update_window(handle, |_, window, _| {
+                assert_row_action_color(window, &bounds, index, color, alpha);
+            })
+            .unwrap();
+        }
+        cx.update_window(handle, |_, window, cx| {
+            window.simulate_mouse_move(gpui::point(gpui::px(500.), gpui::px(500.)), cx);
+            scope.handle().focus(window, cx);
+        })
+        .unwrap();
+        press(&mut cx, handle, "tab");
+        cx.update_window(handle, |_, window, _| {
+            assert!(focus[0].is_focused(window));
+            assert_row_action_color(window, &bounds, 0, theme.panel, alpha);
+        })
+        .unwrap();
+        // Selection changes while focus stays put must update the already-visible shell.
+        root.update(&mut cx, |this, cx| {
+            this.selected[0] = true;
+            cx.notify();
+        });
+        draw(&mut cx, handle);
+        cx.update_window(handle, |_, window, _| {
+            assert!(focus[0].is_focused(window));
+            assert_row_action_color(window, &bounds, 0, theme.selected, alpha);
+        })
+        .unwrap();
+        press(&mut cx, handle, "space");
+        cx.update_window(handle, |_, window, _| {
+            assert_row_action_color(window, &bounds, 0, theme.selected, alpha);
+        })
+        .unwrap();
+        press(&mut cx, handle, "tab");
+        cx.update_window(handle, |_, window, _| {
+            assert!(focus[1].is_focused(window));
+            assert_row_action_color(window, &bounds, 1, theme.selected, alpha);
+        })
+        .unwrap();
+    }
+}
+
 struct RowActionFocus {
     search: gpui::Entity<crate::input::Input>,
     action_focus: gpui::FocusHandle,
@@ -690,6 +905,7 @@ impl Render for RowActionFocus {
                 theme,
                 "action-region",
                 "action-row",
+                false,
                 crate::SurfaceStyle::Opaque,
             )
             .child(action),

@@ -1304,12 +1304,13 @@ impl Render for AlbumBrowser {
                                             theme,
                                             ("album-track-actions", id as u64),
                                             "album-track-row",
+                                            false,
                                             crate::gui::appearance::material::surface(cx),
                                         )
                                         .on_click(|_, _, cx| cx.stop_propagation())
                                         .child(
                                             IconButtonGroup::new(
-                                                IconButtonStyle::Quiet,
+                                                IconButtonStyle::RowAction,
                                                 IconButtonDensity::Compact,
                                             )
                                             .surface(crate::gui::appearance::material::surface(cx))

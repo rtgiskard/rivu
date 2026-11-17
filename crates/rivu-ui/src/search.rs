@@ -40,7 +40,7 @@ pub struct SearchField {
 impl EventEmitter<SearchEvent> for SearchField {}
 
 impl SearchField {
-    /// Resolve the collapsed button's surface at render time; the expanded input stays solid.
+    /// Resolve both collapsed and expanded backgrounds from the current host surface.
     pub fn new(
         labels: SearchLabels,
         debounce: Duration,
@@ -204,6 +204,7 @@ impl Render for SearchField {
         let visible =
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let focused = self.input_focused(window, cx);
+        let surface = (self.surface)(cx);
         if !visible {
             return row()
                 .track_focus(&self.focus_handle)
@@ -211,7 +212,7 @@ impl Render for SearchField {
                 .flex_shrink_0()
                 .child(
                     IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone())
-                        .surface((self.surface)(cx))
+                        .surface(surface)
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -228,7 +229,8 @@ impl Render for SearchField {
             .min_w_0()
             .overflow_x_hidden()
             .rounded_md()
-            .bg(rgb(theme.panel))
+            .bg(surface.fill(theme.control))
+            .hover(move |style| style.bg(surface.fill(theme.highlight)))
             .border_1()
             .border_color(if focused {
                 rgb(theme.accent)
@@ -237,6 +239,7 @@ impl Render for SearchField {
             })
             .child(
                 IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone())
+                    .surface(surface)
                     .build(
                         IconButtonStyle::Surface,
                         IconButtonDensity::Regular,
@@ -262,6 +265,7 @@ impl Render for SearchField {
             .when(!self.input.read(cx).text().is_empty(), |field| {
                 field.child(
                     IconButton::new("search-clear", "", self.labels.clear.clone())
+                        .surface(surface)
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
@@ -321,7 +325,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn collapsed_search_tracks_live_host_surface(cx: &mut TestAppContext) {
+    fn search_tracks_live_host_surface_in_both_states(cx: &mut TestAppContext) {
         struct HostSurface(crate::SurfaceStyle);
         impl Global for HostSurface {}
 
@@ -337,11 +341,19 @@ mod tests {
                 cx,
             )
         });
-        for surface in [
-            crate::SurfaceStyle::Translucent,
-            crate::SurfaceStyle::Opaque,
-            crate::SurfaceStyle::Translucent,
+        for (surface, expanded) in [
+            (crate::SurfaceStyle::Translucent, false),
+            (crate::SurfaceStyle::Translucent, true),
+            (crate::SurfaceStyle::Opaque, true),
+            (crate::SurfaceStyle::Opaque, false),
+            (crate::SurfaceStyle::Translucent, true),
         ] {
+            window
+                .update(cx, |search, _, cx| {
+                    search.expanded = expanded;
+                    cx.notify();
+                })
+                .unwrap();
             cx.update(|cx| {
                 cx.set_global(HostSurface(surface));
                 cx.refresh_windows();
@@ -357,9 +369,8 @@ mod tests {
                     .find(|color| {
                         color.h == expected.h && color.s == expected.s && color.l == expected.l
                     })
-                    .expect("collapsed search must paint its control surface");
-                assert!(fill.a > 0.);
-                assert_eq!(fill.a == 1., surface == crate::SurfaceStyle::Opaque);
+                    .expect("search must paint its host control surface in both states");
+                assert_eq!(fill.a, if surface.is_translucent() { 0.2 } else { 1. });
             })
             .unwrap();
         }

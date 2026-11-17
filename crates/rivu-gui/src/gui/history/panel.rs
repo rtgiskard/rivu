@@ -84,7 +84,7 @@ impl History {
                 cx.notify();
             },
         )
-        .hover(move |style| style.bg(surface.fill(theme.highlight, 0.55)))
+        .hover(move |style| style.bg(surface.fill(theme.highlight)))
         .px(window.rem_size() * 0.5 - px(1.))
         .py_1()
         .rounded_sm()
@@ -175,7 +175,7 @@ impl History {
         let header = row()
             .items_center()
             .gap_0()
-            .px(rem_size * 0.5 + px(1.))
+            .px(rem_size * 0.5)
             .py_1()
             .h_auto()
             .min_h(gpui::rems(2.625))
@@ -281,6 +281,7 @@ impl History {
                                             row_height,
                                             crate::gui::appearance::material::surface(cx),
                                         )
+                                        .border_0()
                                         .gap_0()
                                         .group("history-track-row")
                                         .relative()
@@ -324,6 +325,7 @@ impl History {
                                                 theme,
                                                 ("history-track-actions", id as u64),
                                                 "history-track-row",
+                                                selected,
                                                 crate::gui::appearance::material::surface(cx),
                                             )
                                             .child(

@@ -1191,8 +1191,6 @@ mod tests {
                         assert_eq!(rendered.style().background, expected_row.style().background);
                         if !enabled {
                             assert_eq!(background.a, 1.);
-                        } else if !selected && !hovered {
-                            assert_eq!(background.a, 0.);
                         } else {
                             assert!(background.a > 0. && background.a < 1.);
                         }

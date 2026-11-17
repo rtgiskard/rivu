@@ -496,19 +496,16 @@ effect immediately and save automatically, independently of the Settings draft.
 They do not change semantic theme colors, playback, queue state or saved-layout
 syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
 
-Workspace rows, tabs and buttons receive an explicit opaque or translucent
-interaction surface from the host. Enabled materials leave idle rows and tabs
-clear and use theme-colored translucent hover and selection fills; active tabs
-also retain an accent underline. Buttons use light fills and subdued borders,
-with stronger hover and selection fills. Disabling preserves surface transparency;
-text, icons and keyboard focus borders are not faded. Scroll-edge gradients also
-follow the host surface instead of covering materials with opaque tint. These
-interaction fills are independent of the panel-opacity parameter. Menus, dialogs
-and input fields remain opaque. Floating row actions share a local blurred
-backdrop and translucent theme fill while materials are enabled; their text and
-icons remain sharp. Without materials their backdrop is opaque and is not sampled
-or blurred. These action containers do not change the row's text layout.
-Album-card actions are bare icons without a backdrop.
+Rows, tabs, buttons and scroll-edge fades share the host's surface policy:
+materials scale background opacity by 0.2 without changing semantic colors,
+text, icons or keyboard focus borders. This is independent of panel opacity.
+Expanded search matches its collapsed button's background and hover fill;
+menus, dialogs and standalone input fields remain opaque.
+
+Floating row actions follow the row's selection and hover colors at 80% opacity
+(16% with materials), without extra button hover fills or changes to text layout.
+Only material surfaces add local backdrop blur. Album-card actions remain bare
+icons without a backdrop.
 
 The GUI projects the saved preferences into its material state. Factory defaults
 are compiled from

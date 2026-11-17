@@ -1359,10 +1359,31 @@ impl Playlists {
                                 theme,
                                 ("playlist-catalog-actions", id as u64),
                                 "playlist-catalog-row",
+                                this.browser.playlists().selected() == Some(id),
                                 crate::gui::appearance::material::surface(cx),
                             )
+                                .can_drop({
+                                    let owner = cx.weak_entity();
+                                    move |value, _, cx| {
+                                        owner.upgrade().is_some_and(|owner| {
+                                            owner.read(cx).can_transfer_content(
+                                                value,
+                                                super::DragDestination::Playlist(id),
+                                            )
+                                        })
+                                    }
+                                })
+                                .group_drag_over::<LibraryDrag>("playlist-catalog-row", |style| {
+                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                })
+                                .group_drag_over::<super::ContentDrag>("playlist-catalog-row", |style| {
+                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                })
+                                .group_drag_over::<ListDrag>("playlist-catalog-row", |style| {
+                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                })
                                 .child(
-                                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact).surface(crate::gui::appearance::material::surface(cx))
+                                    IconButtonGroup::new(IconButtonStyle::RowAction, IconButtonDensity::Compact).surface(crate::gui::appearance::material::surface(cx))
                                         .button(
                                             IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).enabled(playable),
                                             cx,
@@ -1647,11 +1668,12 @@ impl Playlists {
                                     theme,
                                     ("playlist-track-actions", id as u64),
                                     "playlist-track-row",
+                                    this.browser.playlists().track_selection.contains(id),
                                     crate::gui::appearance::material::surface(cx),
                                 )
                                 .child(
                                     IconButtonGroup::new(
-                                        IconButtonStyle::Quiet,
+                                        IconButtonStyle::RowAction,
                                         IconButtonDensity::Compact,
                                     )
                                     .surface(crate::gui::appearance::material::surface(cx))

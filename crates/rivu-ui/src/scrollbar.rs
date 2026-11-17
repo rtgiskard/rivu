@@ -380,7 +380,7 @@ impl Element for Scrollbar {
             let offset = self.scroll.handle().offset().y;
             paint_scroll_edges(
                 self.surface
-                    .fill(self.edge_fade_color.unwrap_or(theme.panel), 0.35),
+                    .fill(self.edge_fade_color.unwrap_or(theme.panel)),
                 state.geometry,
                 offset,
                 window,

@@ -343,7 +343,7 @@ impl Library {
                             } else {
                                 this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                             };
-                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).surface(crate::gui::appearance::material::surface(cx)).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).surface(crate::gui::appearance::material::surface(cx)).build_with(IconButtonStyle::RowAction, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                 if this.library.root_count_failed(&scan_path) || this.library.root_counts_retired() {
                                     this.library.retry_root_counts();
                                     this.request_root_counts(cx);
@@ -368,7 +368,7 @@ impl Library {
                             };
                             IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint)).surface(crate::gui::appearance::material::surface(cx))
                                 .enabled(retry_counts || !this.state.system.scanning)
-                                .build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
+                                .build_with(IconButtonStyle::RowAction, IconButtonDensity::Regular, cx, |this, _, cx| {
                                     if this.library.other_count_failed() || this.library.root_counts_retired() {
                                         this.library.retry_root_counts();
                                         this.request_root_counts(cx);
@@ -509,8 +509,12 @@ impl Library {
                                         theme,
                                         gpui::ElementId::named_usize("library-scan-actions", index),
                                         "library-track-row",
+                                        selected,
                                         crate::gui::appearance::material::surface(cx),
                                     )
+                                    .when(located, |actions| {
+                                        rivu_ui::floating_action_surface(crate::gui::appearance::material::surface(cx), theme.highlight, actions)
+                                    })
                                     .when(retry_counts, |view| view.opacity(1.))
                                     .on_click(|_, _, cx| cx.stop_propagation())
                                     .child(scan),
@@ -523,7 +527,11 @@ impl Library {
                                 },
                                 |view, (track_id, favorite)| {
                                     view.child(
-                                        rivu_ui::hover_actions(theme, ("library-track-actions", track_id as u64), "library-track-row", crate::gui::appearance::material::surface(cx)).child(this.track_favorite_toggle(
+                                        rivu_ui::hover_actions(theme, ("library-track-actions", track_id as u64), "library-track-row", selected, crate::gui::appearance::material::surface(cx))
+                                        .when(located, |actions| {
+                                            rivu_ui::floating_action_surface(crate::gui::appearance::material::surface(cx), theme.highlight, actions)
+                                        })
+                                        .child(this.track_favorite_toggle(
                                             gpui::ElementId::NamedInteger("library-tree-favorite".into(), track_id as u64),
                                             track_id,
                                             favorite,

@@ -438,20 +438,17 @@ impl WindowView {
                                     .truncate()
                                     .child(rivu_ui::truncated_label("panel-tab-title", title)),
                             )
-                            .when(
-                                active == panel_id && surface == rivu_ui::SurfaceStyle::Translucent,
-                                |view| {
-                                    view.child(
-                                        div()
-                                            .absolute()
-                                            .bottom_0()
-                                            .left_1()
-                                            .right_1()
-                                            .h(px(2.))
-                                            .bg(rgb(theme.accent)),
-                                    )
-                                },
-                            )
+                            .when(active == panel_id && surface.is_translucent(), |view| {
+                                view.child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .left_1()
+                                        .right_1()
+                                        .h(px(2.))
+                                        .bg(rgb(theme.accent)),
+                                )
+                            })
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
                                 let close_focus = window

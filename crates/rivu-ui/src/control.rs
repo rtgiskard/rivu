@@ -12,12 +12,32 @@ pub enum SurfaceStyle {
 }
 
 impl SurfaceStyle {
-    /// Resolve a fill using full opacity on solid surfaces and `alpha` on materials.
-    pub fn fill(self, color: u32, alpha: f32) -> gpui::Rgba {
-        match self {
-            Self::Opaque => rgb(color),
-            Self::Translucent => rgb(color).alpha(alpha),
-        }
+    pub const fn is_translucent(self) -> bool {
+        matches!(self, Self::Translucent)
+    }
+
+    /// Resolve row fills relative to their opaque baseline.
+    pub fn row_fill(self, color: u32) -> gpui::Rgba {
+        self.fill(color)
+    }
+
+    /// Floating actions retain their 80% baseline on either host surface.
+    pub fn action_fill(self, color: u32) -> gpui::Rgba {
+        rgb(color).alpha(0.8 * self.background_multiplier())
+    }
+
+    /// Textured interaction backgrounds use 20% of their opaque baseline.
+    pub fn fill(self, color: u32) -> gpui::Rgba {
+        rgb(color).alpha(self.background_multiplier())
+    }
+
+    fn background_multiplier(self) -> f32 {
+        if self.is_translucent() { 0.2 } else { 1. }
+    }
+
+    /// Borders keep their existing subdued material treatment, independently of fills.
+    fn border(self, color: u32) -> gpui::Rgba {
+        rgb(color).alpha(if self.is_translucent() { 0.3 } else { 1. })
     }
 }
 
@@ -41,10 +61,10 @@ pub fn active_control(
     surface: SurfaceStyle,
 ) -> Stateful<Div> {
     control.when(active, |view| {
-        view.bg(surface.fill(theme.selected, 0.65))
+        view.bg(surface.fill(theme.selected))
             .text_color(rgb(theme.accent))
             .group_hover("control", move |style| {
-                style.bg(surface.fill(theme.selected_hover, 0.75))
+                style.bg(surface.fill(theme.selected_hover))
             })
     })
 }
@@ -71,11 +91,11 @@ fn control_surface(
         .text_sm()
         .text_color(rgb(theme.text))
         .cursor_pointer()
-        .bg(surface.fill(theme.control, 0.35))
+        .bg(surface.fill(theme.control))
         .border_1()
-        .border_color(surface.fill(theme.border, 0.30))
+        .border_color(surface.border(theme.border))
         .group_hover("control", move |style| {
-            style.bg(surface.fill(theme.highlight, 0.55))
+            style.bg(surface.fill(theme.highlight))
         })
 }
 
@@ -259,6 +279,8 @@ pub enum IconButtonStyle {
     Surface,
     Quiet,
     Bare,
+    /// The enclosing row action surface owns all background states.
+    RowAction,
 }
 
 /// Natural icon-button padding and minimum hit area, independent of glyph size.
@@ -364,6 +386,7 @@ impl IconButton {
         let theme = crate::theme::palette(cx);
         let mut control =
             icon_button_surface(theme, self.id, self.icon, self.hint, cx, self.surface);
+        let selected_fill = self.selected_fill && style != IconButtonStyle::RowAction;
         if density == IconButtonDensity::Compact {
             control = control.px_1().py_2().min_w_6().min_h_8();
         }
@@ -373,10 +396,16 @@ impl IconButton {
                 .bg(rgb(theme.panel).alpha(0.0))
                 .text_color(rgb(theme.secondary));
         }
-        if style == IconButtonStyle::Quiet && self.surface == SurfaceStyle::Translucent {
-            control = control.group_hover("control", move |style| {
-                style.bg(rgb(theme.highlight).alpha(0.45))
-            });
+        if style == IconButtonStyle::RowAction {
+            control = control
+                .h_full()
+                .min_h_0()
+                .py_0()
+                .group_hover("control", move |style| {
+                    style
+                        .bg(gpui::transparent_black())
+                        .text_color(rgb(theme.accent))
+                });
         }
         if let IconButtonSemantics::Toggled(on) | IconButtonSemantics::Switch(on) = self.semantics {
             control = control.aria_toggled(if on { Toggled::True } else { Toggled::False });
@@ -384,17 +413,12 @@ impl IconButton {
                 control = control.role(Role::Switch);
             }
         }
-        control = active_control(
-            theme,
-            control,
-            self.selected && self.selected_fill,
-            self.surface,
-        );
-        if self.selected && !self.selected_fill {
+        control = active_control(theme, control, self.selected && selected_fill, self.surface);
+        if self.selected && !selected_fill {
             control = control.text_color(rgb(theme.accent));
         }
         if self.enabled {
-            if style == IconButtonStyle::Bare && !(self.selected && self.selected_fill) {
+            if style == IconButtonStyle::Bare && !(self.selected && selected_fill) {
                 control = control.group_hover("control", |style| {
                     style
                         .bg(gpui::transparent_black())
@@ -407,15 +431,15 @@ impl IconButton {
         if self.enabled {
             control
         } else {
-            let background = if self.selected && self.selected_fill {
-                self.surface.fill(theme.selected, 0.65)
+            let background = if self.selected && selected_fill {
+                self.surface.fill(theme.selected)
             } else if style == IconButtonStyle::Surface {
-                self.surface.fill(theme.control, 0.35)
+                self.surface.fill(theme.control)
             } else {
                 gpui::transparent_black().into()
             };
             let border = if style == IconButtonStyle::Surface {
-                self.surface.fill(theme.structure_border, 0.30).into()
+                self.surface.border(theme.structure_border).into()
             } else {
                 gpui::transparent_black()
             };
@@ -451,6 +475,7 @@ impl IconButtonGroup {
                 .min_w_0()
                 .gap_0()
                 .flex_shrink_0()
+                .when(style == IconButtonStyle::RowAction, |group| group.h_full())
                 .when(density == IconButtonDensity::Regular, |group| group.gap_1()),
             style,
             density,

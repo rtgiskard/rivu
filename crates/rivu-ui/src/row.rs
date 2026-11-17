@@ -125,13 +125,13 @@ pub fn row_background(
     hovered: bool,
     surface: crate::SurfaceStyle,
 ) -> gpui::Rgba {
-    let (color, alpha) = match (selected, hovered) {
-        (true, true) => (theme.selected_hover, 0.78),
-        (true, false) => (theme.selected, 0.68),
-        (false, true) => (theme.highlight, 0.42),
-        (false, false) => (theme.panel, 0.0),
+    let color = match (selected, hovered) {
+        (true, true) => theme.selected_hover,
+        (true, false) => theme.selected,
+        (false, true) => theme.highlight,
+        (false, false) => theme.panel,
     };
-    surface.fill(color, alpha)
+    surface.row_fill(color)
 }
 
 pub fn tree_row(
@@ -299,13 +299,13 @@ fn hover_reveal_surface(id: impl Into<ElementId>, group: &'static str) -> Statef
 
 /// Separate floating actions from row content without filtering their foreground.
 pub fn floating_action_surface(
-    theme: &rivu_format::palette::Palette,
     surface: crate::SurfaceStyle,
+    color: u32,
     actions: Stateful<Div>,
 ) -> Stateful<Div> {
     actions
-        .bg(surface.fill(theme.control, 0.35))
-        .when(surface == crate::SurfaceStyle::Translucent, |actions| {
+        .bg(surface.action_fill(color))
+        .when(surface.is_translucent(), |actions| {
             actions.backdrop_blur(gpui::px(6.))
         })
 }
@@ -315,9 +315,23 @@ pub fn hover_actions(
     theme: &rivu_format::palette::Palette,
     id: impl Into<ElementId>,
     group: &'static str,
+    selected: bool,
     surface: crate::SurfaceStyle,
 ) -> Stateful<Div> {
-    floating_action_surface(theme, surface, hover_reveal_surface(id, group))
+    let background = if selected {
+        theme.selected
+    } else {
+        theme.panel
+    };
+    let hover_background = if selected {
+        theme.selected_hover
+    } else {
+        theme.highlight
+    };
+    floating_action_surface(surface, background, hover_reveal_surface(id, group))
+        .group_hover(group, move |style| {
+            style.opacity(1.).bg(surface.action_fill(hover_background))
+        })
         .absolute()
         .right_0()
         .top_0()
@@ -353,11 +367,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn translucent_rows_preserve_semantic_colors_and_state_order(cx: &mut gpui::TestAppContext) {
+    fn translucent_rows_preserve_semantic_colors_at_uniform_opacity(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             crate::theme::init_test(cx);
             let theme = crate::theme::palette(cx);
-            let mut alphas = Vec::new();
             for (selected, hovered) in [(false, false), (false, true), (true, false), (true, true)]
             {
                 let opaque = row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque);
@@ -367,11 +380,8 @@ mod tests {
                     (translucent.r, translucent.g, translucent.b),
                     (opaque.r, opaque.g, opaque.b)
                 );
-                assert!(translucent.a < opaque.a);
-                alphas.push(translucent.a);
+                assert_eq!(translucent.a, opaque.a * 0.2);
             }
-            assert_eq!(alphas[0], 0.);
-            assert!(alphas.windows(2).all(|states| states[0] < states[1]));
             assert_eq!(crate::SurfaceStyle::default(), crate::SurfaceStyle::Opaque);
         });
     }
