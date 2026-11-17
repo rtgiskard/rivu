@@ -115,7 +115,10 @@ pub(super) fn mapping(source: &[Channel], device: &[Channel]) -> Result<Vec<Opti
     }
     // Preserve the established mono-on-stereo behavior, explicitly duplicating
     // a single center signal. No multichannel signal is ever downmixed here.
-    if source == [Channel::FrontCenter] && device == [Channel::FrontLeft, Channel::FrontRight] {
+    if source == [Channel::FrontCenter]
+        && (device == [Channel::FrontLeft, Channel::FrontRight]
+            || device == [Channel::FrontRight, Channel::FrontLeft])
+    {
         return Ok(vec![Some(0), Some(0)]);
     }
     for channel in source {
@@ -225,6 +228,10 @@ mod tests {
         assert!(mapping(&[FrontLeft, FrontRight, Lfe], &[FrontLeft, FrontRight]).is_err());
         assert_eq!(
             mapping(&[FrontCenter], &[FrontLeft, FrontRight]).unwrap(),
+            [Some(0), Some(0)]
+        );
+        assert_eq!(
+            mapping(&[FrontCenter], &[FrontRight, FrontLeft]).unwrap(),
             [Some(0), Some(0)]
         );
     }

@@ -1034,6 +1034,13 @@ struct Route {
     input_port: u32,
 }
 
+struct RouteValidation {
+    source: u32,
+    target: Sink,
+    speakers: Vec<&'static str>,
+    auto_mix: bool,
+}
+
 #[derive(Default)]
 struct Inventory {
     sinks: BTreeMap<u32, Sink>,
@@ -1041,16 +1048,28 @@ struct Inventory {
     default_metadata: Option<u32>,
     ports: BTreeMap<u32, String>,
     links: BTreeMap<u32, Route>,
-    revision: u64,
-    // Registry mutations invalidate confirmation immediately, even if process
-    // is dispatched before the control loop next validates the new topology.
+    // Registry callbacks revalidate before a process callback can consume PCM.
+    route_validation: Option<RouteValidation>,
     route_confirmed: Rc<Cell<bool>>,
 }
 
 impl Inventory {
     fn changed(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
-        self.route_confirmed.set(false);
+        self.validate_route();
+    }
+
+    fn validate_route(&self) {
+        self.route_confirmed
+            .set(self.route_validation.as_ref().is_some_and(|route| {
+                self.sinks.get(&route.target.id) == Some(&route.target)
+                    && route_matches(
+                        self,
+                        route.source,
+                        route.target.id,
+                        &route.speakers,
+                        route.auto_mix,
+                    )
+            }));
     }
 }
 
@@ -1522,7 +1541,13 @@ fn run(
     let deadline = Instant::now() + TIMEOUT;
     let mut started = false;
     let mut active = true;
-    let mut observed_revision = None;
+    connection.inventory.borrow_mut().route_validation = Some(RouteValidation {
+        source: stream.node_id(),
+        target: target.clone(),
+        speakers: names,
+        auto_mix,
+    });
+    connection.inventory.borrow().validate_route();
     let failure = Rc::new(RefCell::new(None));
     let failed = failure.clone();
     let _core_listener = connection
@@ -1548,16 +1573,11 @@ fn run(
             }
         }
         {
-            let graph = connection.inventory.borrow();
-            if observed_revision != Some(graph.revision) {
-                route_ok.set(route_matches(
-                    &graph,
-                    stream.node_id(),
-                    target.id,
-                    &names,
-                    auto_mix,
-                ));
-                observed_revision = Some(graph.revision);
+            let mut graph = connection.inventory.borrow_mut();
+            let source = stream.node_id();
+            if graph.route_validation.as_ref().unwrap().source != source {
+                graph.route_validation.as_mut().unwrap().source = source;
+                graph.validate_route();
             }
         }
         if let Some(error) = failure.borrow_mut().take() {
@@ -3161,12 +3181,28 @@ mod routing_tests {
             );
         }
         assert!(route_matches(&graph, 1, 2, &speakers, false));
-        graph.route_confirmed.set(true);
+        let sink = Sink {
+            id: 2,
+            serial: "2".into(),
+            name: "selected".into(),
+            positions: speakers.join(" "),
+        };
+        graph.sinks.insert(sink.id, sink.clone());
+        graph.route_validation = Some(RouteValidation {
+            source: 1,
+            target: sink,
+            speakers: speakers.to_vec(),
+            auto_mix: false,
+        });
+        graph.validate_route();
+        assert!(graph.route_confirmed.get());
         graph.ports.insert(203, "FL".into());
         graph.changed();
         assert!(!graph.route_confirmed.get());
         assert!(!route_matches(&graph, 1, 2, &speakers, false));
         graph.ports.insert(203, "LFE".into());
+        graph.changed();
+        assert!(graph.route_confirmed.get());
         graph.links.get_mut(&4).unwrap().input_node = 3;
         assert!(!route_matches(&graph, 1, 2, &speakers, false));
         graph.links.get_mut(&4).unwrap().input_node = 2;
@@ -3218,7 +3254,21 @@ mod routing_tests {
         assert!(!route_matches(&graph, 1, 2, &["FC"], true));
         graph.links.get_mut(&0).unwrap().input_node = 2;
         assert!(route_matches(&graph, 1, 2, &["FC"], true));
-        graph.route_confirmed.set(true);
+        let sink = Sink {
+            id: 2,
+            serial: "2".into(),
+            name: "selected".into(),
+            positions: "FL FR".into(),
+        };
+        graph.sinks.insert(sink.id, sink.clone());
+        graph.route_validation = Some(RouteValidation {
+            source: 1,
+            target: sink,
+            speakers: vec!["FC"],
+            auto_mix: true,
+        });
+        graph.validate_route();
+        assert!(graph.route_confirmed.get());
 
         // An unrelated stream may use a different sink; our stream may not
         // gain even one additional outgoing link to that sink.
@@ -3232,13 +3282,22 @@ mod routing_tests {
             },
         );
         graph.changed();
-        assert!(!graph.route_confirmed.get());
+        assert!(graph.route_confirmed.get());
         assert!(route_matches(&graph, 1, 2, &["FC"], true));
         graph.links.get_mut(&1).unwrap().output_node = 1;
+        graph.changed();
+        assert!(!graph.route_confirmed.get());
         assert!(!route_matches(&graph, 1, 2, &["FC"], true));
 
         graph.links.get_mut(&1).unwrap().output_node = 4;
-        graph.route_confirmed.set(true);
+        graph.changed();
+        assert!(graph.route_confirmed.get());
+        let sink = graph.sinks.remove(&2).unwrap();
+        graph.changed();
+        assert!(!graph.route_confirmed.get());
+        graph.sinks.insert(2, sink);
+        graph.changed();
+        assert!(graph.route_confirmed.get());
         graph.links.remove(&0);
         graph.changed();
         assert!(!graph.route_confirmed.get());
