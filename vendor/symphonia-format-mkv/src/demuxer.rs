@@ -316,7 +316,19 @@ impl<'s> MkvReader<'s> {
             // Create the track.
             let mut tr = Track::new(state.track_num);
 
-            tr.with_time_base(PACKET_TIME_BASE);
+            // CodecDelay places the encoder delay ahead of time zero, where it stays seekable.
+            tr.with_time_base(PACKET_TIME_BASE)
+                .with_start_ts(Timestamp::ZERO.saturating_sub(Duration::new(state.codec_delay.get())));
+
+            // Segment duration uses the unshifted clock. Publish each track's
+            // duration in the same presented coordinates as its packets.
+            if let Some(duration) = info.duration {
+                let nanos = duration.get() * f64::from(time_base.numer.get())
+                    / f64::from(time_base.denom.get()) * 1_000_000_000.0;
+                tr.with_duration(Duration::new(
+                    (nanos.round() as u64).saturating_sub(state.codec_delay.get()),
+                ));
+            }
 
             if let Some(lang_bcp47) = &track.lang_bcp47 {
                 tr.with_language(lang_bcp47);
@@ -386,12 +398,7 @@ impl<'s> MkvReader<'s> {
         Ok(SeekedTo { track_id, required_ts: ts, actual_ts })
     }
 
-    fn seek_track_by_ts_atomic(
-        &mut self,
-        id: u32,
-        tb: TimeBase,
-        ts: Timestamp,
-    ) -> Result<SeekedTo> {
+    fn seek_track_by_ts_atomic(&mut self, id: u32, ts: Timestamp) -> Result<SeekedTo> {
         if !self.is_seekable {
             // A streaming source cannot rewind or restore a failed seek. Continue
             // scanning its existing frame queue without discarding pending laces.
@@ -403,7 +410,7 @@ impl<'s> MkvReader<'s> {
         let cluster_state = self.current_cluster;
         let frames = std::mem::take(&mut self.frames);
 
-        match self.seek_track_by_ts(id, tb, ts) {
+        match self.seek_track_by_ts(id, ts) {
             Err(err) => {
                 // Restore saved iterator and cluster states.
                 self.iter.restore_state(iter_state)?;
@@ -415,20 +422,21 @@ impl<'s> MkvReader<'s> {
         }
     }
 
-    fn seek_track_by_ts(&mut self, id: u32, _tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
+    fn seek_track_by_ts(&mut self, id: u32, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
 
         // If cues exist, seek to the nearest cue point.
         if let Some(cues) = &self.cues {
             let mut target_cue_point = None;
 
-            // Cue timestamps are Segment ticks, while packet timestamps are nanoseconds.
-            let ts = u64::try_from(ts.get())
-                .map(MatroskaTicks::from)
-                .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?
-                .into_segment_ticks(
-                    self.media_info.time_base.expect("media info time base always populated"),
-                );
+            // Cues use the unshifted Segment clock; packets subtract CodecDelay.
+            let delay = self.track_states[&id].codec_delay.get();
+            let encoded_ts = (i128::from(ts.get()) + i128::from(delay)).max(0);
+            let encoded_ts = u64::try_from(encoded_ts)
+                .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
+            let ts = MatroskaTicks::from(encoded_ts).into_segment_ticks(
+                self.media_info.time_base.expect("media info time base always populated"),
+            );
 
             for cue_point in &cues.points {
                 if cue_point.time > ts {
@@ -648,14 +656,11 @@ impl FormatReader for MkvReader<'_> {
                     }
                 };
                 let track_id = track.id;
-                self.seek_track_by_ts_atomic(track_id, tb, ts)
+                self.seek_track_by_ts_atomic(track_id, ts)
             }
             SeekTo::Timestamp { ts, track_id } => {
                 match self.tracks.iter().find(|t| t.id == track_id) {
-                    Some(track) => {
-                        let tb = track.time_base.expect("track always has a timebase");
-                        self.seek_track_by_ts_atomic(track_id, tb, ts)
-                    }
+                    Some(_) => self.seek_track_by_ts_atomic(track_id, ts),
                     None => seek_error(SeekErrorKind::InvalidTrack),
                 }
             }
@@ -781,8 +786,17 @@ mod tests {
     }
 
     fn fixture(clusters: &[Vec<u8>], indexed: bool, codec_delay: u64) -> Vec<u8> {
+        fixture_with_duration(clusters, indexed, codec_delay, None)
+    }
+
+    fn fixture_with_duration(
+        clusters: &[Vec<u8>], indexed: bool, codec_delay: u64, duration: Option<f64>,
+    ) -> Vec<u8> {
         let mut info = element(&[0x4d, 0x80], b"test");
         info.extend(element(&[0x57, 0x41], b"test"));
+        if let Some(duration) = duration {
+            info.extend(element(&[0x44, 0x89], &duration.to_be_bytes()));
+        }
         let mut segment = element(&[0x15, 0x49, 0xa9, 0x66], &info);
         let mut track = uint(&[0xd7], 1);
         track.extend(uint(&[0x73, 0xc5], 1));
@@ -820,6 +834,21 @@ mod tests {
             SeekMode::Accurate,
             SeekTo::Timestamp { ts: Timestamp::new(ns), track_id: 1 },
         ).unwrap()
+    }
+
+    #[test]
+    fn codec_delay_duration_and_origin_seek_share_presented_coordinates() {
+        let clusters = [cluster(0, &group(0, 0, &[0], 0))];
+        for indexed in [false, true] {
+            let mut reader = reader(fixture_with_duration(
+                &clusters, indexed, 6_500_000, Some(100.5),
+            ));
+            let track = &reader.tracks()[0];
+            assert_eq!(track.start_ts.get(), -6_500_000);
+            assert_eq!(track.duration.unwrap().get(), 94_000_000);
+            assert_eq!(seek(&mut reader, -6_500_000).actual_ts.get(), -6_500_000);
+            assert_eq!(reader.next_packet().unwrap().unwrap().pts.get(), -6_500_000);
+        }
     }
 
     #[test]
@@ -868,6 +897,24 @@ mod tests {
                 assert_eq!(packets[untouched].trim_end.get(), 0);
                 assert_eq!(packets[1].pts.get(), 20_000_000);
             }
+        }
+    }
+
+    #[test]
+    fn cue_seek_adds_codec_delay_before_choosing_cluster() {
+        // A 100ms cue presents at 93.5ms. The earlier cluster has damaged
+        // lacing and is not needed to read the packet at the requested cue.
+        let clusters = [
+            cluster(0, &element(&[0xa3], &block(0, 0x02, &[1, 0xff]))),
+            cluster(100, &element(&[0xa3], &block(0, 0, &[20]))),
+        ];
+        let mut reader = reader(fixture(&clusters, true, 6_500_000));
+        for _ in 0..2 {
+            assert_eq!(seek(&mut reader, 93_500_000).actual_ts.get(), 93_500_000);
+            let packet = reader.next_packet().unwrap().unwrap();
+            assert_eq!(packet.pts.get(), 93_500_000);
+            assert_eq!(&*packet.data, &[20]);
+            assert!(reader.next_packet().unwrap().is_none());
         }
     }
 

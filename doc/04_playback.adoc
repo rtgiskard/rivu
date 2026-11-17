@@ -444,6 +444,22 @@ forward, potentially to EOF. This is cancellable. A valid exhausted selection
 returns EOF; a source with no decodable audio fails. Native Matroska supports
 backward seeking when seekable; unseekable sources scan forward only.
 
+Native decoding presents the timeline the container declares, not every decoded
+frame. Encoder delay and padding are removed for MP4 (a single normal-rate media
+edit, otherwise the `iTunSMPB` tag of a file with one audio track, with Opus
+codec pre-skip as fallback, plus a shortened final sample), Matroska
+(`CodecDelay` and discard padding), MP3
+(Xing/LAME header), Ogg Vorbis and Opus. Matroska AAC without discard padding
+keeps its trailing padding frames; raw ADTS declares neither and plays whole.
+MP4 edit lists with several media edits or a non-unit rate are not applied.
+After a seek, native AAC and MP3 decode two packets ahead of the target and
+discard them, reaching into the encoder delay near the start. This restores
+overlap history, but codec rounding and stateful noise substitution can keep
+the result from being bit-exact with continuous decoding.
+Demuxers publish these declarations on one presented clock; decoding does not
+apply a second codec-specific delay correction. See
+link:91_design_decisions.adoc#DEC-027[encoder-delay ownership].
+
 
 [[optional-ffmpeg-decoder]]
 == Optional FFmpeg decoder
@@ -497,6 +513,9 @@ rewriting media files. Reliable fixed-encoding metadata can confirm a value at
 open. Otherwise, complete playback from the beginning to actual source EOF may
 measure the selected encoded audio stream during normal decoding, without an
 additional analysis pass.
+For a finite MP4 presentation span, this includes complete priming and boundary
+packets needed to decode that span, not wholly hidden trailing media. The
+denominator is their encoded duration, not the cropped PCM duration.
 
 Seeking, restricted CUE playback, early stop, decode errors, incomplete stream
 statistics, or unsupported measurements leave the value estimated or unknown.

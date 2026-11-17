@@ -299,21 +299,33 @@ pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Resul
 fn seconds(time: Time) -> f64 {
     time.as_secs_f64()
 }
-fn trim_samples(
-    base: TimeBase,
-    trim: symphonia::core::units::Duration,
-    rate: u32,
-) -> Result<usize> {
-    let time = base
-        .calc_duration(trim)
-        .context("Packet trim out of range")
-        .context(SourceFailure)?;
-    Ok((seconds(time) * rate as f64).round().max(0.0) as usize)
-}
 fn trim_sample_count(base: TimeBase, ticks: u64, rate: u32) -> Option<u64> {
     let scaled = u128::from(ticks) * u128::from(base.numer.get()) * u128::from(rate);
     let denominator = u128::from(base.denom.get());
     u64::try_from((scaled + denominator / 2) / denominator).ok()
+}
+
+/// Whether packet durations count PCM frames exactly, which only a
+/// sample-period time base guarantees.
+fn counts_frames(base: TimeBase, rate: u32) -> bool {
+    base.numer.get() == 1 && base.denom.get() == rate
+}
+
+fn decoded_span(
+    frames: usize,
+    leading: u64,
+    trailing: u64,
+    valid: Option<u64>,
+) -> std::ops::Range<usize> {
+    let start = usize::try_from(leading).unwrap_or(usize::MAX).min(frames);
+    let mut end = frames
+        - usize::try_from(trailing)
+            .unwrap_or(usize::MAX)
+            .min(frames - start);
+    if let Some(valid) = valid {
+        end = end.min(start.saturating_add(usize::try_from(valid).unwrap_or(usize::MAX)));
+    }
+    start..end
 }
 
 fn duration(track: &Track, rate: u32) -> Option<f64> {
@@ -321,6 +333,15 @@ fn duration(track: &Track, rate: u32) -> Option<f64> {
         return base.calc_duration(duration).map(seconds);
     }
     track.num_frames.map(|frames| frames as f64 / rate as f64)
+}
+
+fn native_seek_anchor(anchor: f64, first: f64, end: Option<f64>, rate: u32) -> f64 {
+    let anchor = match end.filter(|end| anchor >= *end) {
+        Some(end) => (end - 1.0 / f64::from(rate)).max(0.0),
+        None => anchor,
+    };
+    // A duration estimate is not authority to seek below the encoded origin.
+    anchor.max(first)
 }
 
 fn pcm_bitrate(params: &AudioCodecParameters) -> Option<u64> {
@@ -377,9 +398,6 @@ struct OpusDecoder {
     decoder: opus::Decoder,
     samples: Vec<f32>,
     channels: usize,
-    initial_skip: usize,
-    skip: usize,
-    timestamp_delay: f64,
 }
 enum Decode {
     Native(Box<dyn AudioDecoder>),
@@ -387,7 +405,7 @@ enum Decode {
     Ffmpeg(Box<super::ffmpeg::Decoder>),
     Memory { pcm: super::PcmAudio, position: u64 },
 }
-fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Result<Decode> {
+fn decoder(params: &AudioCodecParameters) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
         return Ok(Decode::Native(
             get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?,
@@ -415,11 +433,6 @@ fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Res
     // MP4 dOps uses big-endian fields and version 0; Ogg/Matroska OpusHead
     // uses little-endian fields and version 1.
     let be = head[8] == 0;
-    let preskip = if be {
-        u16::from_be_bytes([head[10], head[11]])
-    } else {
-        u16::from_le_bytes([head[10], head[11]])
-    } as usize;
     let gain = if be {
         i16::from_be_bytes([head[16], head[17]])
     } else {
@@ -434,20 +447,10 @@ fn decoder(params: &AudioCodecParameters, timestamps_include_delay: bool) -> Res
         },
     )?;
     decoder.set_gain(gain as i32)?;
-    // Symphonia 0.6's Ogg mapper records header delay on Track but does not
-    // apply Opus preskip to packets. Apply it here, overlapping rather than
-    // adding any packet trim. Matroska already subtracts CodecDelay from PTS.
     Ok(Decode::Opus(OpusDecoder {
         decoder,
         samples: vec![0.0; 5760 * channels],
         channels,
-        initial_skip: preskip,
-        skip: preskip,
-        timestamp_delay: if timestamps_include_delay {
-            preskip as f64 / 48_000.0
-        } else {
-            0.0
-        },
     }))
 }
 
@@ -460,9 +463,12 @@ impl std::fmt::Display for UnsupportedNative {
 }
 impl std::error::Error for UnsupportedNative {}
 
+/// The kept `offset..end` frames of the decoder's last buffer. `start` is
+/// the media time of that buffer's first frame, kept or not.
 struct NativePcm {
     start: f64,
     offset: usize,
+    end: usize,
 }
 
 /// Configure the selected timeline before the first finite decoding round.
@@ -505,6 +511,8 @@ pub(super) struct Source {
     complete_stream: bool,
     expected_samples: Option<u64>,
     mpeg_packets: bool,
+    // Seconds decoded and discarded before a seek target after a decoder reset.
+    native_preroll: f64,
     opening_fallback: Option<(PathBuf, File, SourceSelection)>,
 }
 impl Source {
@@ -563,6 +571,7 @@ impl Source {
             complete_stream: false,
             expected_samples: None,
             mpeg_packets: false,
+            native_preroll: 0.0,
             opening_fallback: None,
         })
     }
@@ -799,6 +808,7 @@ impl Source {
             complete_stream: true,
             expected_samples: None,
             mpeg_packets: false,
+            native_preroll: 0.0,
             opening_fallback: None,
         })
     }
@@ -835,6 +845,7 @@ impl Source {
         let default = format.default_track(TrackType::Audio).map(|track| track.id);
         let mut candidates = format.tracks().iter().collect::<Vec<_>>();
         candidates.sort_by_key(|track| Some(track.id) != default);
+        let container = format.format_info().short_name;
         let mut chosen = None;
         let mut errors = Vec::new();
         let mut invalid = None;
@@ -845,7 +856,7 @@ impl Source {
             if params.codec == CODEC_ID_NULL_AUDIO {
                 continue;
             }
-            match decoder(params, format.format_info().short_name != "matroska") {
+            match decoder(params) {
                 Ok(decode) => {
                     chosen = Some((track.id, params.clone(), track.time_base, decode));
                     break;
@@ -894,7 +905,7 @@ impl Source {
                 .map(|codec| codec.codec.info.short_name.to_uppercase())
                 .unwrap_or_else(|| format!("{:?}", params.codec))
         };
-        let mut media_duration = format
+        let media_duration = format
             .tracks()
             .iter()
             .find(|candidate| candidate.id == track)
@@ -903,12 +914,17 @@ impl Source {
                 let info = format.media_info();
                 info.time_base?.calc_duration(info.duration?).map(seconds)
             });
-        if let Decode::Opus(opus) = &decode {
-            media_duration =
-                media_duration.map(|value| (value - opus.initial_skip as f64 / 48_000.0).max(0.0));
-        }
         let compressed_summary = compressed_summary.filter(|summary| summary.codec == params.codec);
         let mpeg_packets = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
+        // A reset lapped-transform decoder lacks the preceding packet's overlap:
+        // decode two packets ahead of a seek target and discard them.
+        let native_preroll = if mpeg_packets {
+            2.0 * 1152.0
+        } else if params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC {
+            2.0 * 1024.0
+        } else {
+            0.0
+        } / f64::from(rate);
         // Only exact codec/container sample counts, never estimated durations.
         let expected_samples = if pcm_bitrate(&params).is_some()
             || params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_FLAC
@@ -964,15 +980,14 @@ impl Source {
         let time_base = track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap());
         // Matroska emits nanosecond packets for exact trim, but timestamps
         // still have the Segment's declared quantization granularity.
-        let timestamp_base = if format.format_info().short_name == "matroska" {
+        let timestamp_base = if container == "matroska" {
             format.media_info().time_base.unwrap_or(time_base)
         } else {
             time_base
         };
         let timestamp_tick =
             f64::from(timestamp_base.numer.get()) / f64::from(timestamp_base.denom.get());
-        let vorbis_timing = (params.codec == CODEC_ID_VORBIS
-            && format.format_info().short_name == "matroska")
+        let vorbis_timing = (params.codec == CODEC_ID_VORBIS && container == "matroska")
             .then(|| VorbisTiming::new(timestamp_tick, rate));
         Ok(Self {
             identity,
@@ -1006,6 +1021,7 @@ impl Source {
             complete_stream: true,
             expected_samples,
             mpeg_packets,
+            native_preroll,
             opening_fallback: None,
         })
     }
@@ -1061,7 +1077,7 @@ impl Source {
             }
             Decode::Opus(_) => 0.08,
             Decode::Native(_) if self.vorbis_timing.is_some() => 2.0,
-            Decode::Native(_) => 0.0,
+            Decode::Native(_) => self.native_preroll,
             Decode::Memory { .. } => 0.0,
         }
     }
@@ -1158,8 +1174,7 @@ impl Source {
             self.exhausted = false;
             return Ok(());
         }
-        let preroll = (anchor - preroll).max(0.0);
-        let time = Time::try_from_secs_f64(preroll).context("Invalid seek time")?;
+        let preroll = anchor - preroll;
         let format = self
             .format
             .as_mut()
@@ -1168,38 +1183,42 @@ impl Source {
         // itself has no packet (notably in native FLAC). Keep the anchor inside
         // the reported span; the original target below still controls discard.
         // A short duration hint therefore never hides later samples or proves EOF.
-        let time = match format
+        // Read the encoded origin and duration from the same authoritative track;
+        // decoder preroll cannot precede that origin, regardless of its sign.
+        let track = format
             .tracks()
             .iter()
             .find(|track| track.id == self.track)
-            .and_then(|track| duration(track, self.info.sample_rate))
-            .filter(|end| preroll >= *end)
-        {
-            Some(end) => {
-                Time::try_from_secs_f64((end - 1.0 / f64::from(self.info.sample_rate)).max(0.0))
-                    .context("Invalid seek anchor")?
+            .context("Native source track disappeared")?;
+        let first_ts = track.start_ts;
+        let first = track
+            .time_base
+            .unwrap_or(self.time_base)
+            .calc_time(first_ts)
+            .map(seconds)
+            .context("Invalid native track start timestamp")?;
+        let end = duration(track, self.info.sample_rate);
+        let anchor = native_seek_anchor(preroll, first, end, self.info.sample_rate);
+        // Name the first packet by its timestamp: a time converts to one by
+        // rounding down, which would precede it.
+        let to = if anchor <= first {
+            SeekTo::Timestamp {
+                ts: first_ts,
+                track_id: self.track,
             }
-            None => time,
+        } else {
+            SeekTo::Time {
+                time: Time::try_from_secs_f64(anchor).context("Invalid seek anchor")?,
+                track_id: Some(self.track),
+            }
         };
-        let sought = self.metadata_budget.with(|| {
-            format.seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track),
-                },
-            )
-        })?;
+        self.metadata_budget
+            .with(|| format.seek(SeekMode::Accurate, to))?;
         check_cancelled(cancelled)?;
         match &mut self.decode {
             Decode::Native(decoder) => decoder.reset(),
             Decode::Opus(opus) => {
                 opus.decoder.reset_state()?;
-                opus.skip = if sought.actual_ts.get() <= 0 {
-                    opus.initial_skip
-                } else {
-                    0
-                };
             }
             Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
         }
@@ -1668,21 +1687,21 @@ impl Source {
             self.exhausted = remaining <= self.frames.len() / channels;
             self.frames.truncate(remaining.saturating_mul(channels));
         }
-        if let Some(target) = self.seek_target {
-            let discard =
-                (((target - packet_start).max(0.0) * self.info.sample_rate as f64).round()
-                    as usize)
-                    .saturating_mul(channels);
-            if discard >= self.frames.len() {
-                return false;
-            }
-            if discard != 0 {
-                self.frames.copy_within(discard.., 0);
-                self.frames.truncate(self.frames.len() - discard);
-                packet_start += (discard / channels) as f64 / self.info.sample_rate as f64;
-            }
-            self.seek_target = None;
+        // Neither PCM ahead of a seek target nor encoder delay, which Matroska
+        // places before media time zero, is presented.
+        let floor = self.seek_target.unwrap_or(0.0);
+        let discard = (((floor - packet_start).max(0.0) * self.info.sample_rate as f64).round()
+            as usize)
+            .saturating_mul(channels);
+        if discard >= self.frames.len() {
+            return false;
         }
+        if discard != 0 {
+            self.frames.copy_within(discard.., 0);
+            self.frames.truncate(self.frames.len() - discard);
+            packet_start += (discard / channels) as f64 / self.info.sample_rate as f64;
+        }
+        self.seek_target = None;
         if self.frames.is_empty() {
             return false;
         }
@@ -1816,12 +1835,12 @@ impl Source {
         };
         let audio = decoder.last_decoded();
         let channels = self.layout.len();
-        let count = (audio.frames() - pending.offset).min(pcm_chunk_frames(channels)?);
+        let count = (pending.end - pending.offset).min(pcm_chunk_frames(channels)?);
         let end = pending.offset + count;
         let timestamp = pending.start + pending.offset as f64 / f64::from(self.info.sample_rate);
         interleave_audio(audio, pending.offset..end, &mut self.frames)?;
         pending.offset = end;
-        if end == decoder.last_decoded().frames() {
+        if end == pending.end {
             self.native_pcm = None;
         }
         Ok(Some(timestamp))
@@ -1941,26 +1960,27 @@ impl Source {
                     .context("Packet timestamp out of range")
                     .context(SourceFailure)?,
             );
-            let encoded_samples = match &mut self.decode {
-                Decode::Native(decoder) => {
-                    // Native codec buffers trim in PCM-frame units even when
-                    // the container exposes timestamps/trims in another base.
-                    let leading = trim_sample_count(
-                        self.time_base,
-                        packet.trim_start.get(),
-                        self.info.sample_rate,
-                    )
-                    .context("Packet leading trim out of range")
-                    .context(SourceFailure)?;
-                    let trailing = trim_sample_count(
-                        self.time_base,
-                        packet.trim_end.get(),
-                        self.info.sample_rate,
-                    )
+            let leading = trim_sample_count(
+                self.time_base,
+                packet.trim_start.get(),
+                self.info.sample_rate,
+            )
+            .context("Packet leading trim out of range")
+            .context(SourceFailure)?;
+            let trailing =
+                trim_sample_count(self.time_base, packet.trim_end.get(), self.info.sample_rate)
                     .context("Packet trailing trim out of range")
                     .context(SourceFailure)?;
-                    packet.trim_start = symphonia::core::units::Duration::new(leading);
-                    packet.trim_end = symphonia::core::units::Duration::new(trailing);
+            let valid =
+                counts_frames(self.time_base, self.info.sample_rate).then_some(packet.dur.get());
+            let encoded_samples = match &mut self.decode {
+                Decode::Native(decoder) => {
+                    // Containers signal encoder delay and padding as packet
+                    // trims in their own time base, and only some codecs
+                    // apply them. Decode whole packets and crop PCM frames
+                    // here, for every codec alike.
+                    packet.trim_start = symphonia::core::units::Duration::ZERO;
+                    packet.trim_end = symphonia::core::units::Duration::ZERO;
                     let audio = decoder.decode(&packet).map_err(native_error)?;
                     if audio.spec().rate() != self.info.sample_rate {
                         return Err(anyhow!(
@@ -1970,14 +1990,15 @@ impl Source {
                     }
                     update_layout(audio.spec().channels(), &mut self.layout)?;
                     self.info.channels = self.layout.len() as u16;
+                    let frames = audio.frames();
+                    let span = decoded_span(frames, leading, trailing, valid);
+                    let (offset, end) = (span.start, span.end);
                     let represented = if self.mpeg_packets {
                         bitrate::mpeg_packet_samples(&packet.data, self.info.sample_rate)
                     } else {
-                        (audio.frames() as u64)
-                            .checked_add(leading)
-                            .and_then(|samples| samples.checked_add(trailing))
+                        Some(frames as u64)
                     };
-                    let trim = leading as f64 / f64::from(self.info.sample_rate);
+                    let trim = offset as f64 / f64::from(self.info.sample_rate);
                     let start = if let Some(timing) = &mut self.vorbis_timing {
                         timing.packet(
                             packet_start,
@@ -1985,16 +2006,19 @@ impl Source {
                                 .context("Vorbis sample count out of range")
                                 .context(SourceFailure)?,
                             trim,
-                            audio.frames() * self.layout.len(),
+                            (end - offset) * self.layout.len(),
                         )
                     } else {
                         Some(packet_start + trim)
                     };
                     if let Some(start) = start {
-                        self.native_pcm = Some(NativePcm { start, offset: 0 });
+                        self.native_pcm = Some(NativePcm {
+                            start: start - trim,
+                            offset,
+                            end,
+                        });
                     } else {
-                        let frames = audio.frames();
-                        interleave_audio(audio, 0..frames, &mut self.frames)?;
+                        interleave_audio(audio, offset..end, &mut self.frames)?;
                         self.vorbis_timing.as_mut().unwrap().buffer(
                             packet_start,
                             represented.unwrap(),
@@ -2009,13 +2033,8 @@ impl Source {
                     let count =
                         opus.decoder
                             .decode_float(&packet.data, &mut opus.samples, false)?;
-                    let leading = trim_samples(self.time_base, packet.trim_start, 48_000)?
-                        .max(opus.skip.min(count))
-                        .min(count);
-                    opus.skip = opus.skip.saturating_sub(count);
-                    let end = count
-                        .saturating_sub(trim_samples(self.time_base, packet.trim_end, 48_000)?)
-                        .max(leading);
+                    let span = decoded_span(count, leading, trailing, valid);
+                    let (leading, end) = (span.start, span.end);
                     self.frames.extend(
                         opus.samples[leading * opus.channels..end * opus.channels]
                             .iter()
@@ -2030,8 +2049,7 @@ impl Source {
                         };
                     }
                     self.info.channels = opus.channels as u16;
-                    packet_start =
-                        (packet_start - opus.timestamp_delay + leading as f64 / 48_000.0).max(0.0);
+                    packet_start += leading as f64 / 48_000.0;
                     Some(count as u64)
                 }
                 Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
@@ -2460,26 +2478,33 @@ pub(super) mod tests {
         opus_file_with_mapping(false)
     }
 
-    fn opus_file_with_mapping(mapped: bool) -> tempfile::NamedTempFile {
-        fn page(file: &mut File, sequence: u32, flags: u8, granule: u64, packet: &[u8]) {
-            let segments = packet.len() / 255 + 1;
-            let mut page = Vec::with_capacity(27 + segments + packet.len());
-            page.extend_from_slice(b"OggS\0");
-            page.push(flags);
-            page.extend_from_slice(&granule.to_le_bytes());
-            page.extend_from_slice(&1_u32.to_le_bytes());
-            page.extend_from_slice(&sequence.to_le_bytes());
-            page.extend_from_slice(&[0; 4]);
-            page.push(segments as u8);
-            page.extend(std::iter::repeat_n(255, segments - 1));
+    fn opus_page(file: &mut File, sequence: u32, flags: u8, granule: u64, packets: &[&[u8]]) {
+        let mut page = Vec::new();
+        page.extend_from_slice(b"OggS\0");
+        page.push(flags);
+        page.extend_from_slice(&granule.to_le_bytes());
+        page.extend_from_slice(&1_u32.to_le_bytes());
+        page.extend_from_slice(&sequence.to_le_bytes());
+        page.extend_from_slice(&[0; 4]);
+        let segments = packets
+            .iter()
+            .map(|packet| packet.len() / 255 + 1)
+            .sum::<usize>();
+        page.push(segments as u8);
+        for packet in packets {
+            page.extend(std::iter::repeat_n(255, packet.len() / 255));
             page.push((packet.len() % 255) as u8);
-            page.extend_from_slice(packet);
-            let mut crc = Crc32::new(0);
-            crc.process_buf_bytes(&page);
-            page[22..26].copy_from_slice(&crc.crc().to_le_bytes());
-            file.write_all(&page).unwrap();
         }
+        for packet in packets {
+            page.extend_from_slice(packet);
+        }
+        let mut crc = Crc32::new(0);
+        crc.process_buf_bytes(&page);
+        page[22..26].copy_from_slice(&crc.crc().to_le_bytes());
+        file.write_all(&page).unwrap();
+    }
 
+    fn opus_file_with_mapping(mapped: bool) -> tempfile::NamedTempFile {
         let mut file = tempfile::Builder::new().suffix(".opus").tempfile().unwrap();
         let mut encoder =
             opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
@@ -2496,8 +2521,8 @@ pub(super) mod tests {
             header[18] = 1;
             header.extend_from_slice(&[1, 0, 0]);
         }
-        page(file.as_file_mut(), 0, 2, 0, &header);
-        page(file.as_file_mut(), 1, 0, 0, b"OpusTags\0\0\0\0\0\0\0\0");
+        opus_page(file.as_file_mut(), 0, 2, 0, &[&header]);
+        opus_page(file.as_file_mut(), 1, 0, 0, &[b"OpusTags\0\0\0\0\0\0\0\0"]);
         let total = 96_000 + usize::from(preskip);
         let packets = total.div_ceil(960);
         let mut encoded = [0_u8; 4000];
@@ -2517,15 +2542,100 @@ pub(super) mod tests {
                 }
             });
             let count = encoder.encode_float(&input, &mut encoded).unwrap();
-            page(
+            opus_page(
                 file.as_file_mut(),
                 index as u32 + 2,
                 if index + 1 == packets { 4 } else { 0 },
                 ((index + 1) * 960).min(total) as u64,
-                &encoded[..count],
+                &[&encoded[..count]],
             );
         }
         file
+    }
+
+    #[test]
+    fn native_seek_duration_hint_cannot_precede_positive_origin() {
+        let first = 688.0 / 48_000.0;
+        for end in [None, Some(0.0), Some(100.0 / 48_000.0), Some(first)] {
+            for anchor in [-0.08, 0.0, first, 1200.0 / 48_000.0] {
+                let actual = native_seek_anchor(anchor, first, end, 48_000);
+                assert!(actual >= first, "{anchor:?}, {end:?}");
+                if end.is_some() {
+                    assert_eq!(actual, first);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opus_positive_origin_single_eos_page_repeated_seeks_preserve_pcm_and_timestamps() {
+        let mut file = tempfile::Builder::new().suffix(".opus").tempfile().unwrap();
+        let mut header = b"OpusHead\x01\x01\x38\x01\x80\xbb\0\0\0\0\0".to_vec();
+        assert_eq!(header.len(), 19);
+        // 312 samples of pre-skip; the EOS granule puts encoded origin at 688
+        // and presented PCM at 1000..1648, not at media time zero.
+        header[10..12].copy_from_slice(&312_u16.to_le_bytes());
+        opus_page(file.as_file_mut(), 0, 2, 0, &[&header]);
+        opus_page(file.as_file_mut(), 1, 0, 0, &[b"OpusTags\0\0\0\0\0\0\0\0"]);
+        let mut encoder =
+            opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
+        let mut decoder = opus::Decoder::new(48_000, opus::Channels::Mono).unwrap();
+        let mut packets = Vec::new();
+        let mut expected = Vec::new();
+        let mut noise = 0x1234_5678_u32;
+        for index in 0..2 {
+            let input: [f32; 480] = std::array::from_fn(|_| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                noise as i32 as f32 / i32::MAX as f32 * 0.5
+            });
+            let mut encoded = [0_u8; 4000];
+            let count = encoder.encode_float(&input, &mut encoded).unwrap();
+            let packet = encoded[..count].to_vec();
+            let mut decoded = [0.0_f32; 480];
+            assert_eq!(
+                decoder.decode_float(&packet, &mut decoded, false).unwrap(),
+                480
+            );
+            expected.extend_from_slice(&decoded[if index == 0 { 312 } else { 0 }..]);
+            packets.push(packet);
+        }
+        opus_page(file.as_file_mut(), 2, 4, 1960, &[&packets[0], &packets[1]]);
+
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let (initial, spans) = capture_spans(&mut source);
+        assert_eq!(initial, expected);
+        assert_eq!(initial.len(), 648);
+        assert_eq!(
+            spans.iter().map(|span| span.frames).collect::<Vec<_>>(),
+            [168, 480]
+        );
+        // Symphonia truncates 688/48000 to integer nanoseconds before Source
+        // adds sample-exact leading trim and seek discard offsets.
+        let encoded_origin = (688_u64 * 1_000_000_000 / 48_000) as f64 * 1e-9;
+        for (span, sample) in spans.iter().zip([1000, 1168]) {
+            let expected_start = encoded_origin + f64::from(sample - 688) / 48_000.0;
+            assert!((span.media_start - expected_start).abs() < 1e-12);
+        }
+        for target in [0, 0, 688, 999, 1000, 1001, 1168, 1647, 1648, 1800, 1100, 0] {
+            source.seek(f64::from(target) / 48_000.0).unwrap();
+            let (actual, spans) = capture_spans(&mut source);
+            let offset = (target.max(1000) - 1000).min(648) as usize;
+            assert_eq!(actual, expected[offset..], "seek sample {target}");
+            let mut count = 0;
+            for span in spans {
+                assert_eq!(span.position, count as u64);
+                assert_eq!(span.discontinuity, count == 0);
+                let sample = 1000 + offset + count;
+                let expected_start = encoded_origin + (sample - 688) as f64 / 48_000.0;
+                assert!((span.media_start - expected_start).abs() < 1e-12);
+                count += span.frames;
+            }
+            assert_eq!(count, 648 - offset, "seek sample {target}");
+            assert!(source.next_frames().unwrap().is_none());
+        }
     }
 
     #[cfg(feature = "ffmpeg")]
@@ -2854,7 +2964,7 @@ pub(super) mod tests {
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let reference = decode_remaining(&mut source);
         assert_eq!(reference.len(), 96_000);
-        for target in [1.0, 0.0, 1.137] {
+        for target in [1.0, 0.0, 0.005, 0.01, 1.137] {
             source.seek(target).unwrap();
             let actual = decode_remaining(&mut source);
             let offset = (target * 48_000.0).round() as usize;
@@ -4332,15 +4442,8 @@ pub(super) mod tests {
             let mut source =
                 Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
             source.seek(0.0).unwrap();
-            match mode {
-                1 => {
-                    let Decode::Opus(opus) = &mut source.decode else {
-                        panic!("expected native Opus");
-                    };
-                    opus.skip = usize::MAX;
-                }
-                2 => source.seek_target = Some(1.9),
-                _ => {}
+            if mode == 2 {
+                source.seek_target = Some(1.9);
             }
             let cancelled = AtomicBool::new(false);
             let mut packets = 0;
@@ -4350,6 +4453,10 @@ pub(super) mod tests {
                     packets += 1;
                     if mode == 0 {
                         packet.track_id = packet.track_id.wrapping_add(1);
+                    }
+                    if mode == 1 {
+                        packet.trim_start = symphonia::core::units::Duration::new(960);
+                        packet.dur = symphonia::core::units::Duration::ZERO;
                     }
                     if packets == 3 {
                         cancelled.store(true, Ordering::Relaxed);
@@ -4790,6 +4897,226 @@ pub(super) mod tests {
         assert!(end >= 0.2);
     }
 
+    // FFmpeg-generated 1 kHz AAC-LC, 44.1 kHz mono, 0.3 s (13230 frames) with
+    // 10 ms fades; the edit list declares 1024 priming and 82 padding frames.
+    const AAC_M4A: &[u8] = include_bytes!("../tests/fixtures/aac-edit.m4a");
+
+    #[test]
+    fn native_aac_short_edit_ignores_damaged_hidden_tail_and_seeks_back() {
+        // Locate only this fixture's ordinary 32-bit atoms, not byte patterns
+        // which could accidentally match compressed audio or metadata values.
+        fn child(bytes: &[u8], parent: std::ops::Range<usize>, kind: &[u8; 4]) -> usize {
+            let mut offset = parent.start;
+            while offset < parent.end {
+                let size =
+                    u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                assert!(size >= 8 && offset + size <= parent.end);
+                if &bytes[offset + 4..offset + 8] == kind {
+                    return offset;
+                }
+                offset += size;
+            }
+            panic!("missing fixture atom {kind:?}");
+        }
+        fn payload(bytes: &[u8], atom: usize) -> std::ops::Range<usize> {
+            let size = u32::from_be_bytes(bytes[atom..atom + 4].try_into().unwrap()) as usize;
+            atom + 8..atom + size
+        }
+        let mut bytes = AAC_M4A.to_vec();
+        let moov = child(&bytes, 0..bytes.len(), b"moov");
+        let trak = child(&bytes, payload(&bytes, moov), b"trak");
+        let edts = child(&bytes, payload(&bytes, trak), b"edts");
+        let elst = child(&bytes, payload(&bytes, edts), b"elst");
+        assert_eq!(&bytes[elst + 8..elst + 16], &[0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(&bytes[elst + 20..elst + 24], &1024_u32.to_be_bytes());
+        let mdia = child(&bytes, payload(&bytes, trak), b"mdia");
+        let minf = child(&bytes, payload(&bytes, mdia), b"minf");
+        let stbl = child(&bytes, payload(&bytes, minf), b"stbl");
+        let stsz = child(&bytes, payload(&bytes, stbl), b"stsz");
+        let stco = child(&bytes, payload(&bytes, stbl), b"stco");
+        assert_eq!(&bytes[stsz + 12..stsz + 20], &[0, 0, 0, 0, 0, 0, 0, 14]);
+        assert_eq!(&bytes[stco + 12..stco + 16], &1_u32.to_be_bytes());
+        let audio_start =
+            u32::from_be_bytes(bytes[stco + 16..stco + 20].try_into().unwrap()) as usize;
+        let packet_sizes: Vec<_> = bytes[stsz + 20..stsz + 20 + 14 * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&size| u32::from_be_bytes(size) as usize)
+            .collect();
+        // 1024 priming + 2500 presented frames require four complete AAC
+        // packets. The fourth crosses the edit end; all ten later packets
+        // must remain unread and undecoded, even though stbl advertises them.
+        let encoded_bytes = packet_sizes[..4].iter().sum::<usize>();
+        let hidden_start = audio_start + encoded_bytes;
+        let audio_end = audio_start + packet_sizes.iter().sum::<usize>();
+        bytes[hidden_start..audio_end].fill(0);
+        let mut damaged_full = tempfile::NamedTempFile::new().unwrap();
+        damaged_full.write_all(&bytes).unwrap();
+        let mut full = Source::open(
+            damaged_full.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            false,
+        )
+        .unwrap();
+        let failure = (|| -> Result<()> {
+            while full.next_frames()?.is_some() {}
+            Ok(())
+        })();
+        assert!(
+            failure.is_err(),
+            "the visible damaged suffix must fail decoding"
+        );
+
+        // Movie and media timescales are both 44100 in this fixture. Preserve
+        // media_time (encoder delay), changing only the single edit's length.
+        let mvhd = child(&bytes, payload(&bytes, moov), b"mvhd");
+        assert_eq!(&bytes[mvhd + 20..mvhd + 24], &44_100_u32.to_be_bytes());
+        bytes[elst + 16..elst + 20].copy_from_slice(&2500_u32.to_be_bytes());
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        let mut original = tempfile::NamedTempFile::new().unwrap();
+        original.write_all(AAC_M4A).unwrap();
+        let mut reference = Source::open(
+            original.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Native,
+            false,
+        )
+        .unwrap();
+        let reference = decode_remaining(&mut reference);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(decode_remaining(&mut source), reference[..2500]);
+        assert!(source.next_frames().unwrap().is_none());
+        assert_eq!(source.completed_duration(), Some(2500.0 / 44_100.0));
+        // Full encoded packet durations, not 2500 presented PCM frames and
+        // not the original file's fourteen packets, define the denominator.
+        let encoded_frames = 4 * 1024;
+        let expected_bitrate =
+            (encoded_bytes as u64 * 8 * 44_100 + encoded_frames / 2) / encoded_frames;
+        assert_eq!(source.completed_bitrate(), Some(expected_bitrate));
+        for frame in [0, 441, 2000, 0, 441] {
+            source.seek(frame as f64 / 44_100.0).unwrap();
+            let replayed = decode_remaining(&mut source);
+            assert_eq!(replayed.len(), 2500 - frame);
+            let deviation = replayed
+                .iter()
+                .zip(&reference[frame..2500])
+                .fold(0.0_f32, |max, (a, b)| max.max((a - b).abs()));
+            assert!(deviation < 2e-3, "seek to {frame} deviates by {deviation}");
+            assert!(source.next_frames().unwrap().is_none());
+            assert_eq!(source.completed_bitrate(), None);
+        }
+    }
+
+    // A lapped-transform decoder reset loses the preceding packet's overlap,
+    // which near the start lies in the encoder delay. Matroska seeks are
+    // checked only near the start, beyond its Segment timestamp quantization.
+    #[test]
+    fn native_aac_seek_matches_continuous_decode() {
+        for (bytes, frames) in [
+            (AAC_M4A, [0, 441, 4410].as_slice()),
+            (
+                include_bytes!("../tests/fixtures/aac-delay.mka").as_slice(),
+                [0, 441].as_slice(),
+            ),
+        ] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(bytes).unwrap();
+            let open =
+                || Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            let reference = decode_remaining(&mut open());
+            for &frame in frames {
+                let mut source = open();
+                source.seek(frame as f64 / 44_100.0).unwrap();
+                let tail = decode_remaining(&mut source);
+                assert_eq!(tail.len(), reference.len() - frame);
+                // Not bit-exact: a reset keeps the noise-substitution generator's
+                // state. A missing overlap deviates by about 0.4.
+                let deviation = tail
+                    .iter()
+                    .zip(&reference[frame..])
+                    .fold(0.0_f32, |max, (a, b)| max.max((a - b).abs()));
+                assert!(deviation < 2e-3, "seek to {frame} deviates by {deviation}");
+            }
+        }
+    }
+
+    // FFmpeg-generated 1 kHz Opus, 48 kHz mono, 0.3 s. The media edit already
+    // removes the 312-frame pre-skip from timestamps and duration.
+    #[test]
+    fn native_opus_mp4_presents_the_edited_timeline() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/opus-edit.mp4"))
+            .unwrap();
+        let open =
+            || Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let mut source = open();
+        assert!((source.info().duration.unwrap() - 0.3).abs() < 1e-9);
+        let frames = decode_remaining(&mut source).len();
+        assert_eq!(frames, 14_400);
+        let mut source = open();
+        source.seek(0.1).unwrap();
+        assert_eq!(decode_remaining(&mut source).len(), frames - 4_800);
+    }
+
+    // AAC_M4A's audio in two tracks without edit lists. iTunSMPB describes a
+    // file's only audio track, so the priming stays; the shortened final
+    // sample still removes the 82 padding frames.
+    #[test]
+    fn itunes_gapless_tag_is_ignored_among_several_audio_tracks() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/aac-smpb-two.m4a"))
+            .unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(decode_remaining(&mut source).len(), 14 * 1024 - 82);
+    }
+
+    // AAC_M4A's audio again: with an iTunSMPB tag in place of the edit list,
+    // and in Matroska, whose CodecDelay declares the priming frames while
+    // nothing declares the 82 padding frames.
+    #[test]
+    fn native_aac_presents_the_declared_timeline() {
+        for (bytes, frames, duration) in [
+            (AAC_M4A, 13_230, Some(0.3)),
+            (
+                include_bytes!("../tests/fixtures/aac-smpb.m4a").as_slice(),
+                13_230,
+                Some(0.3),
+            ),
+            (
+                include_bytes!("../tests/fixtures/aac-delay.mka").as_slice(),
+                13_312,
+                None,
+            ),
+        ] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(bytes).unwrap();
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            if let Some(duration) = duration {
+                assert!((source.info().duration.unwrap() - duration).abs() < 1e-9);
+            }
+            let pcm = decode_remaining(&mut source);
+            assert_eq!(pcm.len(), frames);
+            // Presented priming would shift the tone by 1024 frames; a single
+            // frame of misalignment is already 0.05 RMS.
+            let error = ((441..12_789)
+                .map(|frame| {
+                    let tone =
+                        0.5 * (std::f64::consts::TAU * 1000.0 * frame as f64 / 44_100.0).sin();
+                    (f64::from(pcm[frame]) - tone).powi(2)
+                })
+                .sum::<f64>()
+                / 12_348.0)
+                .sqrt();
+            assert!(error < 0.03, "decoded tone deviates by {error} RMS");
+        }
+    }
+
     #[test]
     fn unknown_duration_seek_decodes_the_exact_remaining_timeline() {
         let file = pcm_file();
@@ -4920,7 +5247,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn opus_headers_preserve_mono_stereo_preskip_and_container_timing() {
+    fn opus_headers_preserve_mono_stereo_channels() {
         for channels in [1, 2] {
             for mp4 in [false, true] {
                 let mut header = vec![0; 19];
@@ -4936,31 +5263,22 @@ pub(super) mod tests {
                 params
                     .for_codec(CODEC_ID_OPUS)
                     .with_extra_data(header.into_boxed_slice());
-                let Decode::Opus(opus) = decoder(&params, true).unwrap() else {
+                let Decode::Opus(opus) = decoder(&params).unwrap() else {
                     panic!("Opus")
                 };
                 assert_eq!(opus.channels, usize::from(channels));
-                assert_eq!(opus.initial_skip, 312);
-                assert_eq!(opus.skip, 312);
-                assert_eq!(opus.timestamp_delay, 312.0 / 48_000.0);
-                let Decode::Opus(matroska) = decoder(&params, false).unwrap() else {
-                    panic!("Opus")
-                };
-                assert_eq!(matroska.skip, 312);
-                assert_eq!(matroska.timestamp_delay, 0.0);
             }
         }
     }
 
     #[test]
     fn packet_trims_use_the_container_time_base() {
-        let duration = symphonia::core::units::Duration::new(10);
         assert_eq!(
-            trim_samples(TimeBase::try_new(1, 1000).unwrap(), duration, 48_000).unwrap(),
+            trim_sample_count(TimeBase::try_new(1, 1000).unwrap(), 10, 48_000).unwrap(),
             480
         );
         assert_eq!(
-            trim_samples(TimeBase::try_new(1, 48_000).unwrap(), duration, 48_000).unwrap(),
+            trim_sample_count(TimeBase::try_new(1, 48_000).unwrap(), 10, 48_000).unwrap(),
             10
         );
     }
@@ -4978,22 +5296,12 @@ pub(super) mod tests {
         params
             .for_codec(CODEC_ID_OPUS)
             .with_extra_data(header.clone().into_boxed_slice());
-        assert!(
-            decoder(&params, true)
-                .err()
-                .unwrap()
-                .is::<UnsupportedNative>()
-        );
+        assert!(decoder(&params).err().unwrap().is::<UnsupportedNative>());
 
         // Family zero cannot describe six channels, so retrying another
         // decoder must not turn a malformed native stream into "unsupported".
         header[18] = 0;
         params.with_extra_data(header.into_boxed_slice());
-        assert!(
-            !decoder(&params, true)
-                .err()
-                .unwrap()
-                .is::<UnsupportedNative>()
-        );
+        assert!(!decoder(&params).err().unwrap().is::<UnsupportedNative>());
     }
 }

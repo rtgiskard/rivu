@@ -18,7 +18,7 @@ use symphonia_core::formats::Track;
 use symphonia_core::io::{BufReader, ReadBytes};
 use symphonia_core::meta::MetadataBuilder;
 
-use symphonia_core::units::Duration;
+use symphonia_core::units::{Duration, Timestamp};
 use symphonia_metadata::embedded::vorbis::{self, VORBIS_COMMENT_METADATA_INFO};
 
 use log::warn;
@@ -62,7 +62,11 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
         .with_delay(u32::from(opus_head.pre_skip));
 
     // Instantiate the Opus mapper.
-    let mapper = Box::new(OpusMapper { track, need_comment: true });
+    let mapper = Box::new(OpusMapper {
+        track,
+        need_comment: true,
+        pre_skip: Duration::new(u64::from(opus_head.pre_skip)),
+    });
 
     Ok(Some(mapper))
 }
@@ -133,6 +137,7 @@ impl PacketParser for OpusPacketParser {
 struct OpusMapper {
     track: Track,
     need_comment: bool,
+    pre_skip: Duration,
 }
 
 impl Mapper for OpusMapper {
@@ -150,6 +155,14 @@ impl Mapper for OpusMapper {
 
     fn track_mut(&mut self) -> &mut Track {
         &mut self.track
+    }
+
+    fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
+        Timestamp::from(absgp as i64).saturating_sub(self.pre_skip)
+    }
+
+    fn pre_skip(&self) -> Duration {
+        self.pre_skip
     }
 
     fn make_parser(&self) -> Option<Box<dyn super::PacketParser>> {
@@ -204,7 +217,7 @@ mod tests {
     use super::*;
 
     fn mapper() -> OpusMapper {
-        OpusMapper { track: Track::new(1), need_comment: true }
+        OpusMapper { track: Track::new(1), need_comment: true, pre_skip: Duration::ZERO }
     }
 
     fn assert_audio(mapper: &mut OpusMapper) {

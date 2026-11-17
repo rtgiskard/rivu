@@ -268,7 +268,9 @@ impl<'s> OggReader<'s> {
                         continue;
                     }
 
-                    match packet.pts.checked_add(packet.dur) {
+                    match packet.pts.checked_add(packet.trim_start)
+                        .and_then(|ts| ts.checked_add(packet.dur))
+                    {
                         Some(next_packet_ts) if next_packet_ts < target_ts => (),
                         // Packet exceeds the requested timestamp, or the representable range.
                         _ => break packet.pts,
@@ -496,23 +498,8 @@ impl FormatReader for OggReader<'_> {
             SeekTo::Timestamp { ts, track_id } => {
                 // Check if the user provided an invalid track ID.
                 if let Some(stream) = self.streams.get(&track_id) {
-                    let track = stream.track();
-
-                    // Timestamp lower-bound out-of-range.
-                    if ts < track.start_ts {
+                    if !stream.contains_timestamp(ts) {
                         return seek_error(SeekErrorKind::OutOfRange);
-                    }
-
-                    // Timestamp upper-bound out-of-range.
-                    if let Some(num_frames) = track.num_frames {
-                        let max_ts = track
-                            .start_ts
-                            .checked_add(Duration::from(num_frames))
-                            .ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
-
-                        if ts > max_ts {
-                            return seek_error(SeekErrorKind::OutOfRange);
-                        }
                     }
                 }
                 else {
@@ -547,21 +534,8 @@ impl FormatReader for OggReader<'_> {
                         .calc_timestamp(time)
                         .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
-                    // Timestamp lower-bound out-of-range.
-                    if ts < track.start_ts {
+                    if !stream.contains_timestamp(ts) {
                         return seek_error(SeekErrorKind::OutOfRange);
-                    }
-
-                    // Timestamp upper-bound out-of-range.
-                    if let Some(num_frames) = track.num_frames {
-                        let max_ts = track
-                            .start_ts
-                            .checked_add(Duration::from(num_frames))
-                            .ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
-
-                        if ts > max_ts {
-                            return seek_error(SeekErrorKind::OutOfRange);
-                        }
                     }
 
                     ts
@@ -587,4 +561,174 @@ impl FormatReader for OggReader<'_> {
     {
         self.reader
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use symphonia_core::checksum::Crc32;
+    use symphonia_core::units::Time;
+
+    fn page(serial: u32, sequence: u32, flags: u8, granule: u64, packets: &[&[u8]]) -> Vec<u8> {
+        let laces: Vec<_> = packets.iter().map(|packet| {
+            assert!(packet.len() < 255);
+            packet.len() as u8
+        }).collect();
+        let data: Vec<_> = packets.iter().flat_map(|packet| packet.iter().copied()).collect();
+        raw_page(serial, sequence, flags, granule, &laces, &data)
+    }
+
+    fn raw_page(serial: u32, sequence: u32, flags: u8, granule: u64, laces: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut bytes = b"OggS".to_vec();
+        bytes.extend_from_slice(&[0, flags]);
+        bytes.extend_from_slice(&granule.to_le_bytes());
+        bytes.extend_from_slice(&serial.to_le_bytes());
+        bytes.extend_from_slice(&sequence.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.push(laces.len() as u8);
+        bytes.extend_from_slice(laces);
+        bytes.extend_from_slice(data);
+        let mut crc = Crc32::new(0);
+        crc.process_buf_bytes(&bytes);
+        bytes[22..26].copy_from_slice(&crc.crc().to_le_bytes());
+        bytes
+    }
+
+    fn opus_stream(serial: u32, pre_skip: u16, pages: &[(u64, usize)]) -> Vec<u8> {
+        let mut head = b"OpusHead".to_vec();
+        head.extend_from_slice(&[1, 1]);
+        head.extend_from_slice(&pre_skip.to_le_bytes());
+        head.extend_from_slice(&48_000u32.to_le_bytes());
+        head.extend_from_slice(&[0, 0, 0]);
+        let mut bytes = page(serial, 0, 2, 0, &[&head]);
+        bytes.extend(page(serial, 1, 0, 0, &[b"OpusTags\0\0\0\0\0\0\0\0"]));
+        for (index, &(granule, count)) in pages.iter().enumerate() {
+            let packets = vec![&[0u8][..]; count]; // Each TOC represents 480 decoded samples.
+            let flags = if index + 1 == pages.len() { 4 } else { 0 };
+            bytes.extend(page(serial, index as u32 + 2, flags, granule, &packets));
+        }
+        bytes
+    }
+
+    fn reader(bytes: Vec<u8>) -> OggReader<'static> {
+        let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        OggReader::try_new(source, Default::default()).unwrap()
+    }
+
+    fn assert_track(reader: &OggReader<'_>, serial: u32, pre_skip: i64, duration: u64, padding: u32) {
+        let track = &reader.tracks()[0];
+        assert_eq!(track.id, serial);
+        assert_eq!(track.start_ts.get(), -pre_skip);
+        assert_eq!(track.duration, Some(Duration::new(duration)));
+        assert_eq!(track.num_frames, Some(duration));
+        assert_eq!(track.delay, Some(pre_skip as u32));
+        assert_eq!(track.padding, Some(padding));
+    }
+
+    fn assert_packet(packet: Packet, pts: i64, dur: u64, start: u64, end: u64) {
+        assert_eq!(packet.pts.get(), pts);
+        assert_eq!(packet.dur.get(), dur);
+        assert_eq!(packet.trim_start.get(), start);
+        assert_eq!(packet.trim_end.get(), end);
+    }
+
+    #[test]
+    fn opus_single_page_presents_without_delay_or_padding() {
+        let mut reader = reader(opus_stream(1, 312, &[(792, 2)]));
+        assert_track(&reader, 1, 312, 480, 168);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 168, 312, 0, 168);
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn opus_pre_skip_spans_pages_and_final_padding_is_independent() {
+        let mut reader = reader(opus_stream(1, 1000, &[(480, 1), (960, 1), (1800, 2)]));
+        assert_track(&reader, 1, 1000, 800, 120);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn opus_chained_streams_use_their_own_pre_skip_and_bounds() {
+        let mut bytes = opus_stream(1, 312, &[(792, 2)]);
+        bytes.extend(opus_stream(2, 1000, &[(480, 1), (960, 1), (1800, 2)]));
+        let mut reader = reader(bytes);
+        assert_track(&reader, 1, 312, 480, 168);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 168, 312, 0, 168);
+        assert!(matches!(reader.next_packet(), Err(Error::ResetRequired)));
+        assert_track(&reader, 2, 1000, 800, 120);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn opus_seek_to_zero_keeps_packet_crossing_presentation_start() {
+        let mut reader = reader(opus_stream(1, 312, &[(792, 2)]));
+        let seeked = reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Timestamp { ts: Timestamp::ZERO, track_id: 1 },
+        ).unwrap();
+        assert_eq!(seeked.actual_ts.get(), -312);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
+    }
+
+    #[test]
+    fn opus_single_page_pre_skip_can_cover_multiple_packets() {
+        let mut reader = reader(opus_stream(1, 1000, &[(1800, 4)]));
+        assert_track(&reader, 1, 1000, 800, 120);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+    #[test]
+    fn opus_large_pre_skip_does_not_shrink_seekable_presented_end() {
+        for by_timestamp in [false, true] {
+            for ts in [0, 600] {
+                let mut reader = reader(opus_stream(1, 1000, &[(480, 1), (960, 1), (1800, 2)]));
+                let target = if by_timestamp {
+                    SeekTo::Timestamp { ts: Timestamp::new(ts), track_id: 1 }
+                } else {
+                    SeekTo::Time { time: Time::try_from_secs_f64(ts as f64 / 48_000.0).unwrap(), track_id: Some(1) }
+                };
+                reader.seek(SeekMode::Accurate, target).unwrap();
+                let packet = reader.next_packet().unwrap().unwrap();
+                assert!(packet.pts.get() <= ts);
+                assert!(packet.pts.get() + packet.trim_start.get() as i64 + packet.dur.get() as i64 >= ts);
+            }
+        }
+    }
+
+    #[test]
+    fn opus_offset_origin_trims_identically_after_seek() {
+        let mut reader = reader(opus_stream(1, 312, &[(1960, 2)]));
+        assert_eq!(reader.tracks()[0].start_ts.get(), 688);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 688, 168, 312, 0);
+        reader.seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(688), track_id: 1 }).unwrap();
+        assert_packet(reader.next_packet().unwrap().unwrap(), 688, 168, 312, 0);
+    }
+
+    #[test]
+    fn opus_continuation_probe_cannot_redefine_pre_skip_cutoff() {
+        let mut bytes = opus_stream(1, 1000, &[]);
+        let mut first = [0u8; 255];
+        first[0] = 8; // Complete packet TOC: 960 samples, fragment byte: 480 samples.
+        bytes.extend(raw_page(1, 2, 0, u64::MAX, &[255], &first));
+        bytes.extend(raw_page(1, 3, 1, 960, &[1], &[0]));
+        bytes.extend(page(1, 4, 4, 1440, &[&[0]]));
+        let mut reader = reader(bytes);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 960, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
+    }
+
 }

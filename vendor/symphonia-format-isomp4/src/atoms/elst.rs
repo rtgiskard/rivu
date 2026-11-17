@@ -11,7 +11,6 @@ use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result};
 use crate::atoms::{decode_error, limits::*};
 
 /// Edit list entry.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ElstEntry {
     segment_duration: u64,
@@ -21,10 +20,21 @@ pub struct ElstEntry {
 }
 
 /// Edit list atom.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ElstAtom {
     entries: Vec<ElstEntry>,
+}
+
+impl ElstAtom {
+    /// The media time and movie-timescale duration of the media edit, if the list presents the
+    /// track as that one edit at normal rate. A zero duration extends to the end of the track.
+    pub fn media_edit(&self) -> Option<(u64, u64)> {
+        let mut edits = self.entries.iter().filter(|entry| entry.media_time >= 0);
+        let edit = edits.next()?;
+
+        (edits.next().is_none() && edit.media_rate_int == 1 && edit.media_rate_frac == 0)
+            .then_some((edit.media_time as u64, edit.segment_duration))
+    }
 }
 
 impl Atom for ElstAtom {
@@ -63,5 +73,38 @@ impl Atom for ElstAtom {
         }
 
         Ok(ElstAtom { entries })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn media_edit(entries: &[(u64, i64, i16, i16)]) -> Option<(u64, u64)> {
+        let entries = entries
+            .iter()
+            .map(|&(segment_duration, media_time, media_rate_int, media_rate_frac)| ElstEntry {
+                segment_duration,
+                media_time,
+                media_rate_int,
+                media_rate_frac,
+            })
+            .collect();
+
+        ElstAtom { entries }.media_edit()
+    }
+
+    #[test]
+    fn only_a_single_normal_rate_media_edit_is_presented() {
+        assert_eq!(media_edit(&[(13_230, 1024, 1, 0)]), Some((1024, 13_230)));
+        // Empty edits delay the presentation without selecting media.
+        assert_eq!(media_edit(&[(500, -1, 1, 0), (13_230, 1024, 1, 0)]), Some((1024, 13_230)));
+
+        assert_eq!(media_edit(&[]), None);
+        assert_eq!(media_edit(&[(500, -1, 1, 0)]), None);
+        assert_eq!(media_edit(&[(6000, 1024, 1, 0), (6000, 9000, 1, 0)]), None);
+        assert_eq!(media_edit(&[(13_230, 1024, 2, 0)]), None);
+        assert_eq!(media_edit(&[(13_230, 1024, 1, 1)]), None);
+        assert_eq!(media_edit(&[(13_230, 1024, 0, 0)]), None);
     }
 }

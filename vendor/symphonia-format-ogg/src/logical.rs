@@ -98,6 +98,11 @@ impl LogicalStream {
         self.mapper.track()
     }
 
+    /// Bounds are packet timestamps, not a duration added to the encoded lead-in.
+    pub fn contains_timestamp(&self, ts: Timestamp) -> bool {
+        ts >= self.mapper.track().start_ts && self.end_bound.is_none_or(|bound| ts <= bound.ts)
+    }
+
     /// If known, returns whether the logical stream read the last page.
     pub fn has_read_last_page(&self) -> Option<bool> {
         self.prev_page_info.map(|info| info.is_last_page)
@@ -243,6 +248,7 @@ impl LogicalStream {
 
                 // The lower-bound for the page's start timestamp.
                 let page_start_ts_raw = page_end_ts.saturating_sub(total_pkt_dur);
+                let start_delay = total_pkt_discard.max(self.mapper.pre_skip());
 
                 if is_single_page_stream {
                     // In a single-page stream that begins at t = 0, the page end timestamp is the
@@ -253,11 +259,13 @@ impl LogicalStream {
                     // If the stream does not start at t = 0, then it is not possible to determine
                     // whether frames should be discarded from the start or the end of the stream.
                     // Therefore, we assume t = 0 for the remainder.
-                    let total_dur_no_padding =
-                        match total_pkt_discard.checked_add((page_end_ts.get() as u64).into()) {
-                            Some(v) => v,
-                            None => return decode_error("ogg: duration overflow"),
-                        };
+                    let total_dur_no_padding = match page_end_ts
+                        .checked_add(start_delay)
+                        .and_then(|ts| ts.duration_from(Timestamp::ZERO))
+                    {
+                        Some(v) => v,
+                        None => return decode_error("ogg: duration overflow"),
+                    };
 
                     if total_pkt_dur >= total_dur_no_padding {
                         // The total packet duration is >= delay + valid (assuming t = 0) frames,
@@ -272,7 +280,7 @@ impl LogicalStream {
                         //
                         // If the encoder set t > 0 to indicate the media begins later, then no
                         // padding frames will get discarded.
-                        Timestamp::from(-(total_pkt_discard.get() as i64))
+                        Timestamp::from(-(start_delay.get() as i64))
                     }
                     else {
                         // Stream starts at t > 0.
@@ -292,7 +300,21 @@ impl LogicalStream {
                 }
             };
 
+            let pre_skip = self.mapper.pre_skip();
+            // Only assembled packets can establish the origin: a continuation
+            // fragment is not a codec packet and cannot supply its duration.
+            if is_init_page && pre_skip > Duration::ZERO && self.start_bound.is_none() {
+                self.start_bound = Some(Bound {
+                    seq: page.header.sequence,
+                    is_last_page: page.header.is_last_page,
+                    ts: page_start_ts,
+                    discard: pre_skip,
+                });
+                self.mapper.track_mut().with_start_ts(page_start_ts);
+            }
             let mut next_pkt_pts = page_start_ts;
+            let pre_skip_end_ts = self.start_bound
+                .map_or(Timestamp::ZERO, |bound| bound.ts.saturating_add(pre_skip));
 
             for packet in self.packets.iter_mut().skip(num_prev_packets) {
                 packet.pts = next_pkt_pts;
@@ -301,6 +323,14 @@ impl LogicalStream {
                 // delay and padding). Calculate the next packet's PTS. This is also the end PTS of
                 // the current packet.
                 next_pkt_pts = next_pkt_pts.saturating_add(packet.dur);
+
+                // Mapping-level pre-skip can span packets and pages. Keep the encoded PTS and
+                // trim samples before presentation begins, including streams with an offset.
+                if pre_skip > Duration::ZERO && packet.pts < pre_skip_end_ts {
+                    packet.trim_start = packet
+                        .trim_start
+                        .max(packet.pts.abs_delta(pre_skip_end_ts).min(packet.dur));
+                }
 
                 // Remove the start trim from the packet's duration. The start trim was populated
                 // earlier.
@@ -373,6 +403,9 @@ impl LogicalStream {
                 _ => return,
             };
         }
+
+        // Some mappings declare the lead-in in their header instead of packet discard.
+        total_pkt_discard = total_pkt_discard.max(self.mapper.pre_skip());
 
         // Map the absolute granule position to a timestamp.
         let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
@@ -509,10 +542,9 @@ impl LogicalStream {
 
         // If this is the last page, update the codec parameters.
         if page.header.is_last_page {
-            // TODO: What if this is negative?
             // TODO: Bounds are in timestamp units, not number of frames. Fix this up because it
             // only works for audio codecs.
-            let num_frames = bound.ts.get() as u64;
+            let num_frames = bound.ts.duration_from(Timestamp::ZERO).unwrap_or(Duration::ZERO).get();
             let num_padding_frames = bound.discard.get() as u32;
 
             let track = self.mapper.track_mut();
@@ -545,6 +577,8 @@ impl LogicalStream {
                 total_pkt_discard = total_pkt_discard.saturating_add(pkt_discard);
             }
         }
+
+        total_pkt_discard = total_pkt_discard.max(self.mapper.pre_skip());
 
         let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
 

@@ -64,6 +64,11 @@ pub trait Mapper: Send + Sync {
         Timestamp::from(absgp as i64)
     }
 
+    /// Initial decoded samples preceding presentation time zero, independent of packet discard.
+    fn pre_skip(&self) -> Duration {
+        Duration::ZERO
+    }
+
     /// Get the maximum duration between two random access points.
     fn max_rap_period(&self) -> Duration {
         Duration::new(0)

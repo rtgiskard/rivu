@@ -636,6 +636,38 @@ Reconsider when a decoder reports a new source-specific status, or if an empty
 music folder becomes a legitimate configuration. See
 link:04_playback.adoc#transport-and-timing[current behavior].
 
+[[DEC-027]]
+=== DEC-027: Demuxers own encoder-delay coordinates
+
+Status: implemented, 2026-11-17.
+
+Native demuxers publish packet timestamps and track duration in presented
+coordinates. Encoder lead-in remains decodable before time zero; `start_ts`
+names its first packet, and packet trims describe discarded decoded frames.
+Opus pre-skip belongs to this mapping, not to the libopus decoder adapter.
+MP4 media edits take precedence over its codec-header fallback; Ogg granules
+and Matroska CodecDelay are interpreted at their container boundaries.
+Index and movie timescales are converted at the container boundary, never
+substituted for the media sample clock.
+
+A finite MP4 presentation end also bounds that track's demuxing: keep the
+complete last packet intersecting the span, but do not read wholly hidden
+trailing packets. Other tracks may continue, and seeking back must restore
+the ended track. This bound comes from the declared edit or gapless span,
+not an estimated duration.
+
+Source applies decoded-frame cropping and the zero/selection floor once for
+all native codecs. Decoder positioning is bounded by the first packet, including
+negative lead-in and positive origins; the requested presentation target stays
+separate from that anchor. Source must not infer delay from container names or
+subtract header delay again from packet timestamps or track duration.
+
+This keeps start, duration and seek on one clock instead of maintaining a
+second Opus skip counter whose reset depends on a seek's landing timestamp.
+Timestamp quantization and unresolved Vorbis packet timing remain separate
+container constraints. Reconsider if a new demuxer cannot express presentation
+using timestamps and packet trims; do not add downstream format-name rules.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

@@ -606,13 +606,15 @@ pub struct AtomIterator<R: ReadAtom> {
     pending: Option<AtomHeader>,
     /// The length of the container, if known.
     len: Option<u64>,
+    /// Reader position at which atom iteration resumes after out-of-band packet reads.
+    raw_read_resume_pos: Option<u64>,
 }
 
 impl<R: ReadAtom> AtomIterator<R> {
     /// Instantiate a new atom iterator.
     pub(crate) fn new(reader: R, len: Option<u64>) -> Self {
         let stack = Vec::with_capacity(MAX_ITERATION_DEPTH);
-        AtomIterator { reader, stack, pending: None, len }
+        AtomIterator { reader, stack, pending: None, len, raw_read_resume_pos: None }
     }
 
     /// Consume the iterator and return the inner reader.
@@ -844,16 +846,36 @@ impl<R: ReadAtom> AtomIterator<R> {
         }
     }
 
+    /// Restore the atom scan position after packet reads, then finish the pending atom, if any.
+    /// The scan position remains meaningful even after physical EOF cleared the pending header.
+    pub(crate) fn resume_atom_iteration(&mut self) -> Result<()>
+    where
+        R: MediaSource,
+    {
+        if let Some(pos) = self.raw_read_resume_pos {
+            self.seek_reader(pos)?;
+            self.raw_read_resume_pos = None;
+        }
+        match self.seek_atom_end() {
+            Ok(()) | Err(AtomError::NoPendingAtom) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Reads exactly the number of bytes requested, at the specified position.
     ///
     /// After this operation, it is only safe to make more raw read calls. To continue iteration,
-    /// the iterator must be re-synchronized by calling `seek_atom_start` or `seek_atom_end`.
+    /// restore the independent scan anchor with `resume_atom_iteration`.
     pub(crate) fn read_raw_boxed_slice_exact(&mut self, pos: u64, len: usize) -> Result<Box<[u8]>>
     where
         R: MediaSource,
     {
-        // Must currently have a pending atom to allow resynchronizing to it.
-        let _ = self.pending.as_ref().ok_or(AtomError::NoPendingAtom)?;
+        // Preserve the scan position once, independently of whether a header is still pending.
+        // Cached samples remain readable after the atom scan has reached physical EOF.
+        if self.raw_read_resume_pos.is_none() {
+            self.raw_read_resume_pos =
+                Some(self.pending.as_ref().and_then(AtomHeader::end).unwrap_or(self.reader.pos()));
+        }
 
         // Seek to the desired position. Doesn't seek if already in position.
         self.seek_reader(pos)?;

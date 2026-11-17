@@ -7,6 +7,11 @@ ISO/MP4 demuxer for Project Symphonia.
 > [!NOTE]
 > This crate is part of Project Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
 
+Packet timestamps use the presented timeline: encoder delay precedes zero, `Track::start_ts`
+identifies the first packet, and track duration excludes delay and padding. Audio edits take
+precedence over iTunes gapless metadata; Opus `dOps` pre-skip supplies the start when neither
+declares it. Packet trims include Opus padding encoded by a shortened final MP4 sample duration.
+
 ## License
 
 Symphonia is provided under the MPL v2.0 license. Please refer to the LICENSE file for more details.
