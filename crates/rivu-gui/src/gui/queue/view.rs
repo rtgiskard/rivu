@@ -27,14 +27,18 @@ impl QueueDrag {
     ) -> Option<usize> {
         let entries = self.entries.get()?;
         if entries.is_empty()
-            || target.is_some_and(|(target, _)| entries.iter().any(|row| row.id == target.id))
+            || target.is_some_and(|(target, _)| {
+                entries
+                    .binary_search_by_key(&target.position, |row| row.position)
+                    .is_ok_and(|index| entries[index].id == target.id)
+            })
         {
             return None;
         }
         let position = target.map_or(total, |(target, after)| {
             target.position + usize::from(after)
         });
-        position.checked_sub(entries.iter().filter(|row| row.position < position).count())
+        position.checked_sub(entries.partition_point(|row| row.position < position))
     }
 }
 
@@ -1010,6 +1014,17 @@ mod queue_drag_tests {
         assert!(
             !ListDrag::Queue(pending).can_transfer(&state, super::DragDestination::Playlist(7))
         );
+    }
+
+    #[test]
+    fn queue_drop_rejects_uninitialized_or_empty_occurrences() {
+        let mut pending = drag(&[1]);
+        pending.entries = Default::default();
+        assert_eq!(pending.insertion_index(None, 5), None);
+        assert_eq!(pending.insertion_index(Some((identity(3), false)), 5), None);
+        pending.entries.set(Vec::new()).unwrap();
+        assert_eq!(pending.insertion_index(None, 0), None);
+        assert_eq!(pending.insertion_index(Some((identity(3), true)), 5), None);
     }
 
     #[test]

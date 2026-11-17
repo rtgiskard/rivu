@@ -245,7 +245,7 @@ pub(super) struct AlbumBrowser {
     refresh_wake: RefreshWake,
     loading_text: rivu_ui::loading::LoadingText<()>,
     error: Option<String>,
-    dismissed_actions: Option<AlbumKey>,
+    dismissed_actions: Option<Rc<AlbumKey>>,
     covers: AlbumCovers,
     loader: ArtworkLoader,
     demand: Range<usize>,
@@ -842,7 +842,7 @@ impl AlbumBrowser {
                 .p_2()
                 .into_any_element();
         };
-        let key = album.key.clone();
+        let key = Rc::new(album.key.clone());
         let play_key = key.clone();
         let enqueue_key = key.clone();
         let menu_key = key.clone();
@@ -900,7 +900,7 @@ impl AlbumBrowser {
                             this.dismissed_actions = Some(play_key.clone());
                             cx.notify();
                             window.blur(cx);
-                            cx.emit(AlbumPlayRequest(play_key.clone()));
+                            cx.emit(AlbumPlayRequest(play_key.as_ref().clone()));
                         },
                     )
                     .button(
@@ -912,7 +912,7 @@ impl AlbumBrowser {
                             window.blur(cx);
                             this.send(
                                 Command::EnqueueAlbum {
-                                    key: enqueue_key.clone(),
+                                    key: enqueue_key.as_ref().clone(),
                                 },
                                 cx,
                             )
@@ -939,7 +939,7 @@ impl AlbumBrowser {
                     }))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.click_count() == 2 {
-                            this.open(key.clone(), cx);
+                            this.open(key.as_ref().clone(), cx);
                         }
                     }))
                     .on_mouse_down(
@@ -948,19 +948,19 @@ impl AlbumBrowser {
                             cx.stop_propagation();
                             cx.emit(ContentMenuRequest {
                                 source: TrackSource::Album {
-                                    key: menu_key.clone(),
+                                    key: menu_key.as_ref().clone(),
                                     revision: this.snapshots.read().library.album_revision,
                                 },
                                 position: event.position,
                                 play: Some(Command::PlayAlbum {
-                                    key: menu_key.clone(),
+                                    key: menu_key.as_ref().clone(),
                                 }),
                             });
                         }),
                     )
                     .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
                         drag.initialize(TrackSource::Album {
-                            key: drag_key.clone(),
+                            key: drag_key.as_ref().clone(),
                             revision: drag_snapshots.read().library.album_revision,
                         });
                         rivu_ui::begin_list_drag(window, cx);

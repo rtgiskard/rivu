@@ -675,18 +675,7 @@ impl Library {
         self.finish_library_locate_render(window, cx);
         let total = self.library.tree().display_root_total();
         let range_pending = self.library_range_pending();
-        let selected_directories = self
-            .library
-            .selected_nodes()
-            .iter()
-            .filter(|node| {
-                matches!(
-                    node,
-                    crate::gui::library::LibraryNode::Directory(_)
-                        | crate::gui::library::LibraryNode::OtherTracks
-                )
-            })
-            .count();
+        let selected_directories = self.library.selected_nodes().len();
         let selection_label = if range_pending {
             self.i18n.text("gl-selecting").to_owned()
         } else if selected_directories > 0 && self.library.selected().is_empty() {
