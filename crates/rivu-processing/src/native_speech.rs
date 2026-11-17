@@ -498,10 +498,10 @@ fn reflect(index: i64, length: u64) -> u64 {
     }
 }
 
-// Cached source access and fixed polyphase sinc kernels. This is a centered,
-// delay-compensated low-pass resampler, not linear interpolation or a model-rate
-// relabel. Kernel support is 16 zero crossings per side; rate ratios determine
-// exact phases once. Coefficients and context are independent of track length.
+// Cached source access and exact polyphase sinc kernels. This is a centered,
+// delay-compensated low-pass resampler with 16 zero crossings per side. Store
+// phases in output-position order, preparing only the prefix used by this signal;
+// longer signals reuse one complete phase period without approximating weights.
 struct SincKernel {
     source: u32,
     target: u32,
@@ -523,7 +523,7 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 impl SincKernel {
-    fn new(source: u32, target: u32, cancel: &AtomicBool) -> Result<Self> {
+    fn new(source: u32, target: u32, frames: u64, cancel: &AtomicBool) -> Result<Self> {
         ensure!(
             (8_000..=384_000).contains(&source) && (8_000..=384_000).contains(&target),
             "Native speech resampling supports 8000..384000 Hz"
@@ -534,17 +534,20 @@ impl SincKernel {
         } else {
             (16.0 / cutoff).ceil() as i64
         };
-        let phases = (target / gcd(source, target)) as usize;
+        let divisor = gcd(source, target);
+        let phases = (target / divisor) as usize;
+        let count = frames.min(phases as u64) as usize;
         let taps = (2 * radius + 1) as usize;
         let mut kernels = Vec::new();
         if source != target {
             kernels
-                .try_reserve_exact(phases * taps)
+                .try_reserve_exact(count * taps)
                 .context("Allocating bounded native resampler kernels")?;
-            for phase in 0..phases {
-                if phase % 64 == 0 {
+            for index in 0..count {
+                if index % 64 == 0 {
                     check_cancel(cancel)?;
                 }
+                let phase = (index as u64 * u64::from(source / divisor) % phases as u64) as usize;
                 let frac = phase as f64 / phases as f64;
                 let start = kernels.len();
                 let mut sum = 0.0f64;
@@ -584,8 +587,7 @@ impl SincKernel {
         if self.source == self.target {
             return source(integer);
         }
-        let remainder = u128::from(index) * u128::from(self.source) % u128::from(self.target);
-        let phase = (remainder * self.phases as u128 / u128::from(self.target)) as usize;
+        let phase = (index % self.phases as u64) as usize;
         let taps = (2 * self.radius + 1) as usize;
         let mut value = 0.0;
         for i in 0..taps {
@@ -595,10 +597,15 @@ impl SincKernel {
     }
 }
 impl<'a> Resampler<'a> {
-    fn new(pcm: &'a audio::PcmAudio, target: u32, cancel: &AtomicBool) -> Result<Self> {
+    fn new(
+        pcm: &'a audio::PcmAudio,
+        target: u32,
+        frames: u64,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         Ok(Self {
             pcm,
-            kernel: SincKernel::new(pcm.sample_rate(), target, cancel)?,
+            kernel: SincKernel::new(pcm.sample_rate(), target, frames, cancel)?,
             cache: vec![0.0; 8192 * usize::from(pcm.channels())],
             start: 0,
             valid: 0,
@@ -644,7 +651,7 @@ impl StreamingResampler {
         output_frames: u64,
         cancel: &AtomicBool,
     ) -> Result<Self> {
-        let kernel = SincKernel::new(source, target, cancel)?;
+        let kernel = SincKernel::new(source, target, output_frames, cancel)?;
         let capacity = (HOP + 2 * kernel.radius as usize + 2) * channels;
         Ok(Self {
             kernel,
@@ -868,7 +875,7 @@ pub(super) fn run(
     check_cancel(cancel)?;
     State::validate_session(&session, kind)?;
     let channels = usize::from(input.channels());
-    let mut source = Resampler::new(input, RATE, cancel)?;
+    let mut source = Resampler::new(input, RATE, length, cancel)?;
     let mut states: Vec<_> = (0..channels)
         .map(|_| State::new(kind))
         .collect::<Result<_>>()?;
@@ -986,7 +993,7 @@ mod tests {
     #[test]
     fn streamed_restoration_matches_seekable_fir_and_dry_mix_at_every_boundary() {
         let cancel = AtomicBool::new(false);
-        for rate in [8000, 16000, 44100, 48000, 384000] {
+        for rate in [8000, 16000, 44100, 48000, 383999, 384000] {
             for frames in [1, 2, 17, 255, 256, 257, 513, 8195] {
                 let budget = audio::PcmBudget::new(8 * 1024 * 1024);
                 let dry: Vec<f32> = (0..frames * 2)
@@ -1005,7 +1012,8 @@ mod tests {
                     })
                     .collect();
                 let reference = pcm(RATE, &native, audio::PcmBudget::new(8 * 1024 * 1024));
-                let mut seekable = Resampler::new(&reference, rate, &cancel).unwrap();
+                let mut seekable =
+                    Resampler::new(&reference, rate, frames as u64, &cancel).unwrap();
                 let wet = 0.73;
                 let mut output =
                     SpeechOutput::new(&input, length, wet, Arc::clone(&budget), &cancel).unwrap();
@@ -1190,6 +1198,70 @@ mod tests {
         }
     }
     #[test]
+    fn polyphase_sinc_bounds_preparation_without_changing_samples() {
+        let cancel = AtomicBool::new(false);
+        for (source, target, frames) in [
+            (383999, RATE, 17),
+            (RATE, 383999, 384),
+            (44100, RATE, 100),
+            (48000, 44100, 300),
+            (RATE, RATE, 17),
+        ] {
+            let kernel = SincKernel::new(source, target, frames, &cancel).unwrap();
+            let period = target / gcd(source, target);
+            let taps = (2 * kernel.radius + 1) as usize;
+            assert!(kernel.kernels.len() <= frames.min(u64::from(period)) as usize * taps);
+            let signal = |index: i64| (index.clamp(0, 1000) as f32 * 0.037).sin();
+            // Evaluate the original exact fractional-position FIR directly,
+            // independently of the prepared table and its storage order.
+            for index in (0..frames).rev() {
+                let integer = (u128::from(index) * u128::from(source) / u128::from(target)) as i64;
+                let expected = if source == target {
+                    signal(integer)
+                } else {
+                    let cutoff = (f64::from(target) / f64::from(source)).min(1.0);
+                    let radius = (16.0 / cutoff).ceil() as i64;
+                    let remainder = u128::from(index) * u128::from(source) % u128::from(target);
+                    let phase = remainder * u128::from(period) / u128::from(target);
+                    let frac = phase as f64 / f64::from(period);
+                    let mut weights = Vec::new();
+                    let mut sum = 0.0;
+                    for tap in -radius..=radius {
+                        let distance = (tap as f64 - frac) * cutoff;
+                        let x = std::f64::consts::PI * distance;
+                        let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
+                        let window = if distance.abs() <= 16.0 {
+                            0.5 + 0.5 * (std::f64::consts::PI * distance / 16.0).cos()
+                        } else {
+                            0.0
+                        };
+                        let weight = cutoff * sinc * window;
+                        weights.push(weight as f32);
+                        sum += weight;
+                    }
+                    let mut value = 0.0;
+                    for (tap, weight) in (-radius..=radius).zip(weights) {
+                        value += signal(integer + tap) * (weight / sum as f32);
+                    }
+                    value
+                };
+                assert_eq!(
+                    kernel.sample(index, signal).to_bits(),
+                    expected.to_bits(),
+                    "{source}->{target}, frame {index}"
+                );
+            }
+        }
+        assert!(
+            SincKernel::new(RATE, 383999, 384, &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cancelled")
+        );
+    }
+
+    #[test]
     fn polyphase_sinc_preserves_dc_and_has_no_delay() {
         let cancel = AtomicBool::new(false);
         for rate in [8000, 16000, 44100, 48000, 96000] {
@@ -1199,8 +1271,9 @@ mod tests {
                     .unwrap();
             builder.push(&vec![0.25; 1001]).unwrap();
             let input = builder.finish().unwrap();
-            let mut resampler = Resampler::new(&input, RATE, &cancel).unwrap();
-            for i in 0..converted_frames(1001, rate, RATE).unwrap() {
+            let frames = converted_frames(1001, rate, RATE).unwrap();
+            let mut resampler = Resampler::new(&input, RATE, frames, &cancel).unwrap();
+            for i in 0..frames {
                 assert!((resampler.sample(i, 0) - 0.25).abs() < 2e-6);
             }
         }
@@ -1212,7 +1285,7 @@ mod tests {
         input[1500] = 1.0;
         builder.push(&input).unwrap();
         let input = builder.finish().unwrap();
-        let mut resampler = Resampler::new(&input, RATE, &cancel).unwrap();
+        let mut resampler = Resampler::new(&input, RATE, 1001, &cancel).unwrap();
         let output: Vec<_> = (0..1001).map(|i| resampler.sample(i, 0)).collect();
         assert_eq!(
             output
@@ -1368,7 +1441,7 @@ mod tests {
             .collect();
         builder.push(&signal).unwrap();
         let input = builder.finish().unwrap();
-        let mut resampler = Resampler::new(&input, RATE, &AtomicBool::new(false)).unwrap();
+        let mut resampler = Resampler::new(&input, RATE, 2001, &AtomicBool::new(false)).unwrap();
         for i in 100..1900 {
             assert!(resampler.sample(i, 0).abs() < 0.002);
         }

@@ -651,6 +651,12 @@ Inference rate conversion is explicit: 16 kHz for native speech, 48 kHz for Pyth
 speech and 44.1 kHz for separation. Output preserves the original rate, layout
 and exact frame count. No implicit downmix or duplicated mono separation is offered.
 
+Native speech uses centered polyphase sinc rate conversion with exact fractional
+phases. Each conversion prepares at most one complete phase period, and only the
+prefix reached by the signal's output frames; short inputs at coprime rates do
+not allocate unused phases. Coefficients are shared across channels without phase
+quantization.
+
 Speech Wet=0 copies dry PCM without executing a model or resampling. Input,
 controls, manifest and artifact hashes are still validated. Native dry bypass
 does not load ONNX Runtime. Python streaming still requires NumPy but skips
