@@ -36,7 +36,6 @@ assessment or imply that every platform-specific chain is built on Linux.
 The GPUI `v0.2.2` migration removes `rustybuzz` 0.20.1 from the locked graph
 by updating the SVG stack to resvg/usvg 0.50 with `harfrust`.
 
-
 [[pipewire-context-retention]]
 === Native PipeWire context retirement retains libdbus allocations
 
@@ -107,7 +106,7 @@ Distinct directories whose `library.db` aliases the same file can therefore
 coexist. SQLite locking does not establish the application's offline migration
 precondition. A fix must define supported database aliases and involve both the
 host and maintenance tool; a maintenance-only lock is insufficient. The
-link:26_migration.adoc#supported-source-formats[supported database upgrade] performs
+link:10_upgrading.adoc#supported-source-formats[supported database upgrade] performs
 its transformation under this data-directory exclusion. Database-file alias
 protection remains unresolved.
 
@@ -134,7 +133,6 @@ not evidence that these calls still use the old implementation.
 Upstream fix:
 https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
 
-
 [[artwork-cold-source-identity]]
 === Cold embedded artwork can acquire a stale requested source identity
 
@@ -152,7 +150,6 @@ accepts B under B's fingerprint, then recovers A after restoration. Both verifie
 historical results survive source removal. Identity rejection is not retained as
 a negative result. The full-source read and fingerprintless boundary are documented
 in link:22_cache.adoc#artwork-uri-leases[Artwork lookup ownership].
-
 
 [[socket-eof-fixture-gaps]]
 === Drop-driven socket EOF isolation
@@ -277,7 +274,7 @@ prefixes `c380c04c82f43702` for `crates/rivu-audio/src/graph.rs` and
 The corrected planner charges active hum harmonics and width-dependent repair;
 the 300,000,000-unit limit, state admission, format validation, bypass and explicit
 execution-mode semantics are unchanged. Current allowances are documented in
-link:27_audio_processing.adoc[Audio processing budgets].
+link:26_audio_processing.adoc[Audio processing budgets].
 
 A standalone post-fix execution admitted the one-harmonic graph at 269,088,000
 units/second and matched 4,096 frames exactly against two direct DSP processors.
@@ -424,7 +421,7 @@ Status: resolved in implementation, 2026-10-21.
 Catalog insertion is drag-only, including an empty workspace; clicks and keyboard
 activation insert nothing. Historical layout tests and a nested-Wayland check
 covered valid/invalid drops, cancellation and tab transfers. Current operations
-are in link:01_config.adoc#layout[Configuration and layout].
+are in link:05_layout.adoc#layout[Configuration and layout].
 
 === Small visualization canvas feedback
 

@@ -105,13 +105,11 @@ whole-track scan; seek/source changes reset it and pause retains it. Reference g
 targets −18 LUFS without peak limiting and never changes tags or playback gain.
 Insufficient data and sources without original PCM show `-`.
 
-
 === Playback navigation
-
 
 `playback play` resumes a paused decoder. When stopped, it opens the selected
 queue occurrence from the beginning, or the first occurrence if none is selected;
-an empty queue is an error. Stop resets the position to zero but retains queue
+an empty queue leaves playback stopped without error. Stop resets the position to zero but retains queue
 selection. Pause only changes playing playback; it does not select or open a
 track while stopped.
 
@@ -238,8 +236,8 @@ queue and playlist references, never their audio files.
 Startup restores the selected occurrence and metadata in Stopped state at position
 zero, without opening a decoder. Playback position, playing/paused status, and
 shuffle history are not saved. Use Play explicitly to start from the beginning.
-Queue mutations save as they execute, independently of Settings Apply, layout
-sync, or window close.
+Queue mutations save as they execute. For their independence from configuration
+and layouts, see link:01_config.adoc#persistence-responsibilities[persistence responsibilities].
 
 If a committed queue edit cannot be refreshed, later selection and edit operations
 retry recovery before using it. A failed selection save must also recover before
@@ -298,7 +296,6 @@ A failed task may still have committed registration and insertion, for example
 after skipped inputs or a post-commit refresh failure. Inspect the result and Queue
 before retrying: replaying a committed addition creates more occurrences.
 
-
 === Queue controls
 
 Queue marks the current occurrence and uses the
@@ -326,11 +323,11 @@ half inserts before/after it; the accent line marks the boundary, and blank spac
 appends. Dropping on the group or pressing Esc cancels. Changed queue contents
 reject the drag.
 
-Library tracks or directories, albums or their tracks, recent tracks, and playlist
-tracks use the same insertion boundaries. Positional drops require an unfiltered
-Queue; if the target changes while resolving contents, insertion fails rather
-than appending elsewhere. Dragging queue occurrences to a playlist copies every
-occurrence in queue order without removing them.
+Cross-collection drops use these same boundaries. For supported sources, copy
+versus reorder semantics, and occurrence preservation, see
+link:03_playlist.adoc#transfers-and-queue-saving[Transfers and queue saving].
+Positional drops require an unfiltered Queue; a changed target rejects the old
+position rather than appending elsewhere.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 
@@ -345,7 +342,7 @@ Randomizing changes queue order without changing the current playback or shuffle
 Removing duplicates keeps each track at its first position; if a later duplicate
 is playing, playback continues as that track's retained occurrence.
 
-Saving a queue as a playlist: link:03_playlist.adoc#desktop-ui[Playlists].
+Saving a queue as a playlist: link:03_playlist.adoc#transfers-and-queue-saving[Playlists].
 Scrolling and query retries: link:02_library.adoc#paged-views[Library].
 
 [[keyboard-controls]]
@@ -401,7 +398,8 @@ direct ALSA output or fallback to a different backend.
 Playback stays bound to the selected sink. Invalid or disappearing routes fail
 instead of rerouting; a failed device change stops playback and retains the
 requested setting. Select an available sink and explicitly restart playback to
-recover. Reapplying the same setting validates it again, even while stopped.
+recover. Reapplying unchanged output settings revalidates the device only when no
+source is playing, paused or opening; with an existing source it is a no-op.
 
 Output and Monitor EQ application failures can still be reported after Stop or
 an audition source change, but cannot restart playback or advance the queue.
@@ -452,14 +450,9 @@ codec pre-skip as fallback, plus a shortened final sample), Matroska
 (Xing/LAME header), Ogg Vorbis and Opus. Matroska AAC without discard padding
 keeps its trailing padding frames; raw ADTS declares neither and plays whole.
 MP4 edit lists with several media edits or a non-unit rate are not applied.
-After a seek, native AAC and MP3 decode two packets ahead of the target and
-discard them, reaching into the encoder delay near the start. This restores
-overlap history, but codec rounding and stateful noise substitution can keep
-the result from being bit-exact with continuous decoding.
-Demuxers publish these declarations on one presented clock; decoding does not
-apply a second codec-specific delay correction. See
+After a seek, native AAC and MP3 output is not guaranteed to be bit-exact with
+continuous decoding. For timing ownership and decoder seek recovery, see
 link:91_design_decisions.adoc#DEC-027[encoder-delay ownership].
-
 
 [[optional-ffmpeg-decoder]]
 == Optional FFmpeg decoder
@@ -501,7 +494,8 @@ Library rows are not automatically reprobed after FFmpeg loads; use a forced
 rescan to refresh stored metadata. Probe commands and recognition provenance:
 link:02_library.adoc#metadata-and-favorites[Library].
 
-Build prerequisites and ABI compatibility: link:../readme.adoc[README].
+Build prerequisites and ABI compatibility:
+link:00_getting_started.adoc#ffmpeg-and-native-only-builds[FFmpeg and native-only builds].
 Enablement, disabling an active decoder, and build-feature restrictions:
 link:01_config.adoc[Configuration].
 
@@ -526,139 +520,8 @@ whole-source metadata, not source bytes divided by subtrack duration.
 Enrichment updates open views without changing membership or counts. It uses the
 already selected decoder and never loads FFmpeg or changes decoder selection.
 
-
-[[terminal-client]]
-== Terminal client
-
-`rivu tui` connects to the Core for its data directory, starting an independent
-background `rivu serve` when absent. The service survives TUI and terminal closure;
-use `:qa` / `:qall` or `rivu quit` to stop it. Closing only the client does not stop
-playback. `Tab` cycles
-Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
-Without a search, each page retains its selection and scroll position.
-The active tab identifies the page; its selection/total counter appears at the
-right of navigation when space permits. The content area adds a heading only for
-context such as a directory path or playlist name, not another copy of the tab.
-`Right` opens a playlist; Enter plays the selected playlist, track, or queue
-occurrence. In Library track lists and playlist details, `e` enqueues the selected
-track. `Alt+e` enqueues the selected Library directory or the complete Other
-collection, regardless of filters. Selecting a row alone does not change playback.
-Whole-playlist playback asks on the status line before replacing a nonempty queue:
-`y` or Enter confirms; `n` or Esc cancels.
-
-Outside search editing, help, and details, press `:` to open the command line on
-the bottom row. Enter executes; Escape cancels. Submitted search results remain
-browsable with command mode, without clearing the search. Commands are bounded
-to 256 UTF-8 bytes and support Backspace.
-Command input is cyan. Confirmed queue additions/removals and successful scans
-use green feedback; ordinary progress is secondary text, warnings orange, and
-errors red. Queue-change confirmations do not replace an unexpired warning or
-error. Messages still share the bottom row rather than adding extra rows.
-
-[cols="1,3",options="header"]
-|===
-|Command |Effect
-|`:q`, `:quit` |Close this TUI only; Core and playback continue
-|`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
-|`:help` |Open the scrollable help page, including command descriptions
-|===
-
-Bare `q` has no action outside editors and remains ordinary text inside them.
-Escape cancels or returns; it never closes the client. Unknown commands and
-rejected shutdown requests show errors without closing it; uncertain shutdown
-outcomes are not automatically retried.
-
-Recent shows up to 256 unique tracks in recent-play order, with titles, counts,
-and local timestamps where space permits. The playing or paused track uses its
-live activity time; reordering preserves selection. Enter plays, `i` opens details,
-and `m` toggles favorite. Recent has no selectable sort or removal action. History
-and counting rules: link:02_library.adoc#play-counts-and-recent-tracks[Library].
-
-Use `/` to search the current page, then Enter to apply; typing alone does not
-change the results. Applying or clearing search keeps the selected entry if it
-remains in the results; otherwise it selects the first result, or nothing when
-empty. Scrolling adjusts only as needed to keep the selection visible.
-Search does not start playback. Press `/` again to edit the query.
-Enter on the filtered list keeps its normal play or open action. The editor owns
-all printable characters, including Space, `m`, `q`, and `?`; F1 opens help and
-Ctrl-C exits even while editing.
-The bottom line shows the query. While editing, it hides messages without clearing
-them; after submission, messages use the remaining space, prioritizing the query
-in narrow terminals.
-
-
-The search scope follows the page:
-
-* Queue searches its occurrences; Playlists searches playlist names, and playlist
-  details searches that playlist's entries. Track searches match title, artist,
-  album, and file name, including unloaded pages. Repeated tracks retain their
-  distinct queue or playlist occurrence identities for play and removal.
-* At Library's top level, search shows matching tracks from the full library,
-  matching title, artist, album, or full source path. Within a directory, search keeps
-  immediate tracks and directories with matching descendants, using the same
-  fields. In Other, search stays within that collection and preserves its
-  favorite/missing filters and sort order.
-* Recent filters only the displayed titles in its published history of
-  at most 256 tracks.
-
-Searches use case-insensitive literal substrings, not wildcard patterns. Esc
-clears and closes the transient editor. Tab/Shift+Tab switches tabs and clears
-search even while editing; entering or leaving a directory, Other, or playlist
-details also clears it. Queries are not saved per tab. Refresh preserves visible
-selection by identity; playlist renames preserve track selection and scroll.
-
-Failed queries wait for changed demand or data, or for the view to be reopened.
-Obsolete and cancelled reads retire without a query error. Query lifetime and
-resource boundaries: link:22_cache.adoc#terminal-projections[Terminal projections].
-
-Library's link:02_library.adoc#other[Other] entry is hidden at the top level when
-the unfiltered collection is empty.
-`Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
-album, and most-played sorting. Selection follows its track through changes while
-that track remains in the results. `Alt+c` checks registered files;
-`Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
-`Alt+x` cancels an active scan before its saving phase. F1 lists the actions for
-the current context.
-
-Outside the query editor, `m` toggles the selected track's favorite in Queue,
-Library, Recent, or playlist entries. It never changes a whole directory or
-playlist. Track lists prioritize titles as the terminal narrows and keep compact
-metadata, favorite, playback-state, and missing-file indicators where space permits.
-Truncation does not change stored metadata.
-Track lists use semantic colors to distinguish metadata, favorites, and playback
-state.
-
-The status row shows volume, shuffle, repeat, speed when not 1×, and current-track codec, sample rate,
-bit depth, and available bitrate in `kbps` where space permits, without distinguishing
-estimated and confirmed bitrates. A separate bottom row holds notices, then scan
-status, core errors, or the startup help hint, in that priority order. Notices and
-startup help expire automatically. Playback transitions update the fixed playback
-display rather than replacing messages.
-
-Press `i` outside the query editor for read-only details of the selected track,
-directory, or playlist. Playback changes do not replace that target. Track details
-includes tags, technical audio metadata, source path, Decoder hint, and playback
-history. Missing-file paths remain available; unknowns use `—`, zero counts `0`,
-and estimated bitrates `≈`. Loading, query failure, removal, and no selection are
-distinct states. This is not a tag editor or decoder control.
-
-Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and restores
-the source position. Long query errors can be scrolled independently; loading and
-errors preserve the track details' reading position for a later successful refresh.
-Help and details own navigation while open; actions do not reach the underlying list.
-
-Position, duration, and playback controls remain available while browsing. Warnings
-and errors are distinct; ordinary playback updates do not replace a visible failure.
-
-Left goes to a parent directory; Left/Esc leaves playlist details.
-With search closed, Esc returns from Library tree or playlist catalog to Queue.
-At Queue's outermost level, Esc has no action. Ctrl-C closes the current TUI from
-every view, including editors, overlays, Core startup, and initial connection
-waiting. `SIGINT` and `SIGTERM` also close only the client. These exits cancel
-frontend readiness waiting and restore terminal mode, screen, and cursor; the
-independent Core keeps its own lifetime and playback is not stopped.
-
-Core shutdown exits normally; a lost connection without shutdown state reports an error.
+For terminal navigation, searches and client shutdown, see
+link:08_tui.adoc[Terminal client].
 
 [[desktop-tray-and-window-lifecycle]]
 == Desktop tray and window lifecycle
@@ -673,32 +536,10 @@ tray, or `rivu quit`, stops Core and releases the tray and desktop media control
 The tray requires session D-Bus and a StatusNotifier-compatible host. Failure
 does not prevent the window or playback; a later watcher is registered automatically.
 The host resolves the `rivu` theme icon, so install icons using the
-link:../readme.adoc#build-and-install[installation instructions]. The tray menu
+link:00_getting_started.adoc#build-and-install[installation instructions]. The tray menu
 offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit application. Play/Pause
 toggles Core's state at command execution; the asynchronously updated menu label
 does not determine the transport command.
-
-[[artwork-panel]]
-== Artwork panel
-
-The *Artwork* panel follows the current playback track, independently of
-Library selection and Track details. Add it from the panel catalog; it is also
-included in the built-in *Default* layout.
-
-See link:01_config.adoc#artwork[Artwork configuration] for defaults, per-panel
-controls, animation parameters and the shared frame-rate cap, and
-link:01_config.adoc#layout[Layout persistence] for saving instance choices.
-
-Rotation follows playback while the panel is visible. Pausing or hiding it retains
-the angle without advancing hidden time; stopping, changing tracks, or choosing
-Static resets the cover upright. Animated source covers can continue while paused
-or Static; both animation types use the shared frame-rate cap. Lower caps skip
-source frames without slowing their timeline. Hiding the panel stops both kinds
-of animation, and rotation resumes without catching up on suspended time.
-Missing artwork uses the generated default cover. Disabling visualizations does
-not affect cover loading or animation. Panels share cover loading but retain
-independent rotation and source-animation state. Track details keeps its full,
-static preview.
 
 [[mpris-and-artwork]]
 == MPRIS and artwork
@@ -720,11 +561,9 @@ TIF/TIFF, and ICO, also ignoring case. Within each priority, filenames sort
 case-insensitively with their original bytes as a tie-breaker. Invalid,
 unsupported, or oversized candidates are skipped. File contents determine the
 cached image format; an extension alone does not establish it.
-Before accepting a candidate, Rivu decodes its first displayed frame using the
-image decoder's default 512 MiB allocation limit, then discards those pixels and
-caches the original encoded bytes. Decoder scratch limits are best-effort;
-later animation frames are not validated. Invalid first-frame pixel data falls
-through to the next candidate just like invalid headers.
+Invalid first-frame pixel data falls through to the next candidate just like
+invalid headers. Admission and resource bounds are described in
+link:22_cache.adoc#artwork-lookup-retention[Artwork lookup and retention].
 The GUI shows a default cover until a real cover is ready or when none is found.
 GUI defaults, the About logo, desktop/tray icons and the MPRIS fallback share the
 same bundled SVG. MPRIS publishes its exported file URL. Directory discovery is
@@ -742,10 +581,10 @@ to inspect disk usage and manually clean expired cover files.
 MPRIS supports transport, volume, shuffle, repeat and `Rate` from `MinimumRate`
 0.5 to `MaximumRate` 2; out-of-range rates are clamped and `Rate` 0 pauses. Relative Seek
 accumulates against the current position and stays bound to its queue occurrence;
-stale or stopped requests are ignored. Seeking strictly beyond a known end advances
-if another occurrence exists; the exact endpoint stays within the current one,
-and seeking beyond the queue tail does nothing. Out-of-range or stale `SetPosition`
-is ignored. `OpenUri` is rejected: import media first. `Raise` requires a Core built
+stale or stopped requests are ignored. Seeking strictly beyond a known end follows
+Next, including Shuffle selection and Repeat All wraparound. With no available
+Next target it does nothing; the exact endpoint stays within the current occurrence.
+Out-of-range or stale `SetPosition` is ignored. `OpenUri` is rejected: import media first. `Raise` requires a Core built
 with GUI support; `Quit` also works without it.
 
 MPRIS uses the same Next/Previous commands and execution-time playback-state
@@ -754,12 +593,12 @@ link:21_ipc.adoc[IPC].
 
 == Equalizer and processed audition
 
-Use the link:27_audio_processing.adoc[Audio processing workflow] for Monitor EQ,
+Use the link:07_audio_processing.adoc[Audio processing workflow] for Monitor EQ,
 restoration, speech enhancement, separation, and graph audition. Processing never
 replaces source media. Original returns from audition to source playback; Monitor
 EQ remains in both paths, so keep EQ and level fixed for comparisons. Export a
 retained graph output explicitly for a WAV file; audition results stay in memory
 and are lost when the core exits.
 
-Runtime ownership and backend contracts: link:21_ipc.adoc#core-and-client-boundary[IPC].
+Runtime ownership and backend contracts: link:20_architecture.adoc#core-and-client-boundary[IPC].
 Build and runtime prerequisites: link:../readme.adoc[README].

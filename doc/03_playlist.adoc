@@ -96,30 +96,87 @@ A drag is rejected if membership or order changes, the playlist is deleted, or
 you switch playlists before dropping, even away and back. Renames and edits to
 other playlists do not invalidate it.
 
+[[transfers-and-queue-saving]]
 === Transfers and queue saving
 
-Dragging playlist tracks to Queue or another playlist copies their track IDs in
-playlist order without removing source entries. A named catalog row is an
-explicit destination, even when another playlist is selected. Library tracks and
-directories, album cards and tracks, recent tracks, and queue occurrences can
-also be dropped on a catalog row. Dropping on a track row uses the same before/after
-insertion line; catalog rows and blank space append. Playlist additions retain
-existing entries and insert every supplied occurrence in source order, including
-tracks already present in the destination. Library directory selections remain
-set unions: overlapping sources contribute each track only once.
-If the target playlist changes before a positional insertion commits, the old
-position is rejected rather than falling back to append.
+[cols="2,2,2,3,2,2",options="header"]
+|===
+|Source or action |Destination |Transfer semantics |Order and repeated tracks |Source changes |Playback effect
+
+|Playlist tracks, queue occurrences, Library tracks, albums or their tracks, Recent tracks; drag or Add to playlist
+|Queue or another playlist, as offered by the action
+|Copy and insert; existing destination entries remain
+|Source order and every supplied occurrence survive, even when the track is already in the destination
+|None
+|None
+
+|Library directory or overlapping header selection
+|Queue or playlist
+|Copy the resolved set union
+|Each library track contributes once, even when selected sources overlap
+|None
+|None
+
+|Drag within a queue or playlist
+|The same collection
+|Reorder existing occurrences, not a copy
+|The dragged group keeps its original relative order; repeated tracks remain distinct
+|Its order changes
+|None
+
+|Whole-playlist or whole-album Append
+|Queue
+|Append a copy of the complete collection, regardless of search
+|Saved collection order and duplicates survive
+|None
+|None
+
+|Save queue as playlist
+|New playlist
+|Independent copy
+|Every occurrence in queue order
+|None
+|None
+
+|Whole-playlist or whole-album Play
+|Queue
+|Replace the queue with an independent copy of the complete collection
+|Saved collection order and duplicates survive, regardless of search
+|Playlist or album unchanged
+|Start the first entry
+
+|Play an individual Library, album, Recent tracks, or playlist track
+|Queue
+|Reuse its first existing occurrence in queue order, or append one if absent; do not replace the queue
+|Other occurrences remain intact
+|Source collection unchanged
+|Start that occurrence
+
+|Play a Queue row
+|Queue
+|Select that exact occurrence; no transfer
+|No order or multiplicity change
+|None
+|Start that occurrence
+|===
+
+A named catalog row is an explicit destination, even when another playlist is
+selected. Track-row drops insert at the indicated before/after boundary; catalog
+rows and blank space append. Positional drops require an unfiltered destination.
+If the target queue or playlist changes before insertion commits, the old position
+is rejected rather than falling back to append. Search changes the view, not the
+saved collection. Playback confirmation and source-open failures are described
+under link:04_playback.adoc#transport-and-timing[Playback].
 
 Right-click a track or selected group and choose Add to playlist to select an
 existing playlist or New playlist. The shared name dialog saves the captured
-tracks without changing the source collection. This selector also works when
+tracks. This selector also works when
 the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules].
 
 For a nonempty queue, use Queue → Save queue as playlist. The default name is
-`Queue_YYYYMMDD_HHMMSS`; every occurrence is saved in queue order without changing
-Queue. The dialog uses the same naming and background-save rules as New playlist
-and Rename. Failed queue-selection loading offers Retry.
+`Queue_YYYYMMDD_HHMMSS`. The dialog uses the same naming and background-save rules
+as New playlist and Rename. Failed queue-selection loading offers Retry.
 
 === Loading and selection recovery
 
@@ -189,11 +246,27 @@ limits aborts before saving; these are not playlist-size caps.
 [[commit-and-export-lifecycle]]
 === Commit and export lifecycle
 
-Scan saving and playlist creation commit separately. A failed scan save creates
-no playlist; failure after saving does not undo library changes, and refresh
-failure does not delete an already-created playlist. Results retain
-`library_committed` and `playlist_id` as evidence of confirmed commits. Imports
-are not replayed automatically: inspect the result before retrying a missing step.
+Imports use the shared link:02_library.adoc#cancellation[preparation and Saving
+lifecycle], with two separate commits:
+
+[source,mermaid]
+----
+flowchart TD
+    validate["Validate name, input and referenced paths"] -->|"Invalid input or limits exceeded"| noSave["Stop without saving tracks or a playlist"]
+    validate -->|"Valid"| scan["Scan sources: later errors may leave eligible partial results"]
+    scan --> library["Commit library changes"]
+    library -->|"Failure"| noPlaylist["Do not create a playlist"]
+    library -->|"Success: library_committed"| playlist["Create playlist from eligible occurrences"]
+    playlist -->|"Failure"| libraryOnly["Keep committed library changes"]
+    playlist -->|"Success: playlist_id"| refresh["Refresh views"]
+    refresh -->|"Success"| complete["Report result, including any scan errors"]
+    refresh -->|"Failure"| committed["Keep both commits and report refresh error"]
+----
+
+Results retain `library_committed` and `playlist_id` as evidence of confirmed
+commits, including partial success. A failed result does not imply rollback.
+Imports are not replayed automatically: inspect the evidence before retrying a
+missing step, rather than repeating an already-committed operation.
 
 Export preserves the complete saved order and multiplicity, not search results,
 subject to the CUE restrictions below. One export runs at a time, using a

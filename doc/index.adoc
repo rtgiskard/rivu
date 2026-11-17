@@ -1,0 +1,65 @@
+= Documentation
+
+Start with link:00_getting_started.adoc[Getting started] for installation,
+first playback and data directories. These documents describe the current
+application unless explicitly marked as proposed or historical.
+
+== Getting started and maintenance
+
+* link:00_getting_started.adoc[Install and get started] — runtime requirements,
+  packages, source builds and interface selection
+* link:10_upgrading.adoc[Upgrading and compatibility] — supported formats,
+  automatic migration and manual configuration changes
+* link:02_library.adoc#sqlite-maintenance[Database maintenance]
+
+== User guides
+
+* link:02_library.adoc[Library] — folders, scans, albums, metadata, history,
+  missing files and relocation
+* link:03_playlist.adoc[Playlists] — management, transfers and import/export
+* link:04_playback.adoc[Playback] — transport, queue, ReplayGain, audio output,
+  diagnostics and desktop integration
+* link:05_layout.adoc[Desktop layout and panels] — named layouts, docking,
+  panel choices and Artwork
+* link:06_visualizations.adoc[Visualizations] — display controls, signal choices
+  and visualization-specific parameters
+* link:07_audio_processing.adoc[Audio processing] — EQ, restoration, model setup,
+  graph execution, audition and export
+* link:08_tui.adoc[Terminal client] — navigation, search, details and client shutdown
+* link:09_cli.adoc[CLI] — common options, task references and completion semantics
+
+== Configuration and reference
+
+* link:01_config.adoc[Configuration and settings] — common TOML parameters,
+  desktop settings, validation and saving
+* link:05_layout.adoc#layout-file[Layout file] — persisted desktop structure and
+  per-panel options
+* link:04_playback.adoc#keyboard-controls[Keyboard controls]
+* link:21_ipc.adoc[IPC] — sessions, wire schemas, PCM side channels, revisions,
+  command contracts and failures
+
+== Development and design
+
+* link:28_development.adoc[Building and development] — build identity, checks and
+  test isolation; installation and feature selection remain in Getting started
+* link:20_architecture.adoc[Core and client architecture] — process boundaries,
+  authoritative owners and retirement
+* link:22_cache.adoc[Caching and resource lifecycles]
+* link:23_visuals.adoc[Audio analysis and visualization rendering]
+* link:24_layout.adoc[Desktop layout and GUI composition]
+* link:25_gpu_rendering.adoc[GPU rendering] — implemented contracts and separately
+  identified proposals
+* link:26_audio_processing.adoc[Audio processing design and acceptance] — ownership,
+  resource admission and quality criteria
+* link:27_migration.adoc[Migration design] — version authority, backups, apply
+  protocol and failure guarantees
+
+== Project records
+
+* link:90_open_issues.adoc[Open issues and resolution records] — unresolved and
+  deferred issues first; resolved investigations retain their evidence boundaries
+* link:91_design_decisions.adoc[Engineering decisions and tradeoffs] — accepted
+  decisions and separately identified unapproved candidates
+* Historical measurements: link:25_gpu_measurements.adoc[GPU] and
+  link:26_audio_measurements.adoc[audio processing]. These are workload- and
+  version-specific evidence, not current performance or quality guarantees.

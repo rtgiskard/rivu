@@ -1,0 +1,319 @@
+= Core and client architecture
+:toc:
+:toclevels: 2
+
+This document describes runtime owners, process boundaries and resource
+retirement. Wire formats, side channels, revisions and command contracts are
+specified in link:21_ipc.adoc[IPC].
+
+[[core-and-client-boundary]]
+== Core and client boundary
+
+One Core owns library storage, queue mutations, configuration, and playback
+coordination for a data directory. Frontends submit commands and query projections
+rather than maintaining independent authoritative library or playback state.
+Audio output and analysis have their own workers; transport and rendering stay
+outside the audio callback.
+
+Within Core, the playback-session owner keeps occurrence intent, navigation,
+source generations, listening retirement and unsaved selection together. A Load
+already accepted by audio is not undone when saving the selection fails; later
+database projections cannot overwrite that pending selection.
+Runtime preferences keep low-frequency settings, small live controls and the
+last successful save baseline separate. Volume, shuffle, repeat and device
+selection do not copy the processing graph. Apply and persistence materialize a
+complete configuration at the owner boundary; published configuration and
+playback sections are observations, not alternate preference writers.
+
+The root Rust crate is an application library for its own executable, not a
+stable embedding SDK. Storage transactions, mutable analysis publication, and
+frontend implementation modules are crate-internal capabilities. External
+clients use the protocol rather than bypassing Core validation through storage.
+
+`rivu-protocol` defines commands, queries, snapshots, positional wire schemas, and
+bounded transport. `rivu-client` provides synchronous sessions, instance binding,
+cancellation, typed task waiting, command-failure evidence, and one-shot helpers.
+External Rust clients use these crates rather than the root application crate.
+Their standalone dependency graph requires no GPUI, audio execution, PipeWire,
+SQLite, or FFT execution, although Cargo feature unification can enable database
+or DSP execution in a combined build.
+
+The client drives I/O on its calling thread, so async callers must move it off
+their executor thread. Retained sessions reuse sockets and bounded framing storage.
+The GUI drives retained IPC sessions on bounded background workers and reads
+published local snapshots on its event-loop thread.
+
+Protocol codec and transport contracts are tested in `rivu-protocol`; client
+session, cancellation, and task-wait contracts are tested in `rivu-client`.
+Run these independently with `cargo test --locked -p rivu-protocol -p rivu-client`.
+Socket interactions involving App and Core remain in the root application's IPC
+integration tests rather than making the standalone crates depend on the host.
+
+[[consumer-and-application-lifetimes]]
+=== Consumer and application lifetimes
+
+The service and desktop are separate processes of the same executable. Boxes
+below group runtime components by process, not crate dependencies; arrows show
+communication paths, not ownership.
+
+[source,mermaid]
+----
+flowchart LR
+    subgraph Desktop["Desktop process: rivu-gui"]
+        GUI["Windows and local state cache"]
+        Analysis["Analysis worker and Waveform summaries"]
+        GUI --- Analysis
+    end
+    Clients["TUI / CLI / external clients"]
+    subgraph Service["Service process: App"]
+        IPC["Instance-bound command / query / Watch IPC"]
+        Core["Core: authoritative state and admission"]
+        Audio["Audio worker and output"]
+        PCM["Bounded SHM PCM window"]
+        Integrations["Tray / MPRIS"]
+        IPC <--> Core
+        Integrations <-->|CoreHandle| Core
+        Core <-->|Commands and events| Audio
+        Audio --> PCM
+    end
+    GUI <-->|Local IPC| IPC
+    Clients <-->|Local IPC| IPC
+    PCM -->|Validated reads and output cursor| Analysis
+----
+
+The GUI has no normal dependency on the root crate, audio execution or SQLite.
+Desktop activation requires no GPUI event loop in the service.
+
+Commands, queries, configuration mutations and Watch use instance-bound local
+IPC sessions. State getters read the GUI's published cache, never a socket.
+Configuration edits merge at Core against current owner state; the GUI does not
+write a stale whole-configuration snapshot. An uncertain mutation result is not
+automatically replayed, and an old desktop cannot silently attach to a replacement
+Core instance.
+
+Core owns capture and audio identity; `rivu-analysis` runs display DSP in the GUI
+background worker. Native-channel PCM is folded into reusable stereo scratch and
+the complete SHM read is validated before either consumer receives it. Overwrites
+discard old realtime data without blocking playback; Core publishes no Waveform
+statistics. Explicit previews use the
+link:21_ipc.adoc#finite-pcm-rendering[finite PCM endpoint].
+`rivu-presentation` supplies localization, keyboard semantics, theme mapping and
+shared images without GPUI, audio execution or database dependencies.
+
+[cols="1,3",options="header"]
+|===
+|Owner |Lifetime boundary
+|App
+|Owns TaskRuntime, Core, IPC listeners, instance ownership, shutdown signals,
+artwork, logging, optional tray and MPRIS through physical worker and transport retirement.
+|Core
+|Owns authoritative state and accepted operations. Desktop exit does not cancel
+playback, scans, saves or accepted commands. Dismissing a relocation review
+explicitly requests cancellation without undoing a commit.
+|Desktop
+|Owns GPUI, window-local state, subscriptions and render resources. The last
+window closing exits this process; reopening starts from current Core state,
+while repeated open requests focus an existing desktop. Late results cannot
+restore a closed view or a superseded source.
+|===
+
+GUI and TUI share one Core bootstrap path:
+
+[source,mermaid]
+----
+sequenceDiagram
+    participant Frontend as GUI / TUI bootstrap
+    participant Service as Core service
+    Frontend->>Service: Attempt connection and Hello
+    alt Listener absent
+        Frontend->>Service: Start detached serve process
+        loop Retry only while listener is absent
+            Frontend->>Service: Connect with bounded backoff
+        end
+        Frontend->>Service: Hello once listener is available
+    else Listener present
+        Note over Frontend,Service: Wait for Hello without starting another service
+    end
+    alt Compatible Hello succeeds
+        Service-->>Frontend: Instance identity and ready session
+    else Handshake fails or deadline expires
+        Note over Frontend: Report failure without automatic attachment or replay
+    end
+----
+
+Connection and Hello share one 30-second deadline; absent-listener retries back
+off from 10 ms to at most 500 ms. A bound listener receives one waiting Hello.
+A live child or bound socket alone is not readiness. An existing Core keeps its
+configuration even if the new frontend supplies another config path.
+
+Automatically started Core processes detach from the terminal session and use
+at most 64 KiB of anonymous startup diagnostic storage. Successful initialization
+disconnects that sink; failures return the retained diagnostic to the launcher.
+Manual `serve` retains its normal stderr. GUI open requests coalesce during
+desktop startup under the original child and startup deadline. A failed startup
+is reported rather than automatically replayed; a later explicit open can retry.
+The service writes and flushes its readiness message to stdout. If either fails,
+startup returns an error after normal application teardown and exits unsuccessfully,
+including when a pipe reader has closed; it does not panic or retry the output.
+Explicit application shutdown stops the service and connected consumers; closing
+or killing only a frontend leaves the service alive. Accepted shutdown
+acknowledgements drain before transport retirement. Window/display resource release is described in
+link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
+
+The TUI restores terminal input and display state on normal exit, partial startup
+failure, and Rust panic unwinding. Cleanup failure is reported unless an earlier
+run error takes precedence; unwinding preserves the original panic. Process
+abort and uncatchable termination cannot restore the terminal.
+
+=== Owner execution and retirement
+
+Core applies state transitions on one persistent dedicated thread. Bounded
+channels carry requests and worker facts; replies and revision subscriptions
+wake consumers without polling. Notifications coalesce, so consumers read the
+current authoritative projection after a wakeup rather than replaying events.
+Subscriptions express their owner's interests. Tray and MPRIS management ignore
+irrelevant playback-clock updates; the MPRIS publisher still receives explicit
+seek, metadata and control changes required by its interface.
+
+Command execution returns an explicit outcome: immediate acknowledgement, an
+allocated task ID, or a deferred export/maintenance reply. Dispatch publishes the
+state transition and applies that outcome; it does not infer task identity from
+the current active-task slots. The task owner retains any deferred reply through
+completion or shutdown.
+
+Core serializes foreground SQLite writes with their revision transitions. Admitted
+background saves retain independent transaction evidence until Core accepts their
+completion; database commit and display-projection refresh are not one atomic
+operation. A separate query owner has a 64-entry work queue, reuses one read
+connection, and pins at most one SQLite snapshot, validated against captured
+Core revisions, per request. Its queue is independent of Core request admission.
+The publication fence and save gate prevent reads from pairing committed database
+changes with preceding state. Count reuse follows data-domain revisions;
+maintenance waits for physical snapshot retirement.
+
+Reads have owner-scoped cancellation and retain their physical lease through SQL
+exit and snapshot cleanup; see link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation].
+Accepted commands have independent lifetimes.
+
+App supplies execution capabilities independently of the business `CoreHandle`
+and retains `TaskRuntime` through Core, service and IPC retirement. The desktop
+owns its separate GPUI execution resources. File, probe and background transaction
+stages share at most four blocking slots; waiting for Core admission or replies
+holds none. `BlockingExecutor` bounds physical closures, not a private thread pool.
+
+[source,mermaid]
+----
+sequenceDiagram
+    participant Owner as Request / task owner
+    participant Worker as Started physical work
+    participant Runtime as App / execution runtime
+    Owner->>Worker: Admit work with resource lease
+    opt Waiter or operation cancelled
+        Note over Owner: Stop waiting or revoke publication eligibility
+        Note over Worker: Retain slot and resources until physical exit
+    end
+    par Work completes
+        Worker-->>Owner: Completion subject to owner admission
+        Note over Worker: Release physical lease on exit
+    and Shutdown requested
+        Runtime->>Worker: Join started work, waiting for physical exit
+        Worker-->>Runtime: Physical retirement complete
+        Note over Runtime: Retire execution resources after joins
+    end
+----
+
+Waiter cancellation does not by itself cancel an accepted command; operation
+cancellation follows that owner's contract. Neither cancellation nor shutdown
+rolls back an already committed transaction. Reads retain their physical lease
+through SQL exit and snapshot cleanup even after the consumer stops waiting.
+
+[[application-service-retirement]]
+=== Application service retirement
+
+App owns and joins MPRIS, tray, and logging independently of windows.
+MPRIS registration is asynchronous and cancellable; failures wait for a later
+off/on transition, not a retry timer. Teardown removes interfaces, allows up to
+one second for active replies and a separate second for connection close, then
+joins the publisher. Synchronous artwork work still has to finish. Metadata
+signals reflect exposed-value changes, not ordinary clock or unrelated queue updates.
+
+Tray registration reconciles current publication state independently of bus setup.
+Unchanged menus retain their revision; shutdown cancels bus work and closes under
+a bounded deadline rather than waiting indefinitely for peers.
+
+App owns the process's single active logging session and writer lifetime; Core
+controls settings. A new session may start after the previous one finishes
+shutting down. The permanent subscriber uses a reloadable file layer for level
+and writer changes. A new writer is prepared before configuration persistence;
+only save success publishes the new output and level. File-count limits apply
+when constructing an appender, so changes take effect on the next enable or host
+restart. Native pruning during preparation is not rolled back after a failed
+save. Producers retire before file output is flushed, outside GUI callbacks, and
+session shutdown waits for the file writer to close.
+Standalone Core runtimes install no process subscriber. Processing shutdown closes
+event admission, joins workers, and drains unpublished outputs; retained auditions
+last until service retirement. See
+link:22_cache.adoc#processing-output-retention[Processing output retention].
+
+[[storage-and-preparation-work]]
+=== Storage and preparation work
+
+Scan and external-admission preparation is bounded to 32 sources or CUE sheets
+per batch. Admitted descriptors stay open across one indexed metadata lookup;
+waiting for Core holds no blocking slot. Each blocking turn performs at most 32
+probe/read steps, hashing at most 4 MiB through a reusable 128 KiB buffer before
+yielding. A probe already in progress is not interruptible. Ordinary identities
+reuse full-source metadata; CUE identities share fingerprints and preparation
+across shared sources within configured roots. Force bypasses reuse.
+Scan selection keeps outermost descendant ranges and uncovered exact owners,
+respecting path-component boundaries without weakening coverage protection.
+
+Count-only pages omit row projection; queue/playlist totals do not join metadata.
+Unfiltered entry pages seek contiguous positions; playlist totals use indexed
+maximum positions. Filtered random-access pages count and skip matches in SQL.
+Sequential filtered batches instead retain matching rank, occurrence keyset and
+a fixed-size query/revision scope, with one matching lookahead. Stable traversal
+searches each interval at most twice plus indexed keyset seeks, rather than
+recounting every preceding prefix. It needs no retained SQLite snapshot,
+per-client map or full-list cache.
+
+Directory/root lookups use indexed, case-sensitive component ranges. Directory
+pages count and select children before projecting payloads; temporary work scales
+with matching children, while count-only requests omit it. OFFSET traversal
+retains its preceding-match cost. Count retention is described under
+link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
+
+Album summaries and artist counts are persistent SQLite projections maintained
+in the same transaction as track changes. Unchanged effective metadata does no
+summary work. Indexed membership avoids rescanning an album per changed member;
+substring search and OFFSET still scale with matching summaries. Reverse-reference
+indexes scope sparse library deletion to affected queue/playlist entries. These
+indexes trade storage and write maintenance for scoped lookup work. Format
+validation is specified in
+link:27_migration.adoc#version-authority[Database and configuration migration].
+
+=== Projection and view costs
+
+State reads contain summaries, compact queue state, playback, runtime System state,
+and independently requested Configuration state; library rows are queried separately.
+In-process consumers can share immutable
+projections, whereas socket responses serialize them. Queue displays resolve
+metadata from bounded queue queries and their content revision, not unrelated
+library pages. TUI rendering visits visible queue rows while retaining global
+occurrence selection and scroll position. GUI page, selection-index, and worker
+retention are described in link:22_cache.adoc#window-local-query-retention[Resource lifecycles].
+This avoids both a second control implementation and a universal whole-library
+snapshot on every playback update.
+
+TUI page demand, selection recovery, and read planning are described in
+link:22_cache.adoc#terminal-projections[Terminal projections]. Cancelled reads
+retain their physical slot until the exchange retires.
+
+Local Processing snapshots share task metadata immutably; copy-on-write keeps
+older publications stable. Socket responses encode a task value. The TUI does
+not request Processing; its section and update semantics are defined in
+link:21_ipc.adoc#wire-schemas[Wire schemas].
+
+Startup and single-instance operation are documented in
+link:00_getting_started.adoc[Getting started]. Socket clients and Core must use compatible builds.
+

@@ -1,0 +1,135 @@
+= Upgrading and compatibility
+:toc:
+:toclevels: 2
+
+Upgrade Core and its clients together. This guide covers supported upgrades,
+manual configuration changes and startup behavior. Migration implementation
+and failure guarantees are in link:27_migration.adoc[Migration design].
+
+[[before-upgrading]]
+== Before upgrading
+
+`rivu-migrate check` inspects database compatibility and validates configuration
+without rewriting either. `apply` upgrades supported databases only after a
+completed SQLite backup; current resources are no-ops and need no backup.
+
+Stop Core with `rivu quit`, close other database writers, and make any required
+<<configuration-compatibility,manual configuration changes>> before starting
+the new version. Inspect the intended data directory and configuration first:
+
+[source,sh]
+----
+rivu-migrate --data-dir /path/to/data --config /path/to/config.toml check
+----
+
+`check` exits `0` when no conversion is needed, `1` for a supported upgrade, or `2`
+on failure. `apply` exits `0` on success or a no-op, otherwise `2`. Reports and backup
+paths go to stdout, diagnostics to stderr. Check reserves nothing; Apply revalidates.
+
+If Check reports a supported upgrade (exit `1`), review the compatibility notes
+below, then apply it with the same paths. A Check failure (exit `2`) must be
+resolved before applying; exit `0` needs no conversion.
+
+[source,sh]
+----
+rivu-migrate --data-dir /path/to/data --config /path/to/config.toml apply
+----
+
+After success, start the matching Core and clients. On failure, inspect the
+reported targets, completed changes and backup paths before taking further
+action: a post-commit failure does not undo conversion. Preserve the backup;
+manual restoration requires stopping all writers and choosing the correct copy.
+See link:27_migration.adoc#failure-and-reentry[Failure and reentry] for the
+recovery guarantees.
+
+Normal application opening initializes empty databases or requires the current
+format. Historical recognition and conversion belong only to the independent tool.
+Downgrade, cross-file transactions, paired restore, layout/cache conversion and
+undocumented historical conversions are outside this contract. For other database
+operations, see link:02_library.adoc#sqlite-maintenance[SQLite maintenance].
+
+[[application-invocation]]
+== Automatic startup migration
+
+On a database version mismatch, GUI and headless startup run
+`rivu-migrate --data-dir DATA --config CONFIG apply` with resolved host paths,
+selecting the executable beside `rivu` or otherwise from `PATH`. Current and empty
+databases skip this step.
+
+A missing tool, failed conversion or a database that remains incompatible stops
+startup. Rivu does not retry blindly, reset data or restore a backup automatically.
+The ownership handoff is specified in
+link:27_migration.adoc#startup-migration-handoff[Migration design].
+
+== Compatibility reference
+
+=== Database formats
+
+[[supported-source-formats]]
+Supported database upgrades are `2 → 4 → 6 → 7`, `4 → 6 → 7`, and `6 → 7`.
+Format 4 adds playlist ordering; format 6 replaces raw/override tag columns with
+resolved values; format 7 adds one nullable ReplayGain track-gain field. Existing
+rows start without a value; scan the library to read source tags. Track IDs,
+playback statistics, list references and queue state are preserved. Subsequent
+rescans may replace stored tags. Format 5 and unknown schema objects are rejected.
+
+Missing default resources are reported without creation. With explicit
+`--data-dir`, a missing `library.db` is an error; `--config` alone does not select
+a database. Valid unversioned configuration is current and remains untouched.
+See link:27_migration.adoc#configuration-schema[Configuration schema] for version rules and <<configuration-compatibility>>
+for manual setting changes.
+
+=== Client and protocol changes
+
+The following cutovers describe compatibility changes for upgrades from older
+versions, not the current wire version. See
+link:21_ipc.adoc#session-handshake[IPC handshake] for the current version authority.
+
+Moving waveform ownership to the GUI changes local side-channel
+compatibility, not database or saved visualization configuration. Frontend and
+Core must be upgraded together: realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6,
+and generic finite PCM rendering uses `.audio.v1`. The former waveform-summary
+socket is not a compatibility path. GUI-session summaries are not persisted or
+migrated. Waveform style, display settings and seek controls retain their keys;
+see link:23_visuals.adoc#waveform[Waveform] and
+link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
+
+[[settings-protocol-cutover]]
+Protocol 26 removes the full-configuration `Configure` command. Upgrade clients
+together and restart Core; mismatched versions are rejected before decoding.
+Clients must use `MutateConfig` Settings patches or dedicated commands instead;
+see link:21_ipc.adoc#configuration-mutations[configuration mutations]. On-disk
+configuration and database formats are unchanged; no disk migration is needed.
+
+Protocol 41 adds the ReplayGain setting, track gain, and single-field edits. Upgrade
+Core and frontends together. Source-tag operations include track gain; database
+format 7 is required, while configuration remains compatible.
+
+Protocol 42 adds runtime audio-output diagnostics and the global ReplayGain peak
+policy. Upgrade Core and frontends together and restart Core. Configuration defaults
+preserve existing gain behavior; peak tags and diagnostics are not stored in the
+database, so this change requires no database migration.
+
+[[configuration-compatibility]]
+=== Manual configuration changes
+
+The tool validates current configuration; it does not translate historical keys or
+values. Update these manually with Rivu stopped, following
+link:01_config.adoc#file-access-and-external-editors[Configuration file access]:
+
+* Replace `visualizations.spectrogram.palette` with
+  `visualizations.general.palette`.
+* Replace the removed signal palette `tokyo_night` with a supported
+  link:06_visualizations.adoc#visualizations[signal palette]. The Tokyo Night interface
+  theme is unchanged.
+* Replace `interface.artwork.fps` and `visualizations.general.animation_fps` with
+  one `interface.animation_fps` value (`0`–`240`, default `0`), then remove both old
+  keys. Choose the shared cap explicitly if the old values differ; the tool does
+  not choose between them. See link:01_config.adoc#animation[Animation].
+* Replace `interface.material.selected = "original"` with a real preset such as
+  `"satin"` and set `interface.material.enabled = false` to retain no-effect
+  rendering. Remove any `[interface.material.presets.original]` table. Effects
+  enablement and the selected preset are independent; `original` is not accepted.
+* Remove `[equalizer_ab]` and its nested tables before upgrading. Save any backup
+  settings you want to keep as a named preset first.
+

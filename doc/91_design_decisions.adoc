@@ -51,7 +51,7 @@ estimate was 6,144 bytes versus 12,088 net live allocated bytes; bypass retained
 4,424 bytes despite the same estimate. Three repetitions matched and drop returned
 the allocation delta to zero. These counts establish missing state accounting,
 not a process RSS bound or a demonstrated whole-graph 64 MiB overrun.
-See link:27_audio_processing.adoc[Audio processing budgets].
+See link:26_audio_processing.adoc[Audio processing budgets].
 
 Keep arithmetic policy in the graph planner, separate from this memory accounting:
 charge active hum per harmonic and repair per configured width without raising
@@ -222,7 +222,7 @@ atomic no-clobber publication. Retain these boundaries even if the sink changes.
 For fixed graph/format, output PCM retention is duration-independent; decoder,
 DSP/profile state, delays and existing results still cost memory. This evidence
 is not an RSS or export-latency measurement, nor a promise of unlimited WAV size.
-See link:27_audio_processing.adoc#tasks-retention-and-audition[Processing and export].
+See link:07_audio_processing.adoc#tasks-retention-and-audition[Processing and export].
 
 [[DEC-010]]
 === DEC-010: Scope retirement regressions to stable resource ownership
@@ -476,7 +476,7 @@ successful source replacement updates its generation binding. Selecting a new
 result and returning to Original remain distinct operations. Core retains
 configuration, command admission and source-validation authority; resource
 ownership does not confer permission for late task completion to start playback.
-See link:27_audio_processing.adoc#playback-bypass[Playback bypass] for operation,
+See link:07_audio_processing.adoc#playback-bypass[Playback bypass] for operation,
 selection retirement and failure behavior.
 
 [[DEC-018]]
@@ -525,7 +525,7 @@ sessions; duplicate editors would require extra input identities and draft
 reconciliation without providing a separate workflow.
 
 Insertion and migration behavior: link:24_layout.adoc#_panel_insertion[Panel insertion].
-Draft and input lifetime: link:27_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
+Draft and input lifetime: link:26_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
 
 [[DEC-021]]
 === DEC-021: Processing task status has one authoritative record
@@ -539,7 +539,7 @@ an operation's outcome or resource availability changes; publishing a snapshot
 does not transfer mutation authority.
 
 Record retention and resource boundaries:
-link:27_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
+link:26_audio_processing.adoc#ownership-and-invariants[Ownership and invariants].
 
 [[DEC-022]]
 === DEC-022: Query replacement belongs to the demand owner
@@ -568,7 +568,7 @@ Retain one public Settings write contract: baseline-derived field edits merged
 at Core. Full client snapshots can overwrite unrelated concurrent controls;
 revision-gating them would retain a second write convention rather than express
 field-level intent. See link:21_ipc.adoc#configuration-mutations[the contract] and
-link:26_migration.adoc#settings-protocol-cutover[client upgrade requirements].
+link:10_upgrading.adoc#settings-protocol-cutover[client upgrade requirements].
 
 [[DEC-024]]
 === DEC-024: Explicit tag writes publish verified file facts
@@ -666,6 +666,12 @@ actual block length remains available for encoded bitrate accounting. Source
 discards that first block after each reset; Matroska timestamp-convention
 detection still receives a zero-output primer anchor. Container trim values
 are not substitutes for encoded block length.
+
+After a seek, native AAC and MP3 decode and discard two packets before the
+target to restore overlap history, reaching into encoder lead-in near the start.
+Codec rounding and stateful noise substitution can still differ from continuous
+decoding. This recovery stays on the demuxer's presented clock; it is not a
+second codec-specific delay correction.
 
 This keeps start, duration and seek on one clock instead of maintaining a
 second Opus skip counter whose reset depends on a seek's landing timestamp.

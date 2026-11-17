@@ -25,7 +25,7 @@ Ownership follows lifetime rather than the visible panel tree:
 
 Layout management is desktop-local, not a Core IPC or CLI API. User controls,
 file syntax and Settings exclusion are in
-link:01_config.adoc#layout[Configuration and layout].
+link:05_layout.adoc#layout[Configuration and layout].
 
 Switching or duplicating replaces the active tree, cancels interactions,
 invalidates geometry and reconciles panel demand. Layouts hold structure and
@@ -68,7 +68,7 @@ compilation of GUI source modules inside the application crate.
 === Initial layouts
 
 The initial collection contains Default, Album and Visual, with Default active.
-Their composition is documented in link:01_config.adoc#layout[Configuration and layout]. Templates
+Their composition is documented in link:05_layout.adoc#layout[Configuration and layout]. Templates
 construct panel trees and instance-option slots only; normal initialization
 supplies missing artwork/visualizer defaults from configuration. They have no
 special runtime identity, update or deletion policy. Additional layouts duplicate
@@ -256,7 +256,7 @@ At the supported minimum window size (760 by 480), especially at interface scale
 2, not every list and plot can be useful simultaneously. Playback keeps vertical
 scrolling and horizontal scrolling for its controls so transport, seek and volume
 remain reachable. User adjustments are documented in
-link:01_config.adoc#layout[Configuration and layout]; resizing or scaling never
+link:05_layout.adoc#layout[Configuration and layout]; resizing or scaling never
 rewrites saved proportions.
 
 The separator minima in <<dragging-and-snapping>> constrain adjacent regions,
@@ -409,7 +409,7 @@ pins its target. Failure or cancellation settles that input, never a newer one,
 and does not choose a Details target. The metadata owner synchronizes follow
 identity directly from playback snapshots and when explicit selection is cleared;
 read completions update availability, not target identity. User-facing behavior is
-described in link:02_library.adoc#_inline_track_details_edits[Inline Track details edits].
+described in link:02_library.adoc#inline-track-details-edits[Inline Track details edits].
 
 Settings root-removal controls retain the configured path and edit session, not
 the rendered vector index. Hidden or reopened Settings cannot accept that old
@@ -433,15 +433,12 @@ effects, ordered scene filters and procedural water execution are maintained in
 https://github.com/rtgiskard/gpui-wgpu[gpui-wgpu]; both patched crates use the same
 revision pinned in the workspace manifest. Rivu does not carry a renderer copy.
 
-The footer application menu provides Settings, Layouts and Textures entries plus
-a checked Visualizations switch for immediate enablement. Textures opens
-the same live selector and adjustment panel from the application menu or Settings
-→ Interface, beside Theme. Language occupies the first Interface row. Closing
-Textures returns to its entry point: the workspace for the application menu, or
-the existing Settings draft without applying, discarding or resetting it. Clicking
-the menu's texture status switch enables or disables effects immediately without
-opening the card; clicking the menu item body or the Settings entry opens the card
-without toggling effects.
+Textures is a live editor outside the Settings transaction: opening or closing it
+preserves the existing Settings draft, and material edits neither Apply nor
+Discard that draft. Core owns the saved material configuration; the GUI owns its
+presentation and renderer resources. User entry points, switches, persistence,
+Reset behavior and TOML parameters are documented in
+link:01_config.adoc#desktop-settings[Appearance and library display].
 The twenty-six studies are grouped as follows, without changing their rendering
 compositions:
 
@@ -481,20 +478,11 @@ strength, color levels, water displacement, wave strength, water highlight, cove
 blur, backdrop blur, list edge fade, cover transition and motion speed. These are
 adjustments to a predefined composition, not arbitrary effect stacking.
 
-Without saved preferences, effects are disabled with Satin glass selected, ready
-to enable. The header's texture-effects switch is independent of that selection:
-turning it off renders the unmodified interface without changing the selected
-material or its edited parameters. While effects are off, preset selection,
-adjustments, Experimental expansion and Reset are read-only; the effects switch
-and outside dismissal remain available. Turning effects back on restores the selected composition.
-
-The enable state, selection and per-preset parameters are saved through Core's
-configuration authority. Switching away and back restores each preset's edits;
-closing the card or restarting the desktop does not reset saved preferences.
-Reset selected preset restores only that preset's defaults. Material edits take
-effect immediately and save automatically, independently of the Settings draft.
-They do not change semantic theme colors, playback, queue state or saved-layout
-syntax. Menus and dialogs retain opaque elevated surfaces and input barriers.
+Material enablement, selection and per-preset parameters belong to Core's
+configuration authority, independently of layout-local state and the Settings
+draft. The renderer consumes the accepted preferences without changing semantic
+theme colors, playback, queue state or saved-layout syntax. Menus and dialogs
+retain opaque elevated surfaces and input barriers.
 
 Rows, tabs, buttons and scroll-edge fades share the host's surface policy:
 materials scale background opacity by 0.2 without changing semantic colors,
@@ -695,7 +683,6 @@ or unbounded caches are added, but covered pixels still incur shader work: no
 measured performance improvement is claimed. Unsupported native backends reject
 procedural water rather than substituting artwork.
 
-
 == GUI composition boundaries
 
 GPUI remains the rendering and input framework. Library, Queue, Playlists,
@@ -709,8 +696,7 @@ link:22_cache.adoc#query-projection-retention[Query projection retention].
 Audio processing configuration and jobs belong to Core, not the docking tree.
 Hiding its panel does not disable EQ or cancel work; geometry changes cancel
 pointer gestures without discarding numerical drafts. Its UI and execution
-contract are in link:27_audio_processing.adoc[Audio processing].
-
+contract are in link:26_audio_processing.adoc[Audio processing].
 
 === Feature state and commits
 
@@ -829,7 +815,6 @@ visualization frames do not rebuild their unchanged element trees. Artwork sourc
 and option changes invalidate their consumers; rotation frames invalidate only
 visible rotating instances. Animated source images still update every visible
 Artwork consumer, including instances whose rotation mode is static.
-
 
 [[reusable-gpui-controls]]
 === Reusable GPUI controls
@@ -983,5 +968,4 @@ independent of interface scale, and the page scrolls at larger sizes.
 Playback seek/volume drag transactions and Settings validation remain application
 responsibilities; the package does not provide an automatic form submission,
 query-retry, global overlay or slider-session framework.
-
 

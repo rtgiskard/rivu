@@ -1,0 +1,219 @@
+= Getting started
+:toc:
+:toclevels: 2
+
+Rivu plays local files on Linux. The desktop requires Wayland; audio output
+requires a running PipeWire 1.2 or newer server. Choose an installation method
+below, then follow First use. GUI, TUI and CLI share one playback Core.
+
+== First use
+
+. Install Rivu using the <<build-and-install,instructions below>>.
+. Run `rivu gui` to open the desktop UI; `rivu` alone prints help.
+. Add a music directory with the Library `+` button, then hover its row and use
+  the scan button to import tracks. Scanning is explicit: adding a directory or
+  starting Rivu does not scan it automatically.
+. Browse Library or Albums and double-click a track to play it.
+
+Alternatively, drag files into Queue to append them without configuring a folder
+or starting playback. They are registered under link:02_library.adoc#other[Other].
+See link:02_library.adoc#roots-and-scanning[Library] for configured roots
+(`library.roots`), scanning and absolute-path requirements.
+
+=== Other interfaces and shutdown
+
+[cols="1,2",options="header"]
+|===
+|Action |Command or behavior
+|Open GUI / TUI
+|`rivu gui` / `rivu tui`; connect to the core or start it automatically
+|Run headless
+|`rivu serve`; keep the core in the foreground without a frontend
+|Close the desktop
+|Playback continues; `rivu gui` reopens it
+|Stop the instance
+|`rivu quit` or Quit application; closes connected interfaces and desktop integrations
+|===
+
+One core runs per data directory; clients must share `--data-dir`. `--config`
+selects configuration at core startup. Restart the core after upgrading and use
+matching client binaries.
+
+`rivu gui PATH...` and `rivu serve PATH...` request scans within configured roots,
+not new roots; the GUI also accepts paths when raising an existing window.
+Ctrl-C/SIGTERM stop only the receiving process. See
+link:04_playback.adoc[Playback and desktop integration] for details.
+
+[[files-and-data-directories]]
+== Files and data directories
+
+Library, queue, and playlist edits change Rivu's records, not source files;
+audio processing writes separate outputs. The explicit offline
+link:02_library.adoc#source-file-tags[`library tags` command] can read source
+tags or normalize and write selected fields without an original-file backup.
+
+[cols="1,2",options="header"]
+|===
+|Location |Contents
+|`~/.config/rivu/config.toml`
+|Default configuration
+|`~/.local/share/rivu/`
+|Typical Linux data directory: `library.db`, `layout.json`, `artwork/`, optional `logs/` and prepared `neural/` bundles
+|`--data-dir DIR`
+|Override the data directory; config also becomes `DIR/config.toml` unless `--config` is supplied
+|===
+
+Saved state survives client shutdown; see
+link:01_config.adoc#saving-configuration[configuration saving] and
+link:04_playback.adoc#queue[queue restoration]. Stop Rivu before
+link:02_library.adoc#sqlite-maintenance[database maintenance].
+
+Keep `rivu-migrate` alongside `rivu` for
+link:10_upgrading.adoc#application-invocation[automatic startup migration].
+Unsupported formats or migration failure stop startup without resetting data.
+
+[[build-and-install]]
+== Build and install
+
+=== Prebuilt Linux x86_64 binaries
+
+Download `rivu-linux-x86_64.tar.zst` and its SHA-256 checksum from
+https://github.com/rtgiskard/rivu/releases[GitHub Releases].
+Built on Arch Linux, these binaries require an *x86-64-v3-capable CPU*
+and matching shared libraries. The archive's `build-info.txt` records the build
+environment and shared-library dependencies.
+
+Verify and extract with GNU tar and zstd:
+
+[source,sh]
+----
+sha256sum --check rivu-linux-x86_64.tar.zst.sha256
+tar --zstd -xf rivu-linux-x86_64.tar.zst
+----
+
+Run `rivu-linux-x86_64/bin/rivu` directly from the extracted tree, or install
+both executables from `bin/` into a directory on `PATH` and the complete `share/`
+tree under the same prefix. `share/` contains desktop integration and the tools
+required by `rivu processing setup`.
+
+<<ffmpeg-and-native-only-builds,FFmpeg support>> is included;
+install a Nerd Font as described under <<font-embedding,Font embedding>>.
+
+=== Arch Linux package
+
+Install the `rivu-git` AUR package with paru:
+
+[source,sh]
+----
+paru -S rivu-git
+----
+
+=== Build from source
+
+From the repository root, on Arch Linux:
+
+[source,sh]
+----
+sudo pacman -S --needed rustup make cmake gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
+rustup show
+make install PREFIX="$HOME/.local"
+----
+
+Keep `Cargo.lock`; rustup selects the toolchain pinned in `rust-toolchain.toml`.
+The distribution `rust` package is an alternative if it matches that version.
+Ensure `~/.local/bin` is on `PATH`.
+
+[cols="1,2",options="header"]
+|===
+|Command |Result
+|`make build`
+|Build the release workspace without installing
+|`make install PREFIX="$HOME/.local"`
+|Build and install both executables, desktop files and audio-processing tools
+|`make install-only PREFIX=/usr DESTDIR="$pkgdir"`
+|Install existing release artifacts without rebuilding; suitable for packaging and custom features
+|`make package`
+|Create `.cache/dist/rivu-linux-<host-architecture>.tar.zst` and its SHA-256 checksum; requires GNU tar and zstd
+|===
+
+Artifacts use `.cache/target/`; override with `CARGO_TARGET_DIR`.
+Local builds use the compiler's default CPU target and prefer `mold` when installed.
+
+Default features: `gui`, `tui`, `ffmpeg`, `onnx`; font embedding is off.
+Build variants and optional runtime dependencies are described below.
+
+=== Frontend selection
+
+Select `gui` and `tui` independently; both share the core over IPC.
+Omitting `gui` removes the GPUI and Wayland requirements.
+
+[source,sh]
+----
+# Native service and control commands, without either frontend
+cargo build --locked -p rivu --release --no-default-features
+# Native TUI and service, without graphical dependencies
+cargo build --locked -p rivu --release --no-default-features --features tui
+----
+
+Add `ffmpeg` or `onnx` as needed. Disabled frontend commands are absent from help.
+`-p rivu` builds only the application and selected dependencies; `--workspace`
+also builds independent frontend packages. See
+link:20_architecture.adoc#consumer-and-application-lifetimes[frontend lifetimes].
+
+[[ffmpeg-and-native-only-builds]]
+=== FFmpeg and native-only builds
+
+Enabled by default; requires `libclang` and FFmpeg headers (`libavutil` 61.x,
+`libavcodec` 63.x, `libavformat` 63.x, `libswresample` 7.x). Supported targets:
+little-endian x86-64 and aarch64 Linux; cross-compiling is unsupported.
+
+Enable at runtime with `playback.ffmpeg_enabled = true`. Libraries load on demand;
+native decoding works without them. See
+link:04_playback.adoc#optional-ffmpeg-decoder[decoder behavior and runtime dependencies].
+Encoded audio export explicitly loads its required libraries independently of
+the decoding preference. flac uses FFmpeg's native encoder; opus and mp3 require
+its `libopus` and `libmp3lame` encoders. wav writing remains native. See
+link:07_audio_processing.adoc#encoded-export[Encoded export] for format and
+conversion boundaries; the `ffmpeg` command-line executable is not required.
+
+To build without FFmpeg support, omit the FFmpeg package and disable default features:
+
+[source,sh]
+----
+cargo build --locked --workspace --release --no-default-features --features gui,tui
+----
+
+Install custom-feature builds with `make install-only PREFIX="$HOME/.local"`.
+Do not use `make install`: it rebuilds with default features.
+
+=== Neural audio processing
+
+Speech enhancement and vocal separation require prepared local models.
+Preparation needs Python 3; automatic Python-environment installation also needs
+`uv`. Native speech inference requires ONNX Runtime installed separately.
+
+[source,sh]
+----
+rivu processing setup gtcrn --download
+rivu processing setup separate --download
+----
+
+Setup runs without Core. Add `--activate` to select the prepared model through a
+running Core; it does not start inference. Nothing is downloaded during playback.
+See link:07_audio_processing.adoc#explicit-neural-installation-and-offline-deployment[backend selection, local weights and deployment].
+
+[[font-embedding]]
+=== Font embedding
+
+Off by default. Install Symbols Nerd Font Mono on the GUI host
+(`sudo pacman -S --needed ttf-nerd-fonts-symbols-mono` on Arch), or embed a build-host font:
+
+[source,sh]
+----
+cargo build --locked --release --features embed-nerd-font
+----
+
+Embedding requires `fc-list` and an installed Nerd Font; missing fonts fail the
+build, never trigger a download. After changing the host font, run
+`cargo clean -p rivu-gui` before rebuilding. Include its license when distributing
+an embedded font. TUI glyphs always come from the displaying terminal.

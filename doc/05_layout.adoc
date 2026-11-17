@@ -1,0 +1,175 @@
+= Desktop layout and panels
+:toc:
+:toclevels: 2
+
+Use this guide to manage panel layouts and edit their `layout.json` representation.
+Application-wide defaults and configuration saving are covered in
+link:01_config.adoc#saving-configuration[Configuration and settings]; layout
+geometry, ownership and persistence design are in link:24_layout.adoc[Desktop Layout Design].
+
+[[layout]]
+== Layout
+
+`layout.json` in the data directory stores named panel trees, sizes, tabs and
+instance preferences, plus the selected layout. Locks are window-local; each
+newly opened window starts locked. Layouts do not contain separate browsing or
+editing sessions. Switching keeps playback, queue, global settings, window
+placement and accepted Track details saves; inline text cancels on blur.
+
+Open `Menu > Layouts` to switch, duplicate, rename or delete layouts. Names must
+be nonempty and unique after trimming. To delete the active layout, switch first;
+at least one layout must remain. Hover a row or Tab to its Delete button to reveal
+the action. Finish or discard Settings edits before switching; Escape closes
+the manager. `Default` sorts first when present, followed by names in name order.
+
+Without a saved collection, Rivu supplies editable `Default`, `Album` and `Visual`
+templates. Default combines browsing, Queue, Track details, cover art, Spectrum
+and playback controls; Album emphasizes albums and artwork, Visual the audio
+visualizations. Duplicate the active layout to create another. Renamed or deleted
+templates are not restored on restart.
+
+For the immediate state, write triggers and window-close behavior of layouts,
+configuration and queues, see the
+link:01_config.adoc#persistence-responsibilities[persistence responsibility table].
+Use Sync layouts to file beside Rename to persist the collection explicitly.
+
+Sync cancels drag/resize previews and captures the current collection; later edits
+require another sync. Progress and completion appear in the manager. Failure
+preserves the file and session edits and appears there or, after closing it, in
+the footer. Press Sync to retry; ordinary edits do not retry.
+
+Sync and orderly desktop exit skip unchanged valid content and initialize a missing
+file. If an existing file cannot load, Rivu reports the error and uses defaults,
+preserving the failed input until explicit Sync authorizes replacement. Exit the
+desktop before external file edits: layouts load once per desktop session and
+saves do not merge outside changes.
+
+Unlock with the bottom-right layout button's context menu to add, remove, move,
+resize or reorder panels. Left-click opens the catalog: drag an item onto the
+workspace, including an empty workspace, to add it. Clicks and keyboard activation
+do not insert panels. Playback, tab selection, layout management and the panel
+context menu's tab-bar toggle remain available while locked; separators are inert.
+
+Drag a panel to an edge to split its region, its center to merge tabs, or a visible
+tab bar to reorder/transfer tabs; the unused tail appends. The shaded preview marks
+the committed destination. An invalid drop or `Cannot dock here` leaves the tree
+unchanged. Escape, deactivation, menus/dialogs or locking cancel a panel drag;
+after resize or scale changes, wait for a fresh preview before dropping.
+
+Separator drags resize their two neighboring regions; removing a region gives its
+space to a neighbor without changing other sizes. Escape, deactivation, resize
+or scale changes cancel a separator drag and restore its starting proportions.
+Queue-entry drags never dock panels.
+
+Snapping aligns separators with other separators, equal pane sizes or the configured
+grid while respecting minimum sizes. Hold Alt to invert snapping for that gesture.
+Layouts permit at most 32 splits along a path; tab groups do not count, and there
+is no sibling/tab-count limit. A drop exceeding the depth limit changes nothing.
+
+Layout input must be a regular file; FIFOs, including symlink targets, are rejected
+without waiting. Invalid names and operations leave the UI unchanged. Geometry,
+persistence and editing invariants are in link:24_layout.adoc[Desktop Layout Design].
+
+The footer reports application errors, with Copy for full text and Dismiss for
+errors; media-task progress stays in its Library, Queue or Playlists panel.
+Drag empty footer space with the left button to move the window; text and controls
+do not start a move. Open menus or dialogs disable footer dragging.
+
+[[layout-file]]
+=== Layout file
+
+`active` names an entry in the nonempty `layouts` object. Each entry requires
+`root`; `null` means an empty layout.
+
+[source,json]
+----
+{
+  "active": "Work",
+  "layouts": {
+    "Work": {
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "children": [
+          {"type": "tabs", "panels": [{"kind": "library"}]},
+          {"type": "tabs", "panels": [{"kind": "queue"}]},
+          {"type": "tabs", "panels": [{"kind": "audio_visualizer", "style": "waveform", "reference_lines": false, "labels": false}]}
+        ]
+      }
+    }
+  }
+}
+----
+
+`horizontal` orders children left to right; `vertical` orders them top to bottom.
+Children are direct node objects, not wrappers. An omitted or empty `boundaries`
+array divides the content equally, as in the example. To give the first pane
+half the content and each remaining pane a quarter, add
+`"boundaries": [0.5, 0.75]` beside `children`. Explicit boundaries must contain
+exactly one fewer value than children, all finite, strictly increasing, and
+strictly between `0` and `1`. They are cumulative fractions of pane content
+length, excluding separator gutters, not weights or fractions of adjacent panes.
+Splits require at least two children and cannot directly contain a split in the
+same direction. At most 32 splits may occur along any root-to-leaf path; tabs
+do not count toward this limit.
+
+`tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
+index, defaulting to `0`. Panel objects require `kind`; `show_tab_bar` defaults to
+`true`. Audio Visualizer objects additionally store `style`, `reference_lines`,
+and `labels` directly in the panel object. These three fields must be supplied
+together or omitted together; omission initializes the instance from global
+defaults when that layout is opened. The optional `oscilloscope_overlay_channels`
+boolean selects Overlay channels; when the three fields are supplied but this flag
+is absent, it defaults to `false` (separate channels). Initialized panels save
+all four choices explicitly. The mode flag requires the three visualizer fields
+and is valid only on `audio_visualizer` panels. Unknown fields, invalid structures,
+and out-of-range indices are errors.
+
+The catalog's `kind` values are `transport` (Playback), `library`, `albums`,
+`queue`, `playlists`, `history` (Recent tracks), `metadata` (Track details),
+`artwork`, `audio_visualizer` (Visualization), and `audio_processing`.
+Spectrum, Spectrogram, and Waveform are styles of `audio_visualizer`, not separate
+panel kinds. Unknown kind strings are retained and show an unknown-panel message;
+they do not create a custom panel implementation.
+
+An Artwork panel can additionally contain an `artwork` object with
+all four keys: `style`, `mode`, `period_seconds`, and `direction`. For example:
+
+[source,json]
+----
+{"kind": "artwork", "show_tab_bar": false, "artwork": {
+  "style": "halo", "mode": "rotating", "period_seconds": 20.0,
+  "direction": "clockwise"
+}}
+----
+
+The values use the same enums and positive finite period as
+link:01_config.adoc#artwork[Artwork]. Omit the whole object to initialize from global
+defaults when that layout is opened; partial objects and `null` are invalid.
+The object belongs only to `artwork` panels, just as the visualizer options
+belong only to `audio_visualizer` panels. Animation FPS remains global.
+
+[[artwork-panel]]
+== Artwork panel
+
+The *Artwork* panel follows the current playback track, independently of
+Library selection and Track details. Add it from the panel catalog; it is also
+included in the built-in *Default* layout.
+
+See link:01_config.adoc#artwork[Artwork configuration] for defaults, per-panel
+controls, animation parameters and the shared frame-rate cap, and
+link:05_layout.adoc#layout[Layout persistence] for saving instance choices.
+
+For pause, visibility and visualization-enablement effects, see the
+link:06_visualizations.adoc#visualization-behavior[visualization behavior matrix].
+Artwork has two independent clocks: rotation follows playback while visible,
+whereas animated source covers can continue while paused or Static. Pausing or
+hiding retains the rotation angle without advancing hidden time; stopping,
+changing tracks, or choosing Static resets the cover upright. Hiding stops both
+animation types; rotation resumes without catching up on suspended time. Both use
+the shared frame-rate cap, with lower caps skipping source frames without slowing
+their timeline.
+Missing artwork uses the generated default cover. Panels share cover loading but
+retain independent rotation and source-animation state. Track details keeps its
+full, static preview.
+

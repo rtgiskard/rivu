@@ -8,119 +8,11 @@ External clients need <<transport-and-frame-format,framing>>,
 State, query results and task identities belong to one running instance;
 client timeout or disconnection does not roll back an accepted mutation.
 
-[[core-and-client-boundary]]
-== Core and client boundary
-
-One Core owns library storage, queue mutations, configuration, and playback
-coordination for a data directory. Frontends submit commands and query projections
-rather than maintaining independent authoritative library or playback state.
-Audio output and analysis have their own workers; transport and rendering stay
-outside the audio callback.
-
-Within Core, the playback-session owner keeps occurrence intent, navigation,
-source generations, listening retirement and unsaved selection together. A Load
-already accepted by audio is not undone when saving the selection fails; later
-database projections cannot overwrite that pending selection.
-Runtime preferences keep low-frequency settings, small live controls and the
-last successful save baseline separate. Volume, shuffle, repeat and device
-selection do not copy the processing graph. Apply and persistence materialize a
-complete configuration at the owner boundary; published configuration and
-playback sections are observations, not alternate preference writers.
-
-The root Rust crate is an application library for its own executable, not a
-stable embedding SDK. Storage transactions, mutable analysis publication, and
-frontend implementation modules are crate-internal capabilities. External
-clients use the protocol rather than bypassing Core validation through storage.
-
-`rivu-protocol` defines commands, queries, snapshots, positional wire schemas, and
-bounded transport. `rivu-client` provides synchronous sessions, instance binding,
-cancellation, typed task waiting, command-failure evidence, and one-shot helpers.
-External Rust clients use these crates rather than the root application crate.
-Their standalone dependency graph requires no GPUI, audio execution, PipeWire,
-SQLite, or FFT execution, although Cargo feature unification can enable database
-or DSP execution in a combined build.
-
-The client drives I/O on its calling thread, so async callers must move it off
-their executor thread. Retained sessions reuse sockets and bounded framing storage.
-The GUI drives retained IPC sessions on bounded background workers and reads
-published local snapshots on its event-loop thread.
-
-Protocol codec and transport contracts are tested in `rivu-protocol`; client
-session, cancellation, and task-wait contracts are tested in `rivu-client`.
-Run these independently with `cargo test --locked -p rivu-protocol -p rivu-client`.
-Socket interactions involving App and Core remain in the root application's IPC
-integration tests rather than making the standalone crates depend on the host.
-
-[[consumer-and-application-lifetimes]]
-=== Consumer and application lifetimes
-
-`rivu-gui` owns the graphical event loop, windows, layout persistence, remote
-client workers and display analysis. The application launches Core and desktop
-as separate processes of the same executable. The GUI has no normal dependency
-on the root crate, audio execution or SQLite. Tray and MPRIS remain service-owned
-consumers of `CoreHandle`; desktop activation does not require a GPUI event loop
-in the service.
-
-Commands, queries, configuration mutations and Watch use instance-bound local
-IPC sessions. State getters read the GUI's published cache, never a socket.
-Configuration edits merge at Core against current owner state; the GUI does not
-write a stale whole-configuration snapshot. An uncertain mutation result is not
-automatically replayed, and an old desktop cannot silently attach to a replacement
-Core instance.
-
-High-rate audio uses a separate bounded shared-memory PCM window. Core owns
-capture and audio identity; `rivu-analysis` runs display DSP in the GUI background
-worker. The GUI folds native-channel blocks into reusable stereo scratch and
-validates each complete SHM read before analysis or waveform ingestion. The
-observed output cursor prevents far-ahead consumption; overwrites discard old
-realtime data without blocking playback. The GUI owns waveform summaries of the
-same admitted PCM; Core publishes no waveform statistics. Explicit previews use
-the finite PCM endpoint below.
-`rivu-presentation` supplies localization, keyboard semantics, theme mapping and
-shared images without GPUI, audio execution or database dependencies.
-
-The lifetime boundaries are:
-
-* `App` owns `TaskRuntime`, Core, IPC listeners and instance ownership, shutdown
-  signals, artwork, logging, optional tray and MPRIS. Ownership is retained
-  through physical worker and transport retirement.
-* Core owns authoritative state and accepted business operations. Desktop exit
-  does not cancel playback, scans, saves or accepted commands. Dismissing a
-  relocation review explicitly requests cancellation without undoing a commit.
-* The desktop owns GPUI and its window-local state, subscriptions and render
-  resources. Closing the last window exits that process. Reopening starts a new
-  desktop from current Core state; repeated open requests focus an existing one.
-  Late results cannot restore a closed view or a superseded source.
-
-The executable shares one Core bootstrap path between GUI and TUI. It first
-attempts a Hello; only an absent listener permits starting an independent `serve`
-process. An existing owner keeps its configuration even when a new frontend
-supplies another config path. Readiness requires a successful Hello, not merely
-a bound socket or a live child. The complete connection and Hello exchange share
-one 30-second startup deadline. A bound listener receives one waiting Hello;
-only absent-listener retries back off, from 10 ms to at most 500 ms.
-
-Automatically started Core processes detach from the terminal session and use
-at most 64 KiB of anonymous startup diagnostic storage. Successful initialization
-disconnects that sink; failures return the retained diagnostic to the launcher.
-Manual `serve` retains its normal stderr. GUI open requests coalesce during
-desktop startup under the original child and startup deadline. A failed startup
-is reported rather than automatically replayed; a later explicit open can retry.
-The service writes and flushes its readiness message to stdout. If either fails,
-startup returns an error after normal application teardown and exits unsuccessfully,
-including when a pipe reader has closed; it does not panic or retry the output.
-Explicit application shutdown stops the service and connected consumers; closing
-or killing only a frontend leaves the service alive. Accepted shutdown
-acknowledgements drain before transport retirement. Window/display resource release is described in
-link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
-
-The TUI restores terminal input and display state on normal exit, partial startup
-failure, and Rust panic unwinding. Cleanup failure is reported unless an earlier
-run error takes precedence; unwinding preserves the original panic. Process
-abort and uncatchable termination cannot restore the terminal.
+Runtime ownership and process lifetimes are described in
+link:20_architecture.adoc[Core and client architecture].
 
 [[realtime-pcm-transport]]
-==== Realtime PCM transport
+== Realtime PCM transport
 
 The PCM side channel binds to the command session's Core instance and verifies
 the local peer. Its shared-memory format version is defined by `VERSION` in
@@ -177,6 +69,8 @@ the window is not a lossless snapshot. Slow consumers resume from retained data
 rather than extending storage or reconstructing overwritten history.
 
 [[finite-pcm-rendering]]
+== Finite PCM rendering
+
 Finite PCM rendering uses an instance-bound endpoint independently of visualization
 enablement. Its version and address suffix are defined by `VERSION` and `address`
 in link:../crates/rivu-protocol/src/audio.rs[the finite PCM contract].
@@ -223,73 +117,6 @@ link:23_visuals.adoc#waveform[Waveform].
 Side-channel accept loops, realtime PCM control sessions and finite PCM forwarding
 yield cooperatively, including when buffered I/O completes without waiting.
 
-=== Owner execution and retirement
-
-Core applies state transitions on one persistent dedicated thread. Bounded
-channels carry requests and worker facts; replies and revision subscriptions
-wake consumers without polling. Notifications coalesce, so consumers read the
-current authoritative projection after a wakeup rather than replaying events.
-Subscriptions express their owner's interests. Tray and MPRIS management ignore
-irrelevant playback-clock updates; the MPRIS publisher still receives explicit
-seek, metadata and control changes required by its interface.
-
-Command execution returns an explicit outcome: immediate acknowledgement, an
-allocated task ID, or a deferred export/maintenance reply. Dispatch publishes the
-state transition and applies that outcome; it does not infer task identity from
-the current active-task slots. The task owner retains any deferred reply through
-completion or shutdown.
-
-Core serializes foreground SQLite writes with their revision transitions. Admitted
-background saves retain independent transaction evidence until Core accepts their
-completion; database commit and display-projection refresh are not one atomic
-operation. A separate query owner has a 64-entry work queue, reuses one read
-connection, and pins at most one SQLite snapshot, validated against captured
-Core revisions, per request. Its queue is independent of Core request admission.
-The
-publication fence and save gate prevent reads from pairing committed database
-changes with preceding state. Count reuse follows data-domain revisions;
-maintenance waits for physical snapshot retirement.
-
-Reads have owner-scoped cancellation and retain their physical lease through SQL
-exit and snapshot cleanup; see <<retained-read-cancellation,Retained reads and cancellation>>.
-Accepted commands have independent lifetimes.
-
-App explicitly supplies execution capabilities to Core and services, independently
-of the business `CoreHandle`. It retains `TaskRuntime` through Core, service and
-IPC retirement; the separate desktop owns its GPUI execution resources. File,
-probe and background transaction stages share at most four blocking slots;
-waiting for Core admission or replies holds none.
-`BlockingExecutor` bounds physical closures, not a private pool of threads. A
-closure keeps its slot after async cancellation. Shutdown joins started work
-before retiring execution: cancelling a waiter is neither worker retirement nor
-rollback.
-
-=== Projection and view costs
-
-State reads contain summaries, compact queue state, playback, runtime System state,
-and independently requested Configuration state; library rows are queried separately.
-In-process consumers can share immutable
-projections, whereas socket responses serialize them. Queue displays resolve
-metadata from bounded queue queries and their content revision, not unrelated
-library pages. TUI rendering visits visible queue rows while retaining global
-occurrence selection and scroll position. GUI page, selection-index, and worker
-retention are described in link:22_cache.adoc#window-local-query-retention[Resource lifecycles].
-This avoids both a second control implementation and a universal whole-library
-snapshot on every playback update.
-
-TUI page demand, selection recovery, and read planning are described in
-link:22_cache.adoc#terminal-projections[Terminal projections]. Cancelled reads
-retain their physical slot until the exchange retires.
-
-Local Processing snapshots share task metadata immutably; copy-on-write keeps
-older publications stable. Socket responses encode a task value. The TUI does
-not request Processing; its section and update semantics are defined in
-link:21_ipc.adoc#wire-schemas[Wire schemas].
-
-Startup and single-instance operation are documented in
-link:../readme.adoc[README]. Socket clients and Core must use compatible builds.
-
-
 == Sessions and protocol
 
 [[transport-and-frame-format]]
@@ -326,7 +153,6 @@ Monitor EQ `SavePreset` and `ImportPreset` carry an explicit positional `overwri
 boolean: false creates only, true replaces only an existing named preset.
 JSON commands may omit it for create-only behavior; positional wire encoding
 always carries it.
-
 
 Frame content is limited to 4 MiB for requests and 16 MiB for responses, including
 version/type but excluding the length prefix. The server admits 16 clients;
@@ -380,7 +206,7 @@ startup, but cannot impersonate the server to a client.
 
 Startup binds the listener before database, configuration-write or audio work;
 binding grants ownership through teardown and partial startup failure. The
-link:26_migration.adoc#application-invocation[automatic migration handoff] temporarily
+link:10_upgrading.adoc#application-invocation[automatic migration handoff] temporarily
 releases it to the tool, then reacquires and verifies before startup continues.
 The kernel releases the address when the last listener closes, including on
 process death; no stale-file cleanup is needed.
@@ -411,10 +237,8 @@ request connects and performs Hello; connection, handshake, instance binding
 and request failures remain distinct from construction.
 
 The Hello response contains a random nonzero `u32` instance ID encoded as four
-little-endian bytes. The ID is generated once per server start. Zero is reserved
-as the invalid instance ID. IDs are equality tokens for detecting server
-identity changes; they are not ordered identifiers, authentication credentials,
-or globally unique identifiers.
+little-endian bytes, generated once per server start. Zero is invalid. Its role
+and equality semantics are defined in <<identity-and-freshness,Identity and freshness>>.
 
 The GUI retains fatal connection failures independently of dismissible window
 notifications. After closing the window and retiring its IPC workers, it returns
@@ -530,7 +354,7 @@ Full `WireConfig` values are state observations, not writable command payloads.
 Graph and bypass changes require their dedicated commands. Even an empty Settings
 patch saves accepted live controls and revalidates output settings; see
 link:01_config.adoc#apply-and-validation[Apply and validation]. Client upgrade
-requirements are in link:26_migration.adoc#settings-protocol-cutover[migration].
+requirements are in link:10_upgrading.adoc#settings-protocol-cutover[migration].
 
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.
@@ -558,7 +382,7 @@ boundaries and the distinction between supply wait, EOF padding and underrun.
 The IPC protocol version is independent of on-disk configuration and database
 schema versions: `WireConfig` transports runtime settings, not a versioned TOML
 document. Disk version authority belongs to
-link:26_migration.adoc#version-authority[Database and configuration migration].
+link:27_migration.adoc#version-authority[Database and configuration migration].
 
 Processing task status distinguishes the task `id` from `graph_run_id`, the retained
 graph snapshot accepted by audition and export commands. Export receipts carry
@@ -621,7 +445,8 @@ a usable response.
 
 Core's command/request queue holds at most 64 operations. Admission allows two
 seconds, followed by twelve seconds for an ordinary reply or 120 seconds for
-database optimization. UI fire-and-forget sends fail with `Rivu is busy or stopped`
+`LoadSourceTags`, `SaveSourceTags`, and database optimization.
+UI fire-and-forget sends fail with `Rivu is busy or stopped`
 rather than blocking. IPC adds one second to the operation's waiting budget for
 the server bridge; it does not classify commands again. Local ShowWindow and
 Shutdown allow twelve seconds without Core queue admission. State and Hello read
@@ -642,7 +467,7 @@ second:
 |===
 |Request |Client response-wait limit
 |Ordinary Query, State, Hello and ordinary commands |21 seconds
-|Database optimization |129 seconds
+|LoadSourceTags, SaveSourceTags and database optimization |129 seconds
 |ShowWindow and Shutdown |19 seconds
 |QueryRetained, Watch and WaitTask |No response-wait deadline
 |===
@@ -698,6 +523,38 @@ commands. Per-read cancellation instead uses
 
 == Consistency
 
+[[identity-and-freshness]]
+=== Identity and freshness
+
+These identities answer different questions; none substitutes for the others.
+They are not one ordered version chain.
+
+[cols="1,2,3",options="header"]
+|===
+|Identity / token |Question it answers |Comparison and acceptance boundary
+|Hello instance ID
+|Does this reference belong to the same running service?
+|Equality only; not ordered, globally unique or an authentication credential.
+Restart requires a fresh Hello and state read; task IDs and retained results
+belong to that instance, not a persistent job database.
+|Core publication sequence: `SystemState.revision`, Ack `revision`
+|Has Core assembled a newer publication?
+|A wakeup/publication sequence, not query-data freshness. An Ack carries outcome
+and diagnostics, never replacement state. Distinct from the System section token.
+|State-section tokens: `StateRevisions`
+|Which requested state sections changed?
+|Equality per section. Advance a client's applied token only with the section
+payload actually received; omitted sections preserve previous values.
+|Query-data stamp: `Query::stamp`
+|Are this query's selected data dependencies still current?
+|Compare only dependencies selected by the query kind. An empty task-status stamp
+does not make status immutable: query that task again or use `WaitTask`.
+|Consumer request generation / intent
+|Does the owner still want this target and operation?
+|Owner-scoped admission rejects superseded or abandoned requests even when their
+data is fresh. Invalidating intent or a receipt does not release physical work.
+|===
+
 [[revisions-and-watching]]
 === Revisions and watching
 
@@ -708,21 +565,17 @@ A Watch request carries expected revisions and selected sections; only a changed
 selected section completes it. Its response contains the latest revisions rather
 than an event log.
 
-The `system` token in `StateRevisions` invalidates the System section. It is
-distinct from `SystemState.revision` and acknowledgement `revision`, which are
-the Core publication/wakeup sequence used to detect a newer assembled snapshot;
-neither token is a query-data freshness clock.
+The `system` token invalidates only the System section; its distinction from
+the Core publication sequence is defined in <<identity-and-freshness,the identity table>>.
 
 Clients initialize from an unconditional state read, watch for revision changes,
 then request State with their interests and applied revisions. The conditional
 read returns current changed sections directly, without a separate revision
 probe; a delayed Watch notification need not retransmit already applied payloads.
-Omitted sections preserve the client's previous values; the client advances
-tokens only for sections actually read, otherwise it could acknowledge an unseen
-change. Notifications coalesce to the latest state. A server restart requires
-a fresh Hello and state read.
-`ObservedState` binds its private payload and applied tokens to one instance.
-Its single apply operation advances only sections actually present in the response.
+Clients apply the section/token pairing rules in <<identity-and-freshness,the
+identity table>>. Notifications coalesce to the latest state. `ObservedState`
+binds its private payload and applied tokens to one instance and advances them
+in one apply operation.
 GUI reads and merges are serialized together: a late Watch notification causes
 a conditional read under that same ordering boundary, not a merge of old payload.
 
@@ -822,8 +675,8 @@ next request; disconnect or server shutdown terminates the wait.
 Query responses contain the requested projection and its data revisions, not a
 full client state or queue snapshot. Core captures collection tokens with each
 serialized query; the save gate prevents reads before background commit facts
-have been applied. Publication sequence, state-section tokens, query-data tokens,
-and consumer request generations have distinct responsibilities.
+have been applied. See <<identity-and-freshness,Identity and freshness>> for the
+distinct roles of publication, section, query and consumer tokens.
 
 `Query::stamp` selects query-dependent freshness for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
@@ -852,12 +705,10 @@ Revision zero is a valid equality token, never an indicator of query kind.
 The classification does not own cached rows, selection, cancellation policy or
 physical execution slots; consumers apply it to their own state transitions.
 
-Task-status queries select no query-data revision domains. Their empty stamp does
-not make status immutable: query the exact task again or use `WaitTask` for its
-terminal result. For presentation updates, subscribe to System for scan and
-relocation status; Processing subscriptions follow
-link:21_ipc.adoc#wire-schemas[Wire schemas]. Task IDs and retained results belong
-to the running instance, not a persistent job database.
+Task-status queries select no query-data revision domains; their mutable status
+follows <<identity-and-freshness,the empty-stamp rule>>. For presentation updates,
+subscribe to System for scan and relocation status; Processing subscriptions
+follow <<wire-schemas,Wire schemas>>.
 
 Track and playlist metadata scopes share an index of at most 256 entries. Commits
 identify affected display metadata transactionally; decoder hints and playback
@@ -898,9 +749,8 @@ attach `revisions.playlist_entries = {playlist_id, revision}` when the collectio
 exists. Missing scoped collections attach no token and fail the query. Successful
 standalone single-entry lookups attach the discovered scope; missing lookups have
 none, so selection relocation uses the explicitly scoped locations query.
-Consumer generations independently reject abandoned identity/intent submissions;
-fresh data cannot authorize an obsolete operation. Acknowledgements carry outcome
-and diagnostic information plus publication revision, never replacement state.
+Consumer generations and acknowledgements follow
+<<identity-and-freshness,the independent intent and publication rules>>.
 
 GUI directory reads and playing-occurrence lookups retain tracker-issued receipts
 for query identity and freshness rather than a second owner query and stamp.
@@ -1187,10 +1037,12 @@ must not collect paged track IDs to perform album actions.
 `TransferCollection {source, destination}` copies a version-pinned Album or Playlist
 without client-side page collection. Album sources carry their key and `album`
 revision; Playlist sources carry ID and content/lifetime token. Queue destinations
-carry insertion index and queue revision; Playlist destinations carry ID, entry
-token, and optional index (omitted means append). Core validates both sides before
-the transaction resolves and inserts members. Staleness rejects the whole operation.
-Every occurrence and its order survive, including repeated tracks; later edits to
+may omit `insertion` to append atomically at the execution-time end. A specified
+insertion carries an index and queue revision, which Core validates. Playlist
+destinations carry ID, entry token, and optional index (omitted means append).
+Core validates source and applicable destination tokens before the transaction
+resolves and inserts members; staleness rejects the whole operation. Every
+occurrence and its order survive, including repeated tracks; later edits to
 either collection are independent.
 
 Album drag gestures capture the source revision when the drag begins, just as
@@ -1232,25 +1084,18 @@ whole-file identities; failed sheets grant no exemption. See
 link:02_library.adoc#minimum-duration-for-new-tracks[Library].
 
 Metadata reuse requires the current probe version, independently of schema or
-protocol versions; mismatch reprobes without invalidating fingerprints. Preparation
-is bounded to 32 sources or CUE sheets per batch. Admitted source descriptors stay
-open across one indexed metadata lookup for the batch; waiting for Core holds no
-blocking slot. Each blocking turn performs at most 32 probe/read steps, hashing
-at most 4 MiB through a reusable 128 KiB buffer before yielding. A probe already
-in progress is not interruptible.
-Ordinary identities can reuse full-source metadata; CUE identities can reuse
-fingerprints and preparation across shared sources within configured roots.
-Force bypasses reuse. Cancellation and task identity are checked around lookup
-and blocking work, so stale tasks cannot commit for a replacement.
+protocol versions; mismatch reprobes without invalidating fingerprints. Force
+bypasses reuse. Cancellation and task identity are checked around lookup and
+blocking work, so stale tasks cannot commit for a replacement. Preparation batches,
+hashing work bounds and shared-source reuse are described in
+link:20_architecture.adoc#storage-and-preparation-work[Storage and preparation work].
 
 Relocation matching uses fingerprint and CUE segment identity. Exact identity wins;
 multiple compatible candidates remain ambiguous, and only a confirmed missing
 source permits relocation. Incomplete scans disable relocation and missing
 detection. Fingerprints are validated before commit.
-Scan selection keeps only outermost descendant ranges and exact owners not
-already covered by those ranges. Coverage respects path-component boundaries;
-explicit files and CUE owners outside the ranges remain exact selections.
-This reduces query inputs without changing missing or uncertainty protection.
+Coverage respects path-component boundaries; explicit files and CUE owners outside
+directory ranges remain exact selections.
 
 `CheckOtherTracks {force}` checks only registered sources outside current roots,
 or all registered sources with no roots. It does not discover, relocate, or delete
@@ -1327,37 +1172,23 @@ retries an incomplete recovery. Existing playback Pause and Stop do not require
 queue recovery. External admission repeats the readiness and insertion-baseline
 check before authorizing Saving, since preparation can outlive queue changes.
 
-Count-only pages omit row projection; queue/playlist totals do not join metadata.
-Unfiltered entry pages seek contiguous positions, and playlist totals use the
-indexed maximum position. Filtered random-access pages count and skip matches in
-SQL before projecting rows. Sequential filtered batches instead retain matching
-rank plus the original occurrence keyset and a fixed-size query/revision scope.
-Core supplies the stamp in serialized dispatch and Store rejects foreign scopes
-before reading, even without `expected`. One matching lookahead decides whether
-to continue. A stable traversal searches each interval at most twice plus indexed
-keyset seeks, rather than recounting every preceding prefix. No retained SQLite
-snapshot, per-client map, or full-list cache is introduced.
+Count-only pages omit row projection. Sequential filtered batches carry matching
+rank, occurrence keyset and a fixed-size query/revision scope. Core supplies the
+stamp in serialized dispatch and Store rejects foreign scopes before reading,
+even without `expected`. A matching lookahead determines continuation. Batches
+retain no cross-request SQLite snapshot, per-client map or full-list cache;
+clients still honor limits and revision/continuation validation.
 
-Directory/root queries use indexed, case-sensitive component ranges, preserving
-literal path characters and Unicode. Storage enforces one ordinary whole-file
-identity per path while allowing CUE segments to share their source. Equivalent
-root ranges are counted once and expanded to the requested order, bounded by
-256 roots.
+Directory/root queries are case-sensitive and preserve literal path characters
+and Unicode. Storage enforces one ordinary whole-file identity per path while
+allowing CUE segments to share their source. Equivalent root ranges are counted
+once and expanded to the requested order, bounded by 256 roots. Empty and
+out-of-range directory pages still report exact totals.
 
-Directory pages count and select children before projecting track payloads.
-Temporary work scales with matching children; count-only requests omit it, and
-empty/out-of-range pages still report exact totals. OFFSET traversal retains its
-preceding-match cost. Count retention is described under
+SQL projections, indexed lookup costs and bounded preparation are described in
+link:20_architecture.adoc#storage-and-preparation-work[Storage and preparation work];
+count retention is described in
 link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
-
-Album summaries and artist counts are persistent SQLite projections maintained
-in the same transaction as track changes. Unchanged effective metadata does no
-summary work. Indexed membership avoids rescanning an album per changed member;
-substring search and OFFSET still scale with matching summaries. Reverse-reference
-indexes keep sparse library deletion scoped to affected queue/playlist entries.
-These indexes trade storage and write maintenance for scoped lookup work.
-Database format validation is described in
-link:26_migration.adoc#version-authority[Database and configuration migration].
 
 === Background commits and maintenance
 
@@ -1462,32 +1293,13 @@ including loads initiated by waveform work. Success or failure publishes runtime
 availability without starting a load or periodically polling. Disabled and
 native-only builds have no FFmpeg status polling wakeups.
 
-=== Application services
-
-App owns and joins MPRIS, tray, and logging services independently of windows.
-MPRIS registration is asynchronous and cancellable; failures wait for a later
-off/on transition, not a retry timer. Teardown removes interfaces, allows up to
-one second for active replies and a separate second for connection close, then
-joins the publisher. Synchronous artwork work still has to finish. Metadata
-signals reflect exposed-value changes, not ordinary clock or unrelated queue updates.
-
-Tray registration reconciles current publication state independently of bus setup.
-Unchanged menus retain their revision; shutdown cancels bus work and closes under
-a bounded deadline rather than waiting indefinitely for peers.
-
-App owns the process's single active logging session and writer lifetime; Core
-controls settings. A new session may start after the previous one finishes
-shutting down. The permanent subscriber uses a reloadable file layer for level
-and writer changes. A new writer is prepared before configuration persistence;
-only save success publishes the new output and level. File-count limits apply
-when constructing an appender, so changes take effect on the next enable or host
-restart. Native pruning during preparation is not rolled back after a failed
-save. Producers retire before file output is flushed, outside GUI callbacks, and
-session shutdown waits for the file writer to close.
-Standalone Core runtimes install no process subscriber. Processing shutdown closes
-event admission, joins workers, and drains unpublished outputs; retained auditions
-last until service retirement. See
-link:22_cache.adoc#processing-output-retention[Processing output retention].
+Application service ownership, MPRIS/tray teardown, logging publication and writer
+retirement are described in
+link:20_architecture.adoc#application-service-retirement[Application service retirement].
+Service teardown follows shutdown acceptance; it does not strengthen the Ack into
+proof of completed stop, persistence or physical retirement. Accepted shutdown
+acknowledgements drain under the response-write deadline described in
+<<request-failures-and-completion,Request failures and completion>>.
 
 === Audio processing commands
 
@@ -1523,7 +1335,7 @@ or deleting results. Cancelling bypass revalidates the session's retained select
 before restoring its route. `processing_audition` describes actual audition;
 `processing_selection` describes the independently retained resume target.
 Neither late completion nor effect parameter edits may clear master bypass. See
-link:27_audio_processing.adoc#playback-bypass[Playback bypass] for desktop/CLI use.
+link:07_audio_processing.adoc#playback-bypass[Playback bypass] for desktop/CLI use.
 
 `StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
 `separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
@@ -1548,7 +1360,7 @@ can have a failed operation receipt while its valid outputs remain available.
 identify their ports and optional causal `start_frame` context; PCM remains owned
 by the service and is never serialized into status. Only an explicit export
 receipt carries a published output path. See
-link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing] for
+link:07_audio_processing.adoc#tasks-retention-and-audition[Audio processing] for
 CLI equivalents, terminal states, provisioning, PCM ownership and audition lifetime.
 
 ==== Immutable audio graph runs
@@ -1572,7 +1384,7 @@ deadline guarantee.
 Preparation runs on the processing worker, not Core or the device callback.
 Realtime tasks are `complete` when live-ready, without retained PCM; a nonplaying
 source opens paused/live-ready and cannot replace newer playback intent. Planning
-and execution algorithms belong to link:27_audio_processing.adoc[Audio processing].
+and execution algorithms belong to link:26_audio_processing.adoc[Audio processing].
 
 `ProcessingGraphAudition { id, node: {node,port} }` takes the retained `graph_run_id`,
 not an export task ID. It selects retained PCM directly, or queues a new preparation
@@ -1595,7 +1407,7 @@ overwritten. The captured request is published in `settings.audio_export`.
 Queued requests acknowledge the new task ID; completion and cancellation use
 existing processing tasks. Only a successful terminal task sets
 `graph_exported_path`: an accepted request is not an exported file.
-See link:27_audio_processing.adoc#encoded-export[Encoded export] for encoding and
+See link:07_audio_processing.adoc#encoded-export[Encoded export] for encoding and
 quality boundaries.
 
 `ProbeAudioExportFormats` requests coalesced background encoder discovery.
@@ -1616,5 +1428,5 @@ publication failure are specified in
 link:22_cache.adoc#processing-output-retention[Processing output retention].
 Layout positions, revision counters, and node-ID allocation history do not affect
 audio equivalence or invalidate a frozen result; graph execution is described in
-link:27_audio_processing.adoc[Audio processing].
+link:26_audio_processing.adoc[Audio processing].
 

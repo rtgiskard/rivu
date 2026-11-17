@@ -141,7 +141,7 @@ or playback smoke test.
 Rivu consumes private fixed schemas through GPUI's existing Scene-to-renderer path.
 The implementations described here live in the external pinned GPUI/WGPU patch;
 FFT, analysis and simulation remain Rivu-owned. The original rectangle-only LED
-experiment is retained in link:28_gpu_measurements.adoc#initial-comparative-measurements[the historical measurement archive].
+experiment is retained in link:25_gpu_measurements.adoc#initial-comparative-measurements[the historical measurement archive].
 
 The pinned renderer exposes the experimental `GpuPalette`, `GpuFrame`,
 schema-stable `GpuState`, `GpuSource` and `Window::paint_gpu` interfaces.
@@ -194,7 +194,6 @@ All finite endpoints are admissible, including distant coordinates. Shader
 normalization/rebasing avoids overflow while preserving physical stroke width;
 it does not narrow publication coordinates or require CPU geometry copies.
 
-
 [[spectrogram-column-fields]]
 ==== Spectrogram column fields
 
@@ -211,6 +210,7 @@ index zero. Gaps, pooling and frequency sampling retain their signal meaning.
 Column widths have a one-logical-pixel minimum; content masks, not placement
 bounds, clip any extension. Culling and overlap footprints include that extension.
 
+[[publication-and-scene-recording]]
 ==== Publication and scene recording
 
 Constructors validate schema, geometry, palette and caller capacities before
@@ -221,22 +221,37 @@ cleared. Raw rectangle/field updates validate against that slot before construct
 a replacement; attaching an already built frame cannot avoid its construction
 cost retroactively. Failure preserves the previous publication or cleared state.
 
-Fixed sources replay the recorded publication, not the latest state. Dynamic
-sources retain a revocable slot resolved once per prepared frame, including empty
-results; unsampled intermediate publications need not upload. One synchronous
-owner serializes publication and clear, while readers may capture concurrently.
-Clear revokes future snapshots, not already captured frames or a concurrently
-prepared replacement. Owners must serialize mutations before hiding. Publication
-and clear never schedule a frame. Scaled placement and clip extents must be finite
-and nonnegative.
+[source,mermaid]
+----
+flowchart LR
+    subgraph Fixed["Fixed source"]
+        F["GpuFrame publication"] --> R["Record publication in scene"]
+        R --> Replay["Replay recorded publication"]
+    end
+    subgraph Dynamic["Dynamic source"]
+        S["GpuState revocable slot"] --> D["GpuSource retained in scene"]
+        D --> Resolve["Resolve slot once per prepared frame, including empty"]
+    end
+    Replay --> P["Immutable prepared-frame snapshot"]
+    Resolve --> P
+    P --> U["Admission and reusable content upload"]
+    Place["Placement: bounds, clip, scale, opacity"] --> Slab["One device-aligned immutable placement slab per preparation"]
+    U --> Draw["Draw admitted content with placements"]
+    Slab --> Draw
+----
+
+One synchronous owner serializes publication and clear, while readers may capture
+concurrently. Clear revokes only future snapshots, not already captured frames or
+a concurrently prepared replacement; owners must serialize mutations before hiding.
+Unsampled intermediate publications need not upload. Publication and clear never
+schedule a frame. Scaled placement and clip extents must be finite and nonnegative.
 
 ==== Encoding and uploads
 
 Explicit fixed-layout encoders initialize padding and are structurally checked
 against the matched Naga shader layout. Pipelines are lazy per geometry kind,
 after valid upload/placement admission. Immutable uploads and palettes are reused
-across placements and replay. Each preparation packs admitted placement uniforms
-into one device-aligned immutable slab; its full initialized capacity remains
+across placements and replay. The placement slab's full initialized capacity remains
 charged until completion. Changed fields still copy/upload their whole numerical
 payload: there are no partial-field updates or reusable upload pages.
 
@@ -411,21 +426,17 @@ no-readback submission and completion waits. Cross-binary comparisons must cover
 clipping, translucent overlap, fractional coverage, native packed batches, nonzero
 raster origins, resize and resource recovery.
 
-
 [[admission-and-retirement]]
 === Admission and retirement
 
 Buffers are initialized through write-only mapped storage, never by reinterpreting
 Rust models or overwriting a submitted revision. WGPU's zero-initialization
 guarantee covers unwritten ABI padding; encoding writes only meaningful fields,
-without a second whole-buffer zero pass. Active and retired allocations remain
-charged through completion. Failed pre-submit work follows the renderer's
-queue-flush/finalization path so later draw failure cannot strand a provisional
-submission.
-
-Reusable preparation storage does not retain CPU publications after preparation,
-including rejected work. Placement slabs remain exact-sized and immutable through
-submission completion.
+without a second whole-buffer zero pass. Failed pre-submit work follows the
+renderer's queue-flush/finalization path so later draw failure cannot strand a
+provisional submission. Reusable preparation storage does not retain CPU
+publications after preparation, including rejected work. Placement slabs remain
+exact-sized and immutable through submission completion.
 
 Unsupported capabilities and capacity pressure omit the affected material and
 report an error without preventing unrelated controls from rendering. Capability
@@ -448,25 +459,46 @@ then consume at most half the shared limit. The remainder is headroom, not a har
 reservation. Additional unfinished generations can still encounter ordinary
 per-upload admission pressure; existing uploaded tiles remain drawable.
 
+[source,mermaid]
+----
+sequenceDiagram
+    participant CPU as CPU owner
+    participant Scene as Scene / renderer
+    participant GPU as GPU queue
+    participant Maintenance as Completion maintenance
+    CPU->>Scene: Record fixed publication or dynamic snapshot
+    Note over CPU,Scene: Valid CPU content does not guarantee admission or display
+    Scene->>GPU: Submit admitted immutable storage
+    Note over Scene,GPU: Active and retired allocations stay charged through completion
+    Scene->>Maintenance: Register outstanding submission before surface acquisition
+    opt Window hides before completion
+        Scene->>Scene: Discard residency demand, retain in-flight storage
+    end
+    loop Only while submissions remain outstanding
+        Maintenance->>GPU: Poll completion at 16 ms intervals
+    end
+    GPU-->>Maintenance: Submission completed
+    Maintenance->>Scene: Collect retired storage and placement slabs
+    Note over CPU,Scene: Completion does not release every CPU or scene reference
+    opt Restore with retained CPU drawing
+        CPU->>Scene: Reuse drawing and upload again
+    end
+----
+
 The GPU cache retains only weak CPU ownership. Clearing a dynamic slot releases
 its CPU content once existing snapshots finish; fixed scene records deliberately
 remain replayable until invalidated. Completed storage omitted from a later scene
-is reclaimed during preparation, including an empty scene.
+is reclaimed during preparation, including an empty scene. Visible-idle maintenance
+preserves useful uploads while retiring completed placement slabs.
 
-The window also maintains submitted material work without requesting or presenting
-another frame. One coalesced foreground task polls completion at 16 ms intervals
-only while submissions remain outstanding; it stops after collection, device loss
-or renderer destruction. Registration precedes surface acquisition, so occluded or
-failed presentation cannot strand earlier submissions. Generation-specific handles
-hold only weak references and cannot pin or revive a replaced renderer/device.
-
-Visible-idle maintenance retires completed placement slabs while preserving useful
-uploads. Hide immediately discards material residency demand, but in-flight storage
-stays charged until completion; restoration uploads the retained CPU drawing again.
-Forced hidden presentations detach regenerated GPU scene references as well. There
-is no cleanup frame or permanent polling loop. Ordinary scenes with no extension
-resources do not perform extension-specific device polling. Native Metal remains
-explicitly unsupported.
+One coalesced foreground maintenance task needs no new requested or presented
+frame. It stops after collection, device loss or renderer destruction; registration
+before surface acquisition prevents occluded or failed presentation from stranding
+earlier submissions. Generation-specific handles hold only weak references and
+cannot pin or revive a replaced renderer/device. Forced hidden presentations detach
+regenerated GPU scene references as well. There is no cleanup frame or permanent
+polling loop. Ordinary scenes with no extension resources do not perform
+extension-specific device polling. Native Metal remains explicitly unsupported.
 
 [[surface-reattachment]]
 === Surface reattachment
@@ -557,28 +589,17 @@ borrow another renderer's allocation.
 
 === Fixed and dynamic scene state
 
-One drawing API has an explicit state policy, rather than independently mutable
-bindings sampled at unrelated times.
+The proposal preserves the implemented Fixed/Dynamic selection and immutable
+snapshot rules in <<publication-and-scene-recording,Publication and scene recording>>.
+It extends a captured revision to include complete parameters, draw ranges, axes
+and frozen resource bindings, so a draw cannot combine independently sampled parts
+of different updates.
 
-==== Fixed content
-
-Record immutable content revisions, including parameters, ranges and frozen
-bindings, for palettes, geometry and cached content.
-
-`Scene::replay` clones the recorded references. Recording A, publishing B, and
-replaying the old draw must still produce A. Revisions identify stable content and
-its backing, not merely a generation number followed by a lookup of current data.
-
-==== Dynamic content
-
-Resolve each dynamic slot once per prepared frame; all referencing draws share
-the complete parameters, ranges, axes and resources. Unsampled intermediate
-publications may be skipped, not queued for upload. Recorded placement and the
-slot's schema/maximum envelope stay stable; changing them requires rerecording.
-Updates still use ordinary notifications/frame requests, not polling.
-
-Once resolved, dynamic content has the same immutable execution lifetime as
-fixed content. Latest-wins changes selection, not permission to overwrite backing.
+For fixed content, these additions become part of the recorded immutable revision.
+For dynamic content, they become part of the single resolved state shared by all
+referencing draws. Recorded placement and the slot's schema/maximum envelope stay
+stable; changing them requires rerecording. Updates continue to use ordinary
+notifications/frame requests, not polling.
 
 === Shader composition and ABI
 
@@ -782,30 +803,29 @@ extensions do not inherit earlier timing, memory or image-comparison results
 automatically. No GUI or benchmark rerun is implied by maintaining this document.
 
 The decision index separates the reason for each experiment from its historical
-tables and methods in link:28_gpu_measurements.adoc[the dated measurement archive]. Results from different rows are not a cumulative
+tables and methods in link:25_gpu_measurements.adoc[the dated measurement archive]. Results from different rows are not a cumulative
 speedup or a common benchmark series.
 
 [cols="2,3",options="header"]
 |===
 |Evidence |Decision supported and limits
-|link:28_gpu_measurements.adoc#capacity-neutral-regrouping-comparison-2026-10-30[Capacity-neutral regrouping]
+|link:25_gpu_measurements.adoc#capacity-neutral-regrouping-comparison-2026-10-30[Capacity-neutral regrouping]
 |Reject the extra planning/composite bookkeeping: sparse-layout gains came with an ordinary mixed-layout cost.
-|link:28_gpu_measurements.adoc#shared-local-msaa-comparison-2026-10-23[Shared local MSAA]
+|link:25_gpu_measurements.adoc#shared-local-msaa-comparison-2026-10-23[Shared local MSAA]
 |Share local attachments to reduce retained capacity and mixed-layout engine occupancy; distant regions need more passes and CPU work. This does not measure the later reclamation policy.
-|link:28_gpu_measurements.adoc#initial-comparative-measurements[Rectangle-only predecessor]
+|link:25_gpu_measurements.adoc#initial-comparative-measurements[Rectangle-only predecessor]
 |Replace LED tessellation with instance publication: lower CPU update, payload and render/readback costs in the prototype. Complete first-image latency is measured separately; this is not a consumer cutover.
-|link:28_gpu_measurements.adoc#unified-field-and-path-measurements[Unified fields and paths]
+|link:25_gpu_measurements.adoc#unified-field-and-path-measurements[Unified fields and paths]
 |Move field recoloring to numerical drawing and evaluate palette paths: CPU recoloring disappears, but field render/readback gets slower. Vendor image comparisons alone do not accept application palettes.
-|link:28_gpu_measurements.adoc#demand-specific-preparation-and-path-batching[Demand-local preparation and batching]
+|link:25_gpu_measurements.adoc#demand-specific-preparation-and-path-batching[Demand-local preparation and batching]
 |Prepare only needed pipelines and batch safe disjoint paths: strong replay benefit in the stated multi-path workload, not a universal startup gain.
-|link:28_gpu_measurements.adoc#density-spatial-consumer-evidence[Density/Spatial consumers]; link:28_gpu_measurements.adoc#spectrum-barsled-consumer-measurements[Spectrum consumers]
+|link:25_gpu_measurements.adoc#density-spatial-consumer-evidence[Density/Spatial consumers]; link:25_gpu_measurements.adoc#spectrum-barsled-consumer-measurements[Spectrum consumers]
 |Evaluate actual migrations: bounded live-CPU reductions, overlapping memory ranges and no isolated GPU-cost or synchronized pixel-parity claim.
 |===
 
 The archive retains historical workloads, tables and acceptance
 limits. Where no source commit is stated, the baseline is identified only by its
 described implementation or compiled libraries, not a reproducible source revision.
-
 
 == References and rationale
 

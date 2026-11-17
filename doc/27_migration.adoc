@@ -1,0 +1,183 @@
+= Migration design
+:toc:
+:toclevels: 2
+
+User upgrade steps, supported source formats and manual configuration changes
+are in link:10_upgrading.adoc[Upgrading and compatibility]. This document
+defines migration ownership, version authority, apply and recovery guarantees.
+
+== Dependency and ownership boundaries
+
+`rivu-format` is the shared authority for current schemas, defaults and validation;
+it has no application or migration dependencies. Its optional `database` feature
+enables SQLite. The application owns runtime connections, caches, configuration
+I/O and Core/UI state; the tool owns offline preflight, backups and historical
+conversions. Historical decoders and migration dependencies must not enter the
+application's normal decoding or SQL paths.
+
+[[startup-migration-handoff]]
+== Startup migration handoff
+
+The user-visible startup behavior and tool lookup are described in
+link:10_upgrading.adoc#application-invocation[Automatic startup migration].
+
+Startup acquires data-directory ownership for read-only inspection, closes the
+connection and releases ownership before invoking the tool. After child success,
+it reacquires ownership and checks the format through a fresh connection. Losing
+ownership during this handoff, a missing tool, failed conversion or a noncurrent
+result stops startup before configuration, business connections or audio initialize.
+There is no blind retry, data reset or automatic restoration.
+
+[[version-authority]]
+== Version authority
+
+=== Database schema
+
+`rivu_meta.format_version` identifies structure and interpretation, independently
+of releases or write counts. Its singleton also stores `current_queue_entry_id`,
+referencing system-queue `playlist_entries.id` with `ON DELETE SET NULL`.
+New databases create the current format directly. Its version is defined by
+`SCHEMA_VERSION` in link:../crates/rivu-format/src/database.rs[rivu-format's database contract].
+
+Check and Apply share strict source preflight against the supported schema,
+including tables, columns, keys, indexes, the queue singleton and required triggers.
+Unsupported or custom definitions are rejected before a backup or conversion.
+Before migration commits, all user-defined schema objects must also match a fresh
+current database by identity and definition tokens. Whitespace and unquoted token
+case are ignored; quoted identifiers and literals remain exact. Equivalent
+hand-written schemas can be conservatively rejected. A failed target check rolls
+back conversion and preserves the complete backup; unexpected objects are never
+deleted. Current resources undergo the same strict target check without rewriting
+or backups.
+
+SQLite-owned objects and file-byte equality are excluded. This is not a full
+integrity or derived-data check; normal application opening uses the cheaper
+format guard. Empty detection ignores only the literal `sqlite_` table prefix.
+Other unversioned tables, unknown or future formats are rejected: changing a marker
+cannot establish compatibility.
+
+[[configuration-schema]]
+=== Configuration schema
+
+The current configuration schema permits an omitted `schema_version`, meaning
+current, not historical. Its version is defined by `CONFIG_SCHEMA_VERSION` in
+link:../crates/rivu-format/src/config.rs[rivu-format's configuration contract].
+Missing files use defaults. New serialization includes the version;
+format-preserving saves retain its omission, and loading never adds it. Database,
+configuration and application versions evolve independently.
+
+Explicit noncurrent versions are rejected before field decoding; malformed TOML
+and I/O retain distinct causes. The tool neither
+rewrites nor backs up configuration and takes no configuration writer lock; see
+link:01_config.adoc#saving-configuration[Saving configuration].
+
+== Persistent summaries and runtime authority
+
+`albums` and `album_artists` are trigger-maintained persistent summaries, part of
+the database format rather than independently versioned caches. Conversion must
+handle existing data and subsequent trigger behavior.
+
+Queue and playlists share ordered `playlist_entries`; the protected system
+playlist is `(id = 0, name = '')`. Occurrence identity, multiplicity, runtime
+revision tokens and coordinated writes follow
+link:21_ipc.adoc#business-ownership-and-transactions[Core/Store transaction ownership].
+Runtime tokens are not persisted. External writes require stopping Rivu first.
+
+== Target selection and exclusion
+
+Target selection follows the application's
+link:00_getting_started.adoc#files-and-data-directories[path rules]; `--config` alone does
+not select a database. Targets remain fixed for one operation.
+
+Check opens SQLite read-only without creating application directories, writer
+locks or backups. SQLite may still update WAL shared-memory sidecars. Its result
+is advisory. Apply revalidates under the same device/inode-based data-directory
+ownership as the host, so directory aliases share exclusion independently of path
+spelling or protocol version. The tool does not serve IPC.
+
+This advisory exclusion does not cover external database writers, different data
+directories aliasing the same database, or configuration shared by different data
+directories. Stop external writers for maintenance; configuration remains read-only,
+preserving bytes and symlinks. Its ordinary-file admission and 4 MiB UTF-8 TOML limit
+follow link:01_config.adoc#file-access-and-external-editors[Configuration file access].
+
+Reports escape path control characters without changing the paths. Argument errors
+retain clap's layout, streams and status. Diagnostics follow
+link:01_config.adoc#logging-and-diagnostics[normal logging rules], but the tool
+creates no log files.
+
+== Apply protocol
+
+A supported database conversion follows this protocol; configuration stays read-only:
+
+[source,mermaid]
+----
+flowchart TD
+    Own["Tool acquires data-directory ownership and fixes targets"] --> Pre["Preflight: recheck database and strictly validate configuration"]
+    Pre -->|"Failure"| NoWrite["Stop without database mutation"]
+    Pre -->|"Conversion required"| Backup["SQLite backup: close and publish unique final .bak without replacement"]
+    Pre -->|"Already current and valid"| Current["Report current, no backup or maintenance"]
+    Backup -->|"Failure or incomplete publication"| NoWrite
+    Backup -->|"Complete backup"| Tx["One transaction: conversion, target validation and authoritative markers"]
+    Tx -->|"Failure before commit"| Rollback["Roll back conversion, retain backup"]
+    Tx -->|"Commit uncertain"| Inspect["Inspect persisted version and structure before retry"]
+    Tx -->|"Commit confirmed"| Post["Once per upgrade: VACUUM, PRAGMA optimize, truncating WAL checkpoint"]
+    Post -->|"Failure"| Committed["Report committed migration and maintenance error, retain backup"]
+    Post -->|"Success"| Done["Report outcome and actual backup paths"]
+----
+
+Apply does not start the application, rewrite configuration or delete backups.
+SQLite's backup API includes committed WAL contents; copying a live database file
+alone is not a consistent backup. Publication proceeds from `.bak.partial` to
+`.bak`, with these reported completion states:
+
+[cols="2,3",options="header"]
+|===
+|Reported state |Meaning and write boundary
+|`unpublished; may be incomplete`
+|The retained `.bak.partial` file is not a restore point; database mutation is not permitted.
+|`published; completion uncertain`
+|The final `.bak` name exists, but post-publication bookkeeping did not complete; database mutation is not permitted.
+|`complete; no storage sync requested`
+|The backup is logically complete and database maintenance may start; storage sync was not requested.
+|===
+
+Backup publication does not explicitly sync files or directories. A completed
+backup is logically consistent, not a power-loss durability guarantee; see
+link:91_design_decisions.adoc#DEC-018[file publication policy]. Failures retain
+partial evidence and never trigger restoration. The SQLite migration connection
+uses `synchronous=FULL` for its transaction, including WAL durability. Backup
+publication and the migration transaction are separate boundaries, not a
+cross-resource commit.
+Backup and transaction/WAL growth need disk space; preflight's capacity estimate
+is advisory and later storage errors still fail. Transformations remain in SQLite,
+without whole-library buffers, scanning, network access or decoder probing.
+
+[[failure-and-reentry]]
+== Failure and reentry
+
+Backup files and partial evidence are retained, never automatically restored or
+replaced. Reentry follows persisted version and structure, not a step journal:
+never blindly retry an uncertain commit. A maintenance failure after commit leaves
+the migration committed; inspect the reported error before retrying maintenance.
+Re-running migration on the now-current database does not optimize it.
+
+Errors report targets, backups and known completed changes; failure does not imply
+nothing changed. Manual restoration requires choosing the appropriate backup with
+all writers stopped. Never recover by resetting data, substituting defaults or
+replaying an uncertain mutation.
+
+== Acceptance boundaries
+
+Acceptance covers unchanged unversioned configuration (including comments and
+symlinks), strict version/input rejection, missing resources, preserved user data,
+transaction failure/reentry, no-ops, retained backups, directory aliases and ownership
+exclusion. These are requirements, not a record of checks run by this document.
+
+Historical-format regressions use fixed source-format fixtures, independent of the
+current schema, and verify both preserved data and subsequent reads, writes and
+trigger behavior. Updating the current format must not silently redefine old inputs.
+
+Integration proof must run the tool, then load settings and query/write its database
+with the application. Unit tests or compilation alone are insufficient.
+

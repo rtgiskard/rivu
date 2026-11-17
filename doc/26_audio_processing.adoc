@@ -1,0 +1,430 @@
+= Audio processing design and acceptance
+:toc:
+:toclevels: 2
+
+== Scope and status
+
+Processing never rewrites source media, and no model download occurs during
+playback or a build. <<ownership-and-invariants,Ownership and invariants>> is the
+implementation contract; <<quality-acceptance,Quality acceptance>> defines
+evaluation requirements rather than claiming they all pass.
+For available operations, model preparation, audition and export, see the
+link:07_audio_processing.adoc[Audio processing user guide].
+link:26_audio_measurements.adoc[Historical evidence] distinguishes measured
+observations from the <<remaining-acceptance-limits,remaining acceptance gaps>>.
+
+[[ownership-and-invariants]]
+== Ownership and invariants
+
+Core owns committed configuration and result admission. Editors retain drafts
+and interaction state, submitting typed, validated edits; graph commits require
+the expected revision. Failed validation leaves committed settings unchanged.
+JSON is a command-line/import representation, not a second configuration owner.
+
+Page edits submit sparse patches; graph edits replace a node at its expected
+revision. Draft acknowledgements and file-choice completions belong to the
+window feature owner, target and edit generation. Hiding node parameters or retiring
+a panel host invalidates native input frames and dismisses preedit, but preserves
+drafts and submitted edit acknowledgements. Stale completions
+cannot clear newer drafts, busy state or errors; programmatic synchronization is
+not a user edit.
+
+The processing service owns task records, retained outputs, audition selection
+and physical worker retirement. Current selection, terminal history and retained
+runs reference one status record per ID; published snapshots remain immutable.
+Frozen run metadata survives PCM release; resource eviction updates availability
+without changing the recorded outcome. Budget charging, history, snapshot and
+receipt retention are authoritative in
+link:22_cache.adoc#processing-output-retention[Processing output retention].
+
+Core owns cross-domain playback intent, cancellation/source admission and export
+commit. Cancellation invalidates publication
+without transferring worker ownership. Model runners return audio and provenance;
+they do not own task status.
+
+Prepared DSP owns its coefficients, history and stream format. Device callbacks
+do no model loading, FFT planning or file I/O. Allocation, block work and retained
+storage are bounded; long-running preparation stays on workers. Bypass, gain,
+resampling and latency compensation are explicit, not silent quality fallbacks.
+
+Realtime and offline graphs share bounded denoiser staging and EOF handling.
+Padding drains delay rather than extending the source; short reads and ended
+branches are zero-extended while downstream tails drain. Reset clears DSP history
+and staging. Native/offline Mix uses `f64` gains and accumulation, rounding once
+per node to finite `f32` without clipping or normalization. Realtime admission
+includes reusable wide-sum scratch; processing allocates no mixing scratch.
+
+Non-finite input or intermediate PCM fails without publishing partial audio;
+finite over-range samples are preserved. A failed DSP/profile operation requires
+reset before reuse because a finite prefix may have advanced history. Seeking,
+source changes and incompatible formats reset history; pause does not advance it.
+Source identity/settings bind results; playback generation and pending intent
+independently govern automatic audition, as described in the
+link:07_audio_processing.adoc#practical-workflow[practical workflow].
+
+[[runtime-contracts]]
+=== Runtime contracts
+
+`rivu-processing` owns workers, graph execution, native/neural backends, export
+rendering and retained PCM reclamation without depending on Core or application
+storage. Core retains admission, current-source validation, published task state,
+playback/audition decisions and final export publication. Its `onnx` feature owns
+ONNX Runtime, FFT and model-hash dependencies; `ffmpeg` enables decoder FFmpeg
+support. The application forwards these without implicitly enabling processing
+defaults. Worker test hooks require the explicit `test-support` feature.
+
+Native preparation validates the manifest and pinned artifacts before source PCM
+allocation. The public entry reads at most 1 MiB plus one byte of manifest data
+without per-chunk cancellation checks; the native backend then enforces its
+256 KiB manifest acceptance limit. Bundle artifact reads check cancellation in
+64 KiB chunks and accept at most 16 MiB in total. Decoder/filesystem calls have
+no hard cancellation deadline. Execution consumes prepared bytes and controls,
+not a reopened manifest, so bundle changes affect later preparation only.
+Dry preparation still validates the bundle but does not load ONNX Runtime.
+
+Successful native initialization retains one shared ONNX environment for the
+process. Each run owns its session and per-channel recurrent caches, releasing
+them independently at completion. Later runs reuse the environment; changing a
+successfully loaded runtime requires restarting Rivu. Initialization failures
+are reported and retryable, not cached as success.
+
+Python application inference runs `worker.py --stream`; protocol version 4 is
+defined by `VERSION` and `EVENT_VERSION` in
+link:../tools/audio_processing/runtime/worker.py[the worker contract]. Stdin/stdout
+carry JSON controls and interleaved float32-le PCM in frames with a one-byte kind,
+four-byte little-endian length and at most 64 KiB payload. Requests declare rate,
+channels and exact frame count, not paths. Each child handles one task: request,
+declared PCM, empty input-end marker, then immediate stdin EOF. The producer closes
+stdin without waiting for completion; trailing bytes fail. Diagnostics use stderr.
+Completion identifies model, format, frames and stems; Rust validates framing,
+finite/aligned PCM, completion and successful exit before publication.
+
+Linux `poll` waits without a timeout on nonblocking pipes, pidfd child-exit
+notification and sticky eventfd cancellation, with no periodic wakeups. Bounded
+drain rounds preserve duplex backpressure. Pipe EOF is not process exit:
+cancellation/failure terminates and reaps the child even after early stdout EOF.
+This requires Linux `pidfd_open` support and permission. Readiness/setup syscall
+failures report the OS error and retire the child, never fall back to timed polling.
+
+Application streams collect no export-only PCM hashes, timing/energy statistics
+or detailed report, but still require validated input-end and EOF. Python speech
+with `wet_mix=0` declares the retained format/frame count and sends only input-end
+and EOF, with no PCM in either direction. After manifest, hashes, runtime identity
+and controls validate, the child acknowledges `outputs={"speech":"input"}`.
+Rust validates completion and child exit before sharing the same retained PCM.
+This dry path loads neither NumPy, model dependencies nor context windows.
+
+Neural boundaries retain budgeted PCM. Unreachable boundaries retire before
+inference output allocation; aliases, source forks and remaining branches retain
+their backing storage. Source format/frame metadata outlives retired PCM. Graph
+model nodes retain only ports needed by the selected target and remaining
+dependencies; unused separation streams are fully received/validated without
+retaining their PCM. Standalone separation retains both stems. Source media is
+limited to 8 GiB, neural input to nonempty sequences of at most four hours, and
+each Python source context window to 128 MiB excluding weights/workspace.
+Shutdown joins processing/reclamation workers; live PCM remains valid until its
+last owner releases it. Original media and explicit exports are not result caches.
+
+[[execution-and-source-lifetimes]]
+=== Execution and source lifetimes
+
+One run borrows its immutable graph for shared full-graph validation and topology.
+Candidate planning still checks boundary dominance, format, capabilities and
+budgets; only structural proof and execution-prefix order are reused. Public
+planning validates all stored nodes, including controls outside the selected
+output. Graph edits require a new proof, not revision-based cache reuse.
+
+Standalone restoration and native-only graphs decode blocks, retaining final PCM
+plus bounded DSP/delay state. Uncached entirely native exports stream to an
+unpublished encoded file in the selected format without whole-output PCM;
+cached exports share existing PCM. Model ancestors and Hybrid boundaries retain
+their PCM requirements. For fixed graph/format, streaming output memory is
+duration-independent, not total RSS: decoder, DSP/profile, delays and caches
+remain costs. Synchronous native execution borrows format-checked decoder blocks
+until the next mutable decoder operation, avoiding caller staging copies.
+Retained PCM and DSP-owned buffers have independent lifetimes.
+
+Profile capture reads the required prefix including upstream context/latency.
+The initial decoder serves the first capture; every consumed decoder retires
+before the next capture/output pass opens another with matching source stamp and
+format. No unused output decoder spans capture passes. Early stop checks
+cancellation/opened-source identity without pretending EOF or flushing tails.
+Actual decoded frames establish EOF even with unknown duration; true EOF checks
+source identity/cancellation and flushes context. File output discards causal
+preroll and crops all tails to decoded source length, including FIR tails longer
+than latency. Out-of-source profiles fail. Cached export validates its source
+stamp rather than relabeling old samples. Cancellation or source/destination
+validation failure discards temporary encoded output; only Core publishes it.
+
+[[graph-resource-admission]]
+=== Graph resource admission
+
+Admission uses a lightweight plan before preparing DSP, delay lines or PCM blocks;
+Auto/Hybrid candidates rejected for capability or budget allocate no DSP state.
+The work estimate counts effective DSP: disabled/solo-excluded IIR bands and
+identity peak/shelf sections consume no stage estimates. Disabled EQ and fully
+bypassed restoration have no DSP latency/state, but edges and node buffers still
+count. Restoration bypass means Wet=0, or spectral Off with both hum and repair
+disabled. DSP construction, realtime/offline planning and status share this
+configuration predicate. Validation and Profile requirements still apply; enabled
+flat FIR retains convolution latency, and spectral Off does not bypass active
+hum/repair.
+
+Active restoration adds work independently of spectral mode: each enabled hum
+harmonic adds 12 units per channel/frame. For impulse-repair width `W`, radius
+`R=W+2` and `K=W+3` median differences, repair adds
+`4*R + K*K + 24*W + 32` units per channel/frame for context, sorting and worst-case
+search/interpolation, in addition to common restoration work. These are
+conservative planning allowances, not instruction counts or measured CPU time.
+
+The state estimate covers DSP objects/buffers, graph PCM blocks, wide summation
+scratch and edge delay lines. Logical node PCM blocks are charged conservatively
+even when pass-through outputs alias an upstream block. This is not total retained
+process memory or RSS: graph topology/configuration containers, allocator metadata
+and decoder/device state are outside the budget.
+
+Restoration obtains its estimate from the DSP implementation without constructing
+a processor or FFT plan. For block size `B`, channel count `C` and lookahead `L`
+in frames, processor/staging charges are:
+
+* Adapter: `(L+B)*C` output samples and `(2*L+B)*C` queue samples, totaling
+  `(3*L+2*B)*C*4` bytes, plus the boxed adapter object (which already contains the
+  denoiser and inline repair object).
+* Active hum: one notch object and `C*2*8` state bytes per harmonic.
+* Repair radius `R`: `(2*R+2)*C*4` context/frame bytes.
+* Delayed partial-wet blend: `(L+1)*C*4` dry bytes; full Wet and zero-lookahead
+  hum retain no dry queue.
+* Spectral paths: channel/STFT and mode-specific PSD/gain arrays, plus a separate
+  RustFFT power-of-two allowance of `2*N` complex scratch entries and `64*N` bytes
+  for the two retained plan trees, where `N` is FFT size. This backend-specific
+  allowance is not a multiplier over unrelated storage; changes to RustFFT or
+  supported FFT sizes require reevaluating it.
+
+Spectral modes retain one noise spectrum. Stationary and Profile reset preserve
+that fixed spectrum; Adaptive reset fills its existing estimate from the configured
+floor without allocating a recovery copy.
+
+Bypassed graph nodes construct no adapter and incur none of these processor/staging
+charges.
+
+[[timeline-and-source-identity]]
+=== Timeline and source identity
+
+Graph intermediates preserve causal context, including FIR ringing, denoiser
+startup and branch delays. Only published audio is compensated/cropped to the
+source timeline. Optional `graph_outputs[].context` describes guarded PCM with a
+signed source-relative `start_frame`; hybrid suffixes consume it rather than the
+trimmed audition slice. At EOF, each denoiser finishes at its actual upstream end
+before tails propagate downstream; padding is not new source input.
+
+Native ONNX speech completes FFT512/hop256 analysis frames by reflecting the
+original signal at the endpoint, then crops synthesis to the source length.
+References must match this padding, including short inputs and partial final hops.
+Streaming resampling preserves length and independent channel state without
+retaining a full model-rate intermediate.
+
+Native speech uses centered polyphase sinc conversion with exact fractional
+phases. Each conversion prepares at most one complete phase period and only the
+prefix reached by output frames, so short inputs at coprime rates allocate no
+unused phases. Coefficients are shared across channels without phase quantization.
+
+Original audition validates the opened source descriptor; processed audition
+uses immutable PCM handles. Waveform reuse follows exact PCM identity and slice
+interval, not just matching path/format. Node failures identify the denoise node
+for profile capture or the requested output for final compilation/decode/allocation.
+
+=== DSP crate features
+
+`rivu-dsp` defaults to configuration/validation only. Its optional `execution`
+feature enables IIR/FIR, response sampling, denoising and `rustfft`; disabled APIs
+are absent, not no-ops. The application and `rivu-audio` enable execution;
+`rivu-format` does not request it, though Cargo feature unification can enable it
+in a shared dependency graph. Examples `equalizer_benchmark` and `denoise_render`
+require `--features execution`.
+
+Disabled FIR allocates no convolution/FFT state. Restoration prepares only the
+needed path: exact bypass for zero Wet or a disabled chain, time-domain state for
+hum/repair, and STFT state for spectral modes. Configuration and required profiles
+are validated even on bypass; delayed partial-wet processing retains dry alignment.
+
+[[quality-acceptance]]
+== Quality acceptance
+
+=== Equalizer acceptance
+
+Equalizer controls operate on one authoritative filter configuration. Their
+presence alone does not establish numerical quality.
+
+Numerical acceptance is based on independent transfer-function evaluation and
+processed signals, not source-text or copied-value tests:
+
+* Disabled processing is sample-exact and does not allocate in processing.
+* At defined passband measurement points, steady-state measured response agrees
+  with the declared transfer response within 0.1 dB. Nulls and startup transients
+  are evaluated separately; dB comparisons at zero are undefined.
+* Supported boundary rates, gains and Q values remain finite and stable under
+  impulses, silence, tones and broadband input. No output sanitization hides
+  unstable filter state.
+* Reset eliminates old history; independent channels do not leak. Parameter
+  changes are bounded continuous transitions, including bypass and solo changes.
+* The displayed IIR response represents actual cascaded coefficients at the current
+  sample rate. Frequencies beyond that rate's usable range are explicit. FIR
+  acceptance measures the realized finite impulse separately from its displayed
+  IIR magnitude target; target agreement alone is not realized-response evidence.
+
+=== Denoising acceptance
+
+Required modes cover stationary noise, a captured noise profile, adaptive noise,
+speech-targeted enhancement, hum and impulse suppression. Controls must affect
+real algorithm parameters, not relabel an identical preset. Suppression and
+content preservation are evaluated separately.
+
+Use clean references mixed with known noise at declared SNR, plus real noisy
+recordings. Include speech consonants, quiet words, pauses, nonstationary noise,
+music transients, sustained harmonics and stereo ambience. Record input/output
+level, residual noise, reference distortion and speech intelligibility where a
+valid reference exists. Stereo coherence and musical-noise artifacts require
+additional listening; a high scalar score alone is not acceptance.
+
+Ported neural inference must be compared against the selected upstream reference
+using the same weights and parameters. An optimization may not silently replace
+the model, alter rate handling or claim equal quality from throughput alone.
+
+=== Separation acceptance
+
+Evaluate both vocals and accompaniment against reference stems. Include backing
+vocals, reverb, dense instrumentation, transients and stereo mixtures. Measure
+source quality and leakage, absolute sample alignment, output length, stereo
+coherence, block-boundary discontinuity and mixture reconstruction residual.
+If accompaniment is defined as mixture minus vocals, exact reconstruction proves
+that definition only; it does not prove separation quality.
+
+Compare the integrated inference with its upstream algorithm under identical
+weights, segment, overlap and seed settings before changing those settings for
+speed. Synthetic independent components establish alignment/invariants, not
+real-world vocal-separation quality. Multi-instrument stems and exporting stems
+are not automatically added to the accepted scope.
+
+[[evidence-and-performance]]
+=== Evidence and performance
+
+An acceptance evidence bundle must record source revision, dirty changes,
+executable/model hashes, configuration, corpus provenance/license, exact commands,
+device and thread settings; a normal task status is not that evidence bundle.
+Keep evaluation data and large outputs in task-owned `.cache/` paths. Never use
+private library files without explicit permission.
+
+The explicit link:../tools/audio_processing/export.py[`export.py --request` adapter]
+serves benchmark/corpus file jobs, not application execution. It requires
+absolute `input_path` and `output_dir`, IEEE float32 WAV/WAVEX/RF64 input and a new
+destination with an existing parent. It writes stem WAVs and `result.json` with
+an 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
+The actual UTF-8 report, including its final newline, is limited to 8 MiB.
+Completion follows closed/checked audio and a successfully written report;
+failure removes the new export directory. Detailed hashes and timing/energy
+evidence are collected for this explicit export only.
+
+Dry file export still reads/validates finite source PCM, writes bit-exact float32
+samples and collects the report. It needs NumPy and SoundFile and declares a
+written speech output, not retained application storage. Both entrypoints validate
+controls before stream construction or export creation. File export uses one
+source descriptor for metadata, bounded hashing and PCM reads; replacement or
+in-place mutation rejects the result. The independent reference loader captures
+PCM and hash together, preventing later pathname replacement from relabeling input.
+Model asset validation and PCM/output protocol checks remain separate.
+
+Offline reports identify the implementation/interpreter actually used. A checkout
+adapter's report does not prove execution of a provisioned bundle's runtime snapshot.
+
+Separate cold initialization, warm processing, file I/O and playback behavior.
+Benchmark bypass, representative and worst supported configurations, and enabled
+versus disabled feature branches. Report repeated measurements and variability:
+wall/CPU time, real-time factor, block latency percentiles, peak resident memory,
+allocations/capacity and underruns. End-to-end seek/cancel/shutdown behavior and
+GUI controls require actual application smoke proof.
+
+The Python benchmark and corpus evaluator report two distinct wall times.
+`worker_subprocess_wall_seconds` covers only the worker subprocess call, including
+startup and captured pipes. `evaluation_wall_seconds` ends after output reads,
+artifact writes, scoring and record construction. In the repeated benchmark it
+starts before each run's request creation; fixed reference/input/backing reads,
+hashes, reference metric preparation and input scoring happen once outside the runs.
+Each worker result must
+identify that same input. In the corpus evaluator it starts before each sample's
+reference/input/backing reads and request creation, including those reads and hashes.
+Both exclude record append, progress printing, aggregate summaries and final report
+serialization or writing. `timing_summary` summarizes each field separately;
+compare only measurements with matching timing boundaries.
+
+Evaluation hashes bracket each loaded PCM snapshot; changed identities and worker
+input hashes that differ from the scored baseline fail the run rather than
+retrying or mixing evidence. Reports identify the loaded reference, input, backing
+and output snapshots, not later versions of those paths. Classical corpus modes
+use the same loaded noisy-clean pair, including Profile capture, and score each
+mode's final repeat independently. The processing benchmark and corpus evaluator
+retain the worker's input-duration contract, not the standalone quality tool's
+12,000,000-frame admission bound.
+
+Reference-statistic reuse and bounded metric scratch reduce scoring work, not
+model-inference cost. Loaded full-track PCM, model workspace and outputs remain
+separate costs; the evaluation parent is neither duration-independent nor covered
+by the worker's PCM budget. Both tool families define stereo side as `(L-R)/2`;
+historical processing-benchmark side RMS used `L-R`, twice the current amplitude.
+
+Both tool families encode undefined scores/gains as JSON `null`. SNR requires
+nonzero reference energy; SI-SDR requires nonzero mean-centered reference energy.
+Exact reconstruction is `"infinity"` only when that condition holds. A constant
+reference therefore has undefined SI-SDR/gain; a silent estimate has undefined
+SI-SDR and zero gain for a nonconstant reference. Infinite-baseline gains can be
+`"-infinity"`; infinity minus itself is undefined.
+
+Summaries exclude undefined values, preserve infinity ordering, and report
+defined/undefined and signed infinity counts. A median between opposite infinities
+is undefined. These numerical cases do not establish quality.
+
+The link:../tools/audio_quality/music_manifest.py[music corpus manifest contract]
+records each prepared directory relative to the corpus root, explicitly binds
+`diagnostic_only` to source identity and SHA256, and requires a `float` identity
+(`path`, SHA256 and byte count) for each generated mixture, vocals and accompaniment
+WAV. The evaluator checks the loaded PCM file snapshots against those prepared
+identities before launching a model. Paired VoiceBank evaluation likewise consumes
+the recorded clean/noisy `float` identities and requires complete manifest membership.
+Recorded paths are provenance, not admission locations: a corpus can move without
+its original containers or archives, but replacing prepared WAV content is rejected.
+Directory numbering is not a diagnostic rule. During preparation, mark any known
+reference erratum with repeatable `--diagnostic-source` paths; the marker follows
+identical source bytes even when renamed or reordered. Run the following from the
+repository root after binding the variables to actual local source files. The
+output directory must not already exist; keep prepared corpora under `.cache/`:
+
+[source,shell]
+----
+python tools/audio_quality/prepare_music.py "$al_james_source" "$other_source" \
+  --diagnostic-source "$al_james_source" \
+  --output .cache/new-music-float --provenance 'actual source and license'
+----
+
+Prepare a new corpus if its manifest lacks the required prepared-file identities;
+incomplete legacy manifests are rejected. Keep recorded measurements bound to
+their original corpus and timing definitions.
+
+`tools/audio_quality/run_classical.py` requires a new output root and isolates each
+corpus occurrence and case in its own numbered subdirectory, so repeated corpus
+names and source stems do not share configurations, noise profiles or rendered
+WAVs. Numbering is only an output namespace, not source identity. Consumers should
+read the root `report.json` and follow each row's `estimate.path`; `reference` and
+`noisy_baseline` retain the actual source paths and content identities.
+
+Automatic metrics and actual listening are distinct evidence. No automated
+analysis is reported as human listening. Missing listening approval remains an
+explicit acceptance gap, even when objective and integration checks pass.
+
+[[remaining-acceptance-limits]]
+== Remaining acceptance limits
+
+Human listening, quiet-content/stereo-artifact approval, broad lossless fullband
+music coverage and device-specific underrun/deadline evidence remain gaps.
+Reference parity, scalar improvement and reconstruction do not close them.
+link:26_audio_measurements.adoc[Historical audio measurements] retains earlier
+observations and their artifact-availability limits, not current-build acceptance.
+

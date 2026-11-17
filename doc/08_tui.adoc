@@ -1,0 +1,140 @@
+= Terminal client
+:toc:
+:toclevels: 2
+
+Install a build with TUI support; see link:00_getting_started.adoc[Getting started].
+Playback, queue and audio-output behavior are shared with the other interfaces;
+see link:04_playback.adoc[Playback].
+
+[[terminal-client]]
+== Navigation and commands
+
+`rivu tui` connects to the Core for its data directory, starting an independent
+background `rivu serve` when absent. The service survives TUI and terminal closure;
+use `:qa` / `:qall` or `rivu quit` to stop it. Closing only the client does not stop
+playback. `Tab` cycles
+Queue → Playlists → Library → Recent; `Shift+Tab` reverses direction.
+Without a search, each page retains its selection and scroll position.
+The active tab identifies the page; its selection/total counter appears at the
+right of navigation when space permits. The content area adds a heading only for
+context such as a directory path or playlist name, not another copy of the tab.
+`Right` opens a playlist; Enter plays the selected playlist, track, or queue
+occurrence. In Library track lists and playlist details, `e` enqueues the selected
+track. `Alt+e` enqueues the selected Library directory or the complete Other
+collection, regardless of filters. Selecting a row alone does not change playback.
+Whole-playlist playback asks on the status line before replacing a nonempty queue:
+`y` or Enter confirms; `n` or Esc cancels.
+
+Outside search editing, help, and details, press `:` to open the command line on
+the bottom row. Enter executes; Escape cancels. Submitted search results remain
+browsable with command mode, without clearing the search. Commands are bounded
+to 256 UTF-8 bytes and support Backspace.
+Command input is cyan. Confirmed queue additions/removals and successful scans
+use green feedback; ordinary progress is secondary text, warnings orange, and
+errors red. Queue-change confirmations do not replace an unexpired warning or
+error. Messages still share the bottom row rather than adding extra rows.
+
+[cols="1,3",options="header"]
+|===
+|Command |Effect
+|`:q`, `:quit` |Close this TUI only; Core and playback continue
+|`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
+|`:help` |Open the scrollable help page, including command descriptions
+|===
+
+Bare `q` has no action outside editors and remains ordinary text inside them.
+Escape cancels or returns; it never closes the client. Unknown commands and
+rejected shutdown requests show errors without closing it; uncertain shutdown
+outcomes are not automatically retried.
+
+Recent shows up to 256 unique tracks in recent-play order, with titles, counts,
+and local timestamps where space permits. The playing or paused track uses its
+live activity time; reordering preserves selection. Enter plays, `i` opens details,
+and `m` toggles favorite. Recent has no selectable sort or removal action. History
+and counting rules: link:02_library.adoc#play-counts-and-recent-tracks[Library].
+
+Use `/` to search the current page, then Enter to apply; typing alone does not
+change the results. Applying or clearing search keeps the selected entry if it
+remains in the results; otherwise it selects the first result, or nothing when
+empty. Scrolling adjusts only as needed to keep the selection visible.
+Search does not start playback. Press `/` again to edit the query.
+Enter on the filtered list keeps its normal play or open action. The editor owns
+all printable characters, including Space, `m`, `q`, and `?`; F1 opens help and
+Ctrl-C exits even while editing.
+The bottom line shows the query. While editing, it hides messages without clearing
+them; after submission, messages use the remaining space, prioritizing the query
+in narrow terminals.
+
+The search scope follows the page:
+
+* Queue searches its occurrences; Playlists searches playlist names, and playlist
+  details searches that playlist's entries. Track searches match title, artist,
+  album, and file name, including unloaded pages. Repeated tracks retain their
+  distinct queue or playlist occurrence identities for play and removal.
+* At Library's top level, search shows matching tracks from the full library,
+  matching title, artist, album, or full source path. Within a directory, search keeps
+  immediate tracks and directories with matching descendants, using the same
+  fields. In Other, search stays within that collection and preserves its
+  favorite/missing filters and sort order.
+* Recent filters only the displayed titles in its published history of
+  at most 256 tracks.
+
+Searches use case-insensitive literal substrings, not wildcard patterns. Esc
+clears and closes the transient editor. Tab/Shift+Tab switches tabs and clears
+search even while editing; entering or leaving a directory, Other, or playlist
+details also clears it. Queries are not saved per tab. Refresh preserves visible
+selection by identity; playlist renames preserve track selection and scroll.
+
+Failed queries wait for changed demand or data, or for the view to be reopened.
+Obsolete and cancelled reads retire without a query error. Query lifetime and
+resource boundaries: link:22_cache.adoc#terminal-projections[Terminal projections].
+
+Library's link:02_library.adoc#other[Other] entry is hidden at the top level when
+the unfiltered collection is empty.
+`Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
+album, and most-played sorting. Selection follows its track through changes while
+that track remains in the results. `Alt+c` checks registered files;
+`Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
+`Alt+x` cancels an active scan before its saving phase. F1 lists the actions for
+the current context.
+
+Outside the query editor, `m` toggles the selected track's favorite in Queue,
+Library, Recent, or playlist entries. It never changes a whole directory or
+playlist. Track lists prioritize titles as the terminal narrows and keep compact
+metadata, favorite, playback-state, and missing-file indicators where space permits.
+Truncation does not change stored metadata.
+Track lists use semantic colors to distinguish metadata, favorites, and playback
+state.
+
+The status row shows volume, shuffle, repeat, speed when not 1×, and current-track codec, sample rate,
+bit depth, and available bitrate in `kbps` where space permits, without distinguishing
+estimated and confirmed bitrates. A separate bottom row holds notices, then scan
+status, core errors, or the startup help hint, in that priority order. Notices and
+startup help expire automatically. Playback transitions update the fixed playback
+display rather than replacing messages.
+
+Press `i` outside the query editor for read-only details of the selected track,
+directory, or playlist. Playback changes do not replace that target. Track details
+includes tags, technical audio metadata, source path, Decoder hint, and playback
+history. Missing-file paths remain available; unknowns use `—`, zero counts `0`,
+and estimated bitrates `≈`. Loading, query failure, removal, and no selection are
+distinct states. This is not a tag editor or decoder control.
+
+Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and restores
+the source position. Long query errors can be scrolled independently; loading and
+errors preserve the track details' reading position for a later successful refresh.
+Help and details own navigation while open; actions do not reach the underlying list.
+
+Position, duration, and playback controls remain available while browsing. Warnings
+and errors are distinct; ordinary playback updates do not replace a visible failure.
+
+Left goes to a parent directory; Left/Esc leaves playlist details.
+With search closed, Esc returns from Library tree or playlist catalog to Queue.
+At Queue's outermost level, Esc has no action. Ctrl-C closes the current TUI from
+every view, including editors, overlays, Core startup, and initial connection
+waiting. `SIGINT` and `SIGTERM` also close only the client. These exits cancel
+frontend readiness waiting and restore terminal mode, screen, and cursor; the
+independent Core keeps its own lifetime and playback is not stopped.
+
+Core shutdown exits normally; a lost connection without shutdown state reports an error.
+

@@ -48,7 +48,7 @@ rivu library other check --force --wait
 include both states. Count always returns the unfiltered collection total.
 `rivu queue add-other` appends the complete collection without starting playback,
 independently of browsing filters. Terminal browsing and keys are documented in
-link:04_playback.adoc#terminal-client[Terminal client].
+link:08_tui.adoc#terminal-client[Terminal client].
 
 [[roots-and-scanning]]
 == Roots and scanning
@@ -187,7 +187,7 @@ saved contents or playback order.
 
 Nonempty edits apply after 150 ms without input; Enter does not bypass the delay.
 Surrounding whitespace is ignored, and clearing applies immediately. The
-link:04_playback.adoc#terminal-client[terminal client] instead applies search on Enter.
+link:08_tui.adoc#terminal-client[terminal client] instead applies search on Enter.
 
 Library searches title, artist, album, and the full source path, combined with
 its favorite and missing-file filters; matching a folder name finds the tracks
@@ -210,7 +210,6 @@ rows only. Queue and playlist drag reordering is unavailable while filtered; cle
 the search before dragging to reorder. Playing or appending a whole playlist still uses its
 complete saved contents, not its search results. If search hides the playing
 track, use the explicit clear-and-locate action to reveal it.
-
 
 == Locate the playing track
 
@@ -239,7 +238,6 @@ source bit depth, channels, and bitrate. Unknown specifications are omitted;
 estimated bitrate uses `≈`. Library hover also shows the full source path,
 including in Other and when information columns are hidden. Directory hover
 shows its complete path.
-
 
 [[albums]]
 == Albums
@@ -351,7 +349,7 @@ Navigation and selection keys act on the focused visible panel. Library, Queue,
 and playlist tracks support Home/End. The TUI Library lists configured roots,
 including empty ones, followed by <<other,Other>> when nonempty; it does not infer
 filesystem roots from registered tracks. Terminal actions are documented in
-link:04_playback.adoc#terminal-client[Terminal client].
+link:08_tui.adoc#terminal-client[Terminal client].
 
 In the GUI, PageUp/PageDown scrolls a viewport without changing selection. It uses
 the last-clicked visible viewport, or the one under the pointer after clicking
@@ -377,18 +375,67 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 [[database-edits]]
 === Database edits
 
-Library edits change the database only, not media files or CUE sheets.
+The operations below have distinct read and write targets; source tags and the
+library database are not synchronized automatically.
+
+[[metadata-operation-targets]]
+[cols="2,2,2,2,2,3",options="header"]
+|===
+|Operation |Reads |Changes displayed fields |Writes database |Writes source file |Failure or next step
+
+|Ordinary library edit, including inline edits
+|Library record and submitted fields
+|After the saved edit refreshes
+|Submitted fields only
+|No
+|A failed write leaves saved data unchanged; retry refresh, not the edit, after a committed write.
+
+|Track details: load file tags
+|Source tags, including ReplayGain
+|Yes
+|No
+|No
+|Inspect loaded text before choosing a save operation.
+
+|Track details: synchronize to database
+|Displayed tag fields
+|Uses the displayed values
+|Yes
+|No
+|Retry database synchronization if it fails.
+
+|Track details: save to source file, then database
+|Displayed tag fields and existing source tags
+|Uses the displayed values
+|After successful file save, including verified fingerprint, size and modification time
+|Yes
+|These are separate writes, not a cross-store transaction. If the file succeeds but database synchronization fails, retry only database synchronization; the UI blocks another file write until resolved.
+
+|Offline CLI: `library tags`
+|Source tags and supplied options
+|No GUI update
+|No
+|Only when edit options are supplied
+|Rescan separately to update the library after a successful source edit.
+
+|Scan or force reread
+|Source metadata, rereading unchanged audio when forced
+|After database refresh
+|Descriptive source metadata may replace edits
+|No
+|Readable tracks may be saved despite task errors; inspect the result before retrying.
+|===
+
 Title, artist, album, date and track/disc numbers have one stored value; rescans
 may replace them from source metadata. Matching IDs, favorites, decoder hints,
-counts and last-played timestamps are preserved. `library remove` and `library clean-missing` atomically
-remove records and their queue/playlist
+counts and last-played timestamps are preserved. `library remove` and
+`library clean-missing` atomically remove records and their queue/playlist
 references, compacting positions without changing surviving occurrence identities
 or relative order. They never delete media files. Missing rows remain visible in
 playlist views until removed or cleaned.
 
-Failed writes leave saved data unchanged. A refresh error after a committed edit
-does not roll it back; older rows may remain visible until refresh succeeds.
-Repeating an already-saved edit is not a refresh retry.
+A refresh error after a committed edit does not roll it back; older rows may
+remain visible until refresh succeeds.
 
 Omitted fields remain unchanged; an empty string clears a text field.
 Concurrent edits to different fields preserve both changes; edits to the same
@@ -436,7 +483,8 @@ Results distinguish `unchanged` (already normalized) and `replaced`; failures re
 `{"unix_bytes":[...]}` preserves the complete Unix path. No storage synchronization
 is requested; see link:91_design_decisions.adoc#DEC-018[file publication policy].
 
-The offline command does not update the library; rescan afterward.
+See <<metadata-operation-targets,the operation table>> for database synchronization
+after offline source editing.
 
 Lofty supplies source tags and embedded artwork; containers outside its metadata
 coverage may still play but have no audio-backend tag fallback. Inspection
@@ -448,10 +496,10 @@ lost text cannot be reconstructed.
 [[inline-track-details-edits]]
 === Inline Track details edits
 
-Hover Title, Artist, Album, Release date, Track number, Disc number, Play count,
-or ReplayGain for Edit and Copy. Enter saves that database field; Escape
-or leaving the input cancels unsubmitted text. Empty text clears a field; unknown
-values display as `—`.
+Hover Title, Artist, Album, Release date, Play count, or ReplayGain for Edit and
+Copy. Enter saves that database field; Escape or leaving the input cancels
+unsubmitted text. Empty text clears a field; unknown values display as `—`.
+Track number and Disc number are display/copy fields, not inline editors.
 
 Play count accepts integers from `0` to `9223372036854775807`. Setting it does not
 change last-played time or reset the current playback's already-counted state;
@@ -479,24 +527,22 @@ replace a newer editor or another track's details. A refresh failure does not un
 a saved edit; see <<database-edits,Database edits>>. Decoder hint saves immediately,
 independently of text edits, and applies on the next track open or full waveform request.
 
-The header menu loads file tags into the displayed tag fields, including ReplayGain,
-synchronizes them to the database, or saves them to the source file and then the
-database. Clearing ReplayGain removes `REPLAYGAIN_TRACK_GAIN`; album and peak tags
-are left untouched. Existing file-format support and write safeguards apply.
-Loading alone changes neither store. Explicit legacy decoding applies only to
-Latin-1-labelled ID3 text; Unicode fields are preserved. Check the loaded text
+The header menu provides the load, database synchronization, and source-save
+operations in <<metadata-operation-targets,the operation table>>. Clearing
+ReplayGain removes `REPLAYGAIN_TRACK_GAIN`; album and peak tags are left untouched.
+Existing <<source-file-tags,file-format support and write safeguards>> apply,
+including keeping no original-file backup. Explicit legacy decoding applies only
+to Latin-1-labelled ID3 text; Unicode fields are preserved. Check the loaded text
 before saving. CUE subtracks do not support file-tag operations.
-
-File writes keep no backup. If the file is saved but database synchronization fails,
-retry database synchronization only; the UI blocks another file write until resolved.
 
 === Loading and unavailable records
 
 Details distinguishes no selection, loading (`Not loaded`), query failure, an
 unavailable record, and unknown metadata on a loaded track (`—`). Editing and
 actions are disabled until the selected track is ready. Switching tracks clears
-old values and artwork; same-track refreshes retain ready details and active input,
-including after query failure.
+old values and artwork. Same-track refreshes preserve active input, but retain
+old ready details only briefly; query failure does not extend that display period.
+See link:22_cache.adoc#demand-cancellation-and-physical-retirement[Details retention and refresh].
 
 Reload leaves manual selection and follows the current Playback track without
 changing list selections; with no current track, it clears details. A confirmed
@@ -605,8 +651,10 @@ analysis fails rather than saving mixed-version metadata. Playback and waveform
 loading also require ordinary files.
 
 Ordinary scans reuse fingerprints when size and modification time are unchanged;
-metadata reuse also requires the current probe version. `--force` rereads both
-while preserving user edits; CUE sheets are always reread. Reuse does not suppress
+metadata reuse also requires the current probe version. `--force` rereads both;
+CUE sheets are always reread. Source tags may replace database-only descriptive
+edits, while matching identities, favorites, decoder hints, statistics and references
+are preserved; see <<database-edits,Database edits>>. Reuse does not suppress
 playlist creation: an unchanged import still creates its requested playlist.
 
 Overlapping explicit scan scopes are traversed once while retaining their own
@@ -645,17 +693,23 @@ by a later accepted media task. Dismissal hides progress and message, without
 undoing saved data, clearing a separate request error, or deleting the retained
 task result. Closing the desktop window does not cancel a task.
 
-Cancel during preparation to discard all prepared results. Shutdown also cancels
-preparation. Cancellation is cooperative: an active probe must return and work
-must retire before another media task starts.
+[source,mermaid]
+----
+flowchart TD
+    prepare["Preparation"] -->|"Ready to save"| recovery["Recover queue and persist pending playback selection"]
+    prepare -->|"Cancel or Core shutdown"| discard["Discard prepared results and retire work"]
+    recovery -->|"Failure"| noSave["Save nothing and keep existing playback"]
+    recovery -->|"Success"| saving["Saving: cancellation refused"]
+    saving --> result["Inspect final result: failure may include committed changes"]
+    saving -.-> shutdown["Core shutdown waits for the result"]
+----
 
-Saving requires queue recovery and persistence of pending playback selection.
-If recovery fails, the task saves nothing; existing playback is not rolled back.
-
-Once Saving begins, cancellation is refused. Database reads and edits report
-maintenance in progress; published status and existing-playback controls remain
-available. Shutdown waits for the result. A failed task may have committed changes:
-inspect its result before retrying. Playlist imports have additional
+Cancellation is cooperative: acknowledgement does not free the shared media-task
+slot. An active probe must return and work must retire before another task starts.
+During Saving, database reads and edits report maintenance in progress; published
+status and existing-playback controls remain available. Inspect the result before
+retrying.
+Playlist imports have additional
 link:03_playlist.adoc#commit-and-export-lifecycle[commit boundaries].
 
 [[same-files-and-relocation]]
@@ -716,31 +770,15 @@ rivu library keep-independent DESTINATION_ID
 [[sqlite-maintenance]]
 == SQLite maintenance
 
-Rivu opens only the current database format. A new database is initialized
-automatically; on a version mismatch, host startup invokes `rivu-migrate apply`
-to attempt a supported offline upgrade before opening business connections.
-Install `rivu-migrate` beside `rivu` or on `PATH`; migration failure stops startup
-and prints diagnostics. The database stores library records, user edits and
-statistics, playlists, and queue occurrences and selection. Stop Rivu before
-external database edits. Queue restoration: link:04_playback.adoc#queue[Playback].
+The database stores library records, user edits and statistics, playlists, and
+queue occurrences and selection. Stop Rivu before external database edits.
+Queue restoration: link:04_playback.adoc#queue[Playback].
 
-=== Independent migration tool
-
-`rivu-migrate check` inspects formats; `apply` performs supported offline upgrades.
-Stop Rivu and external writers before applying. Upgrades keep an independent backup and
-preserve user data and playlist catalog order. Both commands validate current
-resources without rewriting them and do not initialize missing resources.
-
-[source,sh]
-----
-rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml check
-rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
-----
-
-Use the intended host's paths: `--config` alone does not select the database.
-Both commands exit `0` for valid current resources and `2` on error. `check` does
-not change configuration or database contents, though SQLite may update sidecars.
-Full workflow and compatibility: link:26_migration.adoc[Database and configuration migration].
+Rivu opens only the current database format and attempts supported offline
+upgrades at startup through `rivu-migrate`. For upgrade checks, tool installation,
+shutdown prerequisites and failure handling, follow link:10_upgrading.adoc[Upgrading].
+Migration ownership, compatibility and backup/apply guarantees are specified in
+link:27_migration.adoc[Database and configuration migration].
 
 === Database operations
 
@@ -826,7 +864,7 @@ Result shapes follow the queried resource:
   unsuccessfully for failed or cancelled tasks while retaining terminal results
   on stdout. Inspect the operation's commit boundaries before retrying. See
   <<cancellation,Cancellation>>, <<same-files-and-relocation,Relocation>>, and
-  link:27_audio_processing.adoc[Audio processing].
+  link:26_audio_processing.adoc[Audio processing].
 * Successful `library optimize` acknowledgements include that operation's size
   report in `database_optimization`. The latest successful report in System
   status is observational and must not be mistaken for a failed command's result.

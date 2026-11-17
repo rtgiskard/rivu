@@ -137,24 +137,47 @@ demand. Hiding revokes publication rights while preserving accepted rows and
 selection. Details input, submitted saves, open playlist choosers, and cover
 acquisition have separate lifetimes; retiring a read cannot retire an accepted write.
 
-GUI and TUI query tracking separates three things: current query identity and
-freshness, owner-scoped cancellation, and physical worker occupancy. Tracking
-retains neither result rows nor execution slots. Cancellation reaches only the
-corresponding Core request and does not invalidate another consumer's current data.
+GUI and TUI tracking separates query identity/freshness, owner-scoped cancellation,
+and physical occupancy; tracking itself retains neither rows nor execution slots.
+Cancellation affects only the corresponding Core request, not another consumer's
+current data. For a latest-demand owner, request B replaces A as follows:
 
-Submission receipts identify projection epochs rather than individual physical
-reads. Latest-demand owners revoke the previous epoch on replacement, including
-offset-only changes and same-query retries. Independent Library branches can
-share an epoch while retaining their own request identities; these are different
-demand policies, not interchangeable submission APIs. See
-link:91_design_decisions.adoc#DEC-022[replacement ownership].
+[source,mermaid]
+----
+sequenceDiagram
+    participant O as Demand owner
+    participant E as Client retained exchange
+    participant C as Core query owner
+    participant S as SQL worker
+    O->>E: Submit A under projection epoch A
+    E->>C: QueryRetained(A)
+    C->>S: Execute A with physical lease
+    O->>O: B replaces A, revoke A publication rights
+    Note over O,E: Hide or logical timeout also revokes rights, not occupancy
+    O->>E: Cancel A, retain latest eligible demand B
+    E->>C: QueryCancel(A)
+    Note over E,C: QueryCancel has no independent response
+    C->>S: Request cooperative cancellation
+    S->>S: SQL exits, detach handler, clean up snapshot
+    S-->>C: Physical work retired
+    C->>C: Release A lease
+    C-->>E: Original A Query response
+    E->>E: Drain A response, retire client slot
+    E-->>O: Matching retirement, reject obsolete payload
+    O->>E: Re-drive B only if still eligible
+    E->>C: QueryRetained(B)
+    Note over O,C: Accepted writes have independent lifetimes
+----
 
-A submitted read holds its physical slot until reply or disconnection. Replacement,
-hiding, cancellation, and logical timeout revoke publication but do not free that
-slot. Physical retirement re-drives the latest eligible demand; old completions
-cannot publish or clear replacement requests. Core cancellation and SQLite snapshot
-retirement are defined in
+Receipts identify projection epochs, not individual physical reads. Offset changes
+and same-query retries revoke a latest-demand owner's previous epoch. Independent
+Library branches can instead share one epoch while keeping separate request
+identities; this is not a latest-only lane. See
+link:91_design_decisions.adoc#DEC-022[replacement ownership]. A submitted slot also
+retires on disconnection. Old completions cannot publish or clear B. SQL cleanup
+and wire semantics are defined in
 link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation].
+
 Library navigation, panel hiding and window cancellation discard both active
 logical locate demand and any queued locate intent. A cancelled locate retains
 its physical slot until completion, but that completion cannot reveal ancestors
@@ -168,10 +191,11 @@ make its old coordinates current. Duplicate-review paging likewise retains the
 review epoch and page projection instead of rebinding an old offset to a new group.
 
 GUI admission allows two seconds, followed by twelve seconds for response
-presentation. Timeout shows an error, cancels the read, and rejects late payloads;
-explicit retry still waits for physical retirement. Retained IPC exchanges have
-no response-wait deadline. Transport errors have no payload stamp and do not prove
-data changed; command and framing deadlines are independent
+presentation. Timeout displays an error and requests cancellation; an explicit
+retry still waits for the retirement shown above. Cancellation is cooperative,
+not a hard filesystem/I/O cutoff. Retained IPC exchanges have no response-wait
+deadline. Transport errors have no payload stamp and do not prove data changed;
+command and framing deadlines are independent
 (link:21_ipc.adoc#request-failures-and-completion[IPC waiting limits]).
 
 `RevisionChanged` and owner-scoped `Cancelled` retire the obsolete read without
@@ -394,9 +418,12 @@ Workers wait for preceding retirement without blocking Core; charges persist
 while playback, exports or aliases still own the PCM. Export publication rechecks
 cancellation and source identity before its atomic no-clobber commit. Shutdown
 joins workers; live audio survives until its final playback owner releases it.
-Workflow, native streaming and neural memory boundaries are specified in
-link:27_audio_processing.adoc#tasks-retention-and-audition[Audio processing].
-
+For task controls and audition, see the
+link:07_audio_processing.adoc#tasks-retention-and-audition[user guide]. Native streaming
+and decoder lifetimes belong to the
+link:26_audio_processing.adoc#execution-and-source-lifetimes[execution contract];
+neural workspace and model ownership belong to the
+link:26_audio_processing.adoc#runtime-contracts[runtime contract].
 
 [[visualization-caching]]
 == Visualization caching
@@ -428,7 +455,6 @@ final drawing; the per-view rules below distinguish those lifetimes.
 |Uploads and submitted publications. A scene can retain a publication after the
 view releases it; completion-aware retirement is independent of logical demand.
 |===
-
 
 Disabling visualizations stops capture demand, discards live-analysis results and
 derived graphics, and retains bounded waveform summaries. The admission and
@@ -606,7 +632,8 @@ corresponding analyzer pool without resetting surviving consumers or the shared
 FFT window. During suspension those prepared pools can remain allocated until
 active demand is reconciled again or the analyzer is replaced or destroyed;
 their accepted samples and GUI staging are not retained as current input. The
-five-slot PCM pool retains at most 160 KiB of stereo sample storage per analyzer.
+five-slot PCM pool retains at most 160 KiB of stereo sample storage per analyzer;
+each snapshot contains at most `min(analysis_fft_size, 4096)` stereo frames.
 The optional pools and demand transitions are implemented by
 link:../crates/rivu-analysis/src/engine.rs[the GUI-side analyzer].
 
@@ -631,7 +658,6 @@ Density and Spatial Spectrum retain revocable numerical GPU publications of
 Unchanged fields and resize reuse them; hiding clears application ownership.
 Captured frames and device storage follow
 link:25_gpu_rendering.adoc#admission-and-retirement[GPU retirement].
-
 
 [[native-metadata-admission]]
 == Metadata admission
@@ -698,21 +724,67 @@ background executors and rejects non-regular sources; even a regular-file probe
 can block. GUI and MPRIS defaults share one embedded fallback SVG, separate from
 the application icon; MPRIS lazily exports those same SVG bytes in the background.
 
-Logical identity is track ID, fingerprint, and path. Concurrent CUE identities can
-share physical probing of the same path/fingerprint without sharing completion
-rights. A matching result may update a preview or MPRIS metadata; obsolete results
-can warm lookup state but never replace newer demand. MPRIS publishes metadata
-when a cold cover finishes without needing another playback update.
+Logical identity is track ID, fingerprint, and path. Within each manager,
+concurrent identities can share a physical path/fingerprint probe, but never
+completion rights. The edges below distinguish logical rights, pixel references,
+and filesystem operations; sharing the disk is not sharing a publication owner.
 
-Each consumer holds one physical load until it actually retires, then rechecks
-latest demand. Hiding the Artwork panel clears queued demand, not an already
-submitted shared load; it cannot start hidden acquisition. Other consumers retain
-independent demand. MPRIS continues transport and metadata notifications during
-loading, but disabling or replacing the service waits for physical completion.
-The material atmosphere follows the same physical-slot rule. Hiding or disabling
-it releases display demand, not an in-flight lookup. Matching completion checks
-the latest enabled track against the cache's resolved result, including cached
-misses, before admitting another lookup.
+[source,mermaid]
+----
+flowchart TB
+    subgraph Lookup["Process-local lookup and publication rights"]
+        C["Core manager and local probes"]
+        D["Desktop manager and local probes"]
+        CL["Core result / URI lease"]
+        DL["Desktop result / URI lease"]
+        C -->|"matching logical completion"| CL
+        D -->|"matching logical completion"| DL
+    end
+    subgraph Disk["Shared disk, independent of lookup lifetime"]
+        F["Immutable originals and disposable thumbnails"]
+        M["Explicit maintenance"]
+        M -->|"may delete in-use paths, not installed pixels"| F
+    end
+    subgraph Decode["Application-owned execution seat"]
+        Q["Waiting request state only"]
+        S["One seat: read, decode, filter, encode, publish"]
+        Q -->|"admit one load"| S
+        I["Seat available after actual synchronous exit"]
+        S -->|"release seat only when synchronous work returns"| I
+        I -->|"next eligible load"| Q
+    end
+    subgraph Window["Window consumers and scene references"]
+        W["Independent preview / cover demand"]
+        P["Shared immutable pixels, keyed by content and policies"]
+        R["Current and retired scene references"]
+        T["64-by-64 material derivative"]
+        X{"Last source consumer retired?"}
+        W -->|"holds while demanded"| P
+        R -->|"holds until scene replacement or flush"| P
+        P -->|"source read until derivative ready"| T
+        T -->|"completion retires only its own source demand"| X
+        W -->|"retire after scene replacement"| X
+        X -->|"yes: unload source, old scenes cannot revive it"| R
+        X -->|"no: independent consumers keep their image"| P
+    end
+    C -->|"publish encoded file"| F
+    D -->|"publish encoded file"| F
+    CL -.->|"names URI, no file lock"| F
+    DL -.->|"names path and admission policy, no file lock"| F
+    W -->|"holds logical lookup lease"| DL
+    W -->|"preview demand"| Q
+    F -->|"seat reads bytes"| S
+    S -->|"publish only to current consumers"| P
+    X -->|"only if last consumer: cancel wait, not running work"| Q
+----
+
+Obsolete lookup results may warm lookup state but cannot replace newer demand.
+Each consumer keeps its physical lookup slot until completion, then checks its
+latest enabled demand, including cached misses. Hiding Artwork or material
+atmosphere clears queued demand without starting hidden acquisition. MPRIS keeps
+transport and metadata notifications live during loading and publishes a cold
+cover without another playback update; service replacement/shutdown waits for
+physical completion.
 
 In-flight probes and published results keep their logical versions resident, not
 idle CUE aliases. Different fingerprints may coexist while old covers are in use.
@@ -771,6 +843,12 @@ policy through GUI reads. Shared paths alone do not authorize reuse under anothe
 policy; successful decodes and remembered failures are policy-keyed. Directory
 candidate rules belong to link:04_playback.adoc#mpris-and-artwork[MPRIS and artwork].
 
+Candidate admission decodes the first displayed frame using the image decoder's
+default 512 MiB allocation limit, discards those pixels, and caches the original
+encoded bytes. This decoder-scratch limit is best-effort and does not impose a
+side-length cap or validate later animation frames. It is separate from the
+encoded-file policy and the stricter window-owned pixel/workspace budgets below.
+
 There is no automatic disk-capacity limit, inventory, cleanup, or persistent
 track-to-image index. After restart, probing rediscovers the hash before file reuse.
 
@@ -794,12 +872,10 @@ of two-character lowercase-hex buckets, excluding cache-root files, unknown name
 symlinks, and nested directories. Statistics and cleanup use modification age,
 not access age; reuse never refreshes timestamps.
 
-Cleanup may delete in-use files without invalidating process-local lookup or
-display caches, so retained paths can become stale. Artwork handles share identity,
-admission policy and logical lookup ownership in memory, not file descriptors or
-filesystem locks. Cache-only reads perform no filesystem work; eviction never
-deletes files. Cleanup never touches audio sources, reports inspection/deletion
-failures, and provides no disk-capacity guarantee. Recovery guidance is in
+Cleanup can leave retained paths stale without invalidating process-local lookup
+or display caches, as shown above. Cache eviction never deletes files. Maintenance
+never touches audio sources, reports inspection/deletion failures, and provides
+no disk-capacity guarantee. Recovery guidance is in
 link:01_config.adoc#artwork-cache-maintenance[Settings maintenance].
 
 === Cached panel drawing
@@ -814,35 +890,24 @@ link:23_visuals.adoc#artwork-composition-and-animation[Artwork composition and a
 
 === Window-owned real-cover decoding
 
-Window consumers share pending or completed real-cover decoding by immutable
-content path and encoded policy, while retaining independent lookup identities
-and process-local logical ownership, not protection against file deletion.
-Background sharing also keys the decoded budget; neither pixels nor remembered
-failures cross policy identities. Work starts on preview demand using a bounded
-background decoder, never render-time file I/O.
+Real-cover sharing uses immutable content path, encoded policy and decoded budget;
+neither pixels nor remembered failures cross policy identities. All file I/O uses
+the background decode seat shown above, never render-time I/O.
 
 Static previews select the smallest sufficient tier from actual physical display
 size. Album-card demand is capped at 560 pixels, accepting display upscaling above
 that size; independent large previews retain their 1024/original-image path.
-Visible consumers of the same source share their largest required tier, so a
-large preview can raise the shared image above the album-card cap. Upgrades retain
-the old image until ready; smaller demand is debounced 300 ms. Old textures retire
-only after consumers acknowledge scene replacement. Within-tier resizing does
-not decode again.
-The 64-by-64 material derivative requests source pixels only until its result is
-ready, then retains its own cache without keeping a low-tier source alive. Other
-cover consumers retain their independent source demands. When the last source
-demand retires, source pixels release at the scene boundary without generating a
-lower tier for the derivative. Switching back to a source-image material requests
-the required tier again. Derivative observers remain registered for budget
-invalidation but do not hold obsolete source generations.
+Visible consumers share the largest required tier, so a large preview can raise
+the shared image above the album-card cap. Upgrades keep the old image until ready;
+smaller demand is debounced 300 ms. Within-tier resizing does not decode again.
+The derivative's completed cache does not keep low-tier source pixels alive or
+generate a lower tier when the last source demand retires. Switching back to a
+source-image material requests its tier again. Derivative observers remain for
+budget invalidation, not ownership of obsolete source generations.
 
-One application-owned decode seat, shared by every window, serializes real-cover
-reads, pixel decoding, thumbnail filtering, encoding, and publication on GPUI's
-background executor. Its reusable workspace is released with the application.
-Waiting consumers retain only request state, not encoded input or worker scratch;
-retiring their load cancels the wait. Already-running synchronous work owns the
-seat until it actually returns, even after its consumer stops waiting.
+The decode seat uses GPUI's background executor and releases reusable workspace
+with the application. Retiring a waiting load cancels its wait; a running
+synchronous operation cannot be interrupted by its consumer ceasing to wait.
 
 The seat retains at most 2 MiB each for source, thumbnail-input, and encoded-output
 buffers, plus at most 240 KiB of reusable filtering workspace on x86-64. It keeps
@@ -852,17 +917,12 @@ alpha; delivered pixels have independent immutable ownership, and source sharing
 uses weak display references. These retained-capacity bounds exclude active pixels,
 codec state, GPU uploads, and process RSS.
 
-Replaced or hidden display consumers retire after scene replacement; removed
-panels need not paint again. Only the last retired consumer cancels a shared load
-or unloads its image. Hiding Details or Artwork also clears queued lookup demand;
-late completion cannot restore a hidden owner or start hidden acquisition.
-Window hide, close, or reload flushes current and retired owners without another
-frame. Other windows keep independent lifetimes.
-Source release is terminal even for a scene-held image that was never painted:
-an obsolete scene cannot restart its decode or retain its logical source lookup
-ownership. That ownership never protects encoded files from cleanup. Updating a
-path without changing track ID/fingerprint updates queued and current lookup
-inputs, but does not reset artwork rotation or invent a transition.
+Removed panels need not paint again to retire. Window hide, close, or reload flushes
+current and retired owners without another frame; other windows have independent
+lifetimes. Late completion cannot restore a hidden owner or start hidden acquisition.
+Terminal source retirement also applies to scene-held images never painted.
+Updating a path without changing track ID/fingerprint updates queued and current
+lookup inputs without resetting artwork rotation or inventing a transition.
 
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer
@@ -928,7 +988,6 @@ display `Artwork unavailable`.
 Generated GUI bitmaps remain in RAM/GPU memory and never create disk files.
 MPRIS exports the same SVG source separately for external clients. Installation
 provides the desktop/tray icon as SVG and leaves existing installed files intact.
-
 
 == Font and rendering resources
 

@@ -6,7 +6,7 @@ These records were separated from the current design on 2026-11-13. Experiment
 dates and source identities are retained only where recorded; this date does not
 identify a measurement revision or imply renewed verification. Current workflow,
 acceptance requirements and remaining gaps belong in
-link:27_audio_processing.adoc[Audio processing].
+link:26_audio_processing.adoc[Audio processing].
 
 == Recorded local evidence and remaining limits
 
@@ -33,6 +33,14 @@ distinguishes transform conditioning from model execution; it does not justify
 input special cases or establish speech quality, listening acceptance or
 cross-runtime bit equality. These observations are not acceptance of the current
 standalone or graph dispatch paths.
+
+The historical artifact is
+link:../.cache/native-speech-runtime/acceptance.json[`.cache/native-speech-runtime/acceptance.json`].
+Its `source_sha256` map identifies the measured source files (including their old
+`src/processing*` locations); `model_manifests` and runtime fields identify the
+models and runtime. `numeric_reference` and its `constant_diagnosis` record the
+two differences above. These identities bind the observation to that historical
+implementation, not the current dispatch paths.
 
 === Historical quality and integration observations
 

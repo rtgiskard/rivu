@@ -1,0 +1,54 @@
+= CLI
+:toc:
+:toclevels: 2
+
+Start a shared instance with `rivu serve`, or open the GUI or TUI, before
+issuing playback commands. See link:00_getting_started.adoc[Getting started]
+for installation, instance selection and data directories.
+
+== Command conventions
+
+Control commands require a running core. `library probe`, `library tags`,
+`playback devices`, and `processing setup` also work without Core (setup contacts
+it only with `--activate`). Use `rivu -h` for concise help, `rivu --help` for startup
+details, or a subcommand's `--help` for arguments.
+
+[cols="1,2",options="header"]
+|===
+|Option |Purpose
+|`--data-dir DIRECTORY`
+|Select the instance
+|`--config FILE`
+|Select startup/probe configuration
+|`--log-level LEVEL`
+|Override this process's stderr and enabled file logging: `debug`, `info`, `warning`, `error`
+|`--json`
+|Write results to stdout and runtime diagnostics as JSON to stderr; unavailable for GUI, serve and TUI
+|===
+
+[source,sh]
+----
+# Scan after configuring library roots
+rivu library scan ~/Music --wait
+rivu library list --query "artist"
+
+# Control the current playback
+rivu playback toggle
+rivu playback volume 50
+----
+
+* *State and tasks:* `rivu status`, `rivu task status KIND INSTANCE:ID`,
+  `rivu task cancel KIND INSTANCE:ID` (`KIND`: `scan`, `relocation`, `processing`).
+  Use the printed reference; it identifies both the task and its instance.
+* *Completion:* `--wait` waits for scan, import, relocation or processing results
+  rather than acceptance. A timeout does not prove failure; do not retry blindly.
+* *JSON:* paginated lists stream one array and may be incomplete on failure;
+  check the exit status before consuming stdout.
+* *Output failures:* text and JSON writes, including the final flush, return exit
+  status 1 if stdout fails (including a closed pipe). A command may already have
+  taken effect before its output fails; do not retry it blindly.
+* *Paths:* preset, playlist and graph export paths are relative to the invoking
+  client's working directory, not the core's.
+
+Details: link:02_library.adoc#cli-output[CLI output] and
+link:01_config.adoc#logging-and-diagnostics[logging and diagnostics].

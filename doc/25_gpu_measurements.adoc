@@ -200,7 +200,6 @@ panels sharing one publication. Resize alternates 768 and 576 pixels. Paths comp
 the same 1,024-point, 2-pixel stroke at 768 by 320 through the existing textured
 path and the new palette material; geometry generation is excluded from both.
 
-
 [cols="2,2,2,2,2",options="header"]
 |===
 |Workload |Baseline CPU update |Material CPU update |Baseline render + readback |Material render + readback
@@ -231,7 +230,6 @@ application visualizer changed in this historical vendor slice.
 
 In-process first-use observations do not reset device or driver caches and are
 not cold-start results.
-
 
 [[demand-specific-preparation-and-path-batching]]
 === Demand-specific preparation and path batching

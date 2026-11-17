@@ -1,0 +1,415 @@
+= Visualizations
+:toc:
+:toclevels: 2
+
+This guide covers visualization behavior, panel controls and visualization-specific
+configuration parameters. For shared configuration persistence and validation, see
+link:01_config.adoc#saving-configuration[Saving configuration]; signal ownership,
+analysis and rendering design are in link:23_visuals.adoc[Visualization Rendering Design].
+
+[[visualizations]]
+== Visualizations
+
+Live analysis requires playback, enabled visualizations, and either a visible
+live-analysis style or a configured Spectrogram history view. Waveform uses
+progressively admitted PCM or an explicitly requested track preview rather than
+live FFT analysis. The <<visualization-behavior,behavior matrix>> distinguishes
+visibility, playback and enablement effects.
+
+[cols="2,1,3",options="header"]
+|===
+|`visualizations.general.*` key |Range / default |Controls
+|`analysis_rate_hz`
+|`5`–`60` / `28`
+|Maximum FFT transform and publication rate, not PCM ingestion or animation.
+|===
+
+For Animation FPS, see link:01_config.adoc#animation[Animation]. Analysis rate is under Settings →
+Visualizations → Frequency analysis. Spectrum release, Spectrogram scrolling,
+radial motion, and generative light can advance between analysis publications,
+but display time never advances beyond accepted audio. Stereo Density and Spatial
+Spectrum use the latest result rather than replaying skipped publications.
+
+[[visualization-behavior]]
+[cols="2,3,3,3,4,3",options="header"]
+|===
+|Event |Audio-view drawing / animation |Live analysis |Spectrogram history |Waveform summary / full request |Artwork
+
+|Pause
+|Freezes the last displayed frame and audio-driven animation.
+|No analysis runs.
+|Retained, without advancing audio time.
+|No new playback coverage while paused; explicit full previews are separate from live analysis.
+|Rotation freezes; animated source covers can continue.
+
+|Inactive tab / reliably reported hidden window
+|Drawing and animation stop; returning does not replay hidden time.
+|Other styles suspend demand; configured Spectrogram history can still require analysis during playback.
+|Configured panels continue bounded collection; returning shows the latest history.
+|Configured Waveform panels continue bounded PCM folding even hidden; returning shows the latest coverage.
+|Both rotation and source animation stop while hidden.
+
+|Remove the corresponding panel
+|That panel no longer draws or animates.
+|Releases that panel's demand, not demand from other panels.
+|Removing the corresponding panels stops collection.
+|Removing the corresponding panels stops progressive collection.
+|Removed panel no longer presents artwork.
+
+|Close the window
+|Releases its presentation.
+|Releases its analysis demand.
+|Releases its collection demand.
+|Releases its collection demand.
+|Closes that window's artwork presentation, not Core playback.
+
+|Globally disable visualizations
+|Audio-visualizer content becomes a centered snowflake; Waveform display/interaction caches are released.
+|Sampling and FFT work stop; live results are discarded.
+|Frequency history is discarded.
+|Retains the bounded session summary and completed preview without new coverage. Running full requests are cancelled; new GUI requests are unavailable.
+|Cover loading, rotation and source animation are unaffected.
+
+|Re-enable visualizations
+|Live views rebuild from new audio; paused live analysis has no old picture to restore.
+|Resumes when playback and configured/visible demand require it, without reopening output or decoder.
+|Rebuilds from new audio, not discarded history.
+|Restores retained data and resumes folding subsequently admitted PCM. Missing intervals stay blank until visited. Full requests do not restart automatically; request one explicitly.
+|Unchanged by the switch.
+|===
+
+Hiding is not disabling; losing focus alone is not hiding. Panel and window rows
+describe the demand they own, not a global shutdown of other windows or panels.
+For Artwork's independent rotation and source-animation clocks, see
+link:05_layout.adoc#artwork-panel[Artwork panel]. Scheduling and continuity details
+are in link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
+
+Stop retires analysis results; the optional radial idle fade may keep the last
+drawing briefly. Seek and source replacement retire instantaneous views, but
+preserve compatible Spectrogram history. Incompatible analysis settings clear
+frequency history even while hidden or paused.
+
+`visualizations.general.palette` sets the Spectrum, Spectrogram, and Waveform colors:
+`inferno`, `magma`, `viridis`, `cividis`, `grayscale`, or `deadbeef` (default).
+Select it under Settings → Visualizations → General.
+For older palette keys and values, see
+link:10_upgrading.adoc#configuration-compatibility[Configuration compatibility].
+Color settings use quoted `"#RRGGBB"` values.
+
+Visualization caches are always enabled within their resource bounds; see
+link:22_cache.adoc#visualization-caching[Visualization caching].
+
+Before audio data is available, visualization panels show no waiting message;
+their backgrounds and any applicable reference guides remain. Loading, failure,
+disabled-state icons, and unavailable frequency-data messages remain distinct from this
+normal initial state.
+
+[[shared-visualization-settings]]
+=== Shared visualization settings
+
+* `visualizations.general.signal` selects one shared signal for all audio-data views:
+  `"before"` is before the active realtime processing chain; `"after"` (default)
+  includes the active chain and monitor EQ. Both are before master volume.
+  Change it under Visualizations → General → Appearance. Analysis runs
+  asynchronously; strict audio/visual synchronization is not guaranteed.
+  Changing the signal resets realtime analysis history, but does not clear the
+  rolling waveform or automatically start a full waveform scan. Equalizer changes
+  preserve realtime history; newly visited waveform intervals replace their old data.
+  An explicit full waveform request sends the selected signal; processing and EQ
+  are captured when the service handles it, not necessarily at the click. The
+  prior display remains visible; see link:23_visuals.adoc#waveform[Waveform capture].
+
+* `visualizations.general.background` sets the background for all views (default
+  `"#08090C"`). Radial, stereo-analysis, fractal, and Oscilloscope styles use the
+  Audio Visualizer primary and secondary colors instead of the shared palette.
+* `visualizations.general.db_range` supplies the display span for Spectrum, Spectrogram,
+  and the radial/stereo/fractal styles unless their settings override it. It does
+  not affect Waveform gain, Oscilloscope amplitude, or volume.
+* `visualizations.general.analysis_fft_size`, `visualizations.general.analysis_window`, and
+  `visualizations.general.analysis_rate_hz` apply to live-analysis styles, not Waveform,
+  which requests neither FFT nor PCM snapshots.
+  Oscilloscope uses unwindowed PCM bounded by the selected FFT size; the analysis
+  window does not affect its PCM, but changing it still clears that view.
+  FFT size accepts powers of two from `512` to `32768` and defaults to `8192`.
+  Window accepts `hann`, `blackman_harris` (default), or `none`.
+  Changing size or window clears visualization history.
+  Changing only the analysis rate preserves compatible visualization content and
+  the current analysis window. Small FFT windows at low rates can miss short
+  transients; increasing animation FPS cannot recover unobserved audio.
+* `visualizations.general.enabled` controls processing independently of media read
+  buffering and rendering reuse; see <<visualization-enablement,Visualization enablement>>.
+  In Settings → Visualizations → General → Appearance, its switch sits
+  below the shared material-buffer and scene-filter limits.
+
+Each frequency view has a range override; leave it empty to inherit General,
+or clear an explicit value to restore inheritance. See
+<<visualization-db-ranges,Visualization dB ranges>> for the configuration contract.
+
+Settings → Visualizations groups shared controls, shared effects, and New panel
+defaults under General, with separate pages for view-specific controls. General
+has one shared editor for the colors used by radial, stereo-analysis, fractal, and
+Oscilloscope styles, one range override
+for radial, stereo-analysis, and fractal styles, and sensitivity and Bloom for
+radial and fractal styles. These are shared values, not separate preferences per
+view. View-specific pages contain only independent parameters.
+
+Style, reference lines, and labels under New panel defaults affect new panels only;
+existing panels retain their layout-local choices. See
+<<audio-visualizer,Audio Visualizer>> for panel settings and style-specific effects.
+
+[[visualization-enablement]]
+=== Visualization enablement
+
+`visualizations.general.enabled` defaults to `true`. The Settings snowflake toggle
+is active when visualizations are disabled. The
+<<visualization-behavior,visualization behavior matrix>> describes data retention,
+cancellation and re-enablement; disabling is not merely hiding a panel.
+
+Playback, seeking through the playback slider, ordinary interface effects,
+library operations, IPC, MPRIS, and the tray are unchanged. Layout and visualization
+settings are preserved.
+
+[[visualization-db-ranges]]
+=== Visualization dB ranges
+
+`visualizations.general.db_range` defaults to `70` dB. The optional
+`visualizations.spectrum.db_range` and `visualizations.spectrogram.db_range` override
+their respective views. `visualizations.reactive.db_range` is shared by radial,
+stereo-analysis, and fractal styles. Every supplied range must be finite and
+between `1` and `160` dB, inclusive. An explicit override remains an override even
+if it equals the shared default; changing General later affects only views without
+overrides.
+
+In TOML, omit a view's override key to inherit the shared default. Do not write an empty
+string or a blank assignment: overrides are numeric when present. Saving an
+inherited range omits that override key.
+
+[source,toml]
+----
+[visualizations.general]
+db_range = 80.0
+
+[visualizations.spectrum]
+db_range = 60.0
+
+[visualizations.reactive]
+db_range = 100.0
+# visualizations.spectrogram.db_range is omitted, so Spectrogram uses 80 dB
+----
+
+These ranges affect display mapping only, not FFT analysis, decoded audio,
+playback volume, or Waveform's RMS/Peak gains. Spectrogram recolors retained
+history without discarding it. Changing an unused shared default or setting an
+override equal to the current resolved value leaves the display unchanged.
+
+=== Waveform
+
+Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
+above the centerline, right below; the filled body is RMS amplitude and the outer
+line is peak amplitude. Unknown intervals remain blank. The GUI session builds
+the preview progressively from admitted PCM; `Load full waveform now` explicitly
+requests a complete preview. Summaries are bounded to 1024 bins and not persisted.
+Click or drag to seek the current track; a non-playing selection preview does
+not seek playback.
+Seeking gestures stay bound to the queue entry at press time. If playback moves
+to another entry before release, the old gesture cannot seek the new entry.
+Escape or a geometry change cancels the gesture without seeking.
+To preview a track without starting playback, select it in Library and use
+`Load full waveform now`. A selected track with no decoded samples can also
+build its preview through playback.
+
+`visualizations.waveform.seek_enabled` defaults to `true`. Disable Click and drag to seek in
+the Waveform settings page or its panel right-click menu to prevent accidental
+seeks. Disabling it cancels any active waveform drag and preview; the playback
+slider remains available.
+
+RMS uses a center-to-edge palette gradient; Peak uses the palette color at its
+level. Known silence remains visible as a minimum-height RMS fill; unknown
+intervals stay blank.
+
+Waveform time labels follow the instance's Labels option. Their default for new
+panels is `visualizations.defaults.labels` (`false`).
+`cursor_color` defaults to `"#73DACA"`; `glow` accepts `0`–`2`, default `1.0`.
+Amplitude settings are:
+
+[cols="2,1,1",options="header"]
+|===
+|`visualizations.waveform.*` key |Range |Default
+|`rms_gain` |0–3 |0.94
+|`peak_gain` |0–2 |1.0
+|`peak_gamma` |0.25–3 |2.0
+|===
+
+Gamma above `1` reduces low peaks; below `1` lifts them. These settings affect
+rendering only, not playback volume or decoded preview data.
+
+=== Spectrum and Spectrogram
+Visualization panels expose their local style, reference lines and labels in the right-click menu; Oscilloscope also
+offers Overlay channels.
+
+Inactive Spectrum fields retain their values and are still validated by Apply.
+If a retained value is invalid, open Visualizations → Spectrum: choose a Style
+other than Solid to edit the active bar-layout value or gap, or enable Peak markers to
+edit marker hold or gravity. Correct the value, then restore the desired style
+or toggle and apply again. Disabling a field does not discard or repair its value.
+
+Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
+`outline`, `led`, `line`, or `solid` (default `solid`). Motion freezes while paused.
+Bar layout has two exclusive modes. Automatic mode derives the number of bands
+from the panel width, requested bar width (`1`–`20` logical pixels), and gap:
+
+[source,toml]
+----
+[visualizations.spectrum]
+bar_layout = { mode = "automatic", width = 3.0 }
+----
+
+This is the default layout. For a fixed count, use
+`bar_layout = { mode = "fixed", count = 64 }`; `count` accepts `1`–`512`.
+Only the selected mode's parameter is allowed. Solid derives its slots from
+drawable logical-pixel width, up to the renderer's slot limit, and ignores bar layout and gap.
+
+In desktop settings, correct an invalid active value before switching layout
+modes. Switching initializes the new mode to a width of `3.0` or a count of `64`.
+
+The remaining `visualizations.spectrum.*` settings are:
+
+[cols="2,2,1",options="header"]
+|===
+|Key |Range or meaning |Default
+|`gap` |`0`–`8` pixels |`1.0`
+|`peaks` |Show discrete peak markers |`true`
+|`peak_hold_ms` |`0`–`2000` ms |`400`
+|`peak_gravity` |`0`–`500` dB/s² |`50.0`
+|`bar_hold_ms` |`0`–`2000` ms |`0`
+|`bar_gravity` |`0`–`500` dB/s² |`400.0`
+|`smoothing_ms` |`0`–`1000` ms |`80`
+|===
+
+Zero gravity snaps to the current level after hold; it does not hold peaks forever.
+Display range inheritance is described in <<visualization-db-ranges,Visualization dB ranges>>.
+
+`visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
+continuous or stepped boundary. `line` always connects valid body points
+continuously and skips empty slots rather than drawing them at the floor.
+Peak indicators remain discrete in every style.
+
+Spectrogram shows recent frequency history at a fixed audio-time scale. It records
+the audio stream across seeks and track changes rather than tracking one song's
+position. New audio enters at the right; startup and unavailable history remain
+blank rather than stretching the available audio across the panel.
+Its `visualizations.spectrogram.*` settings include:
+
+* `interpolate`: default `true`; controls interpolation between source rows.
+* `history_seconds`: `1`–`60`, default `20`; sets the displayed audio-time span.
+
+Spectrogram preserves peaks when source values share a display cell. Detail is
+bounded by panel resolution, FFT size and the shared material budget;
+interpolation does not create measured frequency detail.
+
+[source,toml]
+----
+[visualizations.spectrogram]
+history_seconds = 20
+----
+
+The shared material-buffer budget is configured in
+link:01_config.adoc#desktop-settings[Desktop settings].
+
+Both views use a logarithmic frequency axis. Shared analysis controls are described
+under <<visualizations,Visualizations>>; display-range overrides under
+<<visualization-db-ranges,Visualization dB ranges>>.
+
+[[audio-visualizer]]
+=== Audio Visualizer
+
+Every Visualization panel uses the `audio_visualizer` kind. Right-click and open
+`Visualizer style` to choose a style; `Reference lines`, `Labels`, and
+style-specific actions follow it in the menu. Different styles can run simultaneously.
+Instance choices move with the panel and persist through link:05_layout.adoc#layout[Layout].
+`visualizations.defaults.style` (default `bars_rings`),
+`visualizations.defaults.reference_lines` and `visualizations.defaults.labels`
+(both default `false`) seed new panels only.
+
+Reference lines and labels are independently optional. Radial guides show
+normalized bar levels; analysis views use their measured axes; fractal guides
+show normalized scene coordinates, not audio measurements. Small views omit
+labels that would overlap. Eleven styles are available:
+
+* `spectrum`, `spectrogram`, and `waveform` use the views described above, with
+  the same instance-local overlay choices as the other styles.
+* `bars`, `rings`, and `bars_rings` use the radial Spectrum presentation.
+  Rotation, bar width/glow, ring opacity, inner diameter, and idle fade apply
+  to these styles only. Sensitivity and Bloom also affect the fractal styles.
+* `stereo_density` shows a Mid/Side occupancy field: horizontal Side `(L−R)/2`,
+  vertical Mid `(L+R)/2`, both fixed at ±1 without automatic gain. Equal channels
+  form a vertical trace; opposite channels form a horizontal trace. Its readout
+  reports correlation, left/right energy balance, and the Side share of energy
+  over the current FFT window. Correlation is undefined for silence or a silent
+  channel. Color represents decaying sample occupancy in dB, not audio dBFS.
+* `spatial_spectrum` shows logarithmic frequency vertically and left/right
+  energy balance horizontally, with color representing frequency-bin power in
+  dBFS. Equal-energy channels appear at the center even when their phases differ;
+  this is not a source-direction or phase measurement.
+* `fractal_beams` maps low-frequency energy to branch length, mids to bending,
+  and highs to fine-branch intensity. Energy rises launch outward pulses;
+  these are not detected beats.
+* `fractal_flow` maps low, mid, and high energy to filament motion;
+  energy rises brighten the trails.
+* `oscilloscope` displays unwindowed stereo PCM using the primary and secondary
+  colors as solid traces. By default, channels are separate, with left above
+  right. Enabling Overlay channels draws both traces on the same time and amplitude axes.
+  A rising zero crossing on the left triggers a configured sweep; right-only
+  audio triggers on the right. Short FFT windows show the available half-window.
+  Reference lines mark channel centers and amplitude limits, with ten equal time
+  intervals; Separate mode gives each channel its own guides.
+  Labels show channel order as `L / R`, input amplitude limits and the actual
+  source-sample duration. `visualizations.oscilloscope.overlay_channels` defaults
+  to `false` (Separate) and seeds new instances only. Change an existing panel
+  through its right-click Overlay channels action; switching styles retains it.
+  Global controls under Settings →
+  Visualizations → Oscilloscope are `visualizations.oscilloscope.time_span_ms`
+  (`1`–`50` ms, default `20`) and `visualizations.oscilloscope.gain`
+  (`0.1`–`10`, default `1`). Gain affects drawing only, not PCM or volume;
+  a gain of `2` displays input amplitude limits of ±0.5.
+  Sensitivity, dB range, Bloom, radial effects, and idle fade do not apply.
+
+Both fractal styles are generative art, not amplitude or phase measurements.
+
+FFT size, rate and window applicability are defined in
+<<shared-visualization-settings,Shared visualization settings>>.
+`visualizations.reactive.db_range`
+inherits `visualizations.general.db_range` when omitted; it controls analysis color
+mapping and radial/fractal level normalization, not playback volume or the
+Oscilloscope's amplitude scale. The two analysis styles retain a 0.5-second
+exponential trail measured in accepted audio time, so pausing freezes the field.
+Seeking, signal gaps, style changes, and FFT size/window changes clear the trail.
+
+Fractal sensitivity and dB range map energy to shape and brightness; Bloom controls
+the halo. Rotation, bar/ring shape, and idle fade do not apply. Silence extinguishes
+the light; pause freezes it. Seeking, signal gaps, hiding the window, and FFT
+changes reset the scene, while switching to an inactive tab preserves it.
+See link:23_visuals.adoc[Visualization Rendering Design] for signal and rendering
+mechanisms.
+
+The effect parameters below accept finite values in these ranges.
+Keys are relative to `[visualizations]`:
+
+[cols="2,1,1",options="header"]
+|===
+|Key |Range |Default
+|`reactive.sensitivity` |0–5 |1.5
+|`radial.rotation_speed` |0–10 |0.5
+|`radial.bar_width` |0–2 |0.6
+|`radial.ring_opacity` |0–1 |0.8
+|`reactive.bloom_intensity` |0–2 |0.5
+|`radial.inner_diameter` |0–2 |0.7
+|===
+
+`reactive.bloom_intensity` controls radial bar glow; zero disables it.
+
+`visualizations.radial.fade_when_idle` defaults to `false` and applies only to stopped playback; pause
+always preserves the last displayed frame. `visualizations.effects.primary_color` and
+`visualizations.effects.secondary_color` default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
+selected instance style does not use them.
+

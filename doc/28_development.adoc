@@ -1,0 +1,73 @@
+= Building and development
+:toc:
+:toclevels: 2
+
+For build prerequisites, installation commands and feature selection, see
+link:00_getting_started.adoc#build-and-install[Build and install]. Run the
+following development commands from the repository root.
+
+== Build information
+
+[cols="1,2",options="header"]
+|===
+|Setting / command |Purpose
+|`CARGO_PROFILE_DEV_DEBUG=2` / `CARGO_PROFILE_TEST_DEBUG=2`
+|Full debugging information; defaults are line tables for development and none for tests
+|`CARGO_PROFILE_RELEASE_STRIP=none`
+|Keep release symbols for troubleshooting
+|`RIVU_GIT_VERSION`
+|Override build identity; defaults to Git identity with `make build`, package version with plain Cargo
+|`SOURCE_DATE_EPOCH`
+|Reproducible timestamp in nonnegative Unix seconds; invalid values fail the build
+|`rivu -V` / `rivu-migrate -V`
+|Application version with build identity / migration-tool package version
+|`make ui-demo`
+|Explore reusable GUI controls on a Wayland desktop
+|===
+
+About shows build identity, enabled features and the timestamp in local time.
+For GUI development, see link:24_layout.adoc#reusable-gpui-controls[component boundaries]
+and link:23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
+
+== Development checks
+
+[cols="1,3",options="header"]
+|===
+|Command |Coverage
+|`make lint`
+|Formatting and all workspace targets/features, including link:00_getting_started.adoc#font-embedding[font embedding]; requires `rustfmt` and `clippy`
+|`make test`
+|Rust and Python behavior suites below
+|`make test-rust`
+|Workspace and standalone-crate feature combinations listed in link:../Makefile[Makefile]
+|`make test-python`
+|Synthetic audio-processing worker and evaluation tests; no model downloads
+|`cargo test --locked -p rivu-ui --example showcase`
+|Showcase dropdown keyboard regression
+|`cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac`
+|Local decoder/metadata patch regressions outside the workspace
+|===
+
+Rust tests need the build/font prerequisites and `dbus`; they use private session
+buses and require no display server or audio device. Python tests additionally need:
+
+[source,sh]
+----
+sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema
+----
+
+Select another interpreter with `PYTHON=/path/to/python`. Real-model checks need
+prepared environments and local manifests; synthetic tests do not establish model
+quality or runtime memory usage. See
+link:26_audio_processing.adoc#quality-acceptance[audio-processing acceptance].
+The link:../.github/workflows/build.yml[CI workflow] defines release checks.
+
+.IPC test isolation
+[%collapsible]
+====
+Use `socket_test_directory` for IPC fixtures alongside subprocess tests: it pins
+directory inodes so cleanup cannot recycle an address while a pre-exec child holds
+its listener. Rebind checks and Drop-driven EOF tests in binaries that spawn
+subprocesses must also run in a bounded single-test subprocess through
+`test_support::run_in_subprocess`; directory pins do not prevent socket inheritance.
+====
