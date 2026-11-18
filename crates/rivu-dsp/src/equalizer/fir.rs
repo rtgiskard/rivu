@@ -8,7 +8,10 @@
 //! delay includes both the symmetric kernel's group delay and one partition of
 //! buffering. Offline callers flush zeros, discard `latency_frames()`, and keep
 //! their original frame count to obtain source-aligned, zero-extended audio.
-use std::{f64::consts::PI, sync::Arc};
+use std::{
+    f64::consts::PI,
+    sync::{Arc, Mutex},
+};
 
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
@@ -106,28 +109,30 @@ impl FirEqualizer {
             inverse,
         };
         if !bypass {
-            let mut designer = KernelDesigner::new(sample_rate, taps);
-            for (bank, &channel) in representatives[..banks].iter().enumerate() {
-                let impulse = designer.design(config, sample_rate, channels, channel)?;
-                for partition in 0..partitions {
-                    equalizer.work.fill(Complex::default());
-                    for (bin, &value) in equalizer
-                        .work
-                        .iter_mut()
-                        .zip(impulse[partition * PARTITION..].iter().take(PARTITION))
-                    {
-                        bin.re = value;
+            KernelDesigner::with_cached(sample_rate, taps, |designer| -> Result<()> {
+                for (bank, &channel) in representatives[..banks].iter().enumerate() {
+                    let impulse = designer.design(config, sample_rate, channels, channel)?;
+                    for partition in 0..partitions {
+                        equalizer.work.fill(Complex::default());
+                        for (bin, &value) in equalizer
+                            .work
+                            .iter_mut()
+                            .zip(impulse[partition * PARTITION..].iter().take(PARTITION))
+                        {
+                            bin.re = value;
+                        }
+                        equalizer
+                            .forward
+                            .as_ref()
+                            .expect("active FIR has FFT plans")
+                            .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
+                        ensure!(finite_complex(&equalizer.work), "FIR kernel FFT overflow");
+                        let start = (bank * partitions + partition) * FFT_SIZE;
+                        equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
                     }
-                    equalizer
-                        .forward
-                        .as_ref()
-                        .expect("active FIR has FFT plans")
-                        .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
-                    ensure!(finite_complex(&equalizer.work), "FIR kernel FFT overflow");
-                    let start = (bank * partitions + partition) * FFT_SIZE;
-                    equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
                 }
-            }
+                Ok(())
+            })?;
         }
         Ok(equalizer)
     }
@@ -288,8 +293,15 @@ fn same_selection(config: &EqualizerConfig, left: usize, right: usize) -> bool {
     selected(left).eq(selected(right))
 }
 
-/// Shared only by the channels of one construction, then released before use.
+// A checked-out designer is exclusively owned by one construction. Only one
+// idle workspace survives, independent of how many workers have constructed EQ.
+// Validated taps bound its arrays and the single retained FFT plan; convolution
+// histories and the finished kernels remain owned by each FirEqualizer.
+static IDLE_KERNEL_DESIGNER: Mutex<Option<KernelDesigner>> = Mutex::new(None);
+
+/// Reusable preparation storage, never used by the audio processing path.
 struct KernelDesigner {
+    sample_rate: u32,
     frequencies: Vec<f64>,
     decibels: Vec<f64>,
     spectrum: Vec<Complex<f64>>,
@@ -300,6 +312,32 @@ struct KernelDesigner {
 }
 
 impl KernelDesigner {
+    fn with_cached<T>(sample_rate: u32, taps: usize, design: impl FnOnce(&mut Self) -> T) -> T {
+        // Poisoning disables this optional optimization, not FIR construction.
+        // Both planning and design happen after the short checkout lock ends.
+        let cached = IDLE_KERNEL_DESIGNER
+            .lock()
+            .ok()
+            .and_then(|mut idle| idle.take());
+        let mut designer = if let Some(mut designer) = cached {
+            designer.prepare(sample_rate, taps);
+            designer
+        } else {
+            Self::new(sample_rate, taps)
+        };
+        // A fallible design returns its workspace too. Unwinding instead drops
+        // the exclusive workspace without ever poisoning the cache's mutex.
+        let result = design(&mut designer);
+        if let Ok(mut idle) = IDLE_KERNEL_DESIGNER.lock()
+            && idle.is_none()
+        {
+            *idle = Some(designer);
+        }
+        // If another constructor filled the slot, drop this designer only after
+        // releasing the lock, including its potentially large arrays and plan.
+        result
+    }
+
     fn new(sample_rate: u32, taps: usize) -> Self {
         let size = (taps * 8).next_power_of_two();
         let frequencies: Vec<_> = (0..=size / 2)
@@ -314,6 +352,7 @@ impl KernelDesigner {
             })
             .collect();
         Self {
+            sample_rate,
             decibels: vec![0.0; frequencies.len()],
             frequencies,
             spectrum: vec![Complex::default(); size],
@@ -321,6 +360,30 @@ impl KernelDesigner {
             scratch,
             window,
             impulse: vec![0.0; taps],
+        }
+    }
+
+    fn prepare(&mut self, sample_rate: u32, taps: usize) {
+        let size = (taps * 8).next_power_of_two();
+        if self.spectrum.len() != size {
+            // Replace rather than shrink in place: idle retention follows the
+            // latest design size, not the largest one ever prepared.
+            *self = Self::new(sample_rate, taps);
+            return;
+        }
+        if self.sample_rate != sample_rate {
+            for (bin, frequency) in self.frequencies.iter_mut().enumerate() {
+                *frequency = bin as f64 * f64::from(sample_rate) / size as f64;
+            }
+            self.sample_rate = sample_rate;
+        }
+        if self.impulse.len() != taps {
+            self.impulse.resize(taps, 0.0);
+            self.window.resize((taps - 1) / 2 + 1, 0.0);
+            for (index, window) in self.window.iter_mut().enumerate() {
+                let phase = 2.0 * PI * index as f64 / (taps - 1) as f64;
+                *window = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+            }
         }
     }
 
@@ -369,6 +432,95 @@ impl KernelDesigner {
 mod tests {
     use super::super::config::{ChannelTarget, EqBand};
     use super::*;
+
+    #[test]
+    fn kernel_design_refreshes_rate_taps_and_response_between_uses() {
+        let mut config = EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                gain_db: 9.0,
+                frequency_hz: 1_700.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reused = KernelDesigner::new(48_000, 513);
+        // The rate-only and 513 -> 769 changes keep the FFT size unchanged.
+        // Later transitions shrink and grow the transform as well.
+        for (index, (sample_rate, taps)) in [
+            (48_000, 513),
+            (96_000, 513),
+            (96_000, 769),
+            (44_100, 769),
+            (44_100, 257),
+            (48_000, 513),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            config.preamp_db = index as f64 - 3.0;
+            config.bands[0].gain_db = if index % 2 == 0 { 9.0 } else { -6.0 };
+            reused.prepare(sample_rate, taps);
+            let mut fresh = KernelDesigner::new(sample_rate, taps);
+            let expected = fresh.design(&config, sample_rate, 1, 0).unwrap();
+            assert_eq!(
+                reused.design(&config, sample_rate, 1, 0).unwrap(),
+                expected,
+                "{sample_rate} Hz, {taps} taps"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_constructors_preserve_independent_audio_and_timing() {
+        let render = |sample_rate, taps, gain_db| {
+            let config = EqualizerConfig {
+                enabled: true,
+                bands: vec![EqBand {
+                    gain_db,
+                    frequency_hz: 1_700.0,
+                    channels: ChannelTarget::Selected(vec![0]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut fir = FirEqualizer::new(&config, sample_rate, 2, taps).unwrap();
+            let mut samples: Vec<_> = (0..fir.tail_frames() + 1024)
+                .flat_map(|frame| {
+                    let value = if frame < 1024 {
+                        (frame as f32 * 0.071).sin()
+                    } else {
+                        0.0
+                    };
+                    [value, -value * 0.25]
+                })
+                .collect();
+            fir.process_interleaved(&mut samples).unwrap();
+            (fir.latency_frames(), fir.tail_frames(), samples)
+        };
+        let cases = [
+            (48_000, 513, 6.0),
+            (96_000, 513, -9.0),
+            (44_100, 769, 12.0),
+            (48_000, 1025, -6.0),
+        ];
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|&(rate, taps, gain)| render(rate, taps, gain))
+            .collect();
+        let barrier = std::sync::Barrier::new(cases.len());
+        std::thread::scope(|scope| {
+            for (&(rate, taps, gain), expected) in cases.iter().zip(&expected) {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..2 {
+                        assert_eq!(&render(rate, taps, gain), expected);
+                    }
+                });
+            }
+        });
+    }
 
     #[test]
     fn unity_has_exact_declared_delay_and_reset_discards_history() {

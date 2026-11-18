@@ -107,6 +107,8 @@ render failure flush valid partial PCM before the terminal response; cancellatio
 discards unsent PCM. Packet sizing does not change DSP or realtime-window blocks.
 
 Four reusable PCM buffers (at most 128 KiB per render) feed a two-packet queue.
+The GUI receiver decodes each packet into one sample buffer owned by its stream;
+consumers borrow it until the next frame is read and never retain it.
 Backpressure keeps finite rendering lossless without retaining whole-track PCM;
 encoded, socket, decoder and processing storage are additional costs. Disconnect
 or cancellation requests retirement; the physical blocking-work lease remains

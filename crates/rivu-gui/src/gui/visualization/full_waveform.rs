@@ -44,12 +44,12 @@ pub(in crate::gui) async fn load(
                         &path,
                         range,
                         hint,
-                        duration,
-                        sample_rate,
-                        source,
-                        Some(identity),
+                        *duration,
+                        *sample_rate,
+                        *source,
+                        Some(*identity),
                     );
-                    weights = rivu_dsp::channels::analysis_weights(layout);
+                    weights = rivu_dsp::channels::analysis_weights(layout.iter().copied());
                 }
                 Response::Pcm {
                     media_start,
@@ -66,10 +66,10 @@ pub(in crate::gui) async fn load(
                         }
                         stereo
                     }));
-                    summary.push_mapped(media_start, media_step, &folded);
+                    summary.push_mapped(*media_start, *media_step, &folded);
                     progress(&summary.frame)?;
                 }
-                Response::Complete { duration, .. } => summary.finish(duration),
+                Response::Complete { duration, .. } => summary.finish(*duration),
                 _ => unreachable!("Generic stream admission rejects control/error events"),
             }
             Ok(())

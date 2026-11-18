@@ -242,9 +242,15 @@ are absent, not no-ops. The application and `rivu-audio` enable execution;
 in a shared dependency graph. Examples `equalizer_benchmark` and `denoise_render`
 require `--features execution`.
 
-Disabled FIR allocates no convolution/FFT state. Restoration prepares only the
-needed path: exact bypass for zero Wet or a disabled chain, time-domain state for
-hum/repair, and STFT state for spectral modes. Configuration and required profiles
+Disabled FIR allocates no convolution/FFT state. Enabled FIR construction designs
+kernels in a preparation workspace reused across constructions. At most one idle
+workspace is retained process-wide; it is bounded by the 16,385-tap limit and
+rebuilt when the design FFT size changes. Concurrent constructions each take an
+exclusive workspace; finished kernels and convolution history belong to each filter.
+
+Restoration prepares only the needed path: exact bypass for zero Wet or a disabled
+chain, time-domain state for hum/repair, and STFT state for spectral modes.
+Configuration and required profiles
 are validated even on bypass; delayed partial-wet processing retains dry alignment.
 
 [[quality-acceptance]]

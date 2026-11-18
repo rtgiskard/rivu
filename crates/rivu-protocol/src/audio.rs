@@ -7,7 +7,10 @@ use anyhow::{Context, Result, ensure};
 use async_io::Async;
 use futures_lite::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rivu_format::decoder_hint::DecoderHint;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeOwned, DeserializeSeed, EnumAccess, SeqAccess, VariantAccess, Visitor},
+};
 use std::{
     os::{
         linux::net::SocketAddrExt,
@@ -116,6 +119,164 @@ pub enum Response {
     },
     Error(String),
 }
+
+/// Decode storage owned by one physical PCM stream. Responses borrow this storage,
+/// so another frame cannot overwrite samples until the consumer releases its borrow.
+#[derive(Default)]
+pub struct ResponseDecoder {
+    response: Option<Response>,
+    samples: Vec<f32>,
+}
+
+impl ResponseDecoder {
+    pub fn decode(&mut self, bytes: &[u8]) -> Result<&Response> {
+        ensure!(
+            bytes.len() <= MAX_FRAME,
+            "Audio frame exceeds its byte limit"
+        );
+        if let Some(Response::Pcm { samples, .. }) = self.response.take() {
+            self.samples = samples;
+        }
+        let mut deserializer = postcard::Deserializer::from_bytes(bytes);
+        let response = ResponseSeed(&mut self.samples).deserialize(&mut deserializer)?;
+        let response = self.response.insert(response);
+        ensure!(
+            deserializer.finalize()?.is_empty(),
+            "Audio frame has trailing data"
+        );
+        Ok(response)
+    }
+
+    pub async fn read_frame(
+        &mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+        bytes: &mut Vec<u8>,
+    ) -> Result<&Response> {
+        read_frame_with(stream, bytes, move |bytes| self.decode(bytes)).await
+    }
+}
+
+// Serde's enum derive does not implement deserialize_in_place. Keep postcard in
+// charge of all wire decoding, seeding only the PCM sample Vec into its standard
+// in-place deserializer. Control frames leave that Vec available for later PCM.
+struct ResponseSeed<'a>(&'a mut Vec<f32>);
+
+impl<'de> DeserializeSeed<'de> for ResponseSeed<'_> {
+    type Value = Response;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Response, D::Error> {
+        deserializer.deserialize_enum(
+            "Response",
+            &["Hello", "Start", "Pcm", "Complete", "Error"],
+            self,
+        )
+    }
+}
+
+impl<'de> Visitor<'de> for ResponseSeed<'_> {
+    type Value = Response;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("an audio response")
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, access: A) -> Result<Response, A::Error> {
+        #[derive(Deserialize)]
+        #[serde(field_identifier)]
+        enum Variant {
+            Hello,
+            Start,
+            Pcm,
+            Complete,
+            Error,
+        }
+        let (variant, fields) = access.variant()?;
+        Ok(match variant {
+            Variant::Hello => {
+                let (version, instance) = fields.tuple_variant(2, ResponseFields::new())?;
+                Response::Hello { version, instance }
+            }
+            Variant::Start => {
+                let (source, identity, sample_rate, layout, duration) =
+                    fields.tuple_variant(5, ResponseFields::new())?;
+                Response::Start {
+                    source,
+                    identity,
+                    sample_rate,
+                    layout,
+                    duration,
+                }
+            }
+            Variant::Pcm => return fields.tuple_variant(4, self),
+            Variant::Complete => {
+                let (frames, duration) = fields.tuple_variant(2, ResponseFields::new())?;
+                Response::Complete { frames, duration }
+            }
+            Variant::Error => Response::Error(fields.newtype_variant()?),
+        })
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut fields: A) -> Result<Response, A::Error> {
+        let sequence = fields
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let media_start = fields
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        let media_step = fields
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
+        fields
+            .next_element_seed(SamplesSeed(&mut *self.0))?
+            .ok_or_else(|| serde::de::Error::invalid_length(3, &"PCM samples"))?;
+        Ok(Response::Pcm {
+            sequence,
+            media_start,
+            media_step,
+            samples: std::mem::take(self.0),
+        })
+    }
+}
+
+struct ResponseFields<T>(std::marker::PhantomData<T>);
+
+impl<T> ResponseFields<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for ResponseFields<T> {
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("audio response fields")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, fields: A) -> Result<T, A::Error> {
+        T::deserialize(serde::de::value::SeqAccessDeserializer::new(fields))
+    }
+}
+
+struct SamplesSeed<'a>(&'a mut Vec<f32>);
+
+impl<'de> DeserializeSeed<'de> for SamplesSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        Vec::<f32>::deserialize_in_place(deserializer, self.0)?;
+        if self.0.len() > MAX_PCM_SAMPLES {
+            return Err(serde::de::Error::custom(
+                "PCM sample count exceeds its limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
     let base = crate::wire::address(data_dir)?;
     let mut name = base
@@ -148,6 +309,14 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub async fn read_frame<T: DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
     bytes: &mut Vec<u8>,
+) -> Result<T> {
+    read_frame_with(stream, bytes, decode).await
+}
+
+async fn read_frame_with<T>(
+    stream: &mut (impl AsyncRead + Unpin),
+    bytes: &mut Vec<u8>,
+    decode: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<T> {
     bytes.clear();
     release_large_buffer(bytes);
@@ -271,6 +440,99 @@ mod framing_tests {
 #[cfg(test)]
 mod pcm_tests {
     use super::*;
+    #[test]
+    fn reusable_decoder_preserves_wire_responses_across_chunk_sizes_and_control_frames() {
+        let mut decoder = ResponseDecoder::default();
+        let mut bytes = Vec::new();
+        let mut actual = Vec::new();
+        let responses = [
+            Response::Hello {
+                version: VERSION,
+                instance: 7,
+            },
+            Response::Start {
+                source: Some(9),
+                identity: SourceIdentity::Pcm {
+                    storage: 8,
+                    start: 10,
+                    frames: 100,
+                },
+                sample_rate: 48_000,
+                layout: vec![0, 1],
+                duration: Some(1.25),
+            },
+            Response::Pcm {
+                sequence: 1,
+                media_start: 0.25,
+                media_step: 1.0 / 48_000.0,
+                samples: vec![0.125; 64],
+            },
+            Response::Pcm {
+                sequence: 2,
+                media_start: 0.5,
+                media_step: 1.0 / 48_000.0,
+                samples: vec![-0.25; 2],
+            },
+            Response::Complete {
+                frames: 33,
+                duration: 1.25,
+            },
+            Response::Error("capture failed".into()),
+            Response::Pcm {
+                sequence: u64::MAX,
+                media_start: 0.75,
+                media_step: 1.0 / 48_000.0,
+                samples: vec![0.5; MAX_PCM_SAMPLES],
+            },
+        ];
+        for response in responses {
+            encode_frame_into(&response, &mut bytes).unwrap();
+            let decoded = decoder.decode(&bytes[4..]).unwrap();
+            encode_frame_into(decoded, &mut actual).unwrap();
+            assert_eq!(actual, bytes);
+        }
+    }
+
+    #[test]
+    fn reusable_decoder_rejects_malformed_frames_and_recovers() {
+        let mut decoder = ResponseDecoder::default();
+        let mut bytes = Vec::new();
+        encode_frame_into(
+            &Response::Pcm {
+                sequence: 1,
+                media_start: 0.0,
+                media_step: 1.0,
+                samples: vec![0.25; 8],
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let body = &bytes[4..];
+        decoder.decode(body).unwrap();
+        for end in 0..body.len() {
+            assert!(decoder.decode(&body[..end]).is_err());
+        }
+        let mut trailing = body.to_vec();
+        trailing.push(0);
+        assert!(decoder.decode(&trailing).is_err());
+        assert!(decoder.decode(&[255; 10]).is_err());
+        assert!(decoder.decode(&vec![0; MAX_FRAME + 1]).is_err());
+        assert!(matches!(
+            decoder.decode(body).unwrap(),
+            Response::Pcm { samples, .. } if samples.as_slice() == [0.25; 8]
+        ));
+        encode_frame_into(
+            &Response::Pcm {
+                sequence: 2,
+                media_start: 0.0,
+                media_step: 1.0,
+                samples: vec![0.0; MAX_PCM_SAMPLES + 1],
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(decoder.decode(&bytes[4..]).is_err());
+    }
 
     #[test]
     fn finite_pcm_chunks_preserve_mapping_and_enforce_frame_budget() {

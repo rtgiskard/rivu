@@ -3,7 +3,10 @@ use anyhow::{Result, bail, ensure};
 use futures::{FutureExt, channel::oneshot};
 use rivu_format::config::VisualizationSignal;
 use rivu_protocol::{
-    audio::{self, ExpectedSource, IO_TIMEOUT, PlaybackRange, Request, Response, VERSION},
+    audio::{
+        self, ExpectedSource, IO_TIMEOUT, PlaybackRange, Request, Response, ResponseDecoder,
+        VERSION,
+    },
     transport::timeout,
 };
 use std::path::PathBuf;
@@ -17,11 +20,12 @@ pub(crate) async fn read_stream(
     signal: VisualizationSignal,
     range: Option<PlaybackRange>,
     cancelled: oneshot::Receiver<()>,
-    mut consume: impl FnMut(Response) -> Result<()>,
+    mut consume: impl FnMut(&Response) -> Result<()>,
 ) -> Result<()> {
     let operation = async {
         let mut stream = timeout(IO_TIMEOUT, audio::connect(&data_dir)).await??;
         let mut bytes = Vec::new();
+        let mut decoder = ResponseDecoder::default();
         audio::encode_frame_into(
             &Request::Hello {
                 version: VERSION,
@@ -30,11 +34,11 @@ pub(crate) async fn read_stream(
             &mut bytes,
         )?;
         audio::write_frame(&mut stream, &mut bytes).await?;
-        match timeout(IO_TIMEOUT, audio::read_frame(&mut stream, &mut bytes)).await?? {
+        match timeout(IO_TIMEOUT, decoder.read_frame(&mut stream, &mut bytes)).await?? {
             Response::Hello {
                 version: VERSION,
                 instance: actual,
-            } if actual == instance => (),
+            } if *actual == instance => (),
             _ => bail!("Audio transport belongs to a different instance or version"),
         }
         audio::encode_frame_into(
@@ -52,8 +56,8 @@ pub(crate) async fn read_stream(
         let mut frames = 0_u64;
         let mut channels = 0;
         loop {
-            let response = audio::read_frame(&mut stream, &mut bytes).await?;
-            match &response {
+            let response = decoder.read_frame(&mut stream, &mut bytes).await?;
+            match response {
                 Response::Start {
                     source: actual,
                     sample_rate,
@@ -170,6 +174,119 @@ mod tests {
             },
         );
         assert!(matches!(receive(stream), Request::Read { .. }));
+    }
+
+    #[test]
+    fn borrowed_chunks_preserve_mapping_and_reject_interleaved_handshakes() {
+        if rivu::test_support::run_in_subprocess(
+            "transport::audio::tests::borrowed_chunks_preserve_mapping_and_reject_interleaved_handshakes",
+            Duration::from_secs(15),
+        ) {
+            return;
+        }
+        for interleaved_handshake in [false, true] {
+            let directory = rivu::test_support::ipc::socket_test_directory();
+            let listener =
+                UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                hello(&mut stream);
+                send(
+                    &mut stream,
+                    Response::Start {
+                        source: None,
+                        identity: audio::SourceIdentity::Pcm {
+                            storage: 1,
+                            start: 0,
+                            frames: 7,
+                        },
+                        sample_rate: 8,
+                        layout: vec![0, 1],
+                        duration: Some(0.875),
+                    },
+                );
+                let mut frames = 0;
+                for (index, count) in [4, 8, 2].into_iter().enumerate() {
+                    send(
+                        &mut stream,
+                        Response::Pcm {
+                            sequence: index as u64 + 1,
+                            media_start: frames as f64 / 8.0,
+                            media_step: 0.125,
+                            samples: vec![index as f32 + 1.0; count],
+                        },
+                    );
+                    frames += count / 2;
+                }
+                send(
+                    &mut stream,
+                    if interleaved_handshake {
+                        Response::Hello {
+                            version: VERSION,
+                            instance: 7,
+                        }
+                    } else {
+                        Response::Complete {
+                            frames: 7,
+                            duration: 0.875,
+                        }
+                    },
+                );
+            });
+            let expected =
+                ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+            let (_cancel, cancelled) = oneshot::channel();
+            let mut callbacks = 0;
+            let mut received_frames = 0;
+            let result = async_io::block_on(read_stream(
+                directory.path().to_owned(),
+                7,
+                expected,
+                None,
+                VisualizationSignal::Before,
+                None,
+                cancelled,
+                |response| {
+                    match response {
+                        Response::Start { layout, .. } => assert_eq!(layout, &[0, 1]),
+                        Response::Pcm {
+                            sequence,
+                            media_start,
+                            media_step,
+                            samples,
+                        } => {
+                            assert_eq!(*sequence, callbacks);
+                            assert_eq!(*media_start, received_frames as f64 / 8.0);
+                            assert_eq!(*media_step, 0.125);
+                            assert!(samples.iter().all(|sample| *sample == *sequence as f32));
+                            assert_eq!(samples.len(), [4, 8, 2][callbacks as usize - 1]);
+                            received_frames += samples.len() / 2;
+                        }
+                        Response::Complete { frames, duration } => {
+                            assert_eq!(*frames, received_frames as u64);
+                            assert_eq!(*duration, 0.875);
+                        }
+                        _ => panic!("control/error response reached the consumer"),
+                    }
+                    callbacks += 1;
+                    Ok(())
+                },
+            ));
+            if interleaved_handshake {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Unexpected PCM handshake")
+                );
+                assert_eq!(callbacks, 4);
+            } else {
+                result.unwrap();
+                assert_eq!(callbacks, 5);
+            }
+            assert_eq!(received_frames, 7);
+            server.join().unwrap();
+        }
     }
 
     #[test]
