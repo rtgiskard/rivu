@@ -1885,12 +1885,20 @@ mod request_tests {
     #[test]
     fn rewritten_source_updates_fingerprints_and_duplicate_groups() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
+        store.conn.execute(
             "INSERT INTO tracks(id,path,fingerprint,probe_version,album)
-             VALUES(1,'/one.wav',zeroblob(32),2,'Album'),(2,'/two.wav',zeroblob(32),2,'Album');",
+             VALUES(1,'/one.wav',zeroblob(32),?1,'Album'),(2,'/two.wav',zeroblob(32),?1,'Album')",
+            [super::super::scan::PROBE_VERSION],
         )?;
         assert_eq!(store.duplicate_groups_page(0, 10)?.total, 1);
         assert!(store.track(1)?.unwrap().fingerprint.is_some());
+        assert!(
+            store
+                .known_source(Path::new("/one.wav"))?
+                .unwrap()
+                .media
+                .is_some()
+        );
         let source = rivu_metadata::WrittenSource {
             fingerprint: [1; 32],
             file_size: 123,

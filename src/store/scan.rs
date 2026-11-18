@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
-pub(super) const PROBE_VERSION: i64 = 3;
+pub(super) const PROBE_VERSION: i64 = 4;
 
 pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
@@ -1206,14 +1206,14 @@ mod import_tests {
     #[test]
     fn imports_resolve_prepared_file_and_cue_identities_in_order_across_batches() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
+        store.conn.execute_batch(&format!(
             "INSERT INTO tracks(id,path,probe_version) VALUES
-                (1,'/prepared.wav',3),(2,'/unprepared.wav',3);
-             INSERT INTO tracks(id,path,probe_version,missing) VALUES (4,'/missing.wav',3,1);
+                (1,'/prepared.wav',{PROBE_VERSION}),(2,'/unprepared.wav',{PROBE_VERSION});
+             INSERT INTO tracks(id,path,probe_version,missing) VALUES (4,'/missing.wav',{PROBE_VERSION},1);
              INSERT INTO tracks(id,path,cue_sheet,cue_number,cue_start_frame,probe_version)
-                VALUES (3,'/prepared.wav','/sheet.cue',7,0,3),
-                       (5,'/prepared.wav','/sheet.cue',8,0,3);",
-        )?;
+                VALUES (3,'/prepared.wav','/sheet.cue',7,0,{PROBE_VERSION}),
+                       (5,'/prepared.wav','/sheet.cue',8,0,{PROBE_VERSION});"
+        ))?;
         let known = store.known_source(Path::new("/prepared.wav"))?.unwrap();
         let source = Arc::new(ScanRecord {
             path: "/prepared.wav".into(),
