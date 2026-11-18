@@ -371,19 +371,19 @@ mod tests {
         cx.update(|cx| {
             crate::theme::init_test(cx);
             let theme = crate::theme::palette(cx);
-            assert_eq!(
-                row_background(theme, false, false, crate::SurfaceStyle::Translucent).a,
-                0.
-            );
-            for (selected, hovered) in [(false, true), (true, false), (true, true)] {
-                let opaque = row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque);
-                let translucent =
-                    row_background(theme, selected, hovered, crate::SurfaceStyle::Translucent);
-                assert_eq!(
-                    (translucent.r, translucent.g, translucent.b),
-                    (opaque.r, opaque.g, opaque.b)
-                );
-                assert_eq!(translucent.a, opaque.a * 0.28);
+            for strength in [0., 0.28, 0.63, 1.] {
+                let surface = crate::SurfaceStyle::Translucent(strength);
+                assert_eq!(row_background(theme, false, false, surface).a, 0.);
+                for (selected, hovered) in [(false, true), (true, false), (true, true)] {
+                    let opaque =
+                        row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque);
+                    let translucent = row_background(theme, selected, hovered, surface);
+                    assert_eq!(
+                        (translucent.r, translucent.g, translucent.b),
+                        (opaque.r, opaque.g, opaque.b)
+                    );
+                    assert_eq!(translucent.a, opaque.a * strength);
+                }
             }
             assert_eq!(crate::SurfaceStyle::default(), crate::SurfaceStyle::Opaque);
         });

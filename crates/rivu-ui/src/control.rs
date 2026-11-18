@@ -4,25 +4,28 @@ use gpui::{
 };
 
 /// Background material for controls hosted on solid or textured surfaces.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum SurfaceStyle {
     #[default]
     Opaque,
-    Translucent,
+    Translucent(f32),
 }
 
 impl SurfaceStyle {
     pub const fn is_translucent(self) -> bool {
-        matches!(self, Self::Translucent)
+        matches!(self, Self::Translucent(_))
     }
 
-    /// Textured interaction backgrounds use 28% of their opaque baseline.
+    /// Textured interaction backgrounds scale their opaque baseline by the supplied strength.
     pub fn fill(self, color: u32) -> gpui::Rgba {
         rgb(color).alpha(self.background_multiplier())
     }
 
     fn background_multiplier(self) -> f32 {
-        if self.is_translucent() { 0.28 } else { 1. }
+        match self {
+            Self::Opaque => 1.,
+            Self::Translucent(strength) => strength,
+        }
     }
 
     /// Borders keep their existing subdued material treatment, independently of fills.
@@ -701,6 +704,35 @@ mod tests {
     use super::*;
     use gpui::{Element, FocusHandle, InputEvent, Render, TestAppContext};
 
+    #[gpui::test]
+    fn interaction_strength_scales_control_fills_without_changing_borders(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::theme::init_test(cx);
+            let theme = crate::theme::palette(cx);
+            for (surface, alpha, border_alpha) in [
+                (SurfaceStyle::Opaque, 1., 1.),
+                (SurfaceStyle::Translucent(0.), 0., 0.3),
+                (SurfaceStyle::Translucent(0.28), 0.28, 0.3),
+                (SurfaceStyle::Translucent(0.63), 0.63, 0.3),
+                (SurfaceStyle::Translucent(1.), 1., 0.3),
+            ] {
+                let mut control = control_surface(theme, "strength-control", surface);
+                let mut expected = div()
+                    .bg(rgb(theme.control).alpha(alpha))
+                    .border_color(rgb(theme.border).alpha(border_alpha));
+                assert_eq!(control.style().background, expected.style().background);
+                assert_eq!(control.style().border_color, expected.style().border_color);
+                let mut selected = active_control(theme, control, true, surface);
+                let mut expected_selected = div().bg(rgb(theme.selected).alpha(alpha));
+                assert_eq!(
+                    selected.style().background,
+                    expected_selected.style().background
+                );
+                assert_eq!(selected.style().border_color, expected.style().border_color);
+            }
+        });
+    }
+
     const TOOLTIP_LABEL: &str = "A sufficiently descriptive label";
 
     struct TooltipControl {
@@ -888,7 +920,7 @@ mod tests {
             let theme = crate::theme::palette(cx);
             let control = if self.grouped {
                 IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
-                    .surface(SurfaceStyle::Translucent)
+                    .surface(SurfaceStyle::Translucent(0.28))
                     .button_with(
                         IconButton::new("action", "♥", "Favorite")
                             .toggled(true)

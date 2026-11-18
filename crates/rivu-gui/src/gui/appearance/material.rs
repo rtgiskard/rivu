@@ -57,10 +57,11 @@ pub(in crate::gui) trait MaterialAppearance: Sized {
 
 /// Panel interactions expose the scene only while materials are enabled.
 pub(in crate::gui) fn surface(cx: &App) -> rivu_ui::SurfaceStyle {
-    if MaterialPreset::current(cx).is_some() {
-        rivu_ui::SurfaceStyle::Translucent
-    } else {
-        rivu_ui::SurfaceStyle::Opaque
+    match cx.try_global::<MaterialSession>() {
+        Some(session) if session.enabled => {
+            rivu_ui::SurfaceStyle::Translucent(session.interaction_background_strength)
+        }
+        _ => rivu_ui::SurfaceStyle::Opaque,
     }
 }
 
@@ -333,7 +334,7 @@ impl MaterialParametersAppearance for MaterialParameters {
 pub(in crate::gui) trait MaterialParameterAppearance {
     fn relevant(self, material: MaterialPreset) -> bool;
     fn label(self, material: MaterialPreset) -> &'static str;
-    fn limits(self) -> (f32, f32, f32);
+    fn step(self) -> f32;
 }
 
 impl MaterialParameterAppearance for MaterialParameter {
@@ -368,16 +369,14 @@ impl MaterialParameterAppearance for MaterialParameter {
         }
     }
 
-    fn limits(self) -> (f32, f32, f32) {
-        let (min, max) = self.bounds();
-        let step = match self {
+    fn step(self) -> f32 {
+        match self {
             Self::Alpha | Self::Feather | Self::Highlight | Self::EdgeFade => 0.05,
             Self::Grain => 0.02,
             Self::Steps | Self::CoverBlur | Self::BackdropBlur => 1.,
             Self::Wave => 0.5,
             Self::Transition | Self::Speed => 0.1,
-        };
-        (min, max, step)
+        }
     }
 }
 
@@ -630,6 +629,7 @@ impl MaterialSpec {
 pub(in crate::gui) enum MaterialIntent {
     SetEnabled(bool),
     SetDefaultArtworkFallback(bool),
+    SetInteractionBackgroundStrength(f32),
     Select(MaterialPreset),
     Reset(MaterialPreset),
     Set {
@@ -642,6 +642,7 @@ pub(in crate::gui) enum MaterialIntent {
 pub(in crate::gui) struct MaterialSession {
     pub enabled: bool,
     pub default_artwork_fallback: bool,
+    pub interaction_background_strength: f32,
     pub material: MaterialPreset,
     pub settings: MaterialParameters,
     saved: [Option<MaterialParameters>; MATERIALS.len()],
@@ -652,6 +653,8 @@ impl Default for MaterialSession {
         Self {
             enabled: false,
             default_artwork_fallback: true,
+            interaction_background_strength: MaterialPreferences::default()
+                .interaction_background_strength,
             material: MaterialPreset::Satin,
             settings: MaterialParameters::preset(MaterialPreset::Satin),
             saved: [None; MATERIALS.len()],
@@ -664,6 +667,7 @@ impl MaterialSession {
     pub(in crate::gui) fn restore(&mut self, previous: MaterialSnapshot) {
         self.enabled = previous.enabled;
         self.default_artwork_fallback = previous.default_artwork_fallback;
+        self.interaction_background_strength = previous.interaction_background_strength;
         self.material = previous.material;
         self.settings = previous.settings;
     }
@@ -677,6 +681,7 @@ impl MaterialSession {
     fn load_preferences(&mut self, preferences: &MaterialPreferences) {
         self.enabled = preferences.enabled;
         self.default_artwork_fallback = preferences.default_artwork_fallback;
+        self.interaction_background_strength = preferences.interaction_background_strength;
         self.material = preferences.selected;
         self.saved.fill(None);
         for (&preset, &parameters) in &preferences.presets {
@@ -708,6 +713,9 @@ impl MaterialSession {
             MaterialIntent::SetDefaultArtworkFallback(enabled) => {
                 MaterialChange::SetDefaultArtworkFallback(enabled)
             }
+            MaterialIntent::SetInteractionBackgroundStrength(strength) => {
+                MaterialChange::SetInteractionBackgroundStrength(strength)
+            }
             MaterialIntent::Select(material) => MaterialChange::Select(material),
             MaterialIntent::Reset(material) => MaterialChange::Reset(material),
             MaterialIntent::Set {
@@ -732,6 +740,7 @@ impl MaterialSession {
         MaterialSnapshot {
             enabled: self.enabled,
             default_artwork_fallback: self.default_artwork_fallback,
+            interaction_background_strength: self.interaction_background_strength,
             material: self.material,
             settings: self.settings,
         }
@@ -756,6 +765,16 @@ impl MaterialSession {
                     return false;
                 }
                 self.default_artwork_fallback = enabled;
+                true
+            }
+            MaterialIntent::SetInteractionBackgroundStrength(strength) => {
+                if !strength.is_finite()
+                    || !(0.0..=1.0).contains(&strength)
+                    || self.interaction_background_strength == strength
+                {
+                    return false;
+                }
+                self.interaction_background_strength = strength;
                 true
             }
             MaterialIntent::Select(material) => {
@@ -798,6 +817,7 @@ impl MaterialSession {
 pub(in crate::gui) struct MaterialSnapshot {
     pub enabled: bool,
     pub default_artwork_fallback: bool,
+    pub interaction_background_strength: f32,
     pub material: MaterialPreset,
     pub settings: MaterialParameters,
 }
@@ -807,7 +827,7 @@ impl MaterialSnapshot {
         let defaults = MaterialParameters::preset(self.material);
         self.material.spec().controls().any(|parameter| {
             (parameter.value(self.settings) - parameter.value(defaults)).abs()
-                > parameter.limits().2 * 0.0001
+                > parameter.step() * 0.0001
         })
     }
 }
@@ -1140,6 +1160,54 @@ mod tests {
     }
 
     #[test]
+    fn interaction_strength_previews_persists_reconciles_and_restores_globally() {
+        let mut preferences = MaterialPreferences {
+            interaction_background_strength: 0.63,
+            ..Default::default()
+        };
+        let mut session = MaterialSession::from_preferences(&preferences);
+        assert_eq!(session.interaction_background_strength, 0.63);
+        let previous = session.snapshot();
+        assert!(session.apply(MaterialIntent::SetInteractionBackgroundStrength(0.41)));
+        session.restore(previous);
+        assert_eq!(session.interaction_background_strength, 0.63);
+
+        for strength in [0., 1., 0.41] {
+            let intent = MaterialIntent::SetInteractionBackgroundStrength(strength);
+            assert!(session.apply(intent));
+            assert!(!session.apply(intent));
+            session.begin_save();
+            session.change(intent).apply_to(&mut preferences);
+            assert_eq!(preferences.interaction_background_strength, strength);
+            session.reconcile(&MaterialPreferences::default());
+            assert_eq!(session.interaction_background_strength, strength);
+            session.finish_save(&preferences);
+            assert_eq!(session.interaction_background_strength, strength);
+        }
+        for material in MaterialPreset::ALL {
+            session.apply(MaterialIntent::Select(material));
+            session.apply(MaterialIntent::Reset(material));
+            assert_eq!(session.interaction_background_strength, 0.41);
+            assert!(!session.modified());
+        }
+        assert_eq!(
+            MaterialSession::from_preferences(&preferences).interaction_background_strength,
+            0.41
+        );
+        session.reconcile(&MaterialPreferences::default());
+        assert_eq!(session.interaction_background_strength, 0.28);
+    }
+
+    #[test]
+    fn interaction_strength_rejects_invalid_preview_values() {
+        let mut session = MaterialSession::default();
+        for strength in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+            assert!(!session.apply(MaterialIntent::SetInteractionBackgroundStrength(strength)));
+            assert_eq!(session.interaction_background_strength, 0.28);
+        }
+    }
+
+    #[test]
     fn registered_artwork_panel_receives_playback_stage_treatment() {
         let theme = rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
         let frame = MaterialFrame {
@@ -1167,34 +1235,51 @@ mod tests {
         cx.update(|cx| {
             let theme =
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
-            for enabled in [false, true, false] {
-                cx.default_global::<super::MaterialSession>()
-                    .apply(super::MaterialIntent::SetEnabled(enabled));
-                for material in MaterialPreset::ALL {
-                    cx.default_global::<super::MaterialSession>()
-                        .apply(super::MaterialIntent::Select(material));
-                    for (selected, hovered) in
-                        [(false, false), (false, true), (true, false), (true, true)]
-                    {
+            assert_eq!(super::surface(cx), rivu_ui::SurfaceStyle::Opaque);
+            for strength in [0., 0.28, 0.63, 1.] {
+                cx.default_global::<MaterialSession>()
+                    .apply(MaterialIntent::SetInteractionBackgroundStrength(strength));
+                for enabled in [false, true, false] {
+                    cx.default_global::<MaterialSession>()
+                        .apply(MaterialIntent::SetEnabled(enabled));
+                    for material in MaterialPreset::ALL {
+                        cx.default_global::<MaterialSession>()
+                            .apply(MaterialIntent::Select(material));
                         let surface = super::surface(cx);
-                        let expected = if enabled {
-                            rivu_ui::SurfaceStyle::Translucent
-                        } else {
-                            rivu_ui::SurfaceStyle::Opaque
-                        };
-                        assert_eq!(surface, expected);
-                        let background = rivu_ui::row_background(theme, selected, hovered, surface);
-                        let mut rendered =
-                            rivu_ui::list_row(theme, "material-row", selected, px(24.), surface);
-                        let mut expected_row =
-                            div().bg(rivu_ui::row_background(theme, selected, false, expected));
-                        assert_eq!(rendered.style().background, expected_row.style().background);
-                        if !selected && !hovered {
-                            assert_eq!(background.a, 0.);
-                        } else if !enabled {
-                            assert_eq!(background.a, 1.);
-                        } else {
-                            assert!(background.a > 0. && background.a < 1.);
+                        assert_eq!(
+                            surface,
+                            if enabled {
+                                rivu_ui::SurfaceStyle::Translucent(strength)
+                            } else {
+                                rivu_ui::SurfaceStyle::Opaque
+                            }
+                        );
+                        for (selected, hovered) in
+                            [(false, false), (false, true), (true, false), (true, true)]
+                        {
+                            let background =
+                                rivu_ui::row_background(theme, selected, hovered, surface);
+                            let expected_alpha = if !selected && !hovered {
+                                0.
+                            } else if enabled {
+                                strength
+                            } else {
+                                1.
+                            };
+                            assert_eq!(background.a, expected_alpha);
+                            let mut rendered = rivu_ui::list_row(
+                                theme,
+                                "material-row",
+                                selected,
+                                px(24.),
+                                surface,
+                            );
+                            let mut expected_row =
+                                div().bg(rivu_ui::row_background(theme, selected, false, surface));
+                            assert_eq!(
+                                rendered.style().background,
+                                expected_row.style().background
+                            );
                         }
                     }
                 }
@@ -1265,7 +1350,7 @@ mod tests {
         session.apply(MaterialIntent::Select(MaterialPreset::Grain));
         for parameter in MaterialParameter::ALL {
             let baseline = session.settings;
-            let (min, max, _) = parameter.limits();
+            let (min, max) = parameter.bounds();
             for value in [
                 f32::NAN,
                 f32::INFINITY,
@@ -1344,7 +1429,7 @@ mod tests {
             assert!(session.apply(MaterialIntent::Set {
                 material,
                 parameter,
-                value: parameter.limits().1,
+                value: parameter.bounds().1,
             }));
             let edited = session.settings;
             assert!(!session.apply(MaterialIntent::Select(material)));
@@ -1374,7 +1459,7 @@ mod tests {
                 assert!(!session.apply(MaterialIntent::Set {
                     material,
                     parameter,
-                    value: parameter.limits().1,
+                    value: parameter.bounds().1,
                 }));
                 assert_eq!(session.settings, baseline);
             }

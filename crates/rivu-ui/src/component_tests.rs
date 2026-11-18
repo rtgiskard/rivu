@@ -321,9 +321,9 @@ fn assert_reveal_paint(window: &Window, expected: [Option<u32>; 2]) {
 fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
     for (full_height, surface) in [
         (false, crate::SurfaceStyle::Opaque),
-        (false, crate::SurfaceStyle::Translucent),
+        (false, crate::SurfaceStyle::Translucent(0.63)),
         (true, crate::SurfaceStyle::Opaque),
-        (true, crate::SurfaceStyle::Translucent),
+        (true, crate::SurfaceStyle::Translucent(0.63)),
     ] {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);
@@ -770,7 +770,15 @@ fn assert_row_action_color(
             .filter_map(|quad| quad.background.as_solid())
             .filter(|color| color.a > 0.)
             .collect();
-        assert_eq!(backgrounds, vec![expected], "row {index}, action {action}");
+        assert_eq!(
+            backgrounds,
+            if alpha > 0. {
+                vec![expected]
+            } else {
+                Vec::new()
+            },
+            "row {index}, action {action}"
+        );
     }
 }
 
@@ -778,7 +786,10 @@ fn assert_row_action_color(
 fn floating_row_actions_follow_selection_hover_and_focus_without_button_fills() {
     for (surface, alpha) in [
         (crate::SurfaceStyle::Opaque, 1.),
-        (crate::SurfaceStyle::Translucent, 0.28),
+        (crate::SurfaceStyle::Translucent(0.), 0.),
+        (crate::SurfaceStyle::Translucent(0.28), 0.28),
+        (crate::SurfaceStyle::Translucent(0.63), 0.63),
+        (crate::SurfaceStyle::Translucent(1.), 1.),
     ] {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);

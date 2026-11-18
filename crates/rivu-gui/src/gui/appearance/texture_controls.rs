@@ -2,7 +2,7 @@
 //! focus and preset choice state; intents reconcile through window coordination.
 use super::material::{
     MaterialAppearance, MaterialGroup, MaterialIntent, MaterialParameterAppearance,
-    MaterialParametersAppearance, MaterialSession,
+    MaterialParametersAppearance, MaterialSession, MaterialSnapshot,
 };
 use gpui::{prelude::*, *};
 use rivu_format::config::{MaterialParameters, MaterialPreset, material::MaterialParameter};
@@ -13,9 +13,92 @@ use rivu_ui::{
     label_value_row, row,
 };
 
+#[derive(Clone, Copy, PartialEq)]
+enum MaterialField {
+    Parameter(MaterialParameter),
+    InteractionBackgroundStrength,
+}
+
+struct EditFormat {
+    scale: f32,
+    unit: &'static str,
+    min: f32,
+    max: f32,
+}
+
+impl MaterialField {
+    fn all(material: MaterialPreset) -> impl Iterator<Item = Self> {
+        material
+            .spec()
+            .controls()
+            .map(Self::Parameter)
+            .chain(std::iter::once(Self::InteractionBackgroundStrength))
+    }
+
+    fn label(self, material: MaterialPreset) -> &'static str {
+        match self {
+            Self::Parameter(parameter) => parameter.label(material),
+            Self::InteractionBackgroundStrength => "texture-interaction-background-strength",
+        }
+    }
+
+    fn value(self, session: &MaterialSnapshot) -> f32 {
+        match self {
+            Self::Parameter(parameter) => parameter.value(session.settings),
+            Self::InteractionBackgroundStrength => session.interaction_background_strength,
+        }
+    }
+
+    fn edit_format(self, material: MaterialPreset) -> EditFormat {
+        match self {
+            Self::Parameter(parameter) => parameter.edit_format(material),
+            Self::InteractionBackgroundStrength => EditFormat {
+                scale: 100.,
+                unit: "%",
+                min: 0.,
+                max: 1.,
+            },
+        }
+    }
+
+    fn accepts(self, value: f32) -> bool {
+        match self {
+            Self::Parameter(parameter) => parameter.accepts(value),
+            Self::InteractionBackgroundStrength => value.is_finite() && (0. ..=1.).contains(&value),
+        }
+    }
+
+    fn display(
+        self,
+        material: MaterialPreset,
+        session: &MaterialSnapshot,
+        tr: &impl Fn(&str) -> SharedString,
+    ) -> String {
+        match self {
+            Self::Parameter(parameter) => parameter.display(material, session.settings, tr),
+            Self::InteractionBackgroundStrength => {
+                format!("{:.0}%", session.interaction_background_strength * 100.)
+            }
+        }
+    }
+
+    fn intent(self, material: MaterialPreset, value: f32) -> MaterialIntent {
+        match self {
+            Self::Parameter(parameter) => MaterialIntent::Set {
+                material,
+                parameter,
+                value,
+            },
+            Self::InteractionBackgroundStrength => {
+                MaterialIntent::SetInteractionBackgroundStrength(value)
+            }
+        }
+    }
+}
+
 pub(in crate::gui) struct MaterialEdit {
     material: MaterialPreset,
-    parameter: MaterialParameter,
+    field: MaterialField,
     serial: u64,
     input: Entity<Input>,
     error: Option<String>,
@@ -34,7 +117,7 @@ impl crate::gui::WindowView {
     fn begin_material_edit(
         &mut self,
         material: MaterialPreset,
-        parameter: MaterialParameter,
+        field: MaterialField,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -46,9 +129,8 @@ impl crate::gui::WindowView {
         self.shell.material_edit = None;
         self.shell.material_edit_serial = self.shell.material_edit_serial.wrapping_add(1);
         let serial = self.shell.material_edit_serial;
-        let value =
-            parameter.value(MaterialSession::current(cx).settings) * parameter.edit_scale(material);
-        let label = self.tr(parameter.label(material));
+        let value = field.value(&session) * field.edit_format(material).scale;
+        let label = self.tr(field.label(material));
         let input = cx.new(|cx| Input::new(label, value.to_string(), "", cx).embedded());
         let submit = cx.subscribe(&input, move |this, _, event, cx| {
             if !this
@@ -84,7 +166,7 @@ impl crate::gui::WindowView {
         });
         self.shell.material_edit = Some(MaterialEdit {
             material,
-            parameter,
+            field,
             serial,
             input: input.clone(),
             error: None,
@@ -111,30 +193,29 @@ impl crate::gui::WindowView {
             return;
         };
         let material = edit.material;
-        let parameter = edit.parameter;
+        let field = edit.field;
         let session = MaterialSession::current(cx);
         if !session.enabled || session.material != material {
             self.shell.material_edit = None;
             cx.notify();
             return;
         }
-        let scale = parameter.edit_scale(material);
-        let (min, max, _) = parameter.limits();
+        let format = field.edit_format(material);
         let parsed = edit.input.read(cx).text().trim().parse::<f32>();
         let value = parsed
             .ok()
-            .map(|value| value / scale)
-            .filter(|value| parameter.accepts(*value));
+            .map(|value| value / format.scale)
+            .filter(|value| field.accepts(*value));
         let Some(value) = value else {
-            let error = if matches!(parameter, MaterialParameter::Steps) {
+            let error = if matches!(field, MaterialField::Parameter(MaterialParameter::Steps)) {
                 self.tr("material-steps-invalid").to_string()
             } else {
                 format!(
                     "{} {}–{} {}",
                     self.tr("material-value-invalid"),
-                    min * scale,
-                    max * scale,
-                    parameter.edit_unit(material)
+                    format.min * format.scale,
+                    format.max * format.scale,
+                    format.unit
                 )
             };
             self.shell.material_edit.as_mut().unwrap().error = Some(error);
@@ -142,21 +223,13 @@ impl crate::gui::WindowView {
             return;
         };
         self.shell.material_edit = None;
-        self.material_intent(
-            MaterialIntent::Set {
-                material,
-                parameter,
-                value,
-            },
-            cx,
-        );
+        self.material_intent(field.intent(material, value), cx);
         cx.notify();
     }
 }
 
 trait MaterialParameterEdit {
-    fn edit_scale(self, material: MaterialPreset) -> f32;
-    fn edit_unit(self, material: MaterialPreset) -> &'static str;
+    fn edit_format(self, material: MaterialPreset) -> EditFormat;
     fn display(
         self,
         material: MaterialPreset,
@@ -166,22 +239,23 @@ trait MaterialParameterEdit {
 }
 
 impl MaterialParameterEdit for MaterialParameter {
-    fn edit_scale(self, material: MaterialPreset) -> f32 {
-        match self {
-            Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => 100.,
-            Self::Wave if material.is_procedural_water() => 100. / 16.,
-            _ => 1.,
-        }
-    }
-
-    fn edit_unit(self, material: MaterialPreset) -> &'static str {
-        match self {
-            Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => "%",
-            Self::Wave if material.is_procedural_water() => "%",
-            Self::Wave | Self::CoverBlur | Self::BackdropBlur => "px",
-            Self::Transition => "s",
-            Self::Speed => "×",
-            Self::Steps => "",
+    fn edit_format(self, material: MaterialPreset) -> EditFormat {
+        let (scale, unit) = match self {
+            Self::Alpha | Self::Feather | Self::Highlight | Self::Grain | Self::EdgeFade => {
+                (100., "%")
+            }
+            Self::Wave if material.is_procedural_water() => (100. / 16., "%"),
+            Self::Wave | Self::CoverBlur | Self::BackdropBlur => (1., "px"),
+            Self::Transition => (1., "s"),
+            Self::Speed => (1., "×"),
+            Self::Steps => (1., ""),
+        };
+        let (min, max) = self.bounds();
+        EditFormat {
+            scale,
+            unit,
+            min,
+            max,
         }
     }
 
@@ -235,7 +309,6 @@ pub(in crate::gui) fn render(
 ) -> AnyElement {
     let theme = rivu_ui::theme::palette(cx);
     let session = MaterialSession::current(cx);
-    let settings = session.settings;
     if view
         .shell
         .material_edit
@@ -379,11 +452,9 @@ pub(in crate::gui) fn render(
                 .flex_shrink_0(),
         );
     let mut parameters = column().min_w_0().flex_shrink_0().gap_0();
-    let label_width = material
-        .spec()
-        .controls()
-        .map(|parameter| {
-            let label = tr(parameter.label(material));
+    let label_width = MaterialField::all(material)
+        .map(|field| {
+            let label = tr(field.label(material));
             let run = TextRun {
                 len: label.len(),
                 font: view.ui_font.clone(),
@@ -406,63 +477,64 @@ pub(in crate::gui) fn render(
     let scale = window.scale_factor();
     let label_width = px((f32::from(label_width) * scale).ceil() / scale);
     let height = rivu_ui::tree_row_height(window, cx);
-    for (index, parameter) in material.spec().controls().enumerate() {
-        let label = tr(parameter.label(material));
-        let field = if let Some(edit) = view.shell.material_edit.as_ref().filter(|edit| {
-            session.enabled
-                && edit.material == material
-                && edit.parameter as usize == parameter as usize
-        }) {
-            row()
-                .id(("material-parameter-value", parameter as usize))
-                .group("label-value-row")
-                .min_w_0()
-                .h(height)
-                .gap_4()
-                .child(
-                    caption(theme, label)
-                        .w(label_width)
-                        .flex_shrink_0()
-                        .truncate(),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(rems(4.))
-                        .h_full()
-                        .border_1()
-                        .border_color(rgb(if edit.error.is_some() {
-                            theme.error
-                        } else {
-                            theme.accent
-                        }))
-                        .rounded_sm()
-                        .child(edit.input.clone()),
-                )
-                .when(!parameter.edit_unit(material).is_empty(), |row| {
-                    row.child(caption(theme, parameter.edit_unit(material)).flex_shrink_0())
+    for (index, field) in MaterialField::all(material).enumerate() {
+        let label = tr(field.label(material));
+        let global = matches!(field, MaterialField::InteractionBackgroundStrength);
+        let format = field.edit_format(material);
+        let field_view =
+            if let Some(edit) =
+                view.shell.material_edit.as_ref().filter(|edit| {
+                    session.enabled && edit.material == material && edit.field == field
                 })
-                .when_some(edit.error.clone(), |row, error| {
-                    row.child(
-                        caption(theme, "")
-                            .id(("material-field-error", index))
-                            .tooltip(rivu_ui::text_tooltip(error)),
-                    )
-                })
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
-                        this.shell.material_edit = None;
-                        this.shell.scope().handle().focus(window, cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-        } else {
-            let actions =
+            {
                 row()
-                    .id(("material-field-actions", index))
-                    .gap_0()
-                    .child(rivu_ui::hover_reveal(
+                    .id(("material-parameter-value", index))
+                    .group("label-value-row")
+                    .min_w_0()
+                    .h(height)
+                    .gap_4()
+                    .child(
+                        caption(theme, label)
+                            .w(label_width)
+                            .flex_shrink_0()
+                            .truncate(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(rems(4.))
+                            .h_full()
+                            .border_1()
+                            .border_color(rgb(if edit.error.is_some() {
+                                theme.error
+                            } else {
+                                theme.accent
+                            }))
+                            .rounded_sm()
+                            .child(edit.input.clone()),
+                    )
+                    .when(!format.unit.is_empty(), |row| {
+                        row.child(caption(theme, format.unit).flex_shrink_0())
+                    })
+                    .when_some(edit.error.clone(), |row, error| {
+                        row.child(
+                            caption(theme, "")
+                                .id(("material-field-error", index))
+                                .tooltip(rivu_ui::text_tooltip(error)),
+                        )
+                    })
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified()
+                        {
+                            this.shell.material_edit = None;
+                            this.shell.scope().handle().focus(window, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+            } else {
+                let actions = row().id(("material-field-actions", index)).gap_0().child(
+                    rivu_ui::hover_reveal(
                         ("material-edit-action", index),
                         "label-value-row",
                         IconButton::new(("texture-parameter", index), "", tr("gl-edit-value"))
@@ -472,34 +544,49 @@ pub(in crate::gui) fn render(
                                 IconButtonDensity::Compact,
                                 cx,
                                 move |this, window, cx| {
-                                    this.begin_material_edit(material, parameter, window, cx);
+                                    this.begin_material_edit(material, field, window, cx);
                                 },
                             )
                             .min_h_0()
                             .h(height)
                             .py_0()
                             .text_size(rems(0.75)),
-                    ));
-            label_value_row(
-                ("material-parameter-value", parameter as usize),
-                theme,
-                label,
-                parameter.display(material, settings, &tr),
-                label_width,
-                Some(actions),
-            )
-            .flex_initial()
-            .h(height)
-            .items_center()
-        };
-        parameters = parameters.child(field.flex_shrink_0());
-    }
-    if material.spec().controls().next().is_none() {
-        parameters = parameters.child(
-            caption(theme, tr("material-fixed-info"))
-                .max_w(rems(18.))
-                .whitespace_normal(),
-        );
+                    ),
+                );
+                label_value_row(
+                    ("material-parameter-value", index),
+                    theme,
+                    label,
+                    field.display(material, &session, &tr),
+                    label_width,
+                    Some(actions),
+                )
+                .flex_initial()
+                .h(height)
+                .items_center()
+            };
+        if global {
+            if material.spec().controls().next().is_none() {
+                parameters = parameters.child(
+                    caption(theme, tr("material-fixed-info"))
+                        .max_w(rems(18.))
+                        .whitespace_normal(),
+                );
+            }
+            parameters = parameters.child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .my_2()
+                    .bg(rgb(theme.border)),
+            );
+        }
+        parameters = parameters.child(field_view.flex_shrink_0().when(global, |field_view| {
+            field_view.tooltip(rivu_ui::text_tooltip(tr(
+                "texture-interaction-background-strength-hint",
+            )))
+        }));
     }
     let body = div()
         .id("material-controls-body")

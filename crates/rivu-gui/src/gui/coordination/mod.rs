@@ -28,6 +28,10 @@ impl WindowView {
             persisted.default_artwork_fallback,
             preview.default_artwork_fallback
         );
+        assert_eq!(
+            persisted.interaction_background_strength,
+            preview.interaction_background_strength
+        );
         assert_eq!(persisted.material, preview.material);
         assert_eq!(persisted.settings, preview.settings);
     }
@@ -107,7 +111,10 @@ impl WindowView {
             // Material actions never reconcile unrelated feature demand.
             self.reconcile_material_demand(cx);
         }
-        if identity_changed || previous.settings.edge_fade != session.settings.edge_fade {
+        if identity_changed
+            || previous.settings.edge_fade != session.settings.edge_fade
+            || previous.interaction_background_strength != session.interaction_background_strength
+        {
             // Cached descendants own material-dependent rows and list edge fades.
             cx.refresh_windows();
         } else {

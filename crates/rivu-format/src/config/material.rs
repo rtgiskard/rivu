@@ -93,6 +93,7 @@ impl MaterialParameters {
 pub struct MaterialPreferences {
     pub enabled: bool,
     pub default_artwork_fallback: bool,
+    pub interaction_background_strength: f32,
     pub selected: MaterialPreset,
     pub presets: BTreeMap<MaterialPreset, MaterialParameters>,
 }
@@ -102,6 +103,7 @@ impl Default for MaterialPreferences {
         Self {
             enabled: false,
             default_artwork_fallback: true,
+            interaction_background_strength: 0.28,
             selected: MaterialPreset::Satin,
             presets: BTreeMap::new(),
         }
@@ -110,6 +112,11 @@ impl Default for MaterialPreferences {
 
 impl MaterialPreferences {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.interaction_background_strength.is_finite()
+                && (0.0..=1.0).contains(&self.interaction_background_strength),
+            "interface.material.interaction_background_strength must be finite and between 0 and 1"
+        );
         for parameters in self.presets.values() {
             parameters.validate()?;
         }
@@ -220,6 +227,7 @@ impl MaterialParameter {
 pub enum MaterialChange {
     SetEnabled(bool),
     SetDefaultArtworkFallback(bool),
+    SetInteractionBackgroundStrength(f32),
     Select(MaterialPreset),
     Reset(MaterialPreset),
     SetParameter {
@@ -235,6 +243,9 @@ impl MaterialChange {
             Self::SetEnabled(enabled) => preferences.enabled = enabled,
             Self::SetDefaultArtworkFallback(enabled) => {
                 preferences.default_artwork_fallback = enabled;
+            }
+            Self::SetInteractionBackgroundStrength(strength) => {
+                preferences.interaction_background_strength = strength;
             }
             Self::Select(preset) => preferences.selected = preset,
             Self::Reset(preset) => {

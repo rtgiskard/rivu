@@ -443,6 +443,7 @@ card; the item body and Settings entry open the card without toggling effects.
 [interface.material]
 enabled = true
 default_artwork_fallback = true
+interaction_background_strength = 0.28
 selected = "still_water"
 ----
 
@@ -458,6 +459,14 @@ of Experimental controls whether missing, rejected or failed covers use the
 bundled SVG in artwork-dependent material backgrounds. Turning it off preserves
 real-cover backgrounds and all other material effects. It does not affect cover
 panels, About or MPRIS artwork. Reset and preset changes preserve this shared switch.
+
+`interaction_background_strength` defaults to `0.28` and accepts finite values
+from `0` to `1`. The card presents this global coefficient as a percentage under
+Interaction background strength (交互背景强度); `28%` means a `0.28` multiplier,
+not a final background opacity. With texture effects enabled, it multiplies the
+alpha of interaction backgrounds such as selections, hover and pressed states.
+It leaves opaque backgrounds and border alpha unchanged. Preset selection and
+Reset preserve this shared value, just like the artwork fallback switch.
 
 Edited parameters are stored under
 `[interface.material.presets.<preset>]`; Reset restores only the selected preset.

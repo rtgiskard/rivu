@@ -120,6 +120,60 @@ fn material_preferences_round_trip_defaults_and_independent_presets() {
 }
 
 #[test]
+fn interaction_background_strength_defaults_roundtrips_and_survives_preset_changes() {
+    for original in ["", "[interface.material]\nselected = 'still_water'\n"] {
+        let mut baseline = from_toml(original).unwrap();
+        assert_eq!(baseline.material.interaction_background_strength, 0.28);
+        let mut saved = original.to_owned();
+        for strength in [0.0, 0.63, 1.0, 0.28] {
+            let mut config = baseline.clone();
+            MaterialChange::SetInteractionBackgroundStrength(strength)
+                .apply_to(&mut config.material);
+            for preset in [MaterialPreset::Satin, MaterialPreset::StillWater] {
+                config
+                    .material
+                    .presets
+                    .insert(preset, MaterialParameters::preset(preset));
+                MaterialChange::Select(preset).apply_to(&mut config.material);
+                assert_eq!(config.material.interaction_background_strength, strength);
+                MaterialChange::Reset(preset).apply_to(&mut config.material);
+                assert_eq!(config.material.interaction_background_strength, strength);
+                assert!(!config.material.presets.contains_key(&preset));
+            }
+            saved = update_toml(&saved, Some(&baseline), &config).unwrap();
+            assert!(saved.contains("interaction_background_strength"));
+            assert_eq!(from_toml(&saved).unwrap(), config);
+            assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
+            baseline = config;
+        }
+    }
+}
+
+#[test]
+fn interaction_background_strength_rejects_invalid_values() {
+    for (value, literal) in [
+        (f32::NAN, "nan"),
+        (f32::INFINITY, "inf"),
+        (f32::NEG_INFINITY, "-inf"),
+        (-0.01, "-0.01"),
+        (1.01, "1.01"),
+    ] {
+        let mut config = Config::default();
+        MaterialChange::SetInteractionBackgroundStrength(value).apply_to(&mut config.material);
+        assert!(config.validate().is_err(), "{literal}");
+        assert!(to_toml(&config).is_err(), "{literal}");
+        assert!(update_toml("", None, &config).is_err(), "{literal}");
+        assert!(
+            from_toml(&format!(
+                "[interface.material]\ninteraction_background_strength = {literal}\n"
+            ))
+            .is_err(),
+            "{literal}"
+        );
+    }
+}
+
+#[test]
 fn material_effects_toggle_preserves_selection_and_parameters() {
     assert!(!MaterialPreferences::default().enabled);
     assert_eq!(

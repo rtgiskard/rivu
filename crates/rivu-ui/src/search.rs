@@ -341,12 +341,17 @@ mod tests {
                 cx,
             )
         });
-        for (surface, expanded) in [
-            (crate::SurfaceStyle::Translucent, false),
-            (crate::SurfaceStyle::Translucent, true),
-            (crate::SurfaceStyle::Opaque, true),
-            (crate::SurfaceStyle::Opaque, false),
-            (crate::SurfaceStyle::Translucent, true),
+        for (surface, expanded, alpha) in [
+            (crate::SurfaceStyle::Translucent(0.28), false, 0.28),
+            (crate::SurfaceStyle::Translucent(0.28), true, 0.28),
+            (crate::SurfaceStyle::Translucent(0.63), false, 0.63),
+            (crate::SurfaceStyle::Translucent(0.63), true, 0.63),
+            (crate::SurfaceStyle::Translucent(0.), false, 0.),
+            (crate::SurfaceStyle::Translucent(0.), true, 0.),
+            (crate::SurfaceStyle::Translucent(1.), false, 1.),
+            (crate::SurfaceStyle::Translucent(1.), true, 1.),
+            (crate::SurfaceStyle::Opaque, true, 1.),
+            (crate::SurfaceStyle::Opaque, false, 1.),
         ] {
             window
                 .update(cx, |search, _, cx| {
@@ -366,11 +371,23 @@ mod tests {
                     .painted_quads()
                     .iter()
                     .filter_map(|quad| quad.background.as_solid())
-                    .find(|color| {
+                    .filter(|color| {
                         color.h == expected.h && color.s == expected.s && color.l == expected.l
                     })
-                    .expect("search must paint its host control surface in both states");
-                assert_eq!(fill.a, if surface.is_translucent() { 0.28 } else { 1. });
+                    .filter(|color| color.a > 0.)
+                    .collect::<Vec<_>>();
+                if alpha == 0. {
+                    assert!(
+                        fill.is_empty(),
+                        "zero strength must not paint the control fill"
+                    );
+                } else {
+                    assert!(
+                        !fill.is_empty(),
+                        "search must paint its host control surface"
+                    );
+                    assert!(fill.iter().all(|color| color.a == alpha));
+                }
             })
             .unwrap();
         }
