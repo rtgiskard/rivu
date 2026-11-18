@@ -675,18 +675,27 @@ fn menu_properties(
     let mut properties = HashMap::new();
     if all || requested.iter().any(|name| name == "label") {
         let label = menu_entry(snapshot, id, i18n)?;
-        let label = if id == 6 && snapshot.shuffle {
-            format!("{label} ✓")
-        } else {
-            label.to_owned()
-        };
-        properties.insert("label".to_owned(), owned_variant(label));
+        properties.insert("label".to_owned(), owned_variant(label.to_owned()));
     }
     if all || requested.iter().any(|name| name == "type") {
         properties.insert("type".to_owned(), owned_variant(item_type.to_owned()));
     }
     if all || requested.iter().any(|name| name == "enabled") {
         properties.insert("enabled".to_owned(), OwnedVariant::from(true));
+    }
+    if id == 6 {
+        if all || requested.iter().any(|name| name == "toggle-type") {
+            properties.insert(
+                "toggle-type".to_owned(),
+                owned_variant("checkmark".to_owned()),
+            );
+        }
+        if all || requested.iter().any(|name| name == "toggle-state") {
+            properties.insert(
+                "toggle-state".to_owned(),
+                OwnedVariant::from(i32::from(snapshot.shuffle)),
+            );
+        }
     }
     if all || requested.iter().any(|name| name == "visible") {
         properties.insert("visible".to_owned(), OwnedVariant::from(true));
@@ -738,6 +747,25 @@ mod tests {
         );
         runtime.join().unwrap();
         assert!(handle.is_shutting_down());
+    }
+
+    #[test]
+    fn shuffle_menu_item_uses_native_checkmark_without_changing_label() {
+        let i18n = Localizer::new("en-US");
+        let mut snapshot = TraySnapshot::from_core(&crate::core::CoreState::default());
+        let label = owned_variant(i18n.text("core-shuffle").to_owned());
+        let checkmark = owned_variant("checkmark".to_owned());
+        for (shuffle, state) in [(false, 0_i32), (true, 1_i32)] {
+            snapshot.shuffle = shuffle;
+            let items = menu_items(&snapshot, &i18n);
+            let properties = &items.iter().find(|item| item.id == 6).unwrap().properties;
+            assert_eq!(properties.get("label"), Some(&label));
+            assert_eq!(properties.get("toggle-type"), Some(&checkmark));
+            assert_eq!(
+                properties.get("toggle-state"),
+                Some(&OwnedVariant::from(state))
+            );
+        }
     }
 
     #[test]

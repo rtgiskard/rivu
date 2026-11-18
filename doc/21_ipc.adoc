@@ -1230,8 +1230,8 @@ playback, and destination conflicts are rechecked. Shutdown joins the worker.
 Interactive playback changes use execution-time intent commands:
 `AdjustVolume { delta }` adds a finite signed delta to the core's current volume
 and clamps the result to 0..1; `AdjustSpeed { delta }` adds to the current playback
-speed, rounds to hundredths and clamps to 0.5..2; `CycleRepeat` cycles Off → All →
-One → Off; `ToggleShuffle` flips the core's current setting. Queued commands are applied in
+speed, rounds to hundredths and clamps to 0.5..2; `CycleRepeat` cycles Off → One →
+All → Off; `ToggleShuffle` flips the core's current setting. Queued commands are applied in
 order rather than deriving absolute targets from a frontend's earlier snapshot.
 `Next` and `Previous` likewise preserve Playing, Paused, or Stopped as observed
 by Core when executing the command, not a caller's published snapshot. Playing

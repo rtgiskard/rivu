@@ -430,9 +430,9 @@ impl Core {
             Command::CycleRepeat => {
                 self.preferences
                     .set_repeat(match self.preferences.live().repeat {
-                        RepeatMode::Off => RepeatMode::All,
-                        RepeatMode::All => RepeatMode::One,
-                        RepeatMode::One => RepeatMode::Off,
+                        RepeatMode::Off => RepeatMode::One,
+                        RepeatMode::One => RepeatMode::All,
+                        RepeatMode::All => RepeatMode::Off,
                     });
             }
             Command::ToggleShuffle => self.set_shuffle(!self.preferences.live().shuffle),

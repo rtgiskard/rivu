@@ -184,7 +184,7 @@ occurrence; paused navigation loads it paused; stopped navigation selects it
 without opening a decoder. Use Play or Resume to explicitly start playback.
 An earlier queued Pause or Stop therefore also governs a later Next or Previous.
 
-Repeat cycles Off, All, and One. Manual Next or Previous without a target leaves
+Repeat cycles Off → One → All → Off. Manual Next or Previous without a target leaves
 the current occurrence and position unchanged. Previous ignores playback position
 and follows queue order, or navigation history when shuffling.
 With Shuffle enabled, each Next independently chooses a queue occurrence with

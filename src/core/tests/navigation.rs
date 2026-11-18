@@ -759,10 +759,10 @@ fn repeated_keyboard_intents_accumulate_from_one_snapshot_in_execution_order() {
     assert!((core.preferences.live().volume - 0.4).abs() < 0.000001);
     assert_eq!(core.state.playback.position, 2.0);
     for expected in [
-        RepeatMode::All,
         RepeatMode::One,
-        RepeatMode::Off,
         RepeatMode::All,
+        RepeatMode::Off,
+        RepeatMode::One,
     ] {
         core.command(input(Action::Repeat)).unwrap();
         assert_eq!(core.preferences.live().repeat, expected);
@@ -776,7 +776,7 @@ fn repeated_keyboard_intents_accumulate_from_one_snapshot_in_execution_order() {
     })
     .unwrap();
     core.command(input(Action::Repeat)).unwrap();
-    assert_eq!(core.preferences.live().repeat, RepeatMode::Off);
+    assert_eq!(core.preferences.live().repeat, RepeatMode::All);
     core.command(Command::Shuffle { enabled: false }).unwrap();
     core.command(input(Action::Shuffle)).unwrap();
     assert!(core.preferences.live().shuffle);
