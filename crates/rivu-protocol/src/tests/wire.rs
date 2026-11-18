@@ -1415,6 +1415,8 @@ fn relative_playback_intents_round_trip() {
     for command in [
         Command::AdjustVolume { delta: -0.05 },
         Command::AdjustVolume { delta: 0.05 },
+        Command::AdjustSpeed { delta: -0.05 },
+        Command::AdjustSpeed { delta: 0.05 },
         Command::CycleRepeat,
         Command::ToggleShuffle,
         Command::SeekRelative {

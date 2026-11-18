@@ -973,16 +973,24 @@ mod tests {
             assert!(slider_command(slider, key, queue_id, Some(11), &state).is_none());
             assert!(slider_command(slider, key, queue_id, None, &state).is_none());
             let command = slider_command(slider, key, queue_id, Some(10), &state).unwrap();
-            match command {
-                Command::SeekQueue { queue_id, seconds } => {
-                    assert_eq!(queue_id, 10);
+            match (key, command) {
+                (
+                    SliderKey::Start | SliderKey::End,
+                    Command::SeekQueue {
+                        queue_id: 10,
+                        seconds,
+                    },
+                ) => {
                     assert_eq!(seconds, if key == SliderKey::End { 42. } else { 0. });
                 }
-                Command::SeekRelative { queue_id, delta } => {
-                    assert_eq!(queue_id, 10);
-                    assert_eq!(delta, if key == SliderKey::Increase { 5. } else { -5. });
-                }
-                _ => panic!("seek command"),
+                (
+                    SliderKey::Decrease | SliderKey::Increase,
+                    Command::SeekRelative {
+                        queue_id: 10,
+                        delta,
+                    },
+                ) => assert_eq!(delta, if key == SliderKey::Increase { 5. } else { -5. }),
+                _ => panic!("unexpected seek command for {key:?}"),
             }
         }
     }
