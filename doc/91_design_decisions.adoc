@@ -697,6 +697,32 @@ contention. Reconsider the handoff before enabling `RT_PROCESS` or moving
 callbacks to another thread: those producers would need a cross-thread wake
 rather than relying on the current mainloop iteration to return.
 
+[[DEC-029]]
+=== DEC-029: Request PipeWire resample quality 10 without a Rivu setting
+
+Status: implemented, 2026-11-18.
+
+The playback stream sets `resample.quality = 10`. It governs only the stream's
+own conversion when the graph rate differs from the source rate, not sink-side
+device-rate conversion. Measured with `spa-resample` (PipeWire 1.6.11, default
+`--cpuflags 0` without SIMD, 120 s stereo tones, 44.1→48 kHz, three runs):
+
+[cols="1,1,1,1,1,1",options="header"]
+|===
+|Quality |20 kHz |21 kHz |Worst image >22.2 kHz |User CPU |Taps
+|4 (default) |−2.99 dB |−9.24 dB |−44.2 dB |0.185–0.196 s |56
+|8 |0.00 dB |−1.57 dB |−119.9 dB |0.371–0.387 s |136
+|10 |0.00 dB |−0.54 dB |−158.5 dB |0.453–0.459 s |168
+|12 |0.00 dB |0.00 dB |−158.9 dB |0.673–0.676 s |264
+|14 |0.00 dB |0.00 dB |−156.0 dB |2.63–2.92 s |1040
+|===
+
+10 is flat to 20 kHz with images near float precision for about 1.9 ms filter
+latency; 12 gains little at 1.5× CPU, 14 costs about 6×. A `pw-cat` probe showed
+`client.conf` `stream.properties` overriding the application value, so system
+tuning already exists and Rivu adds no second setting. No listening test was run.
+Reconsider if per-application tuning is requested or PipeWire changes precedence.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

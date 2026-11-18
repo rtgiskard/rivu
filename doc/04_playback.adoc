@@ -422,7 +422,11 @@ playing. Unsupported routes report an error rather than using an unrelated compa
 Rivu sends 32-bit float audio at the decoded sample rate and suggests that rate to
 PipeWire without forcing the shared graph. Actual graph and device rates depend on
 system policy and device support; source-rate output alone is not a bit-perfect
-guarantee. Floating-point peaks above full scale are preserved before device
+guarantee. When the graph rate differs, PipeWire resamples the stream at Rivu's
+requested `resample.quality = 10` instead of its default 4; a `stream.properties`
+entry in PipeWire's `client.conf` overrides it. Sink-side device-rate conversion
+is outside this setting. See link:91_design_decisions.adoc#DEC-029[resample quality decision].
+Floating-point peaks above full scale are preserved before device
 conversion, not clipped by Rivu. Downstream gain and integer device conversion can
 still cause clipping; Rivu does not add a limiter or dither to its float output.
 Non-finite decoded samples, including overflow during conversion to 32-bit float,

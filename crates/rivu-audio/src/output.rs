@@ -1478,6 +1478,10 @@ fn run(
         "channelmix.disable" => (!auto_mix).to_string(), "audio.channels" => stream_layout.len().to_string(),
         "audio.position" => format!("[ {positions} ]"), "audio.rate" => rate.to_string(),
         "node.rate" => format!("1/{rate}"),
+        // When the graph rate differs, PipeWire's default quality 4 attenuates
+        // 20 kHz by 3 dB at 44.1->48 kHz. Quality 10 stays flat to 20 kHz with
+        // ~2 ms filter latency; client.conf stream.properties still override it.
+        "resample.quality" => "10",
     };
     if auto_mix {
         properties.insert("channelmix.normalize", "true");
