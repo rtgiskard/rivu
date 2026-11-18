@@ -1,6 +1,6 @@
 [package]
 name = "rivu-metadata"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Shared audio metadata reading and explicit file editing"
 

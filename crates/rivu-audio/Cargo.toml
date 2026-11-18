@@ -1,6 +1,6 @@
 [package]
 name = "rivu-audio"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Rivu audio decoding, playback, rendering and PCM capture engine"
 

@@ -1,6 +1,6 @@
 [package]
 name = "rivu-gui"
-version = "0.2.8"
+version.workspace = true
 edition = "2024"
 
 [features]

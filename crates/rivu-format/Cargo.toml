@@ -1,6 +1,6 @@
 [package]
 name = "rivu-format"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Current Rivu configuration and database format contracts"
 
@@ -13,7 +13,7 @@ anyhow = "1"
 directories = "6"
 rivu-dsp = { path = "../rivu-dsp", default-features = false }
 rivu-utils = { path = "../rivu-utils", default-features = false }
-rusqlite = { version = "0.42.0", features = ["bundled"], optional = true }
+rusqlite = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.8"
 toml_edit = { version = "0.25.17", features = ["serde"] }

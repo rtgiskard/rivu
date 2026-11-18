@@ -1,6 +1,6 @@
 [package]
 name = "rivu-analysis"
-version = "0.2.8"
+version.workspace = true
 edition = "2024"
 description = "Bounded PCM display and cumulative loudness analysis for Rivu clients"
 

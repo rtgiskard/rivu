@@ -1,6 +1,6 @@
 [package]
 name = "rivu-presentation"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Toolkit-neutral Rivu localization, keyboard bindings, and color presets"
 

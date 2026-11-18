@@ -1,6 +1,6 @@
 [package]
 name = "rivu-visuals"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Rivu GPUI audio visualization renderers"
 

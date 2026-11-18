@@ -1,6 +1,6 @@
 [package]
 name = "rivu-client"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "Reusable synchronous Rivu IPC client sessions"
 

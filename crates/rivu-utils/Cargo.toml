@@ -1,6 +1,6 @@
 [package]
 name = "rivu-utils"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
 description = "General-purpose filesystem and optional diagnostic utilities for Rivu"
 

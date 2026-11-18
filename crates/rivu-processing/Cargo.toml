@@ -1,6 +1,6 @@
 [package]
 name = "rivu-processing"
-version = "0.2.20"
+version.workspace = true
 edition = "2024"
 description = "Offline audio processing and retained audition resources for Rivu"
 

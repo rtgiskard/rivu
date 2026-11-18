@@ -1,6 +1,6 @@
 [package]
 name = "rivu-shm"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Bounded native-channel shared PCM window for independent Rivu frontends"
 

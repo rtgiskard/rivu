@@ -2,13 +2,17 @@
 members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-utils", "crates/rivu-migrate", "crates/rivu-metadata", "crates/rivu-dsp", "crates/rivu-audio", "crates/rivu-protocol", "crates/rivu-client", "crates/rivu-visuals", "crates/rivu-presentation", "crates/rivu-tui", "crates/rivu-gui", "crates/rivu-shm", "crates/rivu-analysis", "crates/rivu-processing"]
 resolver = "3"
 
+[workspace.package]
+version = "0.2.24"
+
 [workspace.dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [package]
 name = "rivu"
-version = "0.2.20"
+version.workspace = true
 edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
@@ -52,7 +56,7 @@ tracing = "0.1"
 libc = "0.2"
 parking_lot = "0.13"
 rand = "0.10.3"
-rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
+rusqlite = { workspace = true, features = ["functions"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tempfile = "3.27"
