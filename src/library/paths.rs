@@ -19,6 +19,9 @@ pub(super) fn is_audio_path(path: &Path) -> bool {
     for (output, input) in lowercase.iter_mut().zip(extension.bytes()) {
         *output = input.to_ascii_lowercase();
     }
+    if cfg!(feature = "midi") && matches!(&*lowercase, b"mid" | b"midi") {
+        return true;
+    }
     matches!(
         &*lowercase,
         b"aac"

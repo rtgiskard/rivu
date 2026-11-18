@@ -279,7 +279,9 @@ impl PendingSource {
                 self.fingerprint = known.fingerprint.take();
                 let media = known.media.take().filter(|media| {
                     known.cue.is_none()
-                        && (!ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
+                        && (!ffmpeg_enabled
+                            || (media.channels != 0 && media.sample_rate != 0)
+                            || (cfg!(feature = "midi") && media.codec == "MIDI"))
                 });
                 if let (Some(budget), Some(media)) = (budget, &media) {
                     budget.reserve(media_retained_bytes(media))?;

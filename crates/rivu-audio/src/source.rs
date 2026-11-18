@@ -1,5 +1,7 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
+#[cfg(feature = "midi")]
+mod midi;
 mod vorbis_timing;
 
 use vorbis_timing::VorbisTiming;
@@ -235,7 +237,7 @@ pub struct ProbeResult {
 }
 
 pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
-    Ok(Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, ffmpeg_enabled)?.info)
+    probe_path(path, ffmpeg_enabled, None).map(|result| result.info)
 }
 
 /// Probe metadata while observing job cancellation between decoder work rounds.
@@ -244,16 +246,7 @@ pub fn probe_with_cancel(
     ffmpeg_enabled: bool,
     cancelled: &AtomicBool,
 ) -> Result<MediaInfo> {
-    Ok(Source::open_with_cancel(
-        path,
-        PROBE_BUFFER_LEN,
-        DecoderHint::Auto,
-        ffmpeg_enabled,
-        true,
-        SourceSelection::default(),
-        Some(cancelled),
-    )?
-    .info)
+    probe_path(path, ffmpeg_enabled, Some(cancelled)).map(|result| result.info)
 }
 
 /// Probe the already opened object without looking up its original path again.
@@ -261,29 +254,51 @@ pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<M
     crate::source_identity(&file)?;
     file.rewind()
         .context("Rewinding audio source for probing")?;
-    Ok(Source::open_file_with_cancel(
-        path,
-        file,
-        PROBE_BUFFER_LEN,
-        DecoderHint::Auto,
-        ffmpeg_enabled,
-        true,
-        SourceSelection::default(),
-        None,
-    )?
-    .info)
+    probe_open_file(path, file, ffmpeg_enabled, None).map(|result| result.info)
 }
 
 pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Result<ProbeResult> {
     if enhanced {
         super::ffmpeg::ensure_loaded().context("FFmpeg enhanced probing is unavailable")?;
     }
-    let source = Source::open(
+    probe_path(path, ffmpeg_enabled || enhanced, None)
+}
+
+fn probe_path(
+    path: &Path,
+    ffmpeg_enabled: bool,
+    cancelled: Option<&AtomicBool>,
+) -> Result<ProbeResult> {
+    check_cancelled(cancelled)?;
+    let file = open_regular_file(path).map_err(source_io_error)?;
+    probe_open_file(path, file, ffmpeg_enabled, cancelled)
+}
+
+fn probe_open_file(
+    path: &Path,
+    file: File,
+    ffmpeg_enabled: bool,
+    cancelled: Option<&AtomicBool>,
+) -> Result<ProbeResult> {
+    #[cfg(feature = "midi")]
+    if midi::recognizes(&file).map_err(source_io_error)? {
+        let sequence = midi::Sequence::read(file, false, cancelled)?;
+        return Ok(ProbeResult {
+            probe_backend: AudioBackend::Native,
+            decoder_backend: AudioBackend::Native,
+            info: sequence.info(path, false),
+        });
+    }
+    let source = Source::open_encoded_unprimed(
         path,
+        file,
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
-        ffmpeg_enabled || enhanced,
-    )?;
+        ffmpeg_enabled,
+        true,
+        cancelled,
+    )?
+    .prime(SourceSelection::default(), cancelled)?;
     let decoder_backend = if source.uses_ffmpeg() {
         AudioBackend::Ffmpeg
     } else {
@@ -403,7 +418,12 @@ enum Decode {
     Native(Box<dyn AudioDecoder>),
     Opus(OpusDecoder),
     Ffmpeg(Box<super::ffmpeg::Decoder>),
-    Memory { pcm: super::PcmAudio, position: u64 },
+    Memory {
+        pcm: super::PcmAudio,
+        position: u64,
+    },
+    #[cfg(feature = "midi")]
+    Midi(Box<midi::MidiSource>),
 }
 fn decoder(params: &AudioCodecParameters) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
@@ -542,12 +562,29 @@ impl Source {
             replaygain_track_gain: None,
         };
         let position = ((start * f64::from(rate)).round() as u64).min(pcm.frames());
-        Ok(Self {
+        Ok(Self::from_generated(
+            identity,
+            layout,
+            info,
+            Decode::Memory { pcm, position },
+            start,
+        ))
+    }
+
+    fn from_generated(
+        identity: SourceIdentity,
+        layout: Arc<[Channel]>,
+        info: MediaInfo,
+        decode: Decode,
+        start: f64,
+    ) -> Self {
+        let rate = info.sample_rate;
+        Self {
             identity,
             format: None,
             metadata_budget: metadata_budget(),
             track: 0,
-            decode: Decode::Memory { pcm, position },
+            decode,
             time_base: TimeBase::try_new(1, rate).unwrap(),
             timestamp_tick: 1.0 / f64::from(rate),
             frames: Vec::new(),
@@ -577,7 +614,31 @@ impl Source {
             mpeg_packets: false,
             native_preroll: 0.0,
             opening_fallback: None,
-        })
+        }
+    }
+
+    #[cfg(feature = "midi")]
+    fn from_midi(identity: SourceIdentity, info: MediaInfo, midi: midi::MidiSource) -> Self {
+        let frames = midi.frames();
+        let mut source = Self::from_generated(
+            identity,
+            Arc::from([Channel::FrontLeft, Channel::FrontRight]),
+            info,
+            Decode::Midi(Box::new(midi)),
+            0.0,
+        );
+        source.expected_samples = Some(frames);
+        source
+    }
+
+    #[cfg(all(test, feature = "midi"))]
+    pub(super) fn stalled_midi_for_test(path: &Path) -> (Self, crossbeam_channel::Sender<()>) {
+        let file = open_regular_file(path).unwrap();
+        let identity = crate::source_identity(&file).unwrap();
+        let sequence = midi::Sequence::read(file, true, None).unwrap();
+        let info = sequence.info(path, true);
+        let (midi, release) = midi::MidiSource::stalled_for_test(sequence);
+        (Self::from_midi(identity, info, midi), release)
     }
 
     pub(super) fn pcm(&self) -> Option<&super::PcmAudio> {
@@ -587,6 +648,7 @@ impl Source {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn open(
         path: &Path,
         buffer_len: usize,
@@ -626,6 +688,7 @@ impl Source {
         Ok(source)
     }
 
+    #[cfg(test)]
     fn open_with_cancel(
         path: &Path,
         buffer_len: usize,
@@ -659,7 +722,7 @@ impl Source {
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
-        let mut source = Self::open_file_unprimed(
+        let source = Self::open_file_unprimed(
             path,
             file,
             buffer_len,
@@ -668,12 +731,61 @@ impl Source {
             descriptive,
             cancelled,
         )?;
-        source.select(selection, cancelled)?;
-        while !source.poll_open_with_cancel(cancelled)? {}
-        Ok(source)
+        source.prime(selection, cancelled)
+    }
+
+    fn prime(mut self, selection: SourceSelection, cancelled: Option<&AtomicBool>) -> Result<Self> {
+        self.select(selection, cancelled)?;
+        while !self.poll_open_with_cancel(cancelled)? {
+            #[cfg(feature = "midi")]
+            if let Some(ready) = self.opening_wait() {
+                if cancelled.is_some() {
+                    // Offline callers have an AtomicBool, not a cancellation
+                    // receiver. Bound their wait without polling playback.
+                    let _ = ready.recv_timeout(std::time::Duration::from_millis(20));
+                } else {
+                    let _ = ready.recv();
+                }
+            }
+        }
+        Ok(self)
     }
 
     fn open_file_unprimed(
+        path: &Path,
+        file: File,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+        descriptive: bool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
+        #[cfg(feature = "midi")]
+        if midi::recognizes(&file).map_err(source_io_error)? {
+            if decoder_hint == DecoderHint::Ffmpeg {
+                return Err(anyhow!("MIDI requires the native synthesizer, not FFmpeg")
+                    .context(SourceFailure));
+            }
+            let identity = crate::source_identity(&file)?;
+            let sequence = midi::Sequence::read(file, true, cancelled)?;
+            check_cancelled(cancelled)?;
+            let info = sequence.info(path, true);
+            let midi = midi::MidiSource::new(sequence);
+            return Ok(Self::from_midi(identity, info, midi));
+        }
+        Self::open_encoded_unprimed(
+            path,
+            file,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            descriptive,
+            cancelled,
+        )
+    }
+
+    fn open_encoded_unprimed(
         path: &Path,
         mut file: File,
         buffer_len: usize,
@@ -1051,8 +1163,13 @@ impl Source {
             self.packet_stats.invalidate();
             self.range_start = range.start_seconds;
             self.range_end = range.end_seconds;
-            self.info.duration = range
-                .end_seconds
+            #[cfg(feature = "midi")]
+            if let Decode::Midi(midi) = &self.decode {
+                let end = midi.frames() as f64 / f64::from(midi::RATE);
+                self.range_end = Some(self.range_end.unwrap_or(end).min(end));
+            }
+            self.info.duration = self
+                .range_end
                 .or(self.info.duration)
                 .map(|end| (end - range.start_seconds).max(0.0));
         }
@@ -1085,6 +1202,8 @@ impl Source {
             Decode::Native(_) if self.vorbis_timing.is_some() => 2.0,
             Decode::Native(_) => self.native_preroll,
             Decode::Memory { .. } => 0.0,
+            #[cfg(feature = "midi")]
+            Decode::Midi(_) => 0.0,
         }
     }
 
@@ -1114,6 +1233,22 @@ impl Source {
     fn seek_with_cancel(&mut self, target: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         check_cancelled(cancelled)?;
         self.validate_seek(target)?;
+        #[cfg(feature = "midi")]
+        if let Decode::Midi(midi) = &mut self.decode {
+            let target = self.range_start + target;
+            let frame = (target * f64::from(midi::RATE)).round() as u64;
+            let exhausted =
+                target >= self.range_end.unwrap_or(f64::INFINITY) || frame >= midi.frames();
+            if !exhausted {
+                midi.prepare_seek(frame)?;
+            }
+            self.reset_traversal();
+            self.frames.clear();
+            self.ready = false;
+            self.seek_target = Some(target);
+            self.exhausted = exhausted;
+            return Ok(());
+        }
         if let Decode::Memory { pcm, position } = &mut self.decode {
             *position = ((target * f64::from(pcm.sample_rate())).round() as u64).min(pcm.frames());
             self.reset_traversal();
@@ -1227,6 +1362,8 @@ impl Source {
                 opus.decoder.reset_state()?;
             }
             Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
+            #[cfg(feature = "midi")]
+            Decode::Midi(_) => unreachable!(),
         }
         self.reset_traversal();
         self.frames.clear();
@@ -1339,6 +1476,14 @@ impl Source {
         self.poll_open_with_cancel(None)
     }
 
+    #[cfg(feature = "midi")]
+    pub(super) fn opening_wait(&self) -> Option<&crossbeam_channel::Receiver<()>> {
+        match &self.decode {
+            Decode::Midi(midi) => midi.opening_wait(),
+            _ => None,
+        }
+    }
+
     pub(super) fn disable_opening_fallback(&mut self) {
         self.opening_fallback = None;
     }
@@ -1346,6 +1491,13 @@ impl Source {
     fn poll_open_with_cancel(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
         if self.ready {
             return Ok(true);
+        }
+        #[cfg(feature = "midi")]
+        if let Decode::Midi(midi) = &mut self.decode {
+            check_cancelled(cancelled)?;
+            if !midi.poll_open()? {
+                return Ok(false);
+            }
         }
         let mut budget = DECODE_WORK_BUDGET;
         let step = match self.read_next(cancelled, &mut budget) {
@@ -1890,6 +2042,35 @@ impl Source {
         if self.exhausted {
             return Ok(DecodeStep::Eof);
         }
+        #[cfg(feature = "midi")]
+        if matches!(self.decode, Decode::Midi(_)) {
+            let discard_before =
+                (self.seek_target.unwrap_or(0.0) * f64::from(midi::RATE)).round() as u64;
+            while *budget > 0 {
+                check_cancelled(cancelled)?;
+                *budget -= 1;
+                let Decode::Midi(midi) = &mut self.decode else {
+                    unreachable!()
+                };
+                match midi.next(&mut self.frames, discard_before) {
+                    midi::Step::Pcm(start) => {
+                        self.seek_target = None;
+                        if self.retain_pcm(start as f64 / f64::from(midi::RATE)) {
+                            return Ok(DecodeStep::Frames(()));
+                        }
+                        if self.exhausted {
+                            return Ok(DecodeStep::Eof);
+                        }
+                    }
+                    midi::Step::Progress => (),
+                    midi::Step::Eof => {
+                        self.exhausted = true;
+                        return Ok(DecodeStep::Eof);
+                    }
+                }
+            }
+            return Ok(DecodeStep::Yield);
+        }
         if let Decode::Memory { pcm, position } = &mut self.decode {
             if *budget == 0 {
                 return Ok(DecodeStep::Yield);
@@ -2067,6 +2248,8 @@ impl Source {
                     Some(count as u64)
                 }
                 Decode::Ffmpeg(_) | Decode::Memory { .. } => unreachable!(),
+                #[cfg(feature = "midi")]
+                Decode::Midi(_) => unreachable!(),
             };
             match encoded_samples {
                 Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),

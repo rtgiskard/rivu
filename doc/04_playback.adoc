@@ -503,6 +503,29 @@ link:00_getting_started.adoc#ffmpeg-and-native-only-builds[FFmpeg and native-onl
 Enablement, disabling an active decoder, and build-feature restrictions:
 link:01_config.adoc[Configuration].
 
+[[midi-playback]]
+== MIDI file playback
+
+The default build scans and plays Standard MIDI files (`.mid`, `.midi`, formats
+0 and 1). In custom builds, this requires the `midi` feature. Scanning and
+probing read the sequence without loading an instrument bank. Playback
+synthesizes stereo audio in Rivu, without FFmpeg or a separate audio output.
+Full waveforms and exports use the same bank.
+System-exclusive messages and MIDI hardware input/output are not supported.
+
+Playback requires a General MIDI SoundFont (`.sf2`). On Arch Linux, install
+`soundfont-fluid` for `/usr/share/soundfonts/FluidR3_GM.sf2`. On other distributions,
+Rivu also checks `/usr/share/sounds/sf2/FluidR3_GM.sf2` and
+`/usr/share/sounds/sf2/default-GM.sf2`. To use a different bank, set
+`RIVU_MIDI_SOUNDFONT` to its absolute path in the environment that starts Core.
+Restart Core to change banks or retry a failed load. Rivu does not ship a bank
+or download one automatically.
+
+The playback duration includes one second for note release and effects after
+the last track ends. Seeking ahead of the current synthesis cursor renders and
+discards the intervening audio; seeking behind it rebuilds synth state from the
+beginning. Long seeks can therefore take more work than in a WAV file.
+
 [[playback-metadata-updates]]
 == Playback metadata updates
 

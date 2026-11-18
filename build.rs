@@ -25,6 +25,7 @@ fn main() {
         (cfg!(feature = "gui"), "gui"),
         (cfg!(feature = "tui"), "tui"),
         (cfg!(feature = "ffmpeg"), "ffmpeg"),
+        (cfg!(feature = "midi"), "midi"),
         (cfg!(feature = "onnx"), "onnx"),
         (cfg!(feature = "embed-nerd-font"), "embed-nerd-font"),
     ]

@@ -139,7 +139,7 @@ Ensure `~/.local/bin` is on `PATH`.
 Artifacts use `.cache/target/`; override with `CARGO_TARGET_DIR`.
 Local builds use the compiler's default CPU target and prefer `mold` when installed.
 
-Default features: `gui`, `tui`, `ffmpeg`, `onnx`; font embedding is off.
+Default features: `gui`, `tui`, `ffmpeg`, `midi`, `onnx`; font embedding is off.
 Build variants and optional runtime dependencies are described below.
 
 === Frontend selection
@@ -185,6 +185,14 @@ cargo build --locked --workspace --release --no-default-features --features gui,
 
 Install custom-feature builds with `make install-only PREFIX="$HOME/.local"`.
 Do not use `make install`: it rebuilds with default features.
+
+=== MIDI support
+
+The default build supports Standard MIDI file playback. When building with
+`--no-default-features`, add `midi` explicitly to include it.
+
+This feature adds no system library requirement. Playback needs a separate
+instrument bank; see link:04_playback.adoc#midi-playback[MIDI file playback].
 
 === Neural audio processing
 

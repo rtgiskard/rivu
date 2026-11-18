@@ -717,6 +717,20 @@ impl Worker {
             }
             if self.opening.is_some() {
                 self.poll_opening();
+                #[cfg(feature = "midi")]
+                if let Some(ready) = self
+                    .opening
+                    .as_ref()
+                    .and_then(|opening| opening.source.as_ref())
+                    .and_then(Source::opening_wait)
+                    && !self.commands.has_ready()
+                {
+                    select! {
+                        recv(self.shutdown.signal) -> _ => break,
+                        recv(self.commands_ready) -> wake => if wake.is_err() { break; },
+                        recv(ready) -> _ => {},
+                    }
+                }
                 continue;
             }
             if self.playback.is_none() {
@@ -1177,6 +1191,49 @@ mod tests {
             shutdown: parking_lot::Mutex::new(Some(shutdown)),
         };
         (worker, engine)
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn stop_acknowledges_a_midi_open_before_the_shared_bank_has_loaded() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x04\0\xff\x2f\0")
+            .unwrap();
+        let (source, release) = Source::stalled_midi_for_test(file.path());
+        let bank_ready = source.opening_wait().unwrap().clone();
+        let (mut worker, mut engine) = admitted_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Auto, 75);
+        worker.opening.as_mut().unwrap().source = Some(source);
+        worker.poll_opening();
+        assert!(worker.opening.is_some());
+
+        (engine.command_wake, worker.commands_ready) = bounded(1);
+        engine.worker = Some(std::thread::spawn(move || worker.run()));
+        let mut stop = engine.stop_request();
+        let mut events = Vec::new();
+        let stopped = futures::executor::block_on(stop.wait(|event| events.push(event))).unwrap();
+        assert_eq!(stopped.generation, 75);
+        assert!(matches!(
+            events.as_slice(),
+            [AudioEvent::DecoderStopped { .. }]
+        ));
+        engine.restore_events(stop.into_events());
+
+        // Completion no longer has a source to open or a failure to publish.
+        release.send(()).unwrap();
+        assert_eq!(
+            bank_ready.recv_timeout(Duration::from_secs(2)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        let mut stop = engine.stop_request();
+        let stopped = futures::executor::block_on(stop.wait(|event| {
+            assert!(matches!(event, AudioEvent::DecoderStopped { .. }));
+        }))
+        .unwrap();
+        assert_eq!(stopped.generation, 75);
+        engine.restore_events(stop.into_events());
     }
 
     #[test]
