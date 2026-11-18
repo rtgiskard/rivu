@@ -416,6 +416,8 @@ link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering].
 immutable PCM identity, optional range, library fingerprint and saved decoder hint
 from authoritative Track updates. A committed change by any client retires affected
 requests/results; metadata-only edits do not.
+Restored selection and first playback can share a source generation; summary
+selection also compares the track path and CUE range rather than generation alone.
 |Same-source traversal or processing
 |Seek, signal, processing and EQ changes preserve the old display until newly
 visited intervals overwrite their statistics. Epochs, gaps and applied intent

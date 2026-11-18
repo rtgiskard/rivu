@@ -762,6 +762,79 @@ async fn summary_after(f: &Fixture, revision: u64) -> WaveformFrame {
     .expect("hidden waveform summary did not advance")
 }
 
+#[gpui::test]
+fn first_play_replaces_restored_waveform_target_with_the_same_generation(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+
+    for cue in [false, true] {
+        let f = fixture();
+        let mut restored = crate::test_support::artwork_track("restored.wav".into());
+        restored.sample_rate = 4;
+        restored.duration = Some(1.0);
+        if cue {
+            restored.cue = Some(rivu_protocol::model::CueSegment {
+                sheet: "album.cue".into(),
+                number: 1,
+                start_frame: 0,
+                end_frame: Some(75),
+            });
+        }
+        f.client
+            .configure_source(Some(&restored), 0, restored.duration);
+        let waveform = cx.new(|_| rivu_visuals::Waveform::new(Arc::clone(&f.client.waveform)));
+        let (_, mut cancelled) =
+            waveform.update(cx, |waveform, cx| waveform.prepare_full(&restored, cx));
+
+        let mut playing = restored.clone();
+        playing.id += 1;
+        if let Some(cue) = &mut playing.cue {
+            cue.number = 2;
+            cue.start_frame = 75;
+            cue.end_frame = Some(150);
+        } else {
+            playing.path = "playing.wav".into();
+        }
+        f.client
+            .configure_source(Some(&playing), 0, playing.duration);
+        let (generation, _cancelled) =
+            waveform.update(cx, |waveform, cx| waveform.prepare_full(&playing, cx));
+        assert!(cancelled.try_recv().is_err());
+
+        let range = playing
+            .cue
+            .as_ref()
+            .map(|cue| rivu_protocol::audio::PlaybackRange {
+                start_seconds: cue.start_seconds(),
+                end_seconds: cue.end_seconds(),
+            });
+        let mut scan = WaveformSummary::default();
+        scan.select(
+            &playing.path,
+            range,
+            playing.decoder_hint,
+            playing.duration,
+            playing.sample_rate,
+            Some(0),
+            Some(rivu_protocol::audio::SourceIdentity::Pcm {
+                storage: 1,
+                start: 0,
+                frames: 4,
+            }),
+        );
+        scan.push_mapped(0.0, 0.25, &[[0.5; 2]; 4]);
+        scan.finish(1.0);
+        waveform.update(cx, |waveform, cx| {
+            waveform.progress_full(generation, &scan.frame, cx);
+            assert_eq!(waveform.test_full_peaks().unwrap(), [Some(0.5); 4]);
+            waveform.complete_full(generation, Ok(scan.frame), cx);
+            assert!(!waveform.test_pending_full());
+            assert_eq!(waveform.test_full_peaks().unwrap(), [Some(0.5); 4]);
+        });
+    }
+}
+
 #[test]
 fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
     async_io::block_on(async {

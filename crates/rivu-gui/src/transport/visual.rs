@@ -240,21 +240,24 @@ impl VisualClient {
             return;
         }
         let source_generation = track.map(|_| generation);
-        let unchanged = desired.source_generation == source_generation;
+        let range = track.and_then(|track| track.cue.as_ref()).map(|cue| {
+            rivu_protocol::audio::PlaybackRange {
+                start_seconds: cue.start_seconds(),
+                end_seconds: cue.end_seconds(),
+            }
+        });
+        let mut summary = self.state.summary.lock();
+        // Restored selection and first playback can share generation zero.
+        // Metadata edits and saved decoder hints do not replace an open source.
+        let unchanged = desired.source_generation == source_generation
+            && summary.frame.path.as_deref() == track.map(|track| track.path.as_path())
+            && summary.frame.range == range;
         if unchanged {
             return;
         }
         desired.source_generation = source_generation;
         desired.revision = desired.revision.wrapping_add(1).max(1);
-        let mut summary = self.state.summary.lock();
         if let Some(track) = track {
-            let range = track
-                .cue
-                .as_ref()
-                .map(|cue| rivu_protocol::audio::PlaybackRange {
-                    start_seconds: cue.start_seconds(),
-                    end_seconds: cue.end_seconds(),
-                });
             summary.select(
                 &track.path,
                 range,
