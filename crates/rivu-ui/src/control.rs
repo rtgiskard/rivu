@@ -16,23 +16,13 @@ impl SurfaceStyle {
         matches!(self, Self::Translucent)
     }
 
-    /// Resolve row fills relative to their opaque baseline.
-    pub fn row_fill(self, color: u32) -> gpui::Rgba {
-        self.fill(color)
-    }
-
-    /// Floating actions retain their 80% baseline on either host surface.
-    pub fn action_fill(self, color: u32) -> gpui::Rgba {
-        rgb(color).alpha(0.8 * self.background_multiplier())
-    }
-
-    /// Textured interaction backgrounds use 20% of their opaque baseline.
+    /// Textured interaction backgrounds use 28% of their opaque baseline.
     pub fn fill(self, color: u32) -> gpui::Rgba {
         rgb(color).alpha(self.background_multiplier())
     }
 
     fn background_multiplier(self) -> f32 {
-        if self.is_translucent() { 0.2 } else { 1. }
+        if self.is_translucent() { 0.28 } else { 1. }
     }
 
     /// Borders keep their existing subdued material treatment, independently of fills.

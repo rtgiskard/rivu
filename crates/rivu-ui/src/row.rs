@@ -129,9 +129,10 @@ pub fn row_background(
         (true, true) => theme.selected_hover,
         (true, false) => theme.selected,
         (false, true) => theme.highlight,
-        (false, false) => theme.panel,
+        // Idle rows and tabs never paint; their host surface shows through.
+        (false, false) => return rgb(theme.panel).alpha(0.),
     };
-    surface.row_fill(color)
+    surface.fill(color)
 }
 
 pub fn tree_row(
@@ -304,7 +305,7 @@ pub fn floating_action_surface(
     actions: Stateful<Div>,
 ) -> Stateful<Div> {
     actions
-        .bg(surface.action_fill(color))
+        .bg(surface.fill(color))
         .when(surface.is_translucent(), |actions| {
             actions.backdrop_blur(gpui::px(6.))
         })
@@ -330,7 +331,7 @@ pub fn hover_actions(
     };
     floating_action_surface(surface, background, hover_reveal_surface(id, group))
         .group_hover(group, move |style| {
-            style.opacity(1.).bg(surface.action_fill(hover_background))
+            style.opacity(1.).bg(surface.fill(hover_background))
         })
         .absolute()
         .right_0()
@@ -344,12 +345,15 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn public_rows_keep_opaque_semantic_backgrounds(cx: &mut gpui::TestAppContext) {
+    fn opaque_rows_clear_idle_and_keep_active_states_opaque(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             crate::theme::init_test(cx);
             let theme = crate::theme::palette(cx);
+            assert_eq!(
+                row_background(theme, false, false, crate::SurfaceStyle::Opaque).a,
+                0.
+            );
             for (selected, hovered, color) in [
-                (false, false, theme.panel),
                 (false, true, theme.highlight),
                 (true, false, theme.selected),
                 (true, true, theme.selected_hover),
@@ -358,21 +362,20 @@ mod tests {
                     row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque),
                     rgb(color)
                 );
-                assert_eq!(
-                    row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque).a,
-                    1.
-                );
             }
         });
     }
 
     #[gpui::test]
-    fn translucent_rows_preserve_semantic_colors_at_uniform_opacity(cx: &mut gpui::TestAppContext) {
+    fn translucent_rows_clear_idle_and_scale_active_states(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             crate::theme::init_test(cx);
             let theme = crate::theme::palette(cx);
-            for (selected, hovered) in [(false, false), (false, true), (true, false), (true, true)]
-            {
+            assert_eq!(
+                row_background(theme, false, false, crate::SurfaceStyle::Translucent).a,
+                0.
+            );
+            for (selected, hovered) in [(false, true), (true, false), (true, true)] {
                 let opaque = row_background(theme, selected, hovered, crate::SurfaceStyle::Opaque);
                 let translucent =
                     row_background(theme, selected, hovered, crate::SurfaceStyle::Translucent);
@@ -380,7 +383,7 @@ mod tests {
                     (translucent.r, translucent.g, translucent.b),
                     (opaque.r, opaque.g, opaque.b)
                 );
-                assert_eq!(translucent.a, opaque.a * 0.2);
+                assert_eq!(translucent.a, opaque.a * 0.28);
             }
             assert_eq!(crate::SurfaceStyle::default(), crate::SurfaceStyle::Opaque);
         });

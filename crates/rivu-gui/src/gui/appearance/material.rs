@@ -1189,7 +1189,9 @@ mod tests {
                         let mut expected_row =
                             div().bg(rivu_ui::row_background(theme, selected, false, expected));
                         assert_eq!(rendered.style().background, expected_row.style().background);
-                        if !enabled {
+                        if !selected && !hovered {
+                            assert_eq!(background.a, 0.);
+                        } else if !enabled {
                             assert_eq!(background.a, 1.);
                         } else {
                             assert!(background.a > 0. && background.a < 1.);

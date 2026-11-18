@@ -370,7 +370,7 @@ mod tests {
                         color.h == expected.h && color.s == expected.s && color.l == expected.l
                     })
                     .expect("search must paint its host control surface in both states");
-                assert_eq!(fill.a, if surface.is_translucent() { 0.2 } else { 1. });
+                assert_eq!(fill.a, if surface.is_translucent() { 0.28 } else { 1. });
             })
             .unwrap();
         }

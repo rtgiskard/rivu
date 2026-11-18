@@ -484,9 +484,10 @@ draft. The renderer consumes the accepted preferences without changing semantic
 theme colors, playback, queue state or saved-layout syntax. Menus and dialogs
 retain opaque elevated surfaces and input barriers.
 
-Rows, tabs, buttons and scroll-edge fades share the host's surface policy:
-materials scale background opacity by 0.2 without changing semantic colors,
-text, icons or keyboard focus borders. This is independent of panel opacity.
+Idle rows and tabs paint no background on any surface. Rows, tabs, buttons and
+scroll-edge fades share the host's surface policy: materials scale background
+opacity by 0.2 without changing semantic colors, text, icons or keyboard focus
+borders. This is independent of panel opacity.
 Expanded search matches its collapsed button's background and hover fill;
 menus, dialogs and standalone input fields remain opaque.
 

@@ -777,8 +777,8 @@ fn assert_row_action_color(
 #[test]
 fn floating_row_actions_follow_selection_hover_and_focus_without_button_fills() {
     for (surface, alpha) in [
-        (crate::SurfaceStyle::Opaque, 0.8),
-        (crate::SurfaceStyle::Translucent, 0.8 * 0.2),
+        (crate::SurfaceStyle::Opaque, 1.),
+        (crate::SurfaceStyle::Translucent, 0.28),
     ] {
         let mut cx = TestAppContext::single();
         cx.update(crate::theme::init_test);

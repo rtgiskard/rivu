@@ -1374,13 +1374,13 @@ impl Playlists {
                                     }
                                 })
                                 .group_drag_over::<LibraryDrag>("playlist-catalog-row", |style| {
-                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                    style.bg(crate::gui::appearance::material::surface(cx).fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
                                 })
                                 .group_drag_over::<super::ContentDrag>("playlist-catalog-row", |style| {
-                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                    style.bg(crate::gui::appearance::material::surface(cx).fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
                                 })
                                 .group_drag_over::<ListDrag>("playlist-catalog-row", |style| {
-                                    style.bg(crate::gui::appearance::material::surface(cx).action_fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
+                                    style.bg(crate::gui::appearance::material::surface(cx).fill(if this.browser.playlists().selected() == Some(id) { theme.selected_hover } else { theme.highlight }))
                                 })
                                 .child(
                                     IconButtonGroup::new(IconButtonStyle::RowAction, IconButtonDensity::Compact).surface(crate::gui::appearance::material::surface(cx))
