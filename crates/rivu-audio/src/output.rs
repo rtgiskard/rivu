@@ -1635,6 +1635,35 @@ fn run(
     bail!("PipeWire default audio sink changed again while opening output")
 }
 
+fn pin_to_target(properties: &mut pw::properties::Properties, target: &Sink, follow_default: bool) {
+    properties.insert("target.object", target.serial.as_str());
+    properties.insert("node.dont-reconnect", "true");
+    properties.insert("node.dont-fallback", "true");
+    if follow_default {
+        // WirePlumber otherwise errors and destroys a strict stream when its
+        // target vanishes, possibly before the replacement default arrives.
+        // Keep the pinning policy; the owner bounds the wait and rebuilds.
+        properties.insert("node.linger", "true");
+    }
+}
+
+fn checked_stream_state(
+    core_error: Option<String>,
+    format_rejected: bool,
+    state: impl FnOnce() -> pw::stream::StreamState,
+) -> Result<pw::stream::StreamState> {
+    if let Some(error) = core_error {
+        bail!("PipeWire output: {error}");
+    }
+    if format_rejected {
+        bail!("PipeWire changed the requested sample format, rate or speaker positions");
+    }
+    match state() {
+        pw::stream::StreamState::Error(error) => bail!("PipeWire output: {error}"),
+        state => Ok(state),
+    }
+}
+
 fn run_stream(
     connection: &Connection,
     name: Option<&str>,
@@ -1646,6 +1675,7 @@ fn run_stream(
 ) -> Result<StreamExit> {
     let control = owner.control;
     let target = connection.target(name)?;
+    let follow_default = name.is_none();
     let speakers = parse_positions(&target.positions).with_context(|| {
         format!(
             "PipeWire sink {} has no usable speaker layout ({:?})",
@@ -1679,8 +1709,7 @@ fn run_stream(
         "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Music",
         "application.name" => "Rivu", "application.id" => "rivu",
         "application.icon-name" => "rivu", "node.name" => "rivu-native-output",
-        "target.object" => target.serial.as_str(), "node.dont-reconnect" => "true",
-        "node.dont-fallback" => "true", "stream.dont-remix" => (!auto_mix).to_string(),
+        "stream.dont-remix" => (!auto_mix).to_string(),
         "channelmix.disable" => (!auto_mix).to_string(), "audio.channels" => stream_layout.len().to_string(),
         "audio.position" => format!("[ {positions} ]"), "audio.rate" => rate.to_string(),
         "node.rate" => format!("1/{rate}"),
@@ -1689,6 +1718,7 @@ fn run_stream(
         // ~2 ms filter latency; client.conf stream.properties still override it.
         "resample.quality" => "10",
     };
+    pin_to_target(&mut properties, &target, follow_default);
     if auto_mix {
         properties.insert("channelmix.normalize", "true");
     }
@@ -1825,16 +1855,9 @@ fn run_stream(
                 update_stream_metadata(&stream, &metadata)?;
             }
         }
-        if let Some(error) = failure.borrow_mut().take() {
-            bail!("PipeWire output: {error}");
-        }
-        if format_error.get() {
-            bail!("PipeWire changed the requested sample format, rate or speaker positions");
-        }
-        let stream_state = stream.state();
-        if let pw::stream::StreamState::Error(error) = stream_state {
-            bail!("PipeWire output: {error}");
-        }
+        // Backend failures stay fatal even while awaiting default metadata.
+        let core_error = failure.borrow_mut().take();
+        let stream_state = checked_stream_state(core_error, format_error.get(), || stream.state())?;
         shared.check_timing()?;
         let (replacement, loss) = {
             let mut inventory = connection.inventory.borrow_mut();
@@ -1846,7 +1869,7 @@ fn run_stream(
                 }
             }
             (
-                name.is_none() && inventory.has_replacement_default(&target),
+                follow_default && inventory.has_replacement_default(&target),
                 inventory.route_loss(
                     &target,
                     stream_state == pw::stream::StreamState::Unconnected,
@@ -1857,7 +1880,7 @@ fn run_stream(
         let action = ReplacementWait::on_route(
             &mut replacement_wait,
             loss,
-            name.is_none(),
+            follow_default,
             replacement,
             (!started).then_some(deadline),
             Instant::now,
@@ -3361,6 +3384,47 @@ mod routing_tests {
     use Channel::*;
 
     #[test]
+    fn only_default_managed_streams_linger_without_relaxing_the_pin() {
+        let target = Sink {
+            id: 2,
+            serial: "42".into(),
+            name: "selected".into(),
+            positions: "FL FR".into(),
+        };
+        for (follow_default, linger) in [(false, None), (true, Some("true"))] {
+            let mut props = pw::properties::PropertiesBox::new();
+            pin_to_target(&mut props, &target, follow_default);
+            assert_eq!(props.get("target.object"), Some("42"));
+            assert_eq!(props.get("node.dont-reconnect"), Some("true"));
+            assert_eq!(props.get("node.dont-fallback"), Some("true"));
+            assert_eq!(props.get("node.linger"), linger);
+        }
+    }
+
+    #[test]
+    fn backend_errors_are_not_classified_as_recoverable_route_loss() {
+        use pw::stream::StreamState;
+
+        // Even a missing-object error from another operation is fatal. The
+        // expected policy error is prevented at the source, never filtered.
+        for message in ["no such object", "defined target not found", "broken pipe"] {
+            let error = checked_stream_state(Some(message.into()), false, || StreamState::Paused)
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("PipeWire output: {message}"));
+        }
+        let error = checked_stream_state(None, false, || {
+            StreamState::Error("link activation failed".into())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "PipeWire output: link activation failed");
+        let error = checked_stream_state(None, true, || StreamState::Paused).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "PipeWire changed the requested sample format, rate or speaker positions"
+        );
+    }
+
+    #[test]
     fn default_route_loss_waits_for_a_registered_replacement_without_resetting() {
         let target = Sink {
             id: 2,
@@ -3375,7 +3439,10 @@ mod routing_tests {
             positions: target.positions.clone(),
         };
         let now = Instant::now();
-        for opening_deadline in [None, Some(now + TIMEOUT)] {
+        for (opening_deadline, first_loss) in [
+            (None, RouteLoss::Links),
+            (Some(now + TIMEOUT), RouteLoss::TargetGone),
+        ] {
             let mut graph = Inventory::default();
             graph.sinks.insert(target.id, target.clone());
             graph.default = Some(target.name.clone());
@@ -3408,9 +3475,12 @@ mod routing_tests {
             graph.changed();
             assert!(graph.route_confirmed.get());
             let link = graph.links.remove(&4).unwrap();
+            if first_loss == RouteLoss::TargetGone {
+                graph.sinks.remove(&target.id);
+            }
             graph.changed();
             assert!(!graph.route_confirmed.get());
-            assert_eq!(graph.route_loss(&target, false), Some(RouteLoss::Links));
+            assert_eq!(graph.route_loss(&target, false), Some(first_loss));
             assert_eq!(
                 decide(&mut wait, &graph, now),
                 Ok(RouteAction::AwaitDefault)
@@ -3434,14 +3504,18 @@ mod routing_tests {
             );
 
             graph.sinks.insert(replacement.id, replacement.clone());
-            graph.default = None;
-            assert!(!graph.has_replacement_default(&target));
+            // A registered replacement cannot be used until the default says so.
+            graph.default = Some(target.name.clone());
+            assert_eq!(
+                decide(&mut wait, &graph, before_expiry),
+                Ok(RouteAction::AwaitDefault)
+            );
             graph.default = Some(replacement.name.clone());
             assert_eq!(
                 decide(&mut wait, &graph, before_expiry),
                 Ok(RouteAction::Retire)
             );
-            assert_eq!(decide(&mut wait, &graph, expiry), Err(RouteLoss::Links));
+            assert_eq!(decide(&mut wait, &graph, expiry), Err(first_loss));
         }
     }
 
