@@ -13,6 +13,12 @@ pub(crate) struct EqualizerFormat {
     pub(crate) channels: usize,
 }
 
+impl EqualizerFormat {
+    pub(crate) fn known_sample_rate(self) -> Option<u32> {
+        (self.sample_rate > 0).then_some(self.sample_rate)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: LibrarySnapshot,

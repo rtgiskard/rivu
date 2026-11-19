@@ -272,7 +272,7 @@ impl AudioProcessing {
         pending
             .equalizer_submitted
             .as_ref()?
-            .live_input
+            .field_submit
             .then_some(())?;
         Some((pending.equalizer_target?, pending.before.revision))
     }

@@ -151,14 +151,13 @@ Left/Right. Working areas scroll independently of execution controls and footer.
 Removing a panel discards local interaction state and invalidates its previous
 frame's input, including zoom/resize gestures.
 
-Enter or Apply this field commits a parameter draft, except for the live EQ
-numeric controls below. Apply all node drafts validates and commits that node
-atomically. Discard removes unapplied text/errors without undoing accepted live
-edits. Invalid values and stale revisions retain their drafts with errors;
-acknowledgements do not erase text typed after submission. File selection only
-changes a path draft. Unused backend settings remain available in an expandable
-section. Delete/Duplicate requires that node's drafts to be resolved; Undo/Redo
-requires all graph drafts to be applied or discarded.
+Enter or Apply this field commits a parameter draft. Apply all node drafts
+validates and commits that node atomically. Discard removes unapplied text and
+errors without undoing accepted edits. Invalid values and stale revisions retain
+their drafts with errors; acknowledgements do not erase text typed after submission.
+File selection only changes a path draft. Unused backend settings remain
+available in an expandable section. Delete/Duplicate requires that node's drafts
+to be resolved; Undo/Redo requires all graph drafts to be applied or discarded.
 The denoise node's FFT selector offers only 256, 512, 1024, 2048, 4096 and 8192
 samples. Selecting a size changes the draft, not the committed node. It is
 independent of the visualization analysis FFT setting.
@@ -256,17 +255,17 @@ resolution, preparation cost and latency, not an IIR quality label. The curve
 shows the configured IIR magnitude at the decoded source's sample rate and
 uses its channel count during playback, including when paused. Without a
 decoded source, the editor uses the selected track's catalog format if known.
+An unknown catalog format, including unplayed MIDI, permits parameter editing
+without drawing a response curve; it is not treated as a low-rate PCM stream.
 For FIR the curve is the design target, not the realized finite response or
 phase. Graph execution aligns branches and compensates published audio to the
 source timeline.
 
-Input/output gain and band frequency, gain, Q, shelf slope and stages submit
-valid numeric edits as you type; step buttons and sliders apply immediately.
-Channels requires Enter/Apply. Incomplete/out-of-range text and IME preedit stay
-drafts. Committing composition submits once; Escape cancels it. Newer typed text
-survives acknowledgements, and Enter on unchanged displayed text does not round
-the stored value. Accepted edits are not rolled back when a slider gesture is
-cancelled. Held arrow keys accumulate steps while an edit is pending.
+Press Enter to commit a numeric edit. Typing, completing input-method composition,
+and leaving the field do not change the sound. Enter on unchanged displayed text
+does not round the stored value. Sliders and curve nodes preview the values and
+response without changing the sound during a drag. Release applies the final
+value once; Escape or lost interaction discards the preview.
 
 The band count remains available with no bands. Enter 0–32 and press Enter. Increasing appends
 enabled, 0 dB peak bands with default Q and all channels selected; decreasing

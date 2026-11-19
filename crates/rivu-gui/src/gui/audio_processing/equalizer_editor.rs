@@ -140,7 +140,6 @@ struct EqualizerField {
     native_epoch: u64,
     committed: String,
     dirty: bool,
-    auto_pending: bool,
     generation: u64,
     draft_revision: Option<u64>,
     slider_bounds: MeasuredGraph,
@@ -157,7 +156,9 @@ pub(super) struct SubmittedField {
 
 pub(super) struct NodeEqualizerSubmission {
     pub(super) config: EqualizerConfig,
-    pub(super) live_input: bool,
+    // While this explicit field submit is in flight, accept newer text but
+    // no further graph commands until the prior revision is acknowledged.
+    pub(super) field_submit: bool,
     pub(super) revision: u64,
     node: u64,
     fields: Vec<SubmittedField>,
@@ -187,6 +188,7 @@ struct FieldDrag {
     geometry: WindowGeometry,
     geometry_epoch: u64,
     revision: u64,
+    value: Option<f64>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -219,7 +221,6 @@ struct EqualizerEditor {
     fields: HashMap<EqField, EqualizerField>,
     channel_choices: rivu_ui::ChoiceState<usize>,
     channel_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
-    live_submission_scheduled: bool,
     response: Arc<Vec<f64>>,
     response_buffer: Arc<Vec<f64>>,
     preview_config: EqualizerConfig,
@@ -286,7 +287,6 @@ impl EqualizerEditor {
             fields: HashMap::new(),
             channel_choices: rivu_ui::ChoiceState::default(),
             channel_anchor: Rc::new(Cell::new(None)),
-            live_submission_scheduled: false,
             response: Arc::new(Vec::new()),
             response_buffer: Arc::new(Vec::new()),
             preview_config: EqualizerConfig::default(),
@@ -330,7 +330,7 @@ impl EqualizerEditor {
             format,
             collecting_revision,
         } = availability;
-        let had_preview = self.drag.is_some();
+        let had_preview = self.drag.is_some() || self.field_drag.is_some();
         let format_changed = self.format != format;
         let dimensions = |format: EqualizerFormat| (format.sample_rate, format.channels);
         let response_format_changed = self.format.map(dimensions) != format.map(dimensions);
@@ -347,20 +347,16 @@ impl EqualizerEditor {
             self.graph_epoch = self.graph_epoch.wrapping_add(1);
         }
         let geometry_changed = self.geometry_epoch != geometry_epoch;
-        if had_preview
-            && (config_changed || format_changed || fence_changed || geometry_changed || blocked)
-        {
-            // Restore the old selected row before a structural remap can change
-            // its identity. Dirty text never belongs to the pointer preview.
-            self.restore_position_fields(cx);
-            self.take_drag();
+        let retired_preview = had_preview
+            && (config_changed
+                || format_changed
+                || self.revision != revision
+                || geometry_changed
+                || blocked
+                || pending > 0);
+        if retired_preview {
+            self.retire_pointer(cx);
         }
-        let slider_kind_changed = self.field_drag.as_ref().is_some_and(|drag| {
-            drag.key.band_index().is_some_and(|index| {
-                self.config.bands.get(index).map(|band| band.kind)
-                    != config.bands.get(index).map(|band| band.kind)
-            })
-        });
         // Ordinary same-length parameter updates preserve native keyboard focus.
         if self.config.bands.len() != config.bands.len() {
             // Without persistent band IDs, duplicate rows cannot be disambiguated
@@ -369,6 +365,7 @@ impl EqualizerEditor {
             self.retire_band_focus();
         }
         let changed = config_changed
+            || retired_preview
             || format_changed
             || fence_changed
             || geometry_changed
@@ -411,26 +408,6 @@ impl EqualizerEditor {
         if format_changed || geometry_changed || blocked {
             self.channel_choices.close();
         }
-        if self.field_drag.as_ref().is_some_and(|drag| {
-            drag.revision != revision
-                && !(collecting_revision == Some(drag.revision)
-                    && drag.revision.checked_add(1) == Some(revision))
-        }) {
-            // Publication can precede ACK by any number of event-loop turns.
-            // Preserve this unresolved capture, but only the graph owner's
-            // successful ACK may rebase it onto the published revision.
-            self.take_field_drag();
-        }
-        if format_changed || geometry_changed || slider_kind_changed || !config.enabled {
-            self.take_field_drag();
-        }
-        if !config.enabled {
-            // Turning EQ off cancels unissued live intent, not the text or commands
-            // already owned by the serialized queue. Re-enable is editability only.
-            for field in self.fields.values_mut() {
-                field.auto_pending = false;
-            }
-        }
         if geometry_changed {
             self.bounds.set(None);
         }
@@ -439,16 +416,12 @@ impl EqualizerEditor {
             self.sync_fields(cx);
             self.removing_band = None;
         }
-        if config_changed
-            || response_format_changed
-            || had_preview && (format_changed || fence_changed || geometry_changed || blocked)
-        {
+        if config_changed || response_format_changed || retired_preview {
             self.response_dirty = true;
             if self.active {
                 self.update_response();
             }
         }
-        self.schedule_live_submission(cx);
         cx.notify();
     }
 
@@ -523,23 +496,32 @@ impl EqualizerEditor {
     }
 
     fn cancel_pointer(&mut self, cx: &mut Context<Self>) {
-        let node = self.take_drag().is_some();
-        let field = self.take_field_drag().is_some();
-        if node {
-            self.restore_position_fields(cx);
+        if self.retire_pointer(cx) {
             self.response_dirty = true;
             if self.active {
                 self.update_response();
             }
-        }
-        if node || field {
             cx.notify();
         }
+    }
+
+    fn retire_pointer(&mut self, cx: &mut Context<Self>) -> bool {
+        let node = self.take_drag();
+        let field = self.take_field_drag();
+        if let Some(drag) = &node {
+            self.restore_position_fields(drag.band, cx);
+        }
+        if let Some(drag) = &field {
+            self.restore_preview_field(&drag.key, cx);
+        }
+        node.is_some() || field.is_some()
     }
 
     fn take_field_drag(&mut self) -> Option<FieldDrag> {
         let drag = self.field_drag.take();
         if drag.is_some() {
+            self.drag_epoch = self.drag_epoch.wrapping_add(1);
+            self.response_frame_pending = false;
             self.pointer_count
                 .set(self.pointer_count.get().saturating_sub(1));
         }
@@ -563,14 +545,13 @@ impl EqualizerEditor {
         let format_valid = self.owner.upgrade().is_some()
             && snapshot.equalizer_format() == self.state.equalizer_format();
         let valid = self.active
-            && !self.config_locked()
+            && !self.pointer_locked(cx)
             && self
                 .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
                 .is_some()
             && format_valid
             && config == Some(&self.config)
-            && (self.target == EqTarget::Monitor
-                || snapshot.system.config.processing_graph.revision == self.revision)
+            && snapshot.system.config.processing_graph.revision == self.revision
             && self.drag.as_ref().is_some_and(|drag| {
                 drag.geometry == WindowGeometry::current(window, snapshot.system.config.ui_scale)
                     && drag.geometry_epoch == self.geometry_epoch
@@ -579,6 +560,15 @@ impl EqualizerEditor {
             self.cancel_pointer(cx);
         }
         valid
+    }
+
+    fn pointer_locked(&self, cx: &App) -> bool {
+        self.config_locked()
+            || self.pending > 0
+            || self.owner.upgrade().is_some_and(|owner| {
+                let owner = owner.read(cx);
+                owner.pending > 0 || owner.equalizer_blocked(self.target)
+            })
     }
 
     fn config_locked(&self) -> bool {
@@ -698,7 +688,6 @@ impl EqualizerEditor {
                 input,
                 committed: value,
                 dirty: false,
-                auto_pending: false,
                 generation: 0,
                 draft_revision: None,
                 slider_bounds: Rc::new(Cell::new(None)),
@@ -725,88 +714,33 @@ impl EqualizerEditor {
                 return;
             }
             match event {
-                InputEvent::Changed {
-                    user: true,
-                    composing,
-                } => {
-                    this.cancel_pointer(cx);
-                    let valid = this.fields.get(&name).is_some_and(|field| {
-                        this.valid_live_draft(&name, field.input.read(cx).text())
-                    });
+                InputEvent::Changed { user: true, .. } => {
                     if let Some(field) = this.fields.get_mut(&name) {
                         if !field.dirty {
                             field.draft_revision = Some(this.revision);
                         }
                         field.dirty = true;
                         field.generation = field.generation.wrapping_add(1);
-                        field.auto_pending = !composing && valid;
                     }
-                    this.schedule_live_submission(cx);
+                    this.cancel_pointer(cx);
                     cx.notify();
                     let _ = this.owner.update(cx, |_, cx| cx.notify());
                 }
-                InputEvent::Submit => this.apply_field(&name, cx),
+                InputEvent::Submit => this.submit_field(&name, cx),
                 _ => {}
             }
         })
     }
 
-    fn schedule_live_submission(&mut self, cx: &mut Context<Self>) {
-        if self.live_submission_scheduled
-            || self.config_locked()
-            || self.pending > 0
-            || !self.fields.values().any(|field| field.auto_pending)
-        {
-            return;
-        }
-        // Leave input/reconcile callbacks before submitting. Coalesce motion and
-        // typing while a command is active; graph edits each own one revision.
-        self.live_submission_scheduled = true;
-        let editor = cx.weak_entity();
-        cx.defer(move |cx| {
-            let _ = editor.update(cx, |this, cx| {
-                this.live_submission_scheduled = false;
-                // The editor's snapshot can lag enqueue_submission until the next
-                // reconciliation. Consult the queue owner before consuming intent.
-                let owner_busy = this.owner.upgrade().is_none_or(|owner| {
-                    let owner = owner.read(cx);
-                    owner.pending > 0 || owner.equalizer_blocked(this.target)
-                });
-                if this.config_locked() || this.pending > 0 || owner_busy {
-                    return;
-                }
-                let key = this.fields.iter().find_map(|(key, field)| {
-                    (field.auto_pending && !field.input.read(cx).is_composing()).then_some(*key)
-                });
-                if let Some(key) = key {
-                    this.fields.get_mut(&key).unwrap().auto_pending = false;
-                    this.submit_field(&key, cx);
-                }
-            });
-        });
-    }
-
-    fn valid_live_draft(&self, key: &EqField, text: &str) -> bool {
-        if matches!(key, EqField::PreampDb | EqField::OutputGainDb) {
-            return valid_gain_draft(text);
-        }
-        let Some((minimum, maximum, _)) = self.band_numeric_range(key) else {
-            return false;
-        };
-        let value = if matches!(key, EqField::Band(_, BandField::Stages)) {
-            text.trim().parse::<u8>().ok().map(f64::from)
-        } else {
-            text.trim().parse::<f64>().ok()
-        };
-        value.is_some_and(|value| value.is_finite() && (minimum..=maximum).contains(&value))
-    }
-
     fn band_numeric_range(&self, key: &EqField) -> Option<(f64, f64, bool)> {
         match key {
             EqField::Band(_, BandField::FrequencyHz) => {
-                let maximum = self.format.map_or(96_000., |format| {
-                    (f64::from(format.sample_rate) * MAX_FREQUENCY_RATE_RATIO).min(96_000.)
-                });
+                let maximum = self
+                    .format
+                    .and_then(EqualizerFormat::known_sample_rate)
+                    .map_or(96_000., |sample_rate| {
+                        (f64::from(sample_rate) * MAX_FREQUENCY_RATE_RATIO).min(96_000.)
+                    });
                 (maximum > 1.).then_some((1., maximum, true))
             }
             EqField::Band(_, BandField::GainDb) => Some((-24., 24., false)),
@@ -971,7 +905,7 @@ impl EqualizerEditor {
         if self.input_band != self.band {
             self.input_band = self.band;
             self.input_epoch = self.input_epoch.wrapping_add(1);
-            self.take_field_drag();
+            self.cancel_pointer(cx);
         }
         let state = Rc::clone(&self.state);
         let Some(eq) = target_config(&state, self.target) else {
@@ -1038,68 +972,43 @@ impl EqualizerEditor {
                 && (field.dirty || self.active && index.is_none_or(|index| index == self.band))
         });
     }
-    fn apply_field(&mut self, key: &EqField, cx: &mut Context<Self>) {
-        // Numeric fields are already scheduled by Changed. Enter must neither
-        // quantize an untouched display nor enqueue the same generation twice.
-        if matches!(key, EqField::PreampDb | EqField::OutputGainDb)
-            || self.band_numeric_range(key).is_some()
-        {
-            let Some(field) = self.fields.get(key) else {
-                return;
-            };
-            if !field.dirty || field.input.read(cx).is_composing() {
-                return;
-            }
-            if !self.valid_live_draft(key, field.input.read(cx).text()) {
-                self.submit_field(key, cx);
-            } else {
-                self.schedule_live_submission(cx);
-            }
-            return;
-        }
-        self.submit_field(key, cx);
-    }
 
     fn submit_field(&mut self, key: &EqField, cx: &mut Context<Self>) {
-        if self.config_locked() || key == &EqField::BandCount && self.pending > 0 {
+        let Some(field) = self.fields.get(key) else {
+            return;
+        };
+        let input = field.input.read(cx);
+        if self.config_locked()
+            || key == &EqField::BandCount && self.pending > 0
+            || !field.dirty
+            || input.is_composing()
+        {
             return;
         }
-        if matches!(self.target, EqTarget::Node(_))
-            && self
-                .fields
-                .get(key)
-                .is_some_and(|field| field.dirty && field.draft_revision != Some(self.revision))
-        {
+        if matches!(self.target, EqTarget::Node(_)) && field.draft_revision != Some(self.revision) {
             self.error = Some(self.context.i18n.text("processing-editor-stale").to_owned());
             cx.notify();
             return;
         }
         self.error = None;
-        if let Some(field) = self.fields.get_mut(key) {
-            field.auto_pending = false;
-        }
-        let value = self
-            .fields
-            .get(key)
-            .map(|f| f.input.read(cx).text().trim().to_owned())
-            .unwrap_or_default();
+        let value = input.text().trim().to_owned();
         match self.field_edit(key, &value) {
             Ok(edit) => {
+                let submitted = SubmittedField {
+                    editor: cx.weak_entity(),
+                    key: *key,
+                    identity: field.identity,
+                    generation: field.generation,
+                    text: value,
+                };
+                self.cancel_pointer(cx);
                 if let EqualizerEdit::ResizeBands { count } = &edit {
-                    self.cancel_pointer(cx);
                     self.pending_added_band = (*count > self.config.bands.len()).then_some((
                         self.config.bands.len(),
                         count.saturating_sub(self.config.bands.len()),
                     ));
                 }
-                let submitted = self.fields.get(key).map(|field| SubmittedField {
-                    editor: cx.entity().downgrade(),
-                    key: *key,
-                    identity: field.identity,
-                    generation: field.generation,
-                    text: value,
-                });
-                self.submit_edit(edit, submitted, cx);
+                self.submit_edit(edit, Some(submitted), cx);
             }
             Err(error) => {
                 self.error = Some(error);
@@ -1113,7 +1022,12 @@ impl EqualizerEditor {
             value
                 .parse::<f64>()
                 .ok()
-                .filter(|n| n.is_finite())
+                .filter(|n| {
+                    n.is_finite()
+                        && self
+                            .band_numeric_range(key)
+                            .is_none_or(|(minimum, maximum, _)| (minimum..=maximum).contains(n))
+                })
                 .ok_or_else(|| {
                     self.context
                         .i18n
@@ -1131,9 +1045,12 @@ impl EqualizerEditor {
                 // Automatic placement has a 20 Hz floor in the protocol. A
                 // known unusable stream is not the offline/unknown fallback.
                 if count > self.config.bands.len()
-                    && self.format.is_some_and(|format| {
-                        f64::from(format.sample_rate) * MAX_FREQUENCY_RATE_RATIO < 20.
-                    })
+                    && self
+                        .format
+                        .and_then(EqualizerFormat::known_sample_rate)
+                        .is_some_and(|sample_rate| {
+                            f64::from(sample_rate) * MAX_FREQUENCY_RATE_RATIO < 20.
+                        })
                 {
                     return Err(self.tr("processing-response-unknown").to_string());
                 }
@@ -1157,7 +1074,11 @@ impl EqualizerEditor {
                     BandField::Q => EqBandEdit::Q(number()?),
                     BandField::ShelfSlope => EqBandEdit::ShelfSlope(number()?),
                     BandField::Stages => {
-                        EqBandEdit::Stages(value.parse::<u8>().map_err(|error| error.to_string())?)
+                        let stages = value.parse::<u8>().map_err(|error| error.to_string())?;
+                        if !(1..=4).contains(&stages) {
+                            return Err(self.tr("processing-invalid-number").to_string());
+                        }
+                        EqBandEdit::Stages(stages)
                     }
                     BandField::Channels => {
                         EqBandEdit::Channels(if value.eq_ignore_ascii_case("all") {
@@ -1189,7 +1110,7 @@ impl EqualizerEditor {
         Ok(edit)
     }
     fn step_field(&mut self, key: &EqField, step: f64, cx: &mut Context<Self>) {
-        if !self.field_input_enabled(key) {
+        if self.pointer_locked(cx) || !self.field_input_enabled(key) {
             return;
         }
         self.cancel_pointer(cx);
@@ -1202,47 +1123,48 @@ impl EqualizerEditor {
                 let next = self
                     .band_numeric_range(key)
                     .map_or(value + step, |(min, max, _)| (value + step).clamp(min, max));
-                self.set_live_value(key, next, cx);
+                self.submit_numeric_step(key, next, cx);
             }
             _ => self.error = Some(self.tr("processing-invalid-number").to_string()),
         }
         cx.notify();
     }
 
-    fn set_live_value(&mut self, key: &EqField, value: f64, cx: &mut Context<Self>) {
-        let mut text = equalizer_number_text(key, value);
-        if !self.valid_live_draft(key, &text) {
-            // A rate-dependent endpoint can have more digits than the display
-            // precision. Do not round a legal End intent out of range.
-            text = value.to_string();
-            if !self.valid_live_draft(key, &text) {
-                return;
-            }
-        }
+    fn submit_numeric_step(&mut self, key: &EqField, value: f64, cx: &mut Context<Self>) {
+        let text = self.preview_number_text(key, value);
         let Some(field) = self.fields.get_mut(key) else {
             return;
         };
-        if field.input.read(cx).text() == text {
+        if field.input.read(cx).is_composing() || field.input.read(cx).text() == text {
             return;
         }
-        if !field.dirty {
-            // A held slider still belongs to its press revision even when
-            // Core has published the next snapshot before the graph ACK.
-            field.draft_revision = Some(
-                self.field_drag
-                    .as_ref()
-                    .filter(|drag| drag.key == *key)
-                    .map_or(self.revision, |drag| drag.revision),
-            );
-        }
         field.dirty = true;
-        field.auto_pending = true;
+        field.draft_revision = Some(self.revision);
         field.generation = field.generation.wrapping_add(1);
         field.input.update(cx, |input, cx| input.set_text(text, cx));
-        self.error = None;
-        self.schedule_live_submission(cx);
+        self.submit_field(key, cx);
         cx.notify();
         let _ = self.owner.update(cx, |_, cx| cx.notify());
+    }
+
+    fn slider_geometry_valid(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = &self.field_drag else {
+            return false;
+        };
+        let valid = !self.pointer_locked(cx)
+            && self.field_input_enabled(&drag.key)
+            && self.controls_current(cx)
+            && drag.geometry_epoch == self.geometry_epoch
+            && drag.revision == self.revision
+            && drag.geometry == WindowGeometry::current(window, self.state.system.config.ui_scale)
+            && self.fields.get(&drag.key).is_some_and(|field| {
+                field.input == drag.input
+                    && field.slider_bounds.get() == Some((drag.bounds, drag.geometry))
+            });
+        if !valid {
+            self.cancel_pointer(cx);
+        }
+        valid
     }
 
     fn move_field_slider(
@@ -1251,54 +1173,17 @@ impl EqualizerEditor {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = &self.field_drag else { return };
-        let snapshot = self.context.snapshot();
-        if !self.active
-            || !self.field_input_enabled(&drag.key)
-            || drag.geometry_epoch != self.geometry_epoch
-            || drag.geometry != WindowGeometry::current(window, snapshot.system.config.ui_scale)
-            || snapshot.equalizer_format() != self.state.equalizer_format()
-            || self.target == EqTarget::Monitor
-                && target_config(&snapshot, self.target) != Some(&self.config)
-            || self.target == EqTarget::Monitor
-                && drag.revision != snapshot.system.config.processing_graph.revision
-            || drag
-                .key
-                .band_index()
-                .is_some_and(|index| index != self.band)
-            || !self
-                .fields
-                .get(&drag.key)
-                .is_some_and(|field| field.input == drag.input)
-            || self
-                .fields
-                .get(&drag.key)
-                .and_then(|field| field.slider_bounds.get())
-                != Some((drag.bounds, drag.geometry))
-        {
-            self.cancel_pointer(cx);
+        if !self.slider_geometry_valid(window, cx) {
             return;
         }
-        if let EqTarget::Node(id) = self.target
-            && drag.revision != snapshot.system.config.processing_graph.revision
-        {
-            let awaiting_ack = drag.revision.checked_add(1)
-                == Some(snapshot.system.config.processing_graph.revision)
-                && self.owner.upgrade().is_some_and(|owner| {
-                    owner.read(cx).graph_collecting_equalizer_input() == Some((id, drag.revision))
-                });
-            if !awaiting_ack {
-                self.cancel_pointer(cx);
-                return;
-            }
-            // A snapshot alone cannot identify the winner. Continue collecting
-            // latest intent on the capture's old fence; ACK alone may rebase it.
-        }
+        let drag = self.field_drag.as_ref().unwrap();
         let Some(fraction) = Slider::value_at(drag.bounds, position) else {
+            self.cancel_pointer(cx);
             return;
         };
         let key = drag.key;
         let Some(range) = self.band_numeric_range(&key) else {
+            self.cancel_pointer(cx);
             return;
         };
         let value = slider_number(
@@ -1306,7 +1191,41 @@ impl EqualizerEditor {
             range,
             matches!(key, EqField::Band(_, BandField::Stages)),
         );
-        self.set_live_value(&key, value, cx);
+        let drag = self.field_drag.as_mut().unwrap();
+        if drag.value != Some(value) {
+            drag.value = Some(value);
+            self.response_dirty = true;
+        }
+    }
+
+    fn copy_preview_config(&mut self) {
+        self.preview_config.enabled = self.config.enabled;
+        self.preview_config.preamp_db = self.config.preamp_db;
+        self.preview_config.output_gain_db = self.config.output_gain_db;
+        self.preview_config.bands.clone_from(&self.config.bands);
+    }
+
+    fn finish_field_slider(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.take_field_drag() else {
+            return;
+        };
+        self.restore_preview_field(&drag.key, cx);
+        self.update_response();
+        if let (EqField::Band(index, field), Some(value)) = (drag.key, drag.value) {
+            let field = match field {
+                BandField::FrequencyHz => EqBandEdit::FrequencyHz(value),
+                BandField::GainDb => EqBandEdit::GainDb(value),
+                BandField::Q => EqBandEdit::Q(value),
+                BandField::ShelfSlope => EqBandEdit::ShelfSlope(value),
+                BandField::Stages => EqBandEdit::Stages(value as u8),
+                BandField::Channels => unreachable!("channels have no slider"),
+            };
+            let edit = EqualizerEdit::BandField { index, field };
+            if !equalizer_field_matches_config(&edit, &self.config) {
+                self.eq(edit, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn slider_action(
@@ -1314,7 +1233,7 @@ impl EqualizerEditor {
         bounds: MeasuredGraph,
     ) -> impl Fn(&mut Self, SliderInput, &mut Window, &mut Context<Self>) {
         move |this, input, window, cx| {
-            if !this.field_control_valid(&identity, window, cx) {
+            if this.pointer_locked(cx) || !this.field_control_valid(&identity, window, cx) {
                 return;
             }
             this.cancel_pointer(cx);
@@ -1336,6 +1255,7 @@ impl EqualizerEditor {
                             }
                         }),
                     ];
+                    this.copy_preview_config();
                     this.field_drag = Some(FieldDrag {
                         key: name,
                         input: identity.input.clone(),
@@ -1343,14 +1263,14 @@ impl EqualizerEditor {
                         geometry,
                         geometry_epoch: this.geometry_epoch,
                         revision: this.revision,
+                        value: None,
                         _subscriptions: subscriptions,
                     });
                     this.pointer_count.set(this.pointer_count.get() + 1);
                     this.move_field_slider(position, window, cx);
+                    this.schedule_drag_response(window, cx);
                 }
                 SliderInput::Key(key) => {
-                    // A repeat can arrive before the next paint; the render-time
-                    // fraction is only presentation, not the current draft.
                     let Some(range) = this.band_numeric_range(&name) else {
                         return;
                     };
@@ -1374,7 +1294,7 @@ impl EqualizerEditor {
                             }
                         }
                     };
-                    this.set_live_value(&name, value, cx);
+                    this.submit_numeric_step(&name, value, cx);
                 }
             }
         }
@@ -1400,13 +1320,15 @@ impl EqualizerEditor {
     ) -> Stateful<Div> {
         let field = &self.fields[key];
         let range = self.band_numeric_range(key).unwrap();
-        let number = field
-            .input
-            .read(cx)
-            .text()
-            .trim()
-            .parse::<f64>()
-            .unwrap_or(range.0);
+        let number = self.pointer_preview_value(key).unwrap_or_else(|| {
+            field
+                .input
+                .read(cx)
+                .text()
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(range.0)
+        });
         let fraction = slider_fraction(number, range);
         let bounds = field.slider_bounds.clone();
         let measured = bounds.clone();
@@ -1442,14 +1364,66 @@ impl EqualizerEditor {
         )
     }
 
-    fn restore_position_fields(&mut self, cx: &mut Context<Self>) {
-        for name in [BandField::FrequencyHz, BandField::GainDb] {
-            if let Some(field) = self.fields.get(&EqField::Band(self.band, name))
-                && !field.dirty
-            {
-                let text = field.committed.clone();
+    fn pointer_preview_value(&self, key: &EqField) -> Option<f64> {
+        if let Some(drag) = &self.field_drag
+            && drag.key == *key
+        {
+            return drag.value;
+        }
+        match (key, &self.drag) {
+            (EqField::Band(index, BandField::FrequencyHz), Some(drag)) if *index == drag.band => {
+                Some(drag.frequency)
+            }
+            (EqField::Band(index, BandField::GainDb), Some(drag)) if *index == drag.band => {
+                Some(drag.gain)
+            }
+            _ => None,
+        }
+    }
+
+    fn preview_position(&self, index: usize, band: &EqBand) -> (f64, f64) {
+        (
+            self.pointer_preview_value(&EqField::Band(index, BandField::FrequencyHz))
+                .unwrap_or(band.frequency_hz),
+            self.pointer_preview_value(&EqField::Band(index, BandField::GainDb))
+                .unwrap_or(band.gain_db),
+        )
+    }
+
+    fn preview_number_text(&self, key: &EqField, value: f64) -> String {
+        let text = equalizer_number_text(key, value);
+        if self.band_numeric_range(key).is_some_and(|(min, max, _)| {
+            text.parse::<f64>()
+                .is_ok_and(|rounded| !(min..=max).contains(&rounded))
+        }) {
+            value.to_string()
+        } else {
+            text
+        }
+    }
+
+    fn update_preview_field(&self, key: &EqField, value: f64, cx: &mut Context<Self>) {
+        if let Some(field) = self.fields.get(key).filter(|field| !field.dirty) {
+            let text = self.preview_number_text(key, value);
+            if field.input.read(cx).text() != text {
                 field.input.update(cx, |input, cx| input.set_text(text, cx));
             }
+        }
+    }
+
+    fn restore_preview_field(&self, key: &EqField, cx: &mut Context<Self>) {
+        if let Some(field) = self.fields.get(key).filter(|field| !field.dirty)
+            && field.input.read(cx).text() != field.committed
+        {
+            field
+                .input
+                .update(cx, |input, cx| input.set_text(field.committed.clone(), cx));
+        }
+    }
+
+    fn restore_position_fields(&self, band: usize, cx: &mut Context<Self>) {
+        for name in [BandField::FrequencyHz, BandField::GainDb] {
+            self.restore_preview_field(&EqField::Band(band, name), cx);
         }
     }
 
@@ -1564,7 +1538,7 @@ impl EqualizerEditor {
                     cx,
                     move |this, window, cx| {
                         if this.field_control_valid(&identity, window, cx) {
-                            this.apply_field(&key_owned, cx);
+                            this.submit_field(&key_owned, cx);
                         }
                     },
                 ),
@@ -1584,12 +1558,11 @@ impl EqualizerEditor {
         if Arc::get_mut(&mut self.response_buffer).is_none() {
             self.response_buffer = Arc::new(Vec::with_capacity(self.frequencies.len()));
         }
-        let Some(EqualizerFormat {
-            sample_rate,
-            channels: channel_count,
-            ..
-        }) = self.format
-        else {
+        let Some((sample_rate, channel_count)) = self.format.and_then(|format| {
+            format
+                .known_sample_rate()
+                .map(|sample_rate| (sample_rate, format.channels))
+        }) else {
             self.maximum_frequency = 20_000.;
             Arc::get_mut(&mut self.response_buffer)
                 .expect("unique response buffer")
@@ -1629,6 +1602,22 @@ impl EqualizerEditor {
                 band.gain_db = drag.gain;
             }
             &self.preview_config
+        } else if let Some(FieldDrag {
+            key: EqField::Band(index, field),
+            value: Some(value),
+            ..
+        }) = &self.field_drag
+        {
+            let band = &mut self.preview_config.bands[*index];
+            match field {
+                BandField::FrequencyHz => band.frequency_hz = *value,
+                BandField::GainDb => band.gain_db = *value,
+                BandField::Q => band.q = *value,
+                BandField::ShelfSlope => band.shelf_slope = *value,
+                BandField::Stages => band.stages = *value as u8,
+                BandField::Channels => unreachable!("channels have no slider"),
+            }
+            &self.preview_config
         } else {
             &self.config
         };
@@ -1655,7 +1644,7 @@ impl EqualizerEditor {
     }
 
     fn schedule_drag_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.response_frame_pending || !self.response_dirty || self.drag.is_none() {
+        if self.response_frame_pending || !self.response_dirty {
             return;
         }
         self.response_frame_pending = true;
@@ -1669,8 +1658,27 @@ impl EqualizerEditor {
                     return;
                 }
                 this.response_frame_pending = false;
-                if this.node_geometry_valid(window, cx) && this.response_dirty {
-                    this.update_response();
+                let valid = if this.field_drag.is_some() {
+                    this.slider_geometry_valid(window, cx)
+                } else {
+                    this.node_geometry_valid(window, cx)
+                };
+                if valid {
+                    if let Some(drag) = &this.field_drag
+                        && let Some(value) = drag.value
+                    {
+                        this.update_preview_field(&drag.key, value, cx);
+                    } else if let Some(drag) = &this.drag {
+                        for (field, value) in [
+                            (BandField::FrequencyHz, drag.frequency),
+                            (BandField::GainDb, drag.gain),
+                        ] {
+                            this.update_preview_field(&EqField::Band(drag.band, field), value, cx);
+                        }
+                    }
+                    if this.response_dirty {
+                        this.update_response();
+                    }
                     cx.notify();
                 }
             });
@@ -1704,6 +1712,7 @@ impl EqualizerEditor {
                             this.cancel_pointer(cx);
                         } else {
                             this.move_field_slider(event.position, window, cx);
+                            this.schedule_drag_response(window, cx);
                         }
                         window.prevent_default();
                     }
@@ -1711,7 +1720,7 @@ impl EqualizerEditor {
                         if !event.dragging() {
                             this.cancel_pointer(cx);
                         } else if this.node_geometry_valid(window, cx) {
-                            this.move_node(event.position, cx);
+                            this.move_node(event.position);
                             this.schedule_drag_response(window, cx);
                         }
                         window.prevent_default();
@@ -1724,16 +1733,17 @@ impl EqualizerEditor {
             if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
                 let _ = entity.update(cx, |this, cx| {
                     if this.field_drag.is_some() {
+                        // Sample the release itself; the last scheduled preview
+                        // frame may not have painted yet.
                         this.move_field_slider(event.position, window, cx);
-                        this.take_field_drag();
-                        cx.notify();
+                        this.finish_field_slider(cx);
                     }
                     if this.drag.as_ref().is_some_and(|d| d.panel == panel)
                         && this.node_geometry_valid(window, cx)
                     {
-                        this.move_node(event.position, cx);
+                        this.move_node(event.position);
                         if let Some(drag) = this.take_drag() {
-                            this.restore_position_fields(cx);
+                            this.restore_position_fields(drag.band, cx);
                             if drag.moved {
                                 this.update_response();
                                 let band = &this.config.bands[drag.band];
@@ -1784,12 +1794,7 @@ impl EqualizerEditor {
                     .is_some()
             })
             .map(|(i, b)| {
-                let (frequency, gain) = self
-                    .drag
-                    .as_ref()
-                    .filter(|d| d.band == i)
-                    .map(|d| (d.frequency, d.gain))
-                    .unwrap_or((b.frequency_hz, b.gain_db));
+                let (frequency, gain) = self.preview_position(i, b);
                 (i, self.frequency_x(frequency), (0.5 - gain / 48.) as f32)
             })
             .collect::<Vec<_>>();
@@ -1810,14 +1815,10 @@ impl EqualizerEditor {
         {
             let focus = self.band_focus_handle(index, window, cx);
             let band = &self.config.bands[index];
-            let frequency = self
-                .drag
-                .as_ref()
-                .filter(|drag| drag.band == index)
-                .map_or(band.frequency_hz, |drag| drag.frequency);
+            let (frequency, gain) = self.preview_position(index, band);
             let boundary = graph_frequency_boundary(frequency, self.maximum_frequency);
             let boundary_hint = boundary.map(|key| self.tr(key));
-            let node_value = format!("{frequency:.1} Hz, {:.2} dB", band.gain_db);
+            let node_value = format!("{frequency:.1} Hz, {gain:.2} dB");
             let node_hint = match &boundary_hint {
                 Some(hint) => format!("{node_value} · {hint}"),
                 None => node_value.clone(),
@@ -2018,7 +2019,7 @@ impl EqualizerEditor {
                         let frequency = b.frequency_hz;
                         let gain = b.gain_db;
                         this.focus_graph_band(index, window, cx);
-                        if this.config_locked() {
+                        if this.pointer_locked(cx) {
                             cx.notify();
                             return;
                         }
@@ -2035,10 +2036,7 @@ impl EqualizerEditor {
                             }),
                         ];
                         this.cancel_pointer(cx);
-                        this.preview_config.enabled = this.config.enabled;
-                        this.preview_config.preamp_db = this.config.preamp_db;
-                        this.preview_config.output_gain_db = this.config.output_gain_db;
-                        this.preview_config.bands.clone_from(&this.config.bands);
+                        this.copy_preview_config();
                         this.pointer_count.set(this.pointer_count.get() + 1);
                         this.drag = Some(NodeDrag {
                             panel,
@@ -2147,8 +2145,7 @@ impl EqualizerEditor {
             cx.stop_propagation();
             return;
         }
-        // Keys update the selected band's live draft, so held repeats coalesce
-        // behind the in-flight command instead of queuing stale step edits.
+        // These are explicit control actions, not numeric input events.
         let (field, value) = match event.keystroke.key.as_str() {
             "left" | "right" => {
                 let key = EqField::Band(index, BandField::FrequencyHz);
@@ -2192,13 +2189,13 @@ impl EqualizerEditor {
             }
             _ => return,
         };
-        if self.config_locked() {
+        if self.pointer_locked(cx) {
             return;
         }
         self.cancel_pointer(cx);
         self.band = index;
         self.sync_fields(cx);
-        self.set_live_value(&field, value, cx);
+        self.submit_numeric_step(&field, value, cx);
         cx.stop_propagation();
     }
 
@@ -2209,7 +2206,7 @@ impl EqualizerEditor {
         value.is_finite().then_some(value)
     }
 
-    fn move_node(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn move_node(&mut self, position: Point<Pixels>) {
         let frequency_range = self.band_numeric_range(&EqField::Band(0, BandField::FrequencyHz));
         if let Some(drag) = self.drag.as_mut() {
             if drag.bounds.size.width <= px(0.) || drag.bounds.size.height <= px(0.) {
@@ -2241,27 +2238,6 @@ impl EqualizerEditor {
                     .clamp(-24., 24.);
             }
             if previous != (drag.frequency, drag.gain) {
-                for (name, value) in [
-                    (BandField::FrequencyHz, drag.frequency),
-                    (BandField::GainDb, drag.gain),
-                ] {
-                    if let Some(field) = self.fields.get(&EqField::Band(drag.band, name))
-                        && !field.dirty
-                    {
-                        let mut text =
-                            equalizer_number_text(&EqField::Band(drag.band, name), value);
-                        if name == BandField::FrequencyHz
-                            && frequency_range.is_some_and(|(minimum, maximum, _)| {
-                                text.parse::<f64>()
-                                    .is_ok_and(|value| !(minimum..=maximum).contains(&value))
-                            })
-                        {
-                            text = value.to_string();
-                        }
-                        field.input.update(cx, |input, cx| input.set_text(text, cx));
-                    }
-                }
-                cx.notify();
                 self.response_dirty = true;
             }
         }
@@ -2765,6 +2741,15 @@ impl Render for EqualizerEditor {
         }
         let panel = self.panel;
         self.equalizer_view(panel, window, cx)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && (this.drag.is_some() || this.field_drag.is_some())
+                {
+                    this.cancel_pointer(cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             .when(self.blocked, |view| view.opacity(0.5))
             .when_some(self.error.clone(), |view, error| {
                 view.child(
@@ -2830,7 +2815,6 @@ impl AudioProcessing {
                 editor.cancel_pointer(cx);
                 for field in editor.fields.values_mut() {
                     field.dirty = false;
-                    field.auto_pending = false;
                     field.draft_revision = None;
                     field.generation = field.generation.wrapping_add(1);
                     let text = field.committed.clone();
@@ -2862,7 +2846,7 @@ impl AudioProcessing {
             EqTarget::Node(id) => {
                 let mut submission = NodeEqualizerSubmission {
                     config: next,
-                    live_input: false,
+                    field_submit: false,
                     revision,
                     node: id,
                     fields: Vec::new(),
@@ -2970,26 +2954,13 @@ impl AudioProcessing {
                 };
                 let mut next = config.clone();
                 let sample_rate = expected_format.map(|format| format.sample_rate);
-                let live_input = submitted.is_some()
-                    && matches!(
-                        &edit,
-                        EqualizerEdit::PreampDb(_)
-                            | EqualizerEdit::OutputGainDb(_)
-                            | EqualizerEdit::BandField {
-                                field: EqBandEdit::FrequencyHz(_)
-                                    | EqBandEdit::GainDb(_)
-                                    | EqBandEdit::Q(_)
-                                    | EqBandEdit::ShelfSlope(_)
-                                    | EqBandEdit::Stages(_),
-                                ..
-                            }
-                    );
+                let field_submit = submitted.is_some();
                 let replaces_band_identity = replaces_band_identity(&edit);
                 match edit.apply_config(&mut next, sample_rate) {
                     Ok(None) => {
                         let mut submission = NodeEqualizerSubmission {
                             config: next,
-                            live_input,
+                            field_submit: field_submit && !replaces_band_identity,
                             revision,
                             node: id,
                             fields: submitted.into_iter().collect(),
@@ -3372,7 +3343,7 @@ impl AudioProcessing {
         apply_equalizer_draft_edits(&mut config, edits, sample_rate)?;
         Ok(Some(NodeEqualizerSubmission {
             config,
-            live_input: false,
+            field_submit: false,
             revision,
             node: id,
             fields,
@@ -3409,7 +3380,6 @@ impl AudioProcessing {
                 editor.cancel_pointer(cx);
                 for field in editor.fields.values_mut().filter(|field| field.dirty) {
                     field.dirty = false;
-                    field.auto_pending = false;
                     field.draft_revision = None;
                     field.generation = field.generation.wrapping_add(1);
                     let text = field.committed.clone();
@@ -3467,7 +3437,6 @@ impl AudioProcessing {
                 && field.input.read(cx).text().trim() == submitted.text
             {
                 field.dirty = false;
-                field.auto_pending = false;
                 field.draft_revision = None;
                 if !still_authoritative {
                     let text = field.committed.clone();
@@ -3589,13 +3558,6 @@ fn reset_equalizer_config(config: &EqualizerConfig) -> EqualizerConfig {
     }
 }
 
-fn valid_gain_draft(value: &str) -> bool {
-    value
-        .trim()
-        .parse::<f64>()
-        .is_ok_and(|gain| gain.is_finite() && (-24.0..=24.0).contains(&gain))
-}
-
 fn rebase_draft_origin(origin: &mut Option<u64>, from: u64, to: u64, current: u64) {
     if from.checked_add(1) == Some(to) && to == current && *origin == Some(from) {
         *origin = Some(to);
@@ -3618,11 +3580,6 @@ impl AudioProcessing {
             editor.update(cx, |editor, _| {
                 for field in editor.fields.values_mut().filter(|field| field.dirty) {
                     rebase_draft_origin(&mut field.draft_revision, from, to, current);
-                }
-                if let Some(drag) = &mut editor.field_drag
-                    && drag.revision == from
-                {
-                    drag.revision = to;
                 }
             });
         }
@@ -3714,6 +3671,74 @@ mod tests {
             sample_rate,
             channels,
         }
+    }
+
+    #[gpui::test]
+    fn offline_midi_snapshot_allows_eq_edits_without_fabricating_response(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, editor, _handle) = fixture_with_owner(cx);
+        let mut track = crate::test_support::artwork_track("source.mid".into());
+        track.sample_rate = 0;
+        track.channels = 0;
+        let mut client = rivu_protocol::model::ClientSnapshot {
+            current_track: Some(Arc::new(track)),
+            source_generation: 42,
+            ..Default::default()
+        };
+        client.configuration.config =
+            owner.read_with(cx, |owner, _| Arc::clone(&owner.state.system.config));
+        let snapshot = GuiSnapshot::from_client(&client, Default::default());
+        let format = snapshot.equalizer_format().unwrap();
+        assert_eq!(format.track_id, client.current_track.as_ref().unwrap().id);
+        assert_eq!(format.generation, 42);
+        assert_eq!(format.known_sample_rate(), None);
+        owner.update(cx, |owner, cx| owner.reconcile(Rc::new(snapshot), cx));
+        let epoch = editor.read_with(cx, |editor, _| {
+            let key = EqField::Band(0, BandField::FrequencyHz);
+            assert!(editor.field_input_enabled(&key));
+            let mut config = editor.config.clone();
+            let count = config.bands.len() + 1;
+            editor
+                .field_edit(&EqField::BandCount, &count.to_string())
+                .unwrap()
+                .apply_config(&mut config, Some(0))
+                .unwrap();
+            assert_eq!(config.bands.len(), count);
+            assert!((20.0..=20_000.0).contains(&config.bands.last().unwrap().frequency_hz));
+            editor
+                .field_edit(&key, "1200")
+                .unwrap()
+                .apply_config(&mut config, Some(0))
+                .unwrap();
+            assert_eq!(config.bands[0].frequency_hz, 1200.);
+            assert!(editor.response.is_empty());
+            assert_eq!(editor.response_computations, 0);
+            assert!(editor.response_error.is_none());
+            editor.input_epoch
+        });
+        client.source_generation += 1;
+        owner.update(cx, |owner, cx| {
+            owner.reconcile(
+                Rc::new(GuiSnapshot::from_client(&client, Default::default())),
+                cx,
+            );
+        });
+        let epoch = editor.read_with(cx, |editor, _| {
+            assert_ne!(editor.input_epoch, epoch);
+            assert!(editor.response.is_empty());
+            editor.input_epoch
+        });
+        Arc::make_mut(client.current_track.as_mut().unwrap()).id += 1;
+        owner.update(cx, |owner, cx| {
+            owner.reconcile(
+                Rc::new(GuiSnapshot::from_client(&client, Default::default())),
+                cx,
+            );
+        });
+        editor.read_with(cx, |editor, _| {
+            assert_ne!(editor.input_epoch, epoch);
+            assert!(editor.response.is_empty());
+            assert_eq!(editor.response_computations, 0);
+        });
     }
 
     #[gpui::test]
@@ -3929,19 +3954,6 @@ mod tests {
     }
 
     #[test]
-    fn live_gain_drafts_require_finite_complete_numbers_in_the_supported_range() {
-        for value in ["0", "-0", "-24", "24", " 4.75 ", "+2", "1e1"] {
-            assert!(valid_gain_draft(value), "valid gain draft: {value:?}");
-        }
-        for value in [
-            "", " ", "-", "+", ".", "-.", "1e", "1e-", "NaN", "inf", "-inf", "1e309", "24.01",
-            "-24.01", "invalid", "2 dB",
-        ] {
-            assert!(!valid_gain_draft(value), "invalid gain draft: {value:?}");
-        }
-    }
-
-    #[test]
     fn band_slider_mapping_round_trips_and_clamps_supported_parameters() {
         for range in [
             (1., 1.497, true),
@@ -3966,9 +3978,6 @@ mod tests {
     fn frequency_controls_distinguish_unknown_and_low_stream_rates(cx: &mut TestAppContext) {
         for rate in [None, Some(0), Some(1), Some(2), Some(3), Some(48_001)] {
             let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
-            // Keep drafts local so the test can inspect endpoint precision even
-            // though this fixture deliberately has no playing audio stream.
-            owner.update(cx, |owner, _| owner.pending = 1);
             editor.update(cx, |editor, cx| {
                 editor.format = rate.map(|sample_rate| EqualizerFormat {
                     track_id: 99,
@@ -3986,7 +3995,7 @@ mod tests {
                     .input
                     .clone()
             });
-            if matches!(rate, Some(0..=2)) {
+            if matches!(rate, Some(1..=2)) {
                 assert!(
                     VisualTestContext::from_window(handle, cx)
                         .debug_bounds("eq-slider-band.0.frequency_hz")
@@ -4013,27 +4022,31 @@ mod tests {
                     assert!(editor.field_edit(&EqField::BandCount, "2").is_ok());
                 });
             } else {
-                click(cx, handle, "eq-slider-band.0.frequency_hz");
-                press(cx, handle, "end");
-                let maximum = rate.map_or(96_000., |rate| f64::from(rate) * 0.499);
-                assert_eq!(
-                    input.read_with(cx, |input, _| input.text().parse::<f64>().unwrap()),
-                    maximum
-                );
-                press(cx, handle, "home");
-                assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "1");
+                let maximum = rate
+                    .filter(|rate| *rate > 0)
+                    .map_or(96_000., |rate| f64::from(rate) * 0.499);
+                editor.read_with(cx, |editor, _| {
+                    let key = EqField::Band(0, BandField::FrequencyHz);
+                    assert_eq!(editor.band_numeric_range(&key), Some((1., maximum, true)));
+                    let endpoint = editor.preview_number_text(&key, maximum);
+                    assert_eq!(endpoint.parse::<f64>().unwrap(), maximum);
+                    assert!(editor.field_edit(&key, &endpoint).is_ok());
+                });
                 if rate == Some(3) {
-                    click(cx, handle, "eq-step-band.0.frequency_hz-more");
-                    assert_eq!(
-                        input.read_with(cx, |input, _| input.text().parse::<f64>().unwrap()),
-                        maximum
-                    );
+                    editor.read_with(cx, |editor, _| {
+                        assert!(editor.field_edit(&EqField::BandCount, "4").is_err());
+                        assert!(editor.field_edit(&EqField::BandCount, "2").is_ok());
+                    });
                 }
-                let node = VisualTestContext::from_window(handle, cx)
-                    .debug_bounds("eq-node-7-0")
-                    .unwrap();
-                assert!(f32::from(node.origin.x).is_finite());
-                assert!(f32::from(node.origin.y).is_finite());
+                if rate.is_some_and(|rate| rate > 0) {
+                    let node = VisualTestContext::from_window(handle, cx)
+                        .debug_bounds("eq-node-7-0")
+                        .unwrap();
+                    assert!(f32::from(node.origin.x).is_finite());
+                    assert!(f32::from(node.origin.y).is_finite());
+                } else {
+                    assert!(editor.read_with(cx, |editor, _| editor.response.is_empty()));
+                }
             }
             assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         }
@@ -4045,7 +4058,6 @@ mod tests {
     ) {
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| {
-            owner.pending = 1;
             owner.command_active = true;
         });
         editor.update(cx, |editor, cx| {
@@ -4077,6 +4089,8 @@ mod tests {
                 ..Default::default()
             },
         );
+        cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
         editor.read_with(cx, |editor, cx| {
             let frequency = editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
                 .input
@@ -4087,15 +4101,7 @@ mod tests {
             assert!((1.0..=1.497).contains(&frequency));
             assert!(editor.frequency_x(frequency).is_finite());
         });
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position: position + point(px(-100.), px(0.)),
-                ..Default::default()
-            },
-        );
+        press(cx, handle, "escape");
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
@@ -4107,7 +4113,6 @@ mod tests {
         ] {
             let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
             owner.update(cx, |owner, _| {
-                owner.pending = 1;
                 owner.command_active = true;
             });
             if transition == "remap" {
@@ -4118,7 +4123,6 @@ mod tests {
             } else {
                 "eq-slider-band.0.gain_db"
             };
-            click(cx, handle, selector);
             let position = VisualTestContext::from_window(handle, cx)
                 .debug_bounds(selector)
                 .unwrap()
@@ -4196,7 +4200,7 @@ mod tests {
                             &config,
                             EqAvailability {
                                 blocked: transition == "block",
-                                pending: 1,
+                                pending: 0,
                                 format: editor.format,
                                 collecting_revision: None,
                             },
@@ -4261,6 +4265,8 @@ mod tests {
             .unwrap();
             draw(cx, handle);
             click(cx, handle, "eq-slider-band.0.frequency_hz");
+            acknowledge_front(cx, &runtime, &owner, true);
+            draw(cx, handle);
             press(cx, handle, "end");
             editor.read_with(cx, |editor, cx| {
                 assert_eq!(
@@ -4272,6 +4278,8 @@ mod tests {
                     "fresh slider after {transition}"
                 );
             });
+            acknowledge_front(cx, &runtime, &owner, true);
+            draw(cx, handle);
             click(cx, handle, "eq-step-band.0.frequency_hz-less");
             editor.read_with(cx, |editor, cx| {
                 assert_eq!(
@@ -4283,15 +4291,7 @@ mod tests {
                     "fresh step after {transition}"
                 );
             });
-            // The initial click may have retained a different numeric draft
-            // while dispatch was paused. Drain real ACKs so latest frequency
-            // intent must reach Core, not merely appear in the local field.
-            for _ in 0..MAX_BANDS {
-                if owner.read_with(cx, |owner, _| owner.commands.is_empty()) {
-                    break;
-                }
-                acknowledge_front(cx, &runtime, &owner, true);
-            }
+            acknowledge_front(cx, &runtime, &owner, true);
             assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
             assert_eq!(
                 runtime.handle.gui_snapshot().system.config.equalizer.bands[0].frequency_hz,
@@ -4305,7 +4305,6 @@ mod tests {
     fn numeric_display_does_not_quantize_untouched_configuration_or_user_text(
         cx: &mut TestAppContext,
     ) {
-        use gpui::EntityInputHandler as _;
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
         let input = editor.read_with(cx, |editor, _| {
@@ -4313,23 +4312,18 @@ mod tests {
             editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
         editor.update(cx, |editor, cx| {
-            editor.apply_field(&EqField::Band(0, BandField::Q), cx)
+            editor.submit_field(&EqField::Band(0, BandField::Q), cx)
         });
         draw(cx, handle);
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         let text = "0.8123456789";
-        cx.update_window(handle, |_, window, cx| {
-            input.update(cx, |input, cx| {
-                input.focus_and_select_all(window, cx);
-                input.replace_text_in_range(None, text, window, cx);
-            });
-        })
-        .unwrap();
-        draw(cx, handle);
+        enter_number(cx, handle, &input, text);
         assert_eq!(
             input.read_with(cx, |input, _| input.text().to_owned()),
             text
         );
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        press(cx, handle, "enter");
         owner.read_with(cx, |owner, _| {
             assert!(matches!(&owner.commands.front().unwrap().command,
                 Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }, .. } if *value == 0.8123456789));
@@ -4349,24 +4343,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn band_numbers_submit_live_but_incomplete_and_out_of_range_text_remain_drafts(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::EntityInputHandler as _;
+    fn band_numbers_validate_and_submit_only_on_enter(cx: &mut TestAppContext) {
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
         let input = editor.read_with(cx, |editor, _| {
             editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
         for (text, expected) in [("-", 0), ("21", 0), ("1e", 0), ("2.5", 1)] {
-            cx.update_window(handle, |_, window, cx| {
-                input.update(cx, |input, cx| {
-                    input.focus_and_select_all(window, cx);
-                    input.replace_text_in_range(None, text, window, cx);
-                });
-            })
-            .unwrap();
-            draw(cx, handle);
+            enter_number(cx, handle, &input, text);
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+            press(cx, handle, "enter");
             assert_eq!(
                 owner.read_with(cx, |owner, _| owner.commands.len()),
                 expected
@@ -4376,49 +4362,6 @@ mod tests {
             assert!(matches!(&owner.commands.front().unwrap().command,
                 Command::EqualizerEdit { edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }, .. } if *value == 2.5));
         });
-    }
-
-    #[gpui::test]
-    fn band_slider_pointer_and_keyboard_submit_without_apply(cx: &mut TestAppContext) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.command_active = true);
-        click(cx, handle, "eq-slider-band.0.gain_db");
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.field_drag.is_none());
-            assert_eq!(editor.pointer_count.get(), 0);
-            let gain = editor.fields[&EqField::Band(0, BandField::GainDb)]
-                .input
-                .read(cx)
-                .text()
-                .parse::<f64>()
-                .unwrap();
-            assert!(gain.abs() < 0.01);
-        });
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
-        press(cx, handle, "end");
-        editor.read_with(cx, |editor, cx| {
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "24"
-            );
-        });
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
-        acknowledge_front(cx, &runtime, &owner, true);
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit {
-                    expected_revision: _,
-                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::GainDb(value) }
-                } if *value == 24.
-            ));
-        });
-        acknowledge_front(cx, &runtime, &owner, true);
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
     #[gpui::test]
@@ -4470,6 +4413,7 @@ mod tests {
                 .to_platform_input(),
                 cx,
             );
+            window.simulate_next_frame(cx);
             editor.update(cx, |editor, cx| {
                 let drag = editor.drag.as_ref().unwrap();
                 assert!(drag.moved);
@@ -4542,9 +4486,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn slider_geometry_changes_cancel_capture_without_reverting_live_edits(
-        cx: &mut TestAppContext,
-    ) {
+    fn slider_geometry_changes_cancel_capture_without_committing(cx: &mut TestAppContext) {
         use gpui::InputEvent as _;
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
@@ -4568,18 +4510,53 @@ mod tests {
                 editor.move_field_slider(position + point(px(40.), px(0.)), window, cx);
                 assert!(editor.field_drag.is_none());
                 assert_eq!(editor.pointer_count.get(), 0);
-                let value = editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text()
-                    .parse::<f64>()
-                    .unwrap();
-                assert!(value.abs() < 0.01);
+                let field = &editor.fields[&EqField::Band(0, BandField::GainDb)];
+                assert_eq!(field.input.read(cx).text(), field.committed);
             });
         })
         .unwrap();
         draw(cx, handle);
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+    }
+
+    #[gpui::test]
+    fn slider_escape_discards_preview_and_late_release(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, _| owner.command_active = true);
+        let bounds = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("eq-slider-band.0.gain_db")
+            .unwrap();
+        let position = slider_point(bounds, 0.75);
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            },
+        );
+        cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
+        let key = EqField::Band(0, BandField::GainDb);
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.fields[&key].input.read(cx).text(), "12");
+        });
+        press(cx, handle, "escape");
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            },
+        );
+        editor.read_with(cx, |editor, cx| {
+            assert!(editor.field_drag.is_none());
+            assert_eq!(editor.fields[&key].input.read(cx).text(), "-8");
+        });
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
     // Keep dispatch paused, execute the actual queued command in Core, then
@@ -4634,6 +4611,7 @@ mod tests {
             editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
         enter_number(cx, handle, &input, "2.5");
+        press(cx, handle, "enter");
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
         let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
             expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
@@ -4647,7 +4625,6 @@ mod tests {
         editor.read_with(cx, |editor, cx| {
             let field = &editor.fields[&EqField::Band(0, BandField::Q)];
             assert!(field.dirty);
-            assert!(!field.auto_pending);
             assert_eq!(field.input.read(cx).text(), "2.5");
         });
         assert_eq!(
@@ -4658,212 +4635,27 @@ mod tests {
     }
 
     #[gpui::test]
-    fn rejected_old_numeric_edit_preserves_new_same_or_other_field_input(cx: &mut TestAppContext) {
-        for key in [
-            EqField::Band(0, BandField::Q),
-            EqField::Band(0, BandField::GainDb),
-        ] {
-            let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-            owner.update(cx, |owner, _| owner.command_active = true);
-            let first = editor.read_with(cx, |editor, _| {
-                editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
-            });
-            enter_number(cx, handle, &first, "1.5");
-            let input = editor.read_with(cx, |editor, _| editor.fields[&key].input.clone());
-            enter_number(cx, handle, &input, "2.5");
-            let generation = editor.read_with(cx, |editor, _| {
-                assert!(editor.fields[&key].auto_pending);
-                editor.fields[&key].generation
-            });
-            assert!(
-                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-                    edit: EqualizerEdit::PreampDb(4.),
-                }))
-                .ack
-                .is_success()
-            );
-            acknowledge_front(cx, &runtime, &owner, false);
-            owner.read_with(cx, |owner, _| {
-                assert_eq!(owner.commands.len(), 1);
-                let submitted = owner
-                    .commands
-                    .front()
-                    .unwrap()
-                    .equalizer_field
-                    .as_ref()
-                    .unwrap();
-                assert_eq!(submitted.key, key);
-                assert_eq!(submitted.generation, generation);
-                assert_eq!(submitted.text, "2.5");
-            });
-            editor.read_with(cx, |editor, cx| {
-                let field = &editor.fields[&key];
-                assert!(field.dirty);
-                assert!(!field.auto_pending);
-                assert_eq!(field.generation, generation);
-                assert_eq!(input.read(cx).text(), "2.5");
-            });
-            acknowledge_front(cx, &runtime, &owner, true);
-            editor.read_with(cx, |editor, cx| {
-                assert!(!editor.fields[&key].dirty);
-                assert_eq!(input.read(cx).text(), "2.5");
-                if key == EqField::Band(0, BandField::Q) {
-                    assert_eq!(editor.config.bands[0].q, 2.5);
-                } else {
-                    assert_eq!(editor.config.bands[0].gain_db, 2.5);
-                    let rejected = &editor.fields[&EqField::Band(0, BandField::Q)];
-                    assert!(rejected.dirty);
-                    assert!(!rejected.auto_pending);
-                    assert_eq!(rejected.input.read(cx).text(), "1.5");
-                }
-            });
-            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        }
-    }
-
-    #[gpui::test]
-    fn unrelated_command_failure_preserves_pending_numeric_input(cx: &mut TestAppContext) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, cx| {
-            owner.command_active = true;
-            owner.patch_denoise(
-                super::super::DenoisePatch {
-                    fft_size: Some(0),
-                    ..Default::default()
-                },
-                cx,
-            );
-            // The fixture renders the editor directly, unlike the production
-            // owner view that reconciles queue availability before rendering it.
-            owner.reconcile(owner.context.snapshot(), cx);
-        });
-        let input = editor.read_with(cx, |editor, _| {
-            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
-        });
-        enter_number(cx, handle, &input, "2.5");
-        editor.read_with(cx, |editor, _| {
-            assert_eq!(editor.pending, 1);
-            assert!(editor.fields[&EqField::Band(0, BandField::Q)].auto_pending);
-        });
-        acknowledge_front(cx, &runtime, &owner, false);
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit {
-                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) },
-                    ..
-                } if *value == 2.5
-            ));
-        });
-        acknowledge_front(cx, &runtime, &owner, true);
-        editor.read_with(cx, |editor, cx| {
-            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
-            assert_eq!(editor.config.bands[0].q, 2.5);
-            assert_eq!(input.read(cx).text(), "2.5");
-        });
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-    }
-
-    #[gpui::test]
-    fn pending_live_edits_coalesce_to_latest_without_old_ack_erasing_new_draft(
-        cx: &mut TestAppContext,
-    ) {
+    fn successful_old_ack_does_not_overwrite_or_submit_new_numeric_text(cx: &mut TestAppContext) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| {
-            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
-        });
-        for text in ["1.1", "2.2", "3.3"] {
-            enter_number(cx, handle, &input, text);
-        }
+        let key = EqField::Band(0, BandField::Q);
+        let input = editor.read_with(cx, |editor, _| editor.fields[&key].input.clone());
+        enter_number(cx, handle, &input, "1.1");
         press(cx, handle, "enter");
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.pending, 1);
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit {
-                    expected_revision: _,
-                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }
-                } if *value == 1.1
-            ));
-        });
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields[&EqField::Band(0, BandField::Q)].auto_pending);
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::Q)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "3.3"
-            );
-        });
-        cx.update_window(handle, |_, window, cx| {
-            owner.update(cx, |owner, cx| {
-                owner.sync_panels(&Default::default(), false, cx);
-                let state = Rc::clone(&owner.state);
-                let rebound = owner.equalizer_editor(
-                    PANEL + 1,
-                    EqTarget::Monitor,
-                    &state.system.config.equalizer,
-                    window,
-                    cx,
-                );
-                assert_eq!(rebound.entity_id(), editor.entity_id());
-            });
-        })
-        .unwrap();
-        editor.read_with(cx, |editor, _| {
-            assert_ne!(
-                editor.fields[&EqField::Band(0, BandField::Q)]
-                    .input
-                    .entity_id(),
-                input.entity_id()
-            );
-        });
+        enter_number(cx, handle, &input, "3.3");
         acknowledge_front(cx, &runtime, &owner, true);
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit {
-                    expected_revision: _,
-                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::Q(value) }
-                } if *value == 3.3
-            ));
-        });
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields[&EqField::Band(0, BandField::Q)].dirty);
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::Q)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "3.3"
-            );
-        });
-        cx.update_window(handle, |_, window, cx| {
-            owner.update(cx, |owner, cx| {
-                owner.sync_panels(&Default::default(), false, cx);
-                let state = Rc::clone(&owner.state);
-                let _ = owner.equalizer_editor(
-                    PANEL + 2,
-                    EqTarget::Monitor,
-                    &state.system.config.equalizer,
-                    window,
-                    cx,
-                );
-            });
-        })
-        .unwrap();
-        acknowledge_front(cx, &runtime, &owner, true);
-        editor.read_with(cx, |editor, _| {
-            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
-            assert_eq!(editor.config.bands[0].q, 3.3);
-        });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.config.bands[0].q, 1.1);
+            assert_eq!(input.read(cx).text(), "3.3");
+            assert!(editor.fields[&key].dirty);
+        });
+        press(cx, handle, "enter");
+        acknowledge_front(cx, &runtime, &owner, true);
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.config.bands[0].q, 3.3);
+            assert!(!editor.fields[&key].dirty);
+        });
     }
 
     #[gpui::test]
@@ -4882,6 +4674,7 @@ mod tests {
             ("0.923456789", EqBandEdit::Q(0.923499999), 0.923499999),
         ] {
             enter_number(cx, handle, &input, text);
+            press(cx, handle, "enter");
             let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
             assert!(
                 futures::executor::block_on(runtime.handle.request_ack(issued.command))
@@ -4934,279 +4727,6 @@ mod tests {
             );
             assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         }
-    }
-
-    #[gpui::test]
-    fn bypass_cancels_unissued_live_numbers_without_replaying_them_on_enable(
-        cx: &mut TestAppContext,
-    ) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| {
-            editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
-        });
-        enter_number(cx, handle, &input, "1");
-        for (key, text) in [
-            (&EqField::PreampDb, "1.25"),
-            (&EqField::OutputGainDb, "2.5"),
-            (&EqField::Band(0, BandField::FrequencyHz), "120"),
-            (&EqField::Band(0, BandField::GainDb), "3.5"),
-            (&EqField::Band(0, BandField::Q), "2"),
-            (&EqField::Band(0, BandField::ShelfSlope), "0.5"),
-            (&EqField::Band(0, BandField::Stages), "2"),
-        ] {
-            let input = editor.read_with(cx, |editor, _| editor.fields[key].input.clone());
-            enter_number(cx, handle, &input, text);
-        }
-        let drafts = editor.read_with(cx, |editor, cx| {
-            editor
-                .fields
-                .iter()
-                .filter(|(_, field)| field.dirty)
-                .map(|(key, field)| {
-                    assert!(field.auto_pending);
-                    (
-                        *key,
-                        field.input.clone(),
-                        field.input.read(cx).text().to_owned(),
-                        field.generation,
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-        editor.update(cx, |editor, cx| {
-            editor.eq(EqualizerEdit::Enabled(false), cx)
-        });
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 2);
-        acknowledge_front(cx, &runtime, &owner, true);
-        let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
-        let ack = futures::executor::block_on(runtime.handle.request_ack(submission.command)).ack;
-        assert!(!ack.is_success());
-        owner.update(cx, |owner, cx| {
-            owner.pending = owner.pending.saturating_sub(1);
-            owner.finish_equalizer_command(false);
-            owner.reconcile(owner.context.snapshot(), cx);
-            editor.read_with(cx, |editor, cx| {
-                assert!(editor.config.enabled);
-                for (key, input, text, generation) in &drafts {
-                    let field = &editor.fields[key];
-                    assert!(field.dirty);
-                    assert!(field.auto_pending);
-                    assert_eq!(&field.input, input);
-                    assert_eq!(field.input.read(cx).text(), text);
-                    assert_eq!(field.generation, *generation);
-                }
-            });
-            // Only an authoritative disabled snapshot cancels unissued input.
-            // Publish it before the deferred live submission can consume a draft.
-            assert!(
-                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-                    edit: EqualizerEdit::Enabled(false),
-                }))
-                .ack
-                .is_success()
-            );
-            owner.reconcile(owner.context.snapshot(), cx);
-        });
-        draw(cx, handle);
-        editor.read_with(cx, |editor, cx| {
-            assert!(!editor.config.enabled);
-            assert_eq!(editor.config.bands[0].q, 1.);
-            for (key, input, text, generation) in &drafts {
-                let field = &editor.fields[key];
-                assert!(field.dirty);
-                assert!(!field.auto_pending);
-                assert_eq!(&field.input, input);
-                assert_eq!(field.input.read(cx).text(), text);
-                assert_eq!(field.generation, *generation);
-            }
-        });
-        editor.update(cx, |editor, cx| editor.eq(EqualizerEdit::Enabled(true), cx));
-        acknowledge_front(cx, &runtime, &owner, true);
-        draw(cx, handle);
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.config.enabled);
-            assert_eq!(editor.config.bands[0].q, 1.);
-            for (key, input, text, generation) in &drafts {
-                let field = &editor.fields[key];
-                assert!(field.dirty);
-                assert!(!field.auto_pending);
-                assert_eq!(&field.input, input);
-                assert_eq!(field.input.read(cx).text(), text);
-                assert_eq!(field.generation, *generation);
-            }
-        });
-        assert_eq!(
-            runtime.handle.gui_snapshot().system.config.equalizer.bands[0].q,
-            1.
-        );
-        enter_number(cx, handle, &input, "3");
-        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
-        acknowledge_front(cx, &runtime, &owner, true);
-        editor.read_with(cx, |editor, cx| {
-            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
-            assert_eq!(editor.config.bands[0].q, 3.);
-            assert_eq!(input.read(cx).text(), "3");
-            assert!(editor.fields[&EqField::PreampDb].dirty);
-        });
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-    }
-
-    #[gpui::test]
-    fn held_node_keys_coalesce_behind_one_command_and_keep_every_step(cx: &mut TestAppContext) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.command_active = true);
-        click(cx, handle, "eq-node-7-0");
-        for _ in 0..3 {
-            press(cx, handle, "up");
-        }
-        for _ in 0..2 {
-            press(cx, handle, "right");
-        }
-        // The first step is in flight; later repeats only update the drafts.
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::EqualizerEdit {
-                    edit: EqualizerEdit::BandField { index: 0, field: EqBandEdit::GainDb(gain) },
-                    ..
-                } if *gain == -7.5
-            ));
-        });
-        editor.read_with(cx, |editor, cx| {
-            let text = |name| {
-                editor.fields[&EqField::Band(0, name)]
-                    .input
-                    .read(cx)
-                    .text()
-                    .to_owned()
-            };
-            assert_eq!(text(BandField::GainDb), "-6.5");
-            assert_eq!(text(BandField::FrequencyHz), "89.8");
-        });
-        while owner.read_with(cx, |owner, _| !owner.commands.is_empty()) {
-            acknowledge_front(cx, &runtime, &owner, true);
-        }
-        let band = runtime.handle.gui_snapshot().system.config.equalizer.bands[0].clone();
-        assert_eq!(band.gain_db, -6.5);
-        assert!((band.frequency_hz - 89.8).abs() < 1e-9);
-        editor.read_with(cx, |editor, _| {
-            assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
-            assert!(!editor.fields[&EqField::Band(0, BandField::FrequencyHz)].dirty);
-        });
-    }
-
-    #[gpui::test]
-    fn slider_key_repeats_accumulate_before_repaint_and_stages_stay_integral(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::InputEvent as _;
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.command_active = true);
-        click(cx, handle, "eq-slider-band.0.gain_db");
-        press(cx, handle, "home");
-        cx.update_window(handle, |_, window, cx| {
-            for _ in 0..2 {
-                window.dispatch_event(
-                    KeyDownEvent {
-                        keystroke: gpui::Keystroke::parse("right").unwrap(),
-                        is_held: true,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-            }
-        })
-        .unwrap();
-        draw(cx, handle);
-        editor.read_with(cx, |editor, cx| {
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "-23.04"
-            );
-        });
-        acknowledge_front(cx, &runtime, &owner, true);
-        acknowledge_front(cx, &runtime, &owner, true);
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-                expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-                edit: EqualizerEdit::BandField {
-                    index: 0,
-                    field: EqBandEdit::Kind(FilterKind::LowPass)
-                },
-            }))
-            .ack
-            .is_success()
-        );
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        draw(cx, handle);
-        click(cx, handle, "eq-slider-band.0.stages");
-        press(cx, handle, "home");
-        press(cx, handle, "right");
-        press(cx, handle, "up");
-        editor.read_with(cx, |editor, cx| {
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::Stages)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "3"
-            );
-        });
-        press(cx, handle, "end");
-        editor.read_with(cx, |editor, cx| {
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::Stages)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "4"
-            );
-        });
-        acknowledge_front(cx, &runtime, &owner, true);
-        acknowledge_front(cx, &runtime, &owner, true);
-        assert_eq!(
-            runtime.handle.gui_snapshot().system.config.equalizer.bands[0].stages,
-            4
-        );
-    }
-
-    #[gpui::test]
-    fn slider_end_preserves_rate_limit_when_display_rounding_would_exceed_it(
-        cx: &mut TestAppContext,
-    ) {
-        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.pending = 1);
-        editor.update(cx, |editor, cx| {
-            editor.format = Some(test_format(48_001, 2));
-            cx.notify();
-        });
-        draw(cx, handle);
-        click(cx, handle, "eq-slider-band.0.frequency_hz");
-        press(cx, handle, "end");
-        editor.read_with(cx, |editor, cx| {
-            let text = editor.fields[&EqField::Band(0, BandField::FrequencyHz)]
-                .input
-                .read(cx)
-                .text();
-            let maximum = editor
-                .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
-                .unwrap()
-                .1;
-            assert_eq!(text.parse::<f64>().unwrap(), maximum);
-            assert!(editor.valid_live_draft(&EqField::Band(0, BandField::FrequencyHz), text));
-            assert!(editor.fields[&EqField::Band(0, BandField::FrequencyHz)].auto_pending);
-        });
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
     fn select_node_target(
@@ -5356,6 +4876,7 @@ mod tests {
             editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
         enter_number(cx, handle, &input, "1.2");
+        press(cx, handle, "enter");
         // The real parent reconciles while the graph command is still in flight.
         // Its serialization lock must not disable collection of newer native text.
         owner.update(cx, |owner, cx| {
@@ -5364,16 +4885,7 @@ mod tests {
         draw(cx, handle);
         enter_number(cx, handle, &input, "2.3");
         acknowledge_front(cx, &runtime, &owner, true);
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            assert!(matches!(
-                &owner.commands.front().unwrap().command,
-                Command::ProcessingGraphEdit {
-                    expected_revision: 2,
-                    ..
-                }
-            ));
-        });
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         editor.read_with(cx, |editor, _| {
             assert_eq!(
                 editor.fields[&EqField::Band(0, BandField::Q)].draft_revision,
@@ -5395,7 +4907,7 @@ mod tests {
         owner.update(cx, |owner, cx| {
             owner.reconcile(owner.context.snapshot(), cx)
         });
-        acknowledge_front(cx, &runtime, &owner, false);
+        press(cx, handle, "enter");
         draw(cx, handle);
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         editor.read_with(cx, |editor, cx| {
@@ -5429,77 +4941,9 @@ mod tests {
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         enter_number(cx, handle, &input, "4.5");
+        press(cx, handle, "enter");
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, _| assert_eq!(editor.config.bands[0].q, 4.5));
-    }
-
-    #[gpui::test]
-    fn slider_capture_survives_its_own_ack_but_external_revision_cancels_release(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::InputEvent as _;
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        let id = select_node_target(cx, &runtime, &owner, &editor);
-        draw(cx, handle);
-        let bounds = VisualTestContext::from_window(handle, cx)
-            .debug_bounds("eq-slider-band.0.gain_db")
-            .unwrap();
-        let position = point(
-            bounds.origin.x + bounds.size.width * 0.25,
-            bounds.center().y,
-        );
-        cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseDownEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-        })
-        .unwrap();
-        draw(cx, handle);
-        acknowledge_front(cx, &runtime, &owner, true);
-        editor.read_with(cx, |editor, _| {
-            assert_eq!(editor.field_drag.as_ref().unwrap().revision, 2);
-            assert_eq!(editor.pointer_count.get(), 1);
-            assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
-        });
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: 2,
-                edit: Box::new(GraphEdit::Move {
-                    id,
-                    position: [200., 180.]
-                }),
-            }))
-            .ack
-            .is_success()
-        );
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        draw(cx, handle);
-        editor.read_with(cx, |editor, _| {
-            assert!(editor.field_drag.is_none());
-            assert_eq!(editor.pointer_count.get(), 0);
-        });
-        cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position: point(bounds.right(), bounds.center().y),
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-        })
-        .unwrap();
-        draw(cx, handle);
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
     }
 
     fn dispatch_pointer_event(
@@ -5520,174 +4964,8 @@ mod tests {
         )
     }
 
-    // Execute Core's real command and publish its snapshot, but deliberately
-    // leave the GUI graph owner waiting for ACK across arbitrary event turns.
-    fn publish_graph_front(
-        cx: &mut TestAppContext,
-        runtime: &CoreRuntime,
-        owner: &Entity<AudioProcessing>,
-    ) -> bool {
-        let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
-        assert!(matches!(
-            &submission.command,
-            Command::ProcessingGraphEdit { .. }
-        ));
-        let success = futures::executor::block_on(runtime.handle.request_ack(submission.command))
-            .ack
-            .is_success();
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        success
-    }
-
-    fn deliver_graph_ack(cx: &mut TestAppContext, owner: &Entity<AudioProcessing>, success: bool) {
-        owner.update(cx, |owner, cx| {
-            owner.pending = owner.pending.saturating_sub(1);
-            owner.finish_equalizer_command(success);
-            owner.reconcile(owner.context.snapshot(), cx);
-            owner.graph_ack(
-                if success {
-                    rivu_protocol::response::AckStatus::Succeeded
-                } else {
-                    rivu_protocol::response::AckStatus::Failed
-                },
-                true,
-                cx,
-            );
-        });
-        cx.run_until_parked();
-    }
-
     #[gpui::test]
-    fn slider_snapshot_before_ack_keeps_latest_through_event_turns_and_release(
-        cx: &mut TestAppContext,
-    ) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        let id = select_node_target(cx, &runtime, &owner, &editor);
-        draw(cx, handle);
-        let bounds = VisualTestContext::from_window(handle, cx)
-            .debug_bounds("eq-slider-band.0.gain_db")
-            .unwrap();
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position: slider_point(bounds, 0.25),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        let success = publish_graph_front(cx, &runtime, &owner);
-        assert!(success);
-        for (fraction, expected) in [(0.4, "-4.8"), (0.6, "4.8")] {
-            // Transport-only publications must not retire the old collecting
-            // fence while Core's new graph revision is awaiting its ACK.
-            owner.update(cx, |owner, cx| {
-                let mut state = (*owner.state).clone();
-                state.playback.position += f64::from(fraction);
-                owner.reconcile(Rc::new(state), cx);
-            });
-            draw(cx, handle);
-            dispatch_pointer_event(
-                cx,
-                handle,
-                MouseMoveEvent {
-                    position: slider_point(bounds, fraction),
-                    pressed_button: Some(MouseButton::Left),
-                    ..Default::default()
-                },
-            );
-            cx.run_until_parked();
-            editor.read_with(cx, |editor, cx| {
-                assert_eq!(editor.field_drag.as_ref().unwrap().revision, 1);
-                assert_eq!(editor.pointer_count.get(), 1);
-                assert_eq!(
-                    editor.fields[&EqField::Band(0, BandField::GainDb)]
-                        .input
-                        .read(cx)
-                        .text(),
-                    expected
-                );
-                assert_eq!(
-                    editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
-                    Some(1)
-                );
-            });
-            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        }
-        deliver_graph_ack(cx, &owner, success);
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        draw(cx, handle);
-        assert_eq!(
-            editor.read_with(cx, |editor, _| editor.field_drag.as_ref().unwrap().revision),
-            2
-        );
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseMoveEvent {
-                position: slider_point(bounds, 0.8),
-                pressed_button: Some(MouseButton::Left),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        let success = publish_graph_front(cx, &runtime, &owner);
-        assert!(success);
-        draw(cx, handle);
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position: slider_point(bounds, 0.9),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.field_drag.is_none());
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
-                Some(2)
-            );
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "19.2"
-            );
-            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending);
-        });
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        deliver_graph_ack(cx, &owner, success);
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        draw(cx, handle);
-        acknowledge_front(cx, &runtime, &owner, true);
-        editor.read_with(cx, |editor, _| {
-            assert!(editor.field_drag.is_none());
-            assert_eq!(editor.pointer_count.get(), 0);
-            assert!((editor.config.bands[0].gain_db - 19.2).abs() < 0.01);
-        });
-        let state = runtime.handle.gui_snapshot();
-        assert!(
-            (target_config(&state, EqTarget::Node(id)).unwrap().bands[0].gain_db - 19.2).abs()
-                < 0.01
-        );
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-    }
-
-    #[gpui::test]
-    fn external_snapshot_during_pending_slider_failure_never_replays_collected_intent(
-        cx: &mut TestAppContext,
-    ) {
+    fn node_revision_invalidates_slider_release_before_editor_reconcile(cx: &mut TestAppContext) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
         let id = select_node_target(cx, &runtime, &owner, &editor);
         draw(cx, handle);
@@ -5715,125 +4993,25 @@ mod tests {
             .ack
             .is_success()
         );
-        // The next pointer event can see Core's snapshot before parent reconcile.
+        // Release can see the authoritative snapshot before the view reconciles.
         dispatch_pointer_event(
             cx,
             handle,
-            MouseMoveEvent {
-                position: slider_point(bounds, 0.8),
-                pressed_button: Some(MouseButton::Left),
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: slider_point(bounds, 0.9),
                 ..Default::default()
             },
         );
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
         draw(cx, handle);
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
         editor.read_with(cx, |editor, cx| {
-            assert_eq!(editor.field_drag.as_ref().unwrap().revision, 1);
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "14.4"
-            );
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
-                Some(1)
-            );
-        });
-        let success = publish_graph_front(cx, &runtime, &owner);
-        assert!(!success);
-        draw(cx, handle);
-        deliver_graph_ack(cx, &owner, success);
-        editor.read_with(cx, |editor, _| {
+            let field = &editor.fields[&EqField::Band(0, BandField::GainDb)];
+            assert!(!field.dirty);
+            assert_eq!(field.input.read(cx).text(), field.committed);
             assert!(editor.field_drag.is_none());
             assert_eq!(editor.pointer_count.get(), 0);
-            assert_eq!(editor.config.bands[0].gain_db, -8.);
         });
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position: slider_point(bounds, 0.9),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        editor.read_with(cx, |editor, cx| {
-            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)]
-                    .input
-                    .read(cx)
-                    .text(),
-                "14.4"
-            );
-            assert_eq!(
-                editor.fields[&EqField::Band(0, BandField::GainDb)].draft_revision,
-                Some(1)
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn skipped_revision_before_successful_slider_ack_cancels_capture_and_never_replays(
-        cx: &mut TestAppContext,
-    ) {
-        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        let id = select_node_target(cx, &runtime, &owner, &editor);
-        draw(cx, handle);
-        let bounds = VisualTestContext::from_window(handle, cx)
-            .debug_bounds("eq-slider-band.0.gain_db")
-            .unwrap();
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position: slider_point(bounds, 0.25),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        let success = publish_graph_front(cx, &runtime, &owner);
-        assert!(success);
-        draw(cx, handle);
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: 2,
-                edit: Box::new(GraphEdit::Move {
-                    id,
-                    position: [200., 180.]
-                }),
-            }))
-            .ack
-            .is_success()
-        );
-        owner.update(cx, |owner, cx| {
-            owner.reconcile(owner.context.snapshot(), cx)
-        });
-        draw(cx, handle);
-        assert!(editor.read_with(cx, |editor, _| editor.field_drag.is_none()));
-        deliver_graph_ack(cx, &owner, success);
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position: slider_point(bounds, 0.9),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        assert_eq!(
-            editor.read_with(cx, |editor, _| editor.config.bands[0].gain_db),
-            -12.
-        );
     }
 
     struct ParentInspectorWindow {
@@ -5849,7 +5027,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn parent_inspector_live_pending_frame_keeps_slider_bounds_and_capture(
+    fn parent_inspector_slider_previews_then_commits_only_the_release_value(
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, owner, editor) = editor_fixture(cx);
@@ -5909,16 +5087,20 @@ mod tests {
                 .unwrap(),
             bounds
         );
-        dispatch_pointer_event(
-            cx,
-            handle,
-            MouseMoveEvent {
-                position: slider_point(bounds, 0.75),
-                pressed_button: Some(MouseButton::Left),
-                ..Default::default()
-            },
-        );
-        draw(cx, handle);
+        for fraction in [0.5, 0.6, 0.75] {
+            dispatch_pointer_event(
+                cx,
+                handle,
+                MouseMoveEvent {
+                    position: slider_point(bounds, fraction),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(editor.read_with(cx, |editor, _| editor.response_frame_pending));
+        cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
         editor.read_with(cx, |editor, cx| {
             assert!(editor.field_drag.is_some());
             assert_eq!(
@@ -5929,14 +5111,22 @@ mod tests {
                 "12"
             );
         });
-        acknowledge_front(cx, &runtime, &owner, true);
-        draw(cx, handle);
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        let state = runtime.handle.gui_snapshot();
         assert_eq!(
-            VisualTestContext::from_window(handle, cx)
-                .debug_bounds("eq-slider-band.0.gain_db")
-                .unwrap(),
-            bounds
+            target_config(&state, EqTarget::Node(id)).unwrap().bands[0].gain_db,
+            -8.
         );
+        dispatch_pointer_event(
+            cx,
+            handle,
+            MouseMoveEvent {
+                position: slider_point(bounds, 0.8),
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        assert!(editor.read_with(cx, |editor, _| editor.response_frame_pending));
         dispatch_pointer_event(
             cx,
             handle,
@@ -5947,8 +5137,9 @@ mod tests {
             },
         );
         draw(cx, handle);
+        assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
         acknowledge_front(cx, &runtime, &owner, true);
-        acknowledge_front(cx, &runtime, &owner, true);
+        assert!(editor.read_with(cx, |editor, _| editor.field_drag.is_none()));
         let state = runtime.handle.gui_snapshot();
         assert!(
             (target_config(&state, EqTarget::Node(id)).unwrap().bands[0].gain_db - 19.2).abs()
@@ -6229,10 +5420,8 @@ mod tests {
             editor.fields[&EqField::Band(0, BandField::Q)].input.clone()
         });
         enter_number(cx, handle, &gain, "1");
+        press(cx, handle, "enter");
         enter_number(cx, handle, &gain, "2");
-        editor.update(cx, |editor, cx| {
-            editor.set_live_value(&EqField::Band(0, BandField::GainDb), 3., cx)
-        });
         enter_number(cx, handle, &q, "-");
         owner.update(cx, |owner, cx| {
             owner.reset_target_equalizer(EqTarget::Monitor, 0, None, cx);
@@ -6243,7 +5432,7 @@ mod tests {
             );
         });
         editor.read_with(cx, |editor, _| {
-            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending)
+            assert!(editor.fields[&EqField::Band(0, BandField::GainDb)].dirty)
         });
         let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
         assert!(
@@ -6270,9 +5459,7 @@ mod tests {
         });
         editor.read_with(cx, |editor, _| {
             assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].dirty);
-            assert!(!editor.fields[&EqField::Band(0, BandField::GainDb)].auto_pending);
             assert!(!editor.fields[&EqField::Band(0, BandField::Q)].dirty);
-            assert!(!editor.fields[&EqField::Band(0, BandField::Q)].auto_pending);
         });
         acknowledge_front(cx, &runtime, &owner, true);
         editor.read_with(cx, |editor, _| {
@@ -6283,12 +5470,7 @@ mod tests {
                     ..Default::default()
                 }
             );
-            assert!(
-                editor
-                    .fields
-                    .values()
-                    .all(|field| !field.dirty && !field.auto_pending)
-            );
+            assert!(editor.fields.values().all(|field| !field.dirty));
             assert!(editor.fields.keys().all(|key| key.band_index().is_none()));
         });
         assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
@@ -6442,7 +5624,6 @@ mod tests {
         cx.update_window(handle, |_, window, _| window.activate_window())
             .unwrap();
         draw(cx, handle);
-        assert!(editor.read_with(cx, |editor, _| editor.format.is_none()));
         (directory, runtime, processing, editor, handle)
     }
 
@@ -6767,31 +5948,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn gain_preedit_submits_once_only_after_unchanged_unmark_or_commit(cx: &mut TestAppContext) {
+    fn gain_ime_commit_and_blur_leave_a_draft_until_enter(cx: &mut TestAppContext) {
         let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
-        // Hold the production queue at its dispatch boundary, retaining actual
-        // submissions without sending native commands or replacing the handler.
         owner.update(cx, |owner, _| owner.command_active = true);
-        for (key, text, value, unmark) in [
-            (&EqField::PreampDb, "6", 6., true),
-            (&EqField::OutputGainDb, "-3", -3., false),
-            (&EqField::Band(0, BandField::Q), "1.25", 1.25, true),
+        for (key, text, unmark) in [
+            (EqField::PreampDb, "6", true),
+            (EqField::OutputGainDb, "-3", false),
         ] {
-            let input = editor.read_with(cx, |editor, _| editor.fields[key].input.clone());
-            let before = owner.read_with(cx, |owner, _| owner.commands.len());
+            let input = editor.read_with(cx, |editor, _| editor.fields[&key].input.clone());
             cx.update_window(handle, |_, window, cx| {
                 input.update(cx, |input, cx| {
+                    input.focus_and_select_all(window, cx);
                     let end = input.text().encode_utf16().count();
                     input.replace_and_mark_text_in_range(Some(0..end), text, None, window, cx);
                 });
             })
             .unwrap();
-            cx.run_until_parked();
-            assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), before);
-            editor.read_with(cx, |editor, _| {
-                assert!(!editor.fields[key].auto_pending);
-                assert!(!editor.live_submission_scheduled);
-            });
+            draw(cx, handle);
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
             cx.update_window(handle, |_, window, cx| {
                 input.update(cx, |input, cx| {
                     if unmark {
@@ -6799,110 +5973,29 @@ mod tests {
                     } else {
                         input.replace_text_in_range(None, text, window, cx);
                     }
-                    assert_eq!(input.text(), text);
                 });
             })
             .unwrap();
-            cx.run_until_parked();
-            owner.read_with(cx, |owner, _| {
-                assert_eq!(owner.commands.len(), before + 1);
-                let submission = owner.commands.back().unwrap();
-                match &submission.command {
-                    Command::EqualizerEdit {
-                        expected_revision: _,
-                        edit: EqualizerEdit::PreampDb(gain),
-                    } if key == &EqField::PreampDb => {
-                        assert_eq!(*gain, value);
-                    }
-                    Command::EqualizerEdit {
-                        expected_revision: _,
-                        edit: EqualizerEdit::OutputGainDb(gain),
-                    } if key == &EqField::OutputGainDb => {
-                        assert_eq!(*gain, value);
-                    }
-                    Command::EqualizerEdit {
-                        expected_revision: _,
-                        edit:
-                            EqualizerEdit::BandField {
-                                index: 0,
-                                field: EqBandEdit::Q(q),
-                            },
-                    } if key == &EqField::Band(0, BandField::Q) => assert_eq!(*q, value),
-                    _ => panic!("unexpected numeric command"),
-                }
-                let field = submission.equalizer_field.as_ref().unwrap();
-                assert_eq!(field.key, *key);
-                assert_eq!(field.text, text);
-            });
-            // Repeated unmark, redraw and scheduling do not duplicate the commit.
+            click(cx, handle, "eq-node-7-0");
+            assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
             cx.update_window(handle, |_, window, cx| {
-                input.update(cx, |input, cx| input.unmark_text(window, cx));
-                editor.update(cx, |editor, cx| editor.schedule_live_submission(cx));
+                input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
             })
             .unwrap();
-            draw(cx, handle);
-            assert_eq!(
-                owner.read_with(cx, |owner, _| owner.commands.len()),
-                before + 1
-            );
+            press(cx, handle, "enter");
+            assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
             acknowledge_front(cx, &runtime, &owner, true);
+            editor.read_with(cx, |editor, cx| {
+                assert!(!editor.fields[&key].dirty);
+                assert_eq!(input.read(cx).text(), text);
+                let value = if key == EqField::PreampDb {
+                    editor.config.preamp_db
+                } else {
+                    editor.config.output_gain_db
+                };
+                assert_eq!(value, text.parse::<f64>().unwrap());
+            });
         }
-    }
-
-    #[gpui::test]
-    fn preedit_interrupts_a_queued_gain_submission_until_unchanged_commit(cx: &mut TestAppContext) {
-        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
-        owner.update(cx, |owner, _| owner.command_active = true);
-        let input = editor.read_with(cx, |editor, _| {
-            editor.fields[&EqField::PreampDb].input.clone()
-        });
-        cx.update_window(handle, |_, window, cx| {
-            input.update(cx, |input, cx| {
-                let end = input.text().encode_utf16().count();
-                input.replace_text_in_range(Some(0..end), "4", window, cx);
-            });
-            let input = input.clone();
-            let editor = editor.clone();
-            // Changed queues the gain defer behind this interruption. The
-            // preedit notification itself has not run when that gain defer runs.
-            cx.defer(move |cx| {
-                assert!(editor.read(cx).live_submission_scheduled);
-                assert!(editor.read(cx).fields[&EqField::PreampDb].auto_pending);
-                handle
-                    .update(cx, |_, window, cx| {
-                        input.update(cx, |input, cx| {
-                            input.replace_and_mark_text_in_range(
-                                Some(0..1),
-                                "-7",
-                                None,
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-                    .unwrap();
-            });
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
-        assert!(input.read_with(cx, |input, _| input.is_composing()));
-        cx.update_window(handle, |_, window, cx| {
-            input.update(cx, |input, cx| {
-                input.replace_text_in_range(None, "-7", window, cx);
-            });
-        })
-        .unwrap();
-        cx.run_until_parked();
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.commands.len(), 1);
-            let submission = owner.commands.front().unwrap();
-            assert!(matches!(
-                &submission.command,
-                Command::EqualizerEdit { edit: EqualizerEdit::PreampDb(gain), .. } if *gain == -7.
-            ));
-            assert_eq!(submission.equalizer_field.as_ref().unwrap().text, "-7");
-        });
     }
 
     fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
@@ -7178,7 +6271,7 @@ mod tests {
         editor.update(cx, |editor, cx| {
             assert!(editor.config_locked());
             assert!(editor.error.is_none());
-            editor.apply_field(&EqField::Band(0, BandField::FrequencyHz), cx);
+            editor.submit_field(&EqField::Band(0, BandField::FrequencyHz), cx);
             editor.step_field(&EqField::Band(0, BandField::GainDb), 0.5, cx);
             assert!(
                 editor.error.is_none(),
@@ -7201,7 +6294,7 @@ mod tests {
         draw(cx, handle);
         editor.update(cx, |editor, cx| {
             assert!(!editor.config_locked());
-            editor.apply_field(&EqField::Band(0, BandField::FrequencyHz), cx);
+            editor.submit_field(&EqField::Band(0, BandField::FrequencyHz), cx);
             assert!(
                 editor.error.is_some(),
                 "reenabled fields validate preserved drafts"
