@@ -749,6 +749,17 @@ impl Worker {
                 self.fail(anyhow!(error));
                 continue;
             }
+            // Read only the current output's state after processing commands.
+            // Reopening reads the system default afresh rather than acting on
+            // an old device name carried by a notification.
+            if self.playback.as_ref().unwrap().default_target_changed() {
+                if let Err(error) = self.reopen(None) {
+                    self.fail(error);
+                } else {
+                    self.diagnostics_dirty = true;
+                }
+                continue;
+            }
             let refill_ready = match self.playback.as_mut().unwrap().fill() {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -818,29 +829,23 @@ impl Worker {
                 continue;
             }
             let playback = self.playback.as_ref().unwrap();
-            let errors = playback.errors().clone();
             let notifications = playback.notifications().clone();
-            // Pause waits for commands, errors or the final device-clock tail.
+            // Pause waits for commands or output notifications (route changes,
+            // backend errors and the final device-clock tail).
             // Stable paused playback never schedules a status/GUI polling tick.
-            let deadline = playback
-                .refill_delay()
-                .min(Duration::from_millis(100).saturating_sub(self.progress.elapsed()));
             if playback.paused() {
                 select! {
                     recv(self.shutdown.signal) -> _ => break,
                     recv(self.commands_ready) -> wake => if wake.is_err() { break; },
-                    recv(errors) -> error => {
-                        if let Ok(error) = error { self.fail(anyhow!(error)); }
-                    },
                     recv(notifications) -> _ => {},
                 }
             } else {
+                let deadline = playback
+                    .refill_delay()
+                    .min(Duration::from_millis(100).saturating_sub(self.progress.elapsed()));
                 select! {
                     recv(self.shutdown.signal) -> _ => break,
                     recv(self.commands_ready) -> wake => if wake.is_err() { break; },
-                    recv(errors) -> error => {
-                        if let Ok(error) = error { self.fail(anyhow!(error)); }
-                    },
                     recv(notifications) -> _ => {},
                     default(deadline) => {},
                 }

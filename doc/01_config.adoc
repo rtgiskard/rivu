@@ -551,9 +551,9 @@ link:02_library.adoc#desktop-selection-and-directory-tree[Library display].
 [[output-and-applying-changes]]
 === Output and applying changes
 
-`playback.output_device` selects the default PipeWire sink when omitted, or an
-exact name from `rivu playback devices`. `playback.pipewire_auto_mix` defaults to
-`true`; disable it to require a compatible speaker layout without remixing.
+`playback.output_device` follows the system's default PipeWire sink when omitted,
+or pins an exact name from `rivu playback devices`. `playback.pipewire_auto_mix`
+defaults to `true`; disable it to require a compatible speaker layout without remixing.
 Selection syntax, unavailable-device recovery, output rebuilding, normalization,
 and source-rate negotiation are documented in
 link:04_playback.adoc#output-devices-and-speaker-layouts[Playback output].

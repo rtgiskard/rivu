@@ -401,6 +401,8 @@ impl Playback {
             // The callback can confirm more audible frames while retiring. Resume
             // from that final cursor, not a snapshot taken before a decoder seek.
             let output_heard = self.output.close();
+            // The final callback can also invalidate the retiring clock.
+            self.output.check_timing()?;
             let position = self.base_position + self.speed.source_seconds(output_heard);
             self.source.seek(position)?;
             (position, output_heard)
@@ -568,6 +570,10 @@ impl Playback {
 
     pub(super) fn errors(&self) -> &Receiver<OutputError> {
         self.output.errors()
+    }
+
+    pub(super) fn default_target_changed(&self) -> bool {
+        self.output.default_target_changed()
     }
 
     pub(super) fn notifications(&self) -> &Receiver<()> {
@@ -2612,6 +2618,28 @@ pub(super) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn output_restart_rejects_a_clock_invalidated_during_retirement() {
+        let file = pcm();
+        let (mut playback, _) = test_playback_selected(file.path(), None);
+        let (output, mut render) =
+            crate::output::test_backend(8_000, false, playback.source.layout());
+        playback
+            .restart_output_with(Some(0.25), |_, _| Ok(output))
+            .unwrap();
+        playback.fill().unwrap();
+        render(&mut [0.0; 64], 24);
+        playback
+            .output
+            .on_close_for_test(move || render(&mut [0.0; 64], 0));
+        let error = playback
+            .restart_output_with(None, |_, _| {
+                panic!("cannot reopen at an invalid audible position")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Audio output timestamp moved backwards");
     }
 
     #[test]

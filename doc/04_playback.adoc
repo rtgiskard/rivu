@@ -396,15 +396,17 @@ link:01_config.adoc#desktop-keyboard-navigation[desktop control navigation].
 == Output devices and speaker layouts
 
 `playback.output_device` is an exact name from `rivu playback devices`, which lists native
-PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
-`PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
-direct ALSA output or fallback to a different backend.
+PipeWire sinks only. Omit the setting to follow the system's default PipeWire
+sink, including changes during playback or pause. Use `PipeWire: <node.name>`
+to stay bound to a named sink regardless of system default changes. PipeWire must
+be running; there is no direct ALSA output or fallback to a different backend.
 
-Playback stays bound to the selected sink. Invalid or disappearing routes fail
-instead of rerouting; a failed device change stops playback and retains the
-requested setting. Select an available sink and explicitly restart playback to
-recover. Reapplying unchanged output settings revalidates the device only when no
-source is playing, paused or opening; with an existing source it is a no-op.
+A missing system default does not interrupt a still-valid route. If the current
+route becomes invalid with no replacement default, or a selected route fails to
+open, playback stops without guessing a fallback or changing the setting.
+Select an available output and explicitly restart playback to recover. Reapplying
+unchanged output settings revalidates the device only when no source is playing,
+paused or opening; with an existing source it is a no-op.
 
 Output and Monitor EQ application failures can still be reported after Stop or
 an audition source change, but cannot restart playback or advance the queue.

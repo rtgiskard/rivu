@@ -1,6 +1,6 @@
 //! Native device output; callback state and ring buffers stay private.
 //! Native PipeWire streams keep a fixed target and explicit speaker positions.
-//! The selected sink and its strict speaker routes are never silently replaced.
+//! Following the system default requires a new stream, not a move of the old route.
 
 use super::{Channel, PlaybackMetadata, channels};
 use crate::capture::PcmControl;
@@ -471,6 +471,7 @@ struct OutputShared {
     pause_settled: AtomicBool,
     wakeup: crossbeam_channel::Sender<()>,
     notifications: Receiver<()>,
+    default_target_changed: AtomicBool,
     refill_armed: AtomicBool,
     worker_wake_pending: AtomicBool,
     cursor_wake_pending: AtomicBool,
@@ -490,6 +491,7 @@ impl OutputShared {
             pause_settled: AtomicBool::new(paused),
             wakeup,
             notifications,
+            default_target_changed: AtomicBool::new(false),
             refill_armed: AtomicBool::new(false),
             worker_wake_pending: AtomicBool::new(false),
             cursor_wake_pending: AtomicBool::new(false),
@@ -511,6 +513,16 @@ impl OutputShared {
         }
     }
 
+    fn check_timing(&self) -> Result<()> {
+        match self.timing_error.load(Ordering::Acquire) {
+            0 => Ok(()),
+            1 => bail!("Audio output timestamp moved backwards"),
+            2 => bail!("Audio output timing queue exhausted before playback advanced"),
+            4 => bail!("Cannot wake PipeWire output owner"),
+            _ => bail!("PipeWire output returned invalid buffers or unavailable timing"),
+        }
+    }
+
     // Channel/waker calls stay outside process (including owner-wake failure).
     // Swapping before delivery leaves any concurrently published intent pending.
     fn forward_notifications(&self) {
@@ -519,6 +531,17 @@ impl OutputShared {
         }
         if self.cursor_wake_pending.swap(false, Ordering::AcqRel) {
             self.pcm.notify();
+        }
+    }
+
+    fn publish_default_target_changed(&self, changed: bool) {
+        // Only the PipeWire owner writes this flag; stable routes need no RMW.
+        if self.default_target_changed.load(Ordering::Relaxed) != changed {
+            self.default_target_changed
+                .store(changed, Ordering::Release);
+            if changed {
+                let _ = self.wakeup.try_send(());
+            }
         }
     }
 }
@@ -704,6 +727,10 @@ impl Output {
         &self.errors
     }
 
+    pub(super) fn default_target_changed(&self) -> bool {
+        self.shared.default_target_changed.load(Ordering::Acquire)
+    }
+
     pub(super) fn set_gain(&self, gain: f32) {
         self.shared.gain.store(gain.to_bits(), Ordering::Release);
     }
@@ -860,13 +887,7 @@ impl Output {
     }
 
     pub(super) fn check_timing(&self) -> Result<()> {
-        match self.shared.timing_error.load(Ordering::Acquire) {
-            0 => Ok(()),
-            1 => bail!("Audio output timestamp moved backwards"),
-            2 => bail!("Audio output timing queue exhausted before playback advanced"),
-            4 => bail!("Cannot wake PipeWire output owner"),
-            _ => bail!("PipeWire output returned invalid buffers or unavailable timing"),
-        }
+        self.shared.check_timing()
     }
     pub(super) fn close(&mut self) -> f64 {
         if self.final_heard_frames.is_none() {
@@ -1051,6 +1072,7 @@ impl OutputCallback {
 
 const PREFIX: &str = "PipeWire: ";
 const TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_REPLACEMENT_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 struct Sink {
@@ -1072,6 +1094,30 @@ struct RouteValidation {
     target: Sink,
     speakers: Vec<&'static str>,
     auto_mix: bool,
+    confirmed_once: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteLoss {
+    TargetGone,
+    TargetChanged,
+    Links,
+    Disconnected,
+}
+
+impl RouteLoss {
+    fn error(self, target: &Sink) -> anyhow::Error {
+        match self {
+            Self::TargetGone | Self::TargetChanged => anyhow::anyhow!(
+                "PipeWire target {} disappeared or changed its speaker layout; refusing to reroute",
+                target.name
+            ),
+            Self::Links => anyhow::anyhow!(
+                "PipeWire output links changed or disappeared; refusing an invalid route"
+            ),
+            Self::Disconnected => anyhow::anyhow!("PipeWire output disconnected"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1087,22 +1133,65 @@ struct Inventory {
 }
 
 impl Inventory {
+    fn sink(&self, name: &str) -> Option<&Sink> {
+        self.sinks.values().find(|sink| sink.name == name)
+    }
+
     fn changed(&mut self) {
         self.validate_route();
     }
 
-    fn validate_route(&self) {
-        self.route_confirmed
-            .set(self.route_validation.as_ref().is_some_and(|route| {
-                self.sinks.get(&route.target.id) == Some(&route.target)
-                    && route_matches(
-                        self,
-                        route.source,
-                        route.target.id,
-                        &route.speakers,
-                        route.auto_mix,
-                    )
-            }));
+    fn validate_route(&mut self) {
+        let confirmed = self.route_validation.as_ref().is_some_and(|route| {
+            self.sinks.get(&route.target.id) == Some(&route.target)
+                && route_matches(
+                    self,
+                    route.source,
+                    route.target.id,
+                    &route.speakers,
+                    route.auto_mix,
+                )
+        });
+        if confirmed {
+            self.route_validation.as_mut().unwrap().confirmed_once = true;
+        }
+        self.route_confirmed.set(confirmed);
+    }
+
+    fn retire_route(&mut self) {
+        self.route_validation = None;
+        self.route_confirmed.set(false);
+    }
+
+    fn route_loss(&self, target: &Sink, disconnected: bool) -> Option<RouteLoss> {
+        match self.sinks.get(&target.id) {
+            Some(sink) if sink == target => {}
+            Some(sink) if sink.serial == target.serial => return Some(RouteLoss::TargetChanged),
+            _ => return Some(RouteLoss::TargetGone),
+        }
+        // Missing links are normal during initial negotiation. Once the
+        // registry confirmed this route, losing it is significant even if
+        // the stream has not yet reached readiness.
+        if !self.route_confirmed.get()
+            && self
+                .route_validation
+                .as_ref()
+                .is_some_and(|route| route.confirmed_once)
+        {
+            Some(RouteLoss::Links)
+        } else if disconnected {
+            Some(RouteLoss::Disconnected)
+        } else {
+            None
+        }
+    }
+
+    fn has_replacement_default(&self, target: &Sink) -> bool {
+        self.default
+            .as_deref()
+            .filter(|name| *name != target.name || self.sinks.get(&target.id) != Some(target))
+            .and_then(|name| self.sink(name))
+            .is_some_and(|sink| sink.serial != target.serial)
     }
 }
 
@@ -1224,16 +1313,23 @@ impl Connection {
                 {
                     let id = global.id;
                     if let Ok(metadata) = registry.bind::<pw::metadata::Metadata, _>(global) {
-                        state.borrow_mut().default_metadata = Some(id);
+                        {
+                            let mut state = state.borrow_mut();
+                            state.default_metadata = Some(id);
+                            state.default = None;
+                        }
                         let state = state.clone();
                         let listener = metadata
                             .add_listener_local()
                             .property(move |subject, key, _, value| {
-                                if subject == 0 && key.is_none() {
-                                    state.borrow_mut().default = None;
+                                let mut state = state.borrow_mut();
+                                if state.default_metadata != Some(id) || subject != 0 {
+                                    return 0;
                                 }
-                                if subject == 0 && key == Some("default.audio.sink") {
-                                    state.borrow_mut().default = value
+                                if key.is_none() {
+                                    state.default = None;
+                                } else if key == Some("default.audio.sink") {
+                                    state.default = value
                                         .and_then(|value| {
                                             serde_json::from_str::<serde_json::Value>(value).ok()
                                         })
@@ -1329,9 +1425,7 @@ impl Connection {
             .or(inventory.default.as_deref())
             .context("PipeWire has no default audio sink; select an explicit PipeWire device")?;
         inventory
-            .sinks
-            .values()
-            .find(|sink| sink.name == name)
+            .sink(name)
             .cloned()
             .with_context(|| format!("PipeWire audio sink not found: {name}"))
     }
@@ -1393,6 +1487,7 @@ impl NativeStream {
         let owner_control = control.clone();
         let (wake, receiver) = pw::channel::channel();
         let (ready, receive) = crossbeam_channel::bounded(1);
+        let shared = Arc::clone(&callback.shared);
         let thread = std::thread::Builder::new()
             .name("rivu-pipewire".into())
             .spawn(move || {
@@ -1408,6 +1503,7 @@ impl NativeStream {
                     let message = format!("{error:#}");
                     let _ = ready.try_send(Err(message.clone()));
                     let _ = errors.try_send(OutputError(message));
+                    let _ = shared.wakeup.try_send(());
                 }
             })?;
         let stream = Self {
@@ -1421,6 +1517,70 @@ impl NativeStream {
             .map_err(anyhow::Error::msg)?;
         Ok((stream, format))
     }
+}
+
+enum StreamExit {
+    Closed,
+    Retarget,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RouteAction {
+    Keep,
+    AwaitDefault,
+    Retire,
+}
+
+struct ReplacementWait {
+    loss: RouteLoss,
+    deadline: Instant,
+}
+
+impl ReplacementWait {
+    fn on_route(
+        wait: &mut Option<Self>,
+        loss: Option<RouteLoss>,
+        default_managed: bool,
+        replacement: bool,
+        opening_deadline: Option<Instant>,
+        now: impl FnOnce() -> Instant,
+    ) -> std::result::Result<RouteAction, RouteLoss> {
+        if let Some(loss) = loss
+            && (!default_managed || loss == RouteLoss::TargetChanged)
+        {
+            return Err(loss);
+        }
+        if let Some(wait) = wait {
+            return if now() >= wait.deadline {
+                Err(wait.loss)
+            } else if replacement {
+                Ok(RouteAction::Retire)
+            } else {
+                Ok(RouteAction::AwaitDefault)
+            };
+        }
+        let Some(loss) = loss else {
+            return Ok(RouteAction::Keep);
+        };
+        if replacement {
+            return Ok(RouteAction::Retire);
+        }
+        let now = now();
+        let deadline = now + DEFAULT_REPLACEMENT_GRACE;
+        let deadline = opening_deadline.map_or(deadline, |opening| deadline.min(opening));
+        if now >= deadline {
+            return Err(loss);
+        }
+        *wait = Some(Self { loss, deadline });
+        Ok(RouteAction::AwaitDefault)
+    }
+}
+
+struct StreamOwner<'a> {
+    control: &'a NativeControl,
+    control_woken: &'a Cell<bool>,
+    ready: &'a crossbeam_channel::Sender<std::result::Result<StreamFormat, String>>,
+    initial_metadata: Option<Arc<PlaybackMetadata>>,
 }
 
 fn run(
@@ -1441,6 +1601,50 @@ fn run(
         wake_control.wake_pending.store(false, Ordering::Release);
         received_control.set(true);
     });
+    let initial_metadata = control.metadata.lock().take();
+    let mut owner = StreamOwner {
+        control,
+        control_woken: &control_woken,
+        ready,
+        initial_metadata,
+    };
+    // One extra attempt on the same inventory. No PCM has entered the ring
+    // before readiness, so there is no playback position to hand off yet.
+    for _ in 0..2 {
+        if control.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match run_stream(
+            &connection,
+            name,
+            source_layout,
+            auto_mix,
+            &mut callback,
+            &mut owner,
+            &notifications.0,
+        )? {
+            StreamExit::Closed => return Ok(()),
+            StreamExit::Retarget => {
+                callback.graph_position = None;
+                callback.clock.last_callback = None;
+                callback.diagnostics = CallbackDiagnostics::default();
+                callback.shared.diagnostics.publish(&callback.diagnostics);
+            }
+        }
+    }
+    bail!("PipeWire default audio sink changed again while opening output")
+}
+
+fn run_stream(
+    connection: &Connection,
+    name: Option<&str>,
+    source_layout: &[Channel],
+    auto_mix: bool,
+    callback: &mut OutputCallback,
+    owner: &mut StreamOwner<'_>,
+    shared: &OutputShared,
+) -> Result<StreamExit> {
+    let control = owner.control;
     let target = connection.target(name)?;
     let speakers = parse_positions(&target.positions).with_context(|| {
         format!(
@@ -1466,7 +1670,6 @@ fn run(
     callback.mapping = mapping;
     callback.channels = stream_layout.len();
     let rate = callback.rate;
-    let shared = &notifications.0;
     let names: Vec<_> = stream_layout
         .iter()
         .map(|channel| if mono { "MONO" } else { channel.short_name() })
@@ -1490,13 +1693,11 @@ fn run(
         properties.insert("channelmix.normalize", "true");
     }
     let stream = pw::stream::StreamBox::new(&connection.core, "Rivu playback", properties)?;
-    let metadata = control
-        .metadata
-        .lock()
-        .take()
+    let metadata = owner
+        .initial_metadata
+        .as_deref()
         .context("Missing initial PipeWire track metadata")?;
-    update_stream_metadata(&stream, &metadata)?;
-    drop(metadata);
+    update_stream_metadata(&stream, metadata)?;
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(rate);
@@ -1581,13 +1782,17 @@ fn run(
     let deadline = Instant::now() + TIMEOUT;
     let mut started = false;
     let mut active = true;
-    connection.inventory.borrow_mut().route_validation = Some(RouteValidation {
-        source: stream.node_id(),
-        target: target.clone(),
-        speakers: names,
-        auto_mix,
-    });
-    connection.inventory.borrow().validate_route();
+    {
+        let mut inventory = connection.inventory.borrow_mut();
+        inventory.route_validation = Some(RouteValidation {
+            source: stream.node_id(),
+            target: target.clone(),
+            speakers: names,
+            auto_mix,
+            confirmed_once: false,
+        });
+        inventory.validate_route();
+    }
     let failure = Rc::new(RefCell::new(None));
     let failed = failure.clone();
     let _core_listener = connection
@@ -1597,28 +1802,27 @@ fn run(
             *failed.borrow_mut() = Some(message.to_owned());
         })
         .register();
-    while !control.stop.load(Ordering::Acquire) {
-        connection.mainloop.loop_().iterate(if started {
-            pw::loop_::Timeout::Infinite
-        } else {
-            pw::loop_::Timeout::Finite(deadline.saturating_duration_since(Instant::now()))
-        });
-        notifications.0.forward_notifications();
+    let mut replacement_wait: Option<ReplacementWait> = None;
+    let exit = loop {
         if control.stop.load(Ordering::Acquire) {
-            break;
+            break StreamExit::Closed;
         }
-        if control_woken.replace(false) {
+        let wait_until = replacement_wait
+            .as_ref()
+            .map(|wait| wait.deadline)
+            .or((!started).then_some(deadline));
+        connection.mainloop.loop_().iterate(match wait_until {
+            Some(end) => pw::loop_::Timeout::Finite(end.saturating_duration_since(Instant::now())),
+            None => pw::loop_::Timeout::Infinite,
+        });
+        shared.forward_notifications();
+        if control.stop.load(Ordering::Acquire) {
+            break StreamExit::Closed;
+        }
+        if owner.control_woken.replace(false) {
             let metadata = control.metadata.lock().take();
             if let Some(metadata) = metadata {
                 update_stream_metadata(&stream, &metadata)?;
-            }
-        }
-        {
-            let mut graph = connection.inventory.borrow_mut();
-            let source = stream.node_id();
-            if graph.route_validation.as_ref().unwrap().source != source {
-                graph.route_validation.as_mut().unwrap().source = source;
-                graph.validate_route();
             }
         }
         if let Some(error) = failure.borrow_mut().take() {
@@ -1627,20 +1831,56 @@ fn run(
         if format_error.get() {
             bail!("PipeWire changed the requested sample format, rate or speaker positions");
         }
-        if connection.inventory.borrow().sinks.get(&target.id) != Some(&target) {
-            bail!(
-                "PipeWire target {} disappeared or changed its speaker layout; refusing to reroute",
-                target.name
-            );
+        let stream_state = stream.state();
+        if let pw::stream::StreamState::Error(error) = stream_state {
+            bail!("PipeWire output: {error}");
         }
-        if started && !route_ok.get() {
-            bail!("PipeWire output links changed or disappeared; refusing an invalid route");
-        }
-        match stream.state() {
-            pw::stream::StreamState::Error(error) => bail!("PipeWire output: {error}"),
-            pw::stream::StreamState::Unconnected if started => {
-                bail!("PipeWire output disconnected")
+        shared.check_timing()?;
+        let (replacement, loss) = {
+            let mut inventory = connection.inventory.borrow_mut();
+            if let Some(route) = inventory.route_validation.as_mut() {
+                let source = stream.node_id();
+                if route.source != source {
+                    route.source = source;
+                    inventory.validate_route();
+                }
             }
+            (
+                name.is_none() && inventory.has_replacement_default(&target),
+                inventory.route_loss(
+                    &target,
+                    stream_state == pw::stream::StreamState::Unconnected,
+                ),
+            )
+        };
+        let was_waiting = replacement_wait.is_some();
+        let action = ReplacementWait::on_route(
+            &mut replacement_wait,
+            loss,
+            name.is_none(),
+            replacement,
+            (!started).then_some(deadline),
+            Instant::now,
+        )
+        .map_err(|loss| loss.error(&target))?;
+        if action == RouteAction::AwaitDefault {
+            if !was_waiting {
+                // Registry removals can precede replacement default metadata.
+                // Keep dispatching events, but never certify this route again.
+                connection.inventory.borrow_mut().retire_route();
+                shared.publish_default_target_changed(false);
+            }
+            continue;
+        }
+        if started {
+            shared.publish_default_target_changed(replacement);
+            if action == RouteAction::Retire {
+                break StreamExit::Closed;
+            }
+        } else if replacement {
+            break StreamExit::Retarget;
+        }
+        match stream_state {
             pw::stream::StreamState::Streaming if format_ok.get() && route_ok.get() => {
                 if !started {
                     // Connect active to negotiate format and links even when
@@ -1654,7 +1894,8 @@ fn run(
                             .context("Flushing paused PipeWire output")?;
                         active = false;
                     }
-                    let _ = ready.send(Ok(StreamFormat {
+                    owner.initial_metadata = None;
+                    let _ = owner.ready.send(Ok(StreamFormat {
                         rate,
                         channels: stream_layout.len(),
                         layout: Arc::clone(&positions),
@@ -1692,10 +1933,10 @@ fn run(
                 active = should_be_active;
             }
         }
-    }
-    route_ok.set(false);
+    };
+    connection.inventory.borrow_mut().retire_route();
     stream.disconnect()?;
-    Ok(())
+    Ok(exit)
 }
 
 // Tags may contain NUL; encode that character without rejecting playable audio.
@@ -3120,6 +3361,132 @@ mod routing_tests {
     use Channel::*;
 
     #[test]
+    fn default_route_loss_waits_for_a_registered_replacement_without_resetting() {
+        let target = Sink {
+            id: 2,
+            serial: "2".into(),
+            name: "old".into(),
+            positions: "FL FR".into(),
+        };
+        let replacement = Sink {
+            id: 3,
+            serial: "3".into(),
+            name: "new".into(),
+            positions: target.positions.clone(),
+        };
+        let now = Instant::now();
+        for opening_deadline in [None, Some(now + TIMEOUT)] {
+            let mut graph = Inventory::default();
+            graph.sinks.insert(target.id, target.clone());
+            graph.default = Some(target.name.clone());
+            graph.route_validation = Some(RouteValidation {
+                source: 1,
+                target: target.clone(),
+                speakers: vec!["FL", "FR"],
+                auto_mix: true,
+                confirmed_once: false,
+            });
+            let mut wait = None;
+            let decide = |wait: &mut Option<ReplacementWait>, graph: &Inventory, at| {
+                ReplacementWait::on_route(
+                    wait,
+                    graph.route_loss(&target, false),
+                    true,
+                    graph.has_replacement_default(&target),
+                    opening_deadline,
+                    || at,
+                )
+            };
+            assert_eq!(decide(&mut wait, &graph, now), Ok(RouteAction::Keep));
+            let link = Route {
+                output_node: 1,
+                output_port: 10,
+                input_node: target.id,
+                input_port: 20,
+            };
+            graph.links.insert(4, link);
+            graph.changed();
+            assert!(graph.route_confirmed.get());
+            let link = graph.links.remove(&4).unwrap();
+            graph.changed();
+            assert!(!graph.route_confirmed.get());
+            assert_eq!(graph.route_loss(&target, false), Some(RouteLoss::Links));
+            assert_eq!(
+                decide(&mut wait, &graph, now),
+                Ok(RouteAction::AwaitDefault)
+            );
+            graph.retire_route();
+
+            let expiry = now + DEFAULT_REPLACEMENT_GRACE;
+            let before_expiry = expiry - Duration::from_millis(1);
+            graph.links.insert(4, link);
+            graph.changed();
+            assert!(!graph.route_confirmed.get());
+            graph.sinks.remove(&target.id);
+            assert_eq!(
+                graph.route_loss(&target, false),
+                Some(RouteLoss::TargetGone)
+            );
+            graph.default = Some(replacement.name.clone());
+            assert_eq!(
+                decide(&mut wait, &graph, before_expiry),
+                Ok(RouteAction::AwaitDefault)
+            );
+
+            graph.sinks.insert(replacement.id, replacement.clone());
+            graph.default = None;
+            assert!(!graph.has_replacement_default(&target));
+            graph.default = Some(replacement.name.clone());
+            assert_eq!(
+                decide(&mut wait, &graph, before_expiry),
+                Ok(RouteAction::Retire)
+            );
+            assert_eq!(decide(&mut wait, &graph, expiry), Err(RouteLoss::Links));
+        }
+    }
+
+    #[test]
+    fn replacement_grace_excludes_pinned_and_layout_failures_and_caps_opening_wait() {
+        let now = Instant::now();
+        let mut wait = None;
+        let decide = |wait: &mut Option<ReplacementWait>, loss, default_managed, replacement| {
+            ReplacementWait::on_route(wait, Some(loss), default_managed, replacement, None, || now)
+        };
+        for loss in [
+            RouteLoss::TargetGone,
+            RouteLoss::Links,
+            RouteLoss::Disconnected,
+        ] {
+            assert_eq!(decide(&mut wait, loss, false, true), Err(loss));
+        }
+        assert_eq!(
+            decide(&mut wait, RouteLoss::TargetChanged, true, true),
+            Err(RouteLoss::TargetChanged)
+        );
+        assert!(wait.is_none());
+
+        let opening_deadline = now + Duration::from_millis(10);
+        assert_eq!(
+            ReplacementWait::on_route(
+                &mut wait,
+                Some(RouteLoss::Disconnected),
+                true,
+                false,
+                Some(opening_deadline),
+                || now,
+            ),
+            Ok(RouteAction::AwaitDefault)
+        );
+        assert_eq!(wait.as_ref().unwrap().deadline, opening_deadline);
+        assert_eq!(
+            ReplacementWait::on_route(&mut wait, None, true, true, Some(opening_deadline), || {
+                opening_deadline
+            }),
+            Err(RouteLoss::Disconnected)
+        );
+    }
+
+    #[test]
     fn native_stream_drop_wakes_and_joins_its_owner_loop() {
         let control = Arc::new(NativeControl::default());
         let (wake, receiver) = pw::channel::channel();
@@ -3299,6 +3666,7 @@ mod routing_tests {
             target: sink,
             speakers: speakers.to_vec(),
             auto_mix: false,
+            confirmed_once: false,
         });
         graph.validate_route();
         assert!(graph.route_confirmed.get());
@@ -3372,6 +3740,7 @@ mod routing_tests {
             target: sink,
             speakers: vec!["FC"],
             auto_mix: true,
+            confirmed_once: false,
         });
         graph.validate_route();
         assert!(graph.route_confirmed.get());
