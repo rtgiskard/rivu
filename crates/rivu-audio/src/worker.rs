@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Include coalesced seeks and read-ahead barriers in each scheduling round.
+// Bound FIFO dequeues, including coalesced seeks and read-ahead barriers.
 const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
@@ -39,16 +39,22 @@ impl CommandInbox {
         self.pending.is_some() || !self.receiver.is_empty()
     }
 
-    fn try_recv_round(&mut self, remaining: &mut usize) -> Result<AudioCommand, TryRecvError> {
+    fn try_dequeue(&self, remaining: &mut usize) -> Result<QueuedAudioCommand, TryRecvError> {
         if *remaining == 0 {
             return Err(TryRecvError::Empty);
         }
+        let command = self.receiver.try_recv()?;
+        *remaining -= 1;
+        Ok(command)
+    }
+
+    fn try_recv_round(&mut self, remaining: &mut usize) -> Result<AudioCommand, TryRecvError> {
         let command = if let Some(command) = self.pending.take() {
+            // Already dequeued by seek read-ahead, even at the end of the round.
             command
         } else {
-            self.receiver.try_recv()?
+            self.try_dequeue(remaining)?
         };
-        *remaining -= 1;
         self.admitted_intents += usize::from(command.pcm_intent);
         let AudioCommand::Seek {
             mut seconds,
@@ -57,28 +63,18 @@ impl CommandInbox {
         else {
             return Ok(command.command);
         };
-        while *remaining > 0 {
-            match self.receiver.try_recv() {
-                Ok(QueuedAudioCommand {
-                    command:
-                        AudioCommand::Seek {
-                            seconds: target,
-                            revision: target_revision,
-                        },
-                    pcm_intent,
-                }) => {
-                    *remaining -= 1;
-                    seconds = target;
-                    self.admitted_intents += usize::from(pcm_intent);
-                    revision = target_revision;
-                }
-                Ok(barrier) => {
-                    *remaining -= 1;
-                    self.pending = Some(barrier);
-                    break;
-                }
-                Err(_) => break,
-            }
+        while let Ok(queued) = self.try_dequeue(remaining) {
+            let AudioCommand::Seek {
+                seconds: target,
+                revision: target_revision,
+            } = queued.command
+            else {
+                self.pending = Some(queued);
+                break;
+            };
+            seconds = target;
+            self.admitted_intents += usize::from(queued.pcm_intent);
+            revision = target_revision;
         }
         Ok(AudioCommand::Seek { seconds, revision })
     }
@@ -742,6 +738,10 @@ impl Worker {
     }
 
     fn control_round(&mut self) -> bool {
+        self.control_commands(MAX_COMMANDS_PER_ROUND)
+    }
+
+    fn control_commands(&mut self, mut remaining: usize) -> bool {
         if matches!(
             self.shutdown.signal.try_recv(),
             Err(crossbeam_channel::TryRecvError::Disconnected)
@@ -749,7 +749,6 @@ impl Worker {
             self.stop();
             return false;
         }
-        let mut remaining = MAX_COMMANDS_PER_ROUND;
         while let Ok(command) = self.commands.try_recv_round(&mut remaining) {
             if matches!(
                 self.shutdown.signal.try_recv(),
@@ -771,23 +770,30 @@ impl Worker {
         true
     }
 
+    fn opening_round(&mut self) -> bool {
+        #[cfg(feature = "midi")]
+        if self.opening.as_ref().is_some_and(|opening| {
+            opening.source.is_none() && !matches!(opening.input, OpeningInput::Pcm(_))
+        }) {
+            // Only catch up to commands already queued; producers cannot extend this round.
+            let queued = self.commands.receiver.len();
+            if !self.control_commands(queued) {
+                return false;
+            }
+        }
+        self.poll_opening();
+        true
+    }
+
     pub(super) fn run(mut self) {
         loop {
             if !self.control_round() {
                 return;
             }
             if self.opening.is_some() {
-                // A later command may retire this opening. Do not start or
-                // collect file intake until queued control work catches up.
-                #[cfg(feature = "midi")]
-                if self.commands.has_ready()
-                    && self.opening.as_ref().is_some_and(|opening| {
-                        opening.source.is_none() && !matches!(opening.input, OpeningInput::Pcm(_))
-                    })
-                {
-                    continue;
+                if !self.opening_round() {
+                    return;
                 }
-                self.poll_opening();
                 #[cfg(feature = "midi")]
                 if let Some(ready) = self.opening.as_ref().and_then(Opening::opening_wait)
                     && !self.commands.has_ready()
@@ -1317,6 +1323,149 @@ mod tests {
 
     #[cfg(feature = "midi")]
     #[test]
+    fn replenished_nonretiring_commands_do_not_starve_file_intake() {
+        type SnapshotReply = Result<Option<crate::AudioRenderSnapshot>, String>;
+
+        struct Replenish {
+            commands: async_channel::Sender<QueuedAudioCommand>,
+            receive: parking_lot::Mutex<Option<oneshot::Receiver<SnapshotReply>>>,
+            queued: std::sync::atomic::AtomicUsize,
+        }
+
+        impl Replenish {
+            fn queue(self: &Arc<Self>) {
+                assert!(
+                    self.queued
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        < 4 * MAX_COMMANDS_PER_ROUND,
+                    "opening catch-up did not yield"
+                );
+                let (reply, mut receive) = oneshot::channel();
+                let waker = futures::task::waker_ref(self);
+                let mut context = std::task::Context::from_waker(&waker);
+                assert!(receive.poll_unpin(&mut context).is_pending());
+                *self.receive.lock() = Some(receive);
+                self.commands
+                    .try_send(QueuedAudioCommand::test_unfenced(
+                        AudioCommand::RenderSnapshot(reply),
+                    ))
+                    .unwrap();
+            }
+        }
+
+        impl futures::task::ArcWake for Replenish {
+            fn wake_by_ref(this: &Arc<Self>) {
+                // Replenish synchronously on every reply, without thread timing
+                // or ever allowing the worker's command inbox to become empty.
+                this.queue();
+            }
+        }
+
+        let file = crate::source::opening_prefix_file(1024, true);
+        let (mut worker, commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Native, 73);
+        let replenish = Arc::new(Replenish {
+            commands,
+            receive: parking_lot::Mutex::new(None),
+            queued: std::sync::atomic::AtomicUsize::new(0),
+        });
+        replenish.queue();
+        assert!(worker.control_round());
+        assert!(worker.commands.has_ready());
+        let queued = replenish.queued.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(worker.opening_round());
+        assert_eq!(
+            replenish.queued.load(std::sync::atomic::Ordering::Relaxed),
+            queued + 1,
+            "commands arriving during catch-up belong to the next round"
+        );
+        assert!(worker.commands.has_ready());
+        let Some(OpeningInput::Loading(load)) = worker.opening.as_ref().map(|o| &o.input) else {
+            panic!("replenished commands starved file intake");
+        };
+        assert_eq!(
+            load.ready().recv_timeout(Duration::from_secs(5)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        assert!(worker.control_round());
+        assert!(worker.opening_round());
+        assert!(worker.commands.has_ready());
+        assert!(worker.opening.as_ref().unwrap().source.is_some());
+        assert!(events.is_empty());
+        // Break the receiver's registered-waker ownership cycle.
+        replenish.receive.lock().take();
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn opening_catch_up_executes_retiring_seek_barriers_before_file_intake() {
+        let missing = tempfile::tempdir().unwrap();
+        let replacement = crate::source::opening_prefix_file(1024, true);
+        for replace in [false, true] {
+            let (mut worker, commands, events, _shutdown) = opening_worker();
+            load_prefix(
+                &mut worker,
+                &missing.path().join("superseded.wav"),
+                DecoderHint::Native,
+                73,
+            );
+            let retiring = if replace {
+                AudioCommand::Load {
+                    path: replacement.path().to_owned(),
+                    range: None,
+                    decoder_hint: DecoderHint::Native,
+                    metadata: Arc::default(),
+                    generation: 74,
+                    start_seconds: 0.0,
+                    paused: true,
+                }
+            } else {
+                AudioCommand::Stop
+            };
+            // The retiring command is the last dequeue, read ahead by the preceding seek.
+            for _ in 0..MAX_COMMANDS_PER_ROUND / 2 - 1 {
+                for command in [
+                    AudioCommand::Seek {
+                        seconds: 0.0,
+                        revision: MAX_COMMANDS_PER_ROUND as u64,
+                    },
+                    AudioCommand::Pause(true),
+                ] {
+                    commands
+                        .try_send(QueuedAudioCommand::test_unfenced(command))
+                        .unwrap();
+                }
+            }
+            commands
+                .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Seek {
+                    seconds: 0.0,
+                    revision: MAX_COMMANDS_PER_ROUND as u64,
+                }))
+                .unwrap();
+            commands
+                .try_send(QueuedAudioCommand::test_unfenced(retiring))
+                .unwrap();
+            assert!(worker.opening_round());
+            assert!(!worker.commands.has_ready());
+            if replace {
+                let opening = worker.opening.as_ref().unwrap();
+                assert_eq!(opening.generation, 74);
+                let OpeningInput::Loading(load) = &opening.input else {
+                    panic!("replacement must start its own file intake");
+                };
+                assert_eq!(
+                    load.ready().recv_timeout(Duration::from_secs(5)),
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                );
+            } else {
+                assert!(worker.opening.is_none());
+            }
+            assert!(events.is_empty(), "superseded work must not be opened");
+        }
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
     fn stop_and_replacement_do_not_wait_for_old_midi_intake() {
         let file = midi_file();
         let missing = tempfile::tempdir().unwrap();
@@ -1817,13 +1966,19 @@ mod tests {
         }
         engine.send(AudioCommand::Pause(true)).unwrap();
         assert_eq!(engine.pcm.state().intent, MAX_COMMANDS_PER_ROUND as u64);
-        assert!(worker.control_round());
+        let mut remaining = MAX_COMMANDS_PER_ROUND;
+        let seek = worker.commands.try_recv_round(&mut remaining).unwrap();
+        worker
+            .analyzer
+            .apply_audio_intents(std::mem::take(&mut worker.commands.admitted_intents) as u64);
+        assert!(worker.command(seek));
         assert_eq!(
             engine.pcm.state().applied_intent,
             MAX_COMMANDS_PER_ROUND as u64 - 1
         );
         assert!(worker.commands.has_ready());
-        assert!(worker.control_round());
+        assert_eq!(remaining, 0);
+        assert!(worker.control_commands(remaining));
         assert_eq!(
             engine.pcm.state().applied_intent,
             MAX_COMMANDS_PER_ROUND as u64
@@ -3114,12 +3269,15 @@ mod tests {
         ));
         assert_eq!(remaining, 0);
         assert!(inbox.has_ready());
-        remaining = 1;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
             AudioCommand::Pause(true)
         ));
         assert_eq!(remaining, 0);
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining),
+            Err(TryRecvError::Empty)
+        ));
         remaining = MAX_COMMANDS_PER_ROUND;
         assert!(matches!(
             inbox.try_recv_round(&mut remaining).unwrap(),
