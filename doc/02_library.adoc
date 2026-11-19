@@ -638,6 +638,9 @@ to reject unrelated readable tracks.
 An initially `NotFound` requested path is confirmed absent and can mark tracks
 missing. Disappearance during reading is uncertain until a later scan. Invalid
 scopes or bounded diagnostics may also restrict missing detection and relocation.
+A build without a decoder does not mark a stored whole-file track missing
+just because it cannot discover that format. Confirmed absence still counts
+within the scanned scope.
 Fix reported errors and rescan before cleaning missing records. Detailed coverage
 rules: link:21_ipc.adoc#scanning-and-metadata-ownership[Scanning and metadata ownership].
 

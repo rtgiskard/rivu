@@ -11,7 +11,7 @@ mod source;
 
 pub(crate) use admission::{ExternalAdmission, prepare_external_admission};
 pub(crate) use import_budget::{ImportBudget, ImportBudgetScope};
-pub(crate) use paths::{logical_path, normalize_roots};
+pub(crate) use paths::{is_audio_path, logical_path, normalize_roots};
 pub(crate) use playlist_io::export_m3u;
 pub(crate) use playlist_io::prepare_playlist_import;
 pub use playlist_io::{M3uItem, PlaylistExportTrack};

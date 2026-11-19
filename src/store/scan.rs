@@ -1,7 +1,7 @@
 use super::rows::{cue_from_row, fingerprint_from_row};
 use super::{CatalogChanges, Store};
 use crate::library::{CueRecord, KnownFile, RegisteredCueMetadata, ScanResult, ScanUncertainty};
-use crate::library::{ImportBudget, ImportBudgetScope};
+use crate::library::{ImportBudget, ImportBudgetScope, is_audio_path};
 use anyhow::{Context, Result, bail};
 use rivu_audio::MediaInfo;
 use rivu_protocol::model::CueSegment;
@@ -1135,20 +1135,37 @@ impl Store {
                     .as_ref()
                     .map_or(o.path.as_path(), |cue| cue.sheet.as_path())
             };
-            if !seen.contains(&o.id)
-                && ((if exact_sources {
-                    requested_roots.contains(owner)
-                } else {
-                    owner
+            if seen.contains(&o.id) {
+                continue;
+            }
+            let known_absent = absent_ordinary.contains(&o.id);
+            let explicit = requested_roots.contains(owner);
+            let covered = explicit
+                || (!exact_sources
+                    && owner
                         .ancestors()
-                        .any(|ancestor| requested_roots.contains(ancestor))
-                }) || absent_ordinary.contains(&o.id))
-                && !unconfirmed(o)
-            {
-                missing_ids.push(o.id);
-                if o.cue.is_none() && o.hash.is_some() {
-                    duplicate_missing.insert(o.id);
+                        .skip(1)
+                        .any(|ancestor| requested_roots.contains(ancestor)));
+            if !(covered || known_absent) || unconfirmed(o) {
+                continue;
+            }
+            // Coverage only implies absence for discoverable identities. Check
+            // omitted ordinary sources unless another path confirmed absence.
+            if !exact_sources && o.cue.is_none() && !known_absent && !is_audio_path(owner) {
+                // Just as in discovery, a dangling symlink is uncertain in a
+                // directory walk but NotFound when explicitly requested.
+                let metadata = if explicit {
+                    fs::metadata(owner)
+                } else {
+                    fs::symlink_metadata(owner)
+                };
+                if !metadata.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+                    continue;
                 }
+            }
+            missing_ids.push(o.id);
+            if o.cue.is_none() && o.hash.is_some() {
+                duplicate_missing.insert(o.id);
             }
         }
         if !missing_ids.is_empty() {

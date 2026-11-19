@@ -1,5 +1,95 @@
 use super::*;
 
+#[test]
+fn rescans_keep_existing_midi_and_reconcile_deleted_sources() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let existing = root.join("existing.MID");
+    let deleted = root.join("deleted.MiDi");
+    let novel = root.join("novel.mid");
+    let audio = root.join("deleted.wav");
+    let midi = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x04\0\xff\x2f\0";
+    for path in [&existing, &deleted, &novel] {
+        fs::write(path, midi)?;
+    }
+    wav(&audio, 75)?;
+
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    let mut original = scan_paths(std::slice::from_ref(&audio), &[], false)?;
+    // Simulate rows persisted by a MIDI-enabled build in either test configuration.
+    let midi_media = rivu_audio::MediaInfo {
+        codec: "MIDI".into(),
+        channels: 0,
+        sample_rate: 0,
+        bits_per_sample: None,
+        bitrate_bps: None,
+        bitrate_exact: false,
+        ..original.records[0].media.clone()
+    };
+    original.records.extend([&existing, &deleted].map(|path| {
+        std::sync::Arc::new(ScanRecord {
+            path: path.clone(),
+            size: midi.len() as u64,
+            modified_ns: 0,
+            fingerprint: None,
+            media: midi_media.clone(),
+        })
+    }));
+    store.apply_scan(&original)?;
+    let id_for = |path: &Path| store.track_id_for_identity(crate::store::TrackIdentity::File(path));
+    let existing_id = id_for(&existing)?.context("seeded MIDI")?;
+    let deleted_id = id_for(&deleted)?.context("seeded MIDI to delete")?;
+    let audio_id = id_for(&audio)?.context("seeded audio to delete")?;
+
+    let explicit = scan_paths(std::slice::from_ref(&existing), &[], false)?;
+    assert_eq!(explicit.track_count(), usize::from(cfg!(feature = "midi")));
+    store.apply_scan(&explicit)?;
+    assert!(
+        !store
+            .track(existing_id)?
+            .context("explicit MIDI row")?
+            .missing
+    );
+
+    fs::remove_file(&deleted)?;
+    fs::remove_file(&audio)?;
+    let rescanned = scan_paths(&[root.to_path_buf()], &[], false)?;
+    assert!(rescanned.errors.is_empty(), "{:?}", rescanned.errors);
+    store.apply_scan(&rescanned)?;
+    assert_eq!(id_for(&novel)?.is_some(), cfg!(feature = "midi"));
+    assert!(
+        !store
+            .track(existing_id)?
+            .context("retained MIDI row")?
+            .missing
+    );
+    assert!(
+        store
+            .track(deleted_id)?
+            .context("deleted MIDI row")?
+            .missing
+    );
+    assert!(store.track(audio_id)?.context("deleted audio row")?.missing);
+
+    fs::remove_file(&existing)?;
+    std::os::unix::fs::symlink(&deleted, &existing)?;
+    store.apply_scan(&scan_paths(&[root.to_path_buf()], &[], false)?)?;
+    assert!(
+        !store
+            .track(existing_id)?
+            .context("uncertain dangling MIDI symlink")?
+            .missing
+    );
+    store.apply_scan(&scan_paths(&[existing], &[], false)?)?;
+    assert!(
+        store
+            .track(existing_id)?
+            .context("missing explicit MIDI row")?
+            .missing
+    );
+    Ok(())
+}
+
 struct StoredCue {
     _directory: tempfile::TempDir,
     root: PathBuf,
