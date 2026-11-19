@@ -2726,9 +2726,11 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 Some(2.0),
-                4,
                 Some(1),
-                None,
+                Some(summary::WaveformIdentity {
+                    content: None,
+                    sample_rate: 4,
+                }),
             );
             scan.push_mapped(0.0, 0.25, &[[3.0, 0.5]; 8]);
             scan.finish(2.0);
@@ -2739,9 +2741,11 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 Some(2.0),
-                rate,
                 Some(1),
-                None,
+                Some(summary::WaveformIdentity {
+                    content: None,
+                    sample_rate: rate,
+                }),
             );
             let samples = (rate * 2) as usize;
             let step = f64::from(rate).recip();

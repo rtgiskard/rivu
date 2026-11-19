@@ -400,9 +400,15 @@ impl Core {
         let mut config = self.preferences.checkpoint();
         let sample_rate = self
             .state
-            .current_track
-            .as_ref()
-            .map(|track| track.sample_rate);
+            .playback
+            .decoded_source_format(self.transport.generation)
+            .map(|source| source.sample_rate)
+            .or_else(|| {
+                self.state
+                    .current_track
+                    .as_ref()
+                    .map(|track| track.sample_rate)
+            });
         if let Some(edit) = edit.apply_config(&mut config.equalizer, sample_rate)? {
             match edit {
                 SavePreset { name, overwrite } => {

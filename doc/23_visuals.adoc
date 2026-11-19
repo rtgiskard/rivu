@@ -386,8 +386,10 @@ Unknown or underestimated timelines coarsen existing bins to preserve the bound.
 Subsequent playback can overwrite an installed finite baseline, including reducing
 old Peak and RMS values after lower-gain processing.
 Contiguous fragments accumulate without counting an accepted prefix twice.
-PCM media start and step locate samples relative to the selected source/CUE;
-offset reads advance that start by the accepted frame offset times the step.
+The first admitted PCM block supplies the realtime summary's sample rate;
+catalog metadata does not calibrate its bins. PCM media start and step locate
+samples relative to the selected source/CUE. Offset reads advance that start
+by the accepted frame offset times the step.
 Epochs, gaps and applied intent fence traversal and mapping boundaries rather
 than deriving positions from Core progress notifications.
 

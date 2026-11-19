@@ -253,9 +253,12 @@ Monitor EQ and graph EQ share an editor but have independent settings. Presets
 belong to Monitor EQ. Monitor EQ uses recursive IIR filters;
 graph EQ can select linear-phase FIR with 3–16,385 odd taps. More taps change
 resolution, preparation cost and latency, not an IIR quality label. The curve
-shows the configured IIR magnitude at the current stream rate; for FIR it is the
-design target, not the realized finite response or phase. Graph execution aligns
-branches and compensates published audio to the source timeline.
+shows the configured IIR magnitude at the decoded source's sample rate and
+uses its channel count during playback, including when paused. Without a
+decoded source, the editor uses the selected track's catalog format if known.
+For FIR the curve is the design target, not the realized finite response or
+phase. Graph execution aligns branches and compensates published audio to the
+source timeline.
 
 Input/output gain and band frequency, gain, Q, shelf slope and stages submit
 valid numeric edits as you type; step buttons and sliders apply immediately.
@@ -268,11 +271,11 @@ cancelled. Held arrow keys accumulate steps while an edit is pending.
 The band count remains available with no bands. Enter 0–32 and press Enter. Increasing appends
 enabled, 0 dB peak bands with default Q and all channels selected; decreasing
 removes tail bands. Existing bands and overall gains are preserved. New bands fill
-logarithmic gaps from 20 Hz to `min(20 kHz, 0.499 × track rate)`, or 20 kHz when
+logarithmic gaps from 20 Hz to `min(20 kHz, 0.499 × source rate)`, or 20 kHz when
 the rate is unknown. Apply all commits retained-band drafts and gains atomically
 with the resize; shrinking discards removed bands and their drafts.
-When a track rate is known, adding bands requires room for the 20 Hz lower
-bound; otherwise the editor reports an error. Removing bands remains available.
+When the rate is known, adding bands requires room for the 20 Hz lower bound;
+otherwise the editor reports an error. Removing bands remains available.
 
 Reset preserves the enabled state. In Monitor EQ it restores the parameter snapshot
 of the last preset successfully loaded in this desktop session; subsequent parameter

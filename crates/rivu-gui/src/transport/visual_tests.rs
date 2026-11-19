@@ -728,7 +728,7 @@ async fn subscribe_waveform(f: &mut Fixture, track: &Track, generation: u64) -> 
         epoch: 2,
         generation,
         active: true,
-        sample_rate: track.sample_rate,
+        sample_rate: 48_000,
         heard_frame: u64::MAX,
         ..Default::default()
     };
@@ -815,12 +815,14 @@ fn first_play_replaces_restored_waveform_target_with_the_same_generation(
             range,
             playing.decoder_hint,
             playing.duration,
-            playing.sample_rate,
             Some(0),
-            Some(rivu_protocol::audio::SourceIdentity::Pcm {
-                storage: 1,
-                start: 0,
-                frames: 4,
+            Some(WaveformIdentity {
+                content: Some(rivu_protocol::audio::SourceIdentity::Pcm {
+                    storage: 1,
+                    start: 0,
+                    frames: 4,
+                }),
+                sample_rate: playing.sample_rate,
             }),
         );
         scan.push_mapped(0.0, 0.25, &[[0.5; 2]; 4]);
@@ -836,13 +838,15 @@ fn first_play_replaces_restored_waveform_target_with_the_same_generation(
 }
 
 #[test]
-fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
+fn live_waveform_uses_the_pcm_rate_and_counts_growing_tails_once() {
     async_io::block_on(async {
         let mut f = fixture();
-        let mut track = crate::test_support::artwork_track("source.wav".into());
-        track.sample_rate = 48_000;
+        let mut track = crate::test_support::artwork_track("source.mid".into());
+        track.sample_rate = 0;
         track.duration = Some(1.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
+        let request_epoch = f.client.waveform.read().request_epoch;
+        assert!(f.client.waveform.read().identity.is_none());
         stereo(&f.window, header(state, 0), 0.5, 256);
         write_status(&mut f.server, state, revision, PcmPosition::default())
             .await
@@ -865,6 +869,13 @@ fn waveform_only_uses_shared_pcm_without_fft_and_growing_tails_are_unique() {
         })
         .await
         .unwrap();
+        {
+            let waveform = f.client.waveform.read();
+            assert_eq!(waveform.identity.unwrap().sample_rate, 48_000);
+            assert_eq!(waveform.bin_frames, 48_000);
+            assert_eq!(waveform.request_epoch, request_epoch);
+            assert!(waveform.peaks.iter().flatten().count() > 1);
+        }
         let analysis = f.client.analysis.read();
         assert!(analysis.settings.is_none());
         assert!(analysis.spectrum_db.is_empty());
@@ -1087,6 +1098,7 @@ fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() 
         track.path = "second.wav".into();
         f.client.configure_source(Some(&track), 2, track.duration);
         assert_eq!(f.client.waveform.read().source_generation, Some(2));
+        assert!(f.client.waveform.read().identity.is_none());
         assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
         let request = ControlReader::<REQUEST_SIZE>::new()
             .read(&mut f.server)
@@ -1096,43 +1108,44 @@ fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() 
         else {
             panic!("expected subscription");
         };
-        let next = PcmState {
-            epoch: 6,
-            generation: 2,
-            ..seek
-        };
-        write_status(&mut f.server, next, revision, PcmPosition::default())
+        // The PCM status can still describe the old source when the independent
+        // command connection has already selected its replacement.
+        let stale = PcmState { epoch: 6, ..seek };
+        write_status(&mut f.server, stale, revision, PcmPosition::default())
             .await
             .unwrap();
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
-            while f.client.analysis.read().audio_epoch != next.epoch {
+            while f.client.analysis.read().audio_epoch != stale.epoch {
                 f.wakes.recv().await.unwrap();
             }
         })
         .await
         .unwrap();
-        stereo(
-            &f.window,
-            header(
-                PcmState {
-                    generation: 1,
-                    ..next
-                },
-                0,
-            ),
-            0.875,
-            512,
-        );
+        stereo(&f.window, header(stale, 0), 0.875, 512);
+        write_status(&mut f.server, stale, revision, PcmPosition::default())
+            .await
+            .unwrap();
+        let previous = current_after(&f, sought.sequence).await;
+        assert_eq!(previous.rms_left, 0.875);
+        assert!(f.client.state.summary.lock().frame.identity.is_none());
+
+        let next = PcmState {
+            epoch: 8,
+            generation: 2,
+            sample_rate: 44_100,
+            ..seek
+        };
         stereo(&f.window, header(next, 0), 0.5, 512);
         write_status(&mut f.server, next, revision, PcmPosition::default())
             .await
             .unwrap();
-        let replacement = current_after(&f, sought.sequence).await;
+        let replacement = current_after(&f, previous.sequence).await;
         assert_eq!(replacement.rms_left, 0.5);
         f.client.set_waveform_presentation_visible(true);
         let waveform_revision = {
             let waveform = f.client.waveform.read();
             assert_eq!(waveform.source_generation, Some(2));
+            assert_eq!(waveform.identity.unwrap().sample_rate, 44_100);
             assert_eq!(waveform.path.as_deref(), Some(track.path.as_path()));
             assert_eq!(waveform.left_rms_counts.iter().sum::<u64>(), 512);
             assert!(waveform.peaks.iter().flatten().all(|peak| *peak == 0.5));

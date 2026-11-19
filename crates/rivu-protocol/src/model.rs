@@ -420,6 +420,19 @@ pub struct PlaybackState {
     pub speed: f64,
 }
 
+impl PlaybackState {
+    /// Decoded format of the current playback source, independent of the sink.
+    /// Stopped diagnostics are retained for display but cannot describe a new source.
+    pub fn decoded_source_format(&self, generation: u64) -> Option<&AudioSourceFormat> {
+        self.audio_output
+            .as_deref()
+            .filter(|output| {
+                self.status != PlaybackStatus::Stopped && output.source_generation == generation
+            })
+            .map(|output| output.source.as_ref())
+    }
+}
+
 /// Identity of a task whose owner-committed terminal outcome can be awaited.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TaskTarget {

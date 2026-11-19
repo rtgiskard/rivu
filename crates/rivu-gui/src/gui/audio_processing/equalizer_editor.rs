@@ -2,7 +2,10 @@
 //! Core owns committed parameters; editors retain drafts and cancellable pointer intent.
 //! Gain and response-channel controls share a wrapping header above the editor body.
 use super::*;
-use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS};
+use crate::projection::EqualizerFormat;
+use rivu_dsp::equalizer::config::{
+    ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO,
+};
 use rivu_format::config::processing_graph::{GraphEdit, GraphNodeKind};
 use rivu_protocol::model::EqBandEdit;
 use rivu_ui::{Slider, SliderInput, SliderKey};
@@ -75,7 +78,7 @@ impl std::fmt::Display for EqField {
     }
 }
 
-type EqFormat = Option<(i64, u32, u16)>;
+type EqFormat = Option<EqualizerFormat>;
 
 struct EqAvailability {
     blocked: bool,
@@ -258,7 +261,7 @@ impl EqualizerEditor {
             .map(|(_, revision)| revision);
         let pending = parent.pending;
         let geometry_epoch = parent.geometry_epoch;
-        let format = equalizer_format(&state);
+        let format = state.equalizer_format();
         let mut editor = Self {
             owner,
             context,
@@ -329,8 +332,8 @@ impl EqualizerEditor {
         } = availability;
         let had_preview = self.drag.is_some();
         let format_changed = self.format != format;
-        let response_format_changed = self.format.map(|(_, rate, channels)| (rate, channels))
-            != format.map(|(_, rate, channels)| (rate, channels));
+        let dimensions = |format: EqualizerFormat| (format.sample_rate, format.channels);
+        let response_format_changed = self.format.map(dimensions) != format.map(dimensions);
         let config_changed = &self.config != config;
         let revision = state.system.config.processing_graph.revision;
         let fence_changed = matches!(self.target, EqTarget::Node(_)) && self.revision != revision;
@@ -558,7 +561,7 @@ impl EqualizerEditor {
         let snapshot = self.context.snapshot();
         let config = target_config(&snapshot, self.target);
         let format_valid = self.owner.upgrade().is_some()
-            && equalizer_format(&snapshot) == equalizer_format(&self.state);
+            && snapshot.equalizer_format() == self.state.equalizer_format();
         let valid = self.active
             && !self.config_locked()
             && self
@@ -801,8 +804,8 @@ impl EqualizerEditor {
     fn band_numeric_range(&self, key: &EqField) -> Option<(f64, f64, bool)> {
         match key {
             EqField::Band(_, BandField::FrequencyHz) => {
-                let maximum = self.format.map_or(96_000., |(_, rate, _)| {
-                    (f64::from(rate) * 0.499).min(96_000.)
+                let maximum = self.format.map_or(96_000., |format| {
+                    (f64::from(format.sample_rate) * MAX_FREQUENCY_RATE_RATIO).min(96_000.)
                 });
                 (maximum > 1.).then_some((1., maximum, true))
             }
@@ -870,7 +873,7 @@ impl EqualizerEditor {
             let owner = owner.read(cx);
             snapshot.system.config.processing_graph.revision == self.revision
                 && target_config(&snapshot, self.target) == Some(&self.config)
-                && equalizer_format(&snapshot) == equalizer_format(&self.state)
+                && snapshot.equalizer_format() == self.state.equalizer_format()
                 && (!owner.equalizer_blocked(self.target)
                     || owner.collecting_equalizer_target() == Some((self.target, self.revision)))
         })
@@ -1128,9 +1131,9 @@ impl EqualizerEditor {
                 // Automatic placement has a 20 Hz floor in the protocol. A
                 // known unusable stream is not the offline/unknown fallback.
                 if count > self.config.bands.len()
-                    && self
-                        .format
-                        .is_some_and(|(_, rate, _)| f64::from(rate) * 0.499 < 20.)
+                    && self.format.is_some_and(|format| {
+                        f64::from(format.sample_rate) * MAX_FREQUENCY_RATE_RATIO < 20.
+                    })
                 {
                     return Err(self.tr("processing-response-unknown").to_string());
                 }
@@ -1254,7 +1257,7 @@ impl EqualizerEditor {
             || !self.field_input_enabled(&drag.key)
             || drag.geometry_epoch != self.geometry_epoch
             || drag.geometry != WindowGeometry::current(window, snapshot.system.config.ui_scale)
-            || equalizer_format(&snapshot) != equalizer_format(&self.state)
+            || snapshot.equalizer_format() != self.state.equalizer_format()
             || self.target == EqTarget::Monitor
                 && target_config(&snapshot, self.target) != Some(&self.config)
             || self.target == EqTarget::Monitor
@@ -1581,7 +1584,12 @@ impl EqualizerEditor {
         if Arc::get_mut(&mut self.response_buffer).is_none() {
             self.response_buffer = Arc::new(Vec::with_capacity(self.frequencies.len()));
         }
-        let Some((_, sample_rate, channel_count)) = self.format else {
+        let Some(EqualizerFormat {
+            sample_rate,
+            channels: channel_count,
+            ..
+        }) = self.format
+        else {
             self.maximum_frequency = 20_000.;
             Arc::get_mut(&mut self.response_buffer)
                 .expect("unique response buffer")
@@ -1590,11 +1598,10 @@ impl EqualizerEditor {
             std::mem::swap(&mut self.response, &mut self.response_buffer);
             return;
         };
-        if self
+        let Some((_, maximum_frequency, _)) = self
             .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
-            .is_none()
-            || channel_count == 0
-        {
+            .filter(|_| channel_count != 0)
+        else {
             Arc::get_mut(&mut self.response_buffer)
                 .expect("unique response buffer")
                 .clear();
@@ -1606,9 +1613,9 @@ impl EqualizerEditor {
             );
             std::mem::swap(&mut self.response, &mut self.response_buffer);
             return;
-        }
-        self.maximum_frequency = (sample_rate as f64 * 0.499).min(96_000.);
-        self.response_channel = self.response_channel.min(channel_count as usize - 1);
+        };
+        self.maximum_frequency = maximum_frequency;
+        self.response_channel = self.response_channel.min(channel_count - 1);
         if self.frequency_limit != self.maximum_frequency {
             self.frequency_limit = self.maximum_frequency;
             for (index, frequency) in self.frequencies.iter_mut().enumerate() {
@@ -1633,7 +1640,7 @@ impl EqualizerEditor {
         }
         match config.sample_response_db(
             sample_rate,
-            channel_count as usize,
+            channel_count,
             self.response_channel,
             &self.frequencies,
             response,
@@ -2322,7 +2329,10 @@ impl EqualizerEditor {
             )
             .child(gains.flex_1().flex_basis(rems(17.)));
         let mut curve = column().gap_1().min_w_0();
-        if let Some((_, _, channel_count)) = self.format
+        if let Some(EqualizerFormat {
+            channels: channel_count,
+            ..
+        }) = self.format
             && channel_count > 1
         {
             let anchor = Rc::clone(&self.channel_anchor);
@@ -2355,7 +2365,7 @@ impl EqualizerEditor {
                         this.channel_choices.close();
                     } else {
                         this.channel_choices.open(
-                            (0..channel_count as usize).map(|channel| {
+                            (0..channel_count).map(|channel| {
                                 rivu_ui::ChoiceItem::new(channel, (channel + 1).to_string())
                             }),
                             this.response_channel,
@@ -2802,7 +2812,7 @@ impl AudioProcessing {
         let Some(config) = target_config(&state, target).filter(|config| config.enabled) else {
             return;
         };
-        if equalizer_format(&state) != format
+        if state.equalizer_format() != format
             || matches!(target, EqTarget::Node(_))
                 && (state.system.config.processing_graph.revision != revision
                     || self.state.system.config.processing_graph.revision != revision)
@@ -2911,7 +2921,7 @@ impl AudioProcessing {
         let (target, revision, expected, expected_format) = source;
         let snapshot = self.context.snapshot();
         if target_config(&snapshot, target) != Some(expected)
-            || equalizer_format(&snapshot) != expected_format
+            || snapshot.equalizer_format() != expected_format
             || matches!(target, EqTarget::Node(_))
                 && (self.equalizer_blocked(target)
                     || snapshot.system.config.processing_graph.revision != revision
@@ -2959,7 +2969,7 @@ impl AudioProcessing {
                     return;
                 };
                 let mut next = config.clone();
-                let sample_rate = equalizer_format(&snapshot).map(|(_, rate, _)| rate);
+                let sample_rate = expected_format.map(|format| format.sample_rate);
                 let live_input = submitted.is_some()
                     && matches!(
                         &edit,
@@ -3038,7 +3048,7 @@ impl AudioProcessing {
             let availability = EqAvailability {
                 blocked: self.equalizer_blocked(target),
                 pending: self.pending,
-                format: equalizer_format(&self.state),
+                format: self.state.equalizer_format(),
                 collecting_revision: self
                     .collecting_equalizer_target()
                     .filter(|(pending_target, _)| *pending_target == target)
@@ -3130,7 +3140,7 @@ impl AudioProcessing {
         let (graph_pending, graph_drafts) = self.graph_editor.equalizer_dependencies();
         let inputs = EqualizerReconcileInputs {
             config: Arc::clone(&self.state.system.config),
-            format: equalizer_format(&self.state),
+            format: self.state.equalizer_format(),
             pending: self.pending,
             command_active: self.command_active,
             graph_pending,
@@ -3144,6 +3154,7 @@ impl AudioProcessing {
             .reconciled
             .as_ref()
             .is_some_and(|previous| inputs.unchanged_from(previous));
+        let format = inputs.format;
         self.equalizer_editors.reconciled = Some(inputs);
         if unchanged {
             return;
@@ -3151,7 +3162,6 @@ impl AudioProcessing {
         let state = Rc::clone(&self.state);
         let blocked = self.equalizer_blocked(EqTarget::Node(0));
         let collecting = self.collecting_equalizer_target();
-        let format = equalizer_format(&state);
         let removals = &self.equalizer_editors.removing;
         let reset_band_focus = self.equalizer_editors.reset_band_focus;
         let command_active = self.command_active;
@@ -3355,7 +3365,10 @@ impl AudioProcessing {
             return Ok(None);
         }
         let mut config = base.clone();
-        let sample_rate = self.input_track().map(|track| track.sample_rate);
+        let sample_rate = self
+            .state
+            .equalizer_format()
+            .map(|format| format.sample_rate);
         apply_equalizer_draft_edits(&mut config, edits, sample_rate)?;
         Ok(Some(NodeEqualizerSubmission {
             config,
@@ -3424,7 +3437,7 @@ impl AudioProcessing {
         let state = Rc::clone(&self.state);
         let pending = self.pending;
         let epoch = self.geometry_epoch;
-        let format = equalizer_format(&state);
+        let format = state.equalizer_format();
         let collecting = self.collecting_equalizer_target();
         let _ = submitted.editor.update(cx, |editor, cx| {
             let Some(config) = target_config(&state, editor.target) else {
@@ -3583,12 +3596,6 @@ fn valid_gain_draft(value: &str) -> bool {
         .is_ok_and(|gain| gain.is_finite() && (-24.0..=24.0).contains(&gain))
 }
 
-fn equalizer_format(state: &GuiSnapshot) -> EqFormat {
-    state
-        .current_track()
-        .map(|track| (track.id, track.sample_rate, track.channels))
-}
-
 fn rebase_draft_origin(origin: &mut Option<u64>, from: u64, to: u64, current: u64) {
     if from.checked_add(1) == Some(to) && to == current && *origin == Some(from) {
         *origin = Some(to);
@@ -3699,6 +3706,109 @@ mod tests {
     use core::prelude::v1::test;
 
     const PANEL: u64 = 7;
+
+    fn test_format(sample_rate: u32, channels: usize) -> EqualizerFormat {
+        EqualizerFormat {
+            track_id: 99,
+            generation: 0,
+            sample_rate,
+            channels,
+        }
+    }
+
+    #[gpui::test]
+    fn midi_eq_uses_current_decoded_rate_and_channels(cx: &mut TestAppContext) {
+        use rivu_protocol::model::{
+            AudioOutputState, AudioSourceFormat, AudioStreamFormat, PlaybackStatus,
+            ReplayGainStatus,
+        };
+
+        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        let mut state = owner.read_with(cx, |owner, _| (*owner.state).clone());
+        let mut track = crate::test_support::artwork_track("source.mid".into());
+        track.sample_rate = 0;
+        track.channels = 0;
+        let track = Arc::new(track);
+        state.current_track = Some(Arc::clone(&track));
+        state.source_generation = 42;
+        state.playback.status = PlaybackStatus::Paused;
+        state.playback.audio_output = Some(Arc::new(AudioOutputState {
+            source_generation: 41,
+            segment: 1,
+            active: true,
+            source: Arc::new(AudioSourceFormat {
+                codec: "MIDI".into(),
+                sample_rate: 48_000,
+                bits_per_sample: None,
+                channels: vec!["FL".into(), "FR".into()],
+                processed: false,
+            }),
+            stream: Arc::new(AudioStreamFormat {
+                sample_rate: 96_000,
+                sample_format: "F32".into(),
+                channels: vec!["Mono".into()],
+            }),
+            graph_processing: false,
+            monitor_eq: true,
+            master_gain_db: None,
+            source_loudness_lufs: None,
+            replaygain: ReplayGainStatus {
+                enabled: false,
+                peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off,
+                requested_gain_db: None,
+                applied_gain_db: 0.0,
+                source_peak: None,
+                processed_source: false,
+            },
+            sink: None,
+            remix_allowed: false,
+            stream_resample_quality: None,
+            graph_rate: None,
+            quantum_frames: None,
+            device_rate: None,
+            device_format: None,
+            metrics: Default::default(),
+            session_underruns: 0,
+            session_missing_seconds: 0.0,
+        }));
+        owner.update(cx, |owner, cx| owner.reconcile(Rc::new(state.clone()), cx));
+        assert!(editor.read_with(cx, |editor, _| editor.response.is_empty()));
+
+        Arc::make_mut(state.playback.audio_output.as_mut().unwrap()).source_generation = 42;
+        owner.update(cx, |owner, cx| owner.reconcile(Rc::new(state.clone()), cx));
+        let computations = editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.maximum_frequency, 48_000. * 0.499);
+            assert!(!editor.response.is_empty());
+            assert!(Arc::ptr_eq(
+                editor.state.current_track.as_ref().unwrap(),
+                &track
+            ));
+            editor.response_computations
+        });
+        draw(cx, handle);
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-response-channel-7")
+                .is_some()
+        );
+
+        Arc::make_mut(state.playback.audio_output.as_mut().unwrap()).segment += 1;
+        owner.update(cx, |owner, cx| owner.reconcile(Rc::new(state.clone()), cx));
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.response_computations),
+            computations
+        );
+
+        state.playback.status = PlaybackStatus::Stopped;
+        owner.update(cx, |owner, cx| owner.reconcile(Rc::new(state), cx));
+        assert!(editor.read_with(cx, |editor, _| editor.response.is_empty()));
+        draw(cx, handle);
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-response-channel-7")
+                .is_none()
+        );
+    }
 
     #[gpui::test]
     fn eq_switch_locks_only_eq_edits_while_master_bypass_preserves_editability(
@@ -3860,7 +3970,12 @@ mod tests {
             // though this fixture deliberately has no playing audio stream.
             owner.update(cx, |owner, _| owner.pending = 1);
             editor.update(cx, |editor, cx| {
-                editor.format = rate.map(|rate| (99, rate, 2));
+                editor.format = rate.map(|sample_rate| EqualizerFormat {
+                    track_id: 99,
+                    generation: 0,
+                    sample_rate,
+                    channels: 2,
+                });
                 editor.sync_fields(cx);
                 editor.update_response();
                 cx.notify();
@@ -3934,7 +4049,7 @@ mod tests {
             owner.command_active = true;
         });
         editor.update(cx, |editor, cx| {
-            editor.format = Some((99, 3, 2));
+            editor.format = Some(test_format(3, 2));
             editor.sync_fields(cx);
             editor.update_response();
             cx.notify();
@@ -5072,7 +5187,7 @@ mod tests {
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         owner.update(cx, |owner, _| owner.pending = 1);
         editor.update(cx, |editor, cx| {
-            editor.format = Some((99, 48_001, 2));
+            editor.format = Some(test_format(48_001, 2));
             cx.notify();
         });
         draw(cx, handle);
@@ -5129,7 +5244,7 @@ mod tests {
                     EqAvailability {
                         blocked: false,
                         pending: 0,
-                        format: equalizer_format(&state),
+                        format: state.equalizer_format(),
                         collecting_revision: None,
                     },
                     owner.geometry_epoch,
@@ -5850,7 +5965,7 @@ mod tests {
             editor.update(cx, |editor, cx| {
                 // Supply the headless fixture's plotting format; pointer fences
                 // still use its real, unchanged no-stream snapshot.
-                editor.format = Some((99, 48_000, 2));
+                editor.format = Some(test_format(48_000, 2));
                 editor.update_response();
                 editor.update_response();
                 cx.notify();
@@ -6091,7 +6206,7 @@ mod tests {
             owner.command_active = true;
             let state = owner.context.snapshot();
             assert!(state.system.config.equalizer.enabled);
-            owner.reset_target_equalizer(EqTarget::Monitor, 0, equalizer_format(&state), cx);
+            owner.reset_target_equalizer(EqTarget::Monitor, 0, state.equalizer_format(), cx);
             let command = owner.commands.pop_front().unwrap().command;
             assert!(matches!(command, Command::EqualizerEdit {
                 edit: EqualizerEdit::Replace { config }, ..
@@ -6911,7 +7026,7 @@ mod tests {
     fn viewing_another_channel_changes_the_curve_without_changing_eq(cx: &mut TestAppContext) {
         let (_directory, _runtime, editor, handle) = fixture(cx);
         let original = editor.update(cx, |editor, _| {
-            editor.format = Some((99, 48_000, 2));
+            editor.format = Some(test_format(48_000, 2));
             for band in &mut editor.config.bands {
                 band.channels = ChannelTarget::Selected(vec![1]);
             }
@@ -6929,7 +7044,7 @@ mod tests {
             assert_eq!(editor.config, original);
         });
         editor.update(cx, |editor, _| {
-            editor.format = Some((99, 48_000, 1));
+            editor.format = Some(test_format(48_000, 1));
             editor.update_response();
         });
         draw(cx, handle);

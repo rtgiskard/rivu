@@ -15,7 +15,7 @@ use rivu_protocol::pcm::{
     Welcome, address, decode_status,
 };
 use rivu_shm::{PCM_QUEUE_BLOCKS, SharedPcmWindow};
-use rivu_visuals::{WaveformFrame, WaveformSummary};
+use rivu_visuals::{WaveformFrame, WaveformIdentity, WaveformSummary};
 use std::{
     io::{Read, Write},
     net::Shutdown,
@@ -263,7 +263,6 @@ impl VisualClient {
                 range,
                 track.decoder_hint,
                 duration.or(track.duration),
-                track.sample_rate.max(1),
                 Some(generation),
                 None,
             );
@@ -622,6 +621,10 @@ async fn run_client(
                         && !state.stopped.load(Ordering::Acquire)
                     {
                         let mut summary = state.summary.lock();
+                        summary.configure_pcm(WaveformIdentity {
+                            content: None,
+                            sample_rate: header.sample_rate,
+                        });
                         let key = (
                             header.generation,
                             header.epoch,

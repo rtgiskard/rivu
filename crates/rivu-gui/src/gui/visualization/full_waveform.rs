@@ -45,9 +45,11 @@ pub(in crate::gui) async fn load(
                         range,
                         hint,
                         *duration,
-                        *sample_rate,
                         *source,
-                        Some(*identity),
+                        Some(rivu_visuals::WaveformIdentity {
+                            content: Some(*identity),
+                            sample_rate: *sample_rate,
+                        }),
                     );
                     weights = rivu_dsp::channels::analysis_weights(layout.iter().copied());
                 }

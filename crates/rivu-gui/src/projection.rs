@@ -4,6 +4,15 @@ use rivu_protocol::model::{
     Track,
 };
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EqualizerFormat {
+    pub(crate) track_id: i64,
+    pub(crate) generation: u64,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: LibrarySnapshot,
@@ -78,6 +87,21 @@ impl GuiSnapshot {
     }
     pub fn current_track(&self) -> Option<&Track> {
         self.current_track.as_deref()
+    }
+
+    pub(crate) fn equalizer_format(&self) -> Option<EqualizerFormat> {
+        let track = self.current_track()?;
+        let (sample_rate, channels) = self
+            .playback
+            .decoded_source_format(self.source_generation)
+            .map(|source| (source.sample_rate, source.channels.len()))
+            .unwrap_or_else(|| (track.sample_rate, usize::from(track.channels)));
+        Some(EqualizerFormat {
+            track_id: track.id,
+            generation: self.source_generation,
+            sample_rate,
+            channels,
+        })
     }
 }
 

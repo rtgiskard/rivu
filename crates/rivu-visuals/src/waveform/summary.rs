@@ -158,41 +158,50 @@ pub struct WaveformSummary {
 }
 
 impl WaveformSummary {
-    #[allow(clippy::too_many_arguments)]
     pub fn select(
         &mut self,
         path: &Path,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
         duration: Option<f64>,
-        sample_rate: u32,
         generation: Option<u64>,
-        identity: Option<SourceIdentity>,
+        identity: Option<WaveformIdentity>,
     ) {
-        let duration = duration.filter(|value| value.is_finite() && *value > 0.0);
         let same = self.frame.matches(path, range, decoder_hint)
             && self.frame.source_generation == generation
-            && self.frame.identity.and_then(|identity| identity.content) == identity;
-        if same && self.frame.identity.is_some() {
+            && self.frame.identity.and_then(|format| format.content)
+                == identity.and_then(|format| format.content);
+        if !same {
+            let duration = duration.filter(|value| value.is_finite() && *value > 0.0);
+            self.frame = WaveformFrame {
+                revision: self.frame.revision.wrapping_add(1),
+                request_epoch: self.frame.request_epoch.wrapping_add(1),
+                path: Some(path.to_owned()),
+                range,
+                decoder_hint,
+                duration,
+                span_seconds: duration.unwrap_or(60.0),
+                source_generation: generation,
+                ..WaveformFrame::default()
+            };
+            self.energy.clear();
+            self.end_seconds = None;
+            self.traversal = 1;
+        }
+        if let Some(identity) = identity {
+            self.configure_pcm(identity);
+        }
+    }
+
+    /// Establish bin geometry from the first admitted PCM format for this selection.
+    /// This does not change the selection or fence same-source finite scans.
+    pub fn configure_pcm(&mut self, identity: WaveformIdentity) {
+        if self.frame.identity.is_some() || identity.sample_rate == 0 {
             return;
         }
-        let revision = self.frame.revision.wrapping_add(1);
-        let request_epoch = self.frame.request_epoch.wrapping_add(1);
-        self.frame = WaveformFrame {
-            revision,
-            request_epoch,
-            path: Some(path.to_owned()),
-            range,
-            decoder_hint,
-            duration,
-            span_seconds: duration.unwrap_or(60.0),
-            source_generation: generation,
-            identity: Some(WaveformIdentity {
-                content: identity,
-                sample_rate,
-            }),
-            ..WaveformFrame::default()
-        };
+        self.frame.identity = Some(identity);
+        let sample_rate = identity.sample_rate;
+        let duration = self.frame.duration;
         let bins = duration.map_or(MAX_BINS, |duration| {
             ((duration * f64::from(sample_rate)).round().max(1.0) as usize).min(MAX_BINS)
         });
@@ -212,10 +221,7 @@ impl WaveformSummary {
         self.frame.rms_spans.resize(bins, None);
         self.frame.bin_revisions.resize(bins, 0);
         self.frame.bin_epochs.resize(bins, 0);
-        self.energy.clear();
         self.energy.resize(bins, [0.0; 3]);
-        self.end_seconds = None;
-        self.traversal = 1;
     }
 
     pub fn clear(&mut self) {
@@ -483,9 +489,11 @@ mod tests {
             None,
             DecoderHint::Auto,
             duration,
-            rate,
             Some(1),
-            None,
+            Some(WaveformIdentity {
+                content: None,
+                sample_rate: rate,
+            }),
         );
         summary
     }
@@ -654,9 +662,11 @@ mod tests {
             None,
             DecoderHint::Auto,
             Some(2.0),
-            1,
             Some(1),
-            None,
+            Some(WaveformIdentity {
+                content: None,
+                sample_rate: 1,
+            }),
         );
         assert_eq!(summary.frame.peaks, retained);
         summary.select(
@@ -664,9 +674,11 @@ mod tests {
             None,
             DecoderHint::Auto,
             Some(2.0),
-            1,
             Some(2),
-            None,
+            Some(WaveformIdentity {
+                content: None,
+                sample_rate: 1,
+            }),
         );
         assert_eq!(summary.frame.peaks, [None; 2]);
         assert_eq!(summary.frame.source_generation, Some(2));
