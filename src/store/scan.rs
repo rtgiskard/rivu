@@ -919,7 +919,7 @@ impl Store {
         let mut byidentity = HashMap::new();
         // None records ambiguity without allocating a candidate vector per segment.
         let mut candidates_by_key: HashMap<RelocationKey<'_>, Option<&Existing>> = HashMap::new();
-        let mut absent_sheets = HashMap::new();
+        let mut absent_paths = HashMap::new();
         let mut absent_ordinary = HashSet::new();
         for record in &old {
             let key = identity(&record.path, record.cue.as_ref().map(Into::into));
@@ -936,14 +936,10 @@ impl Store {
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
                 && !unconfirmed(record)
-                && match &record.cue {
-                    Some(cue) => *absent_sheets.entry(cue.sheet.as_path()).or_insert_with(|| {
-                        fs::symlink_metadata(owner)
-                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                    }),
-                    None => fs::symlink_metadata(owner)
-                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-                }
+                && *absent_paths.entry(owner).or_insert_with(|| {
+                    fs::symlink_metadata(owner)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                })
             {
                 if record.cue.is_none() && ordinary_candidate_hashes.contains(hash) {
                     absent_ordinary.insert(record.id);
@@ -1154,12 +1150,16 @@ impl Store {
             if !exact_sources && o.cue.is_none() && !known_absent && !is_audio_path(owner) {
                 // Just as in discovery, a dangling symlink is uncertain in a
                 // directory walk but NotFound when explicitly requested.
-                let metadata = if explicit {
+                let absent = if explicit {
                     fs::metadata(owner)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
                 } else {
-                    fs::symlink_metadata(owner)
+                    absent_paths.get(owner).copied().unwrap_or_else(|| {
+                        fs::symlink_metadata(owner)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    })
                 };
-                if !metadata.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+                if !absent {
                     continue;
                 }
             }
