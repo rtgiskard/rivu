@@ -421,15 +421,16 @@ pub struct PlaybackState {
 }
 
 impl PlaybackState {
-    /// Decoded format of the current playback source, independent of the sink.
-    /// Stopped diagnostics are retained for display but cannot describe a new source.
-    pub fn decoded_source_format(&self, generation: u64) -> Option<&AudioSourceFormat> {
+    /// Current source PCM facts, falling back to catalog facts before decoding.
+    /// A zero component remains unknown; it is never an assumed render format.
+    pub fn source_pcm_format(&self, generation: u64, track: &Track) -> (u32, usize) {
         self.audio_output
             .as_deref()
             .filter(|output| {
                 self.status != PlaybackStatus::Stopped && output.source_generation == generation
             })
-            .map(|output| output.source.as_ref())
+            .map(|output| (output.source.sample_rate, output.source.channels.len()))
+            .unwrap_or((track.sample_rate, usize::from(track.channels)))
     }
 }
 
@@ -1030,6 +1031,90 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_pcm_format_uses_only_current_decoded_facts_and_preserves_unknowns() {
+        let mut track = Track {
+            id: 1,
+            path: "/music/source.mid".into(),
+            fingerprint: None,
+            cue: None,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            duration: Some(1.0),
+            codec: "MIDI".into(),
+            channels: 0,
+            sample_rate: 0,
+            bitrate_bps: None,
+            bitrate_exact: false,
+            track_number: None,
+            disc_number: None,
+            bits_per_sample: None,
+            release_date: None,
+            replaygain_track_gain: None,
+            favorite: false,
+            decoder_hint: Default::default(),
+            missing: false,
+            play_count: 0,
+            last_played: None,
+        };
+        let mut playback = PlaybackState::default();
+        assert_eq!(playback.source_pcm_format(7, &track), (0, 0));
+        playback.audio_output = Some(Arc::new(AudioOutputState {
+            source_generation: 7,
+            segment: 1,
+            active: false,
+            source: Arc::new(AudioSourceFormat {
+                codec: "rendered".into(),
+                sample_rate: 48_000,
+                bits_per_sample: None,
+                channels: vec!["FL".into(), "FR".into()],
+                processed: false,
+            }),
+            graph_processing: false,
+            monitor_eq: false,
+            master_gain_db: None,
+            replaygain: ReplayGainStatus {
+                enabled: false,
+                peak_policy: Default::default(),
+                requested_gain_db: None,
+                applied_gain_db: 0.0,
+                source_peak: None,
+                processed_source: false,
+            },
+            source_loudness_lufs: None,
+            stream: Arc::new(AudioStreamFormat {
+                sample_rate: 96_000,
+                sample_format: "f32".into(),
+                channels: vec!["MONO".into()],
+            }),
+            sink: None,
+            remix_allowed: false,
+            stream_resample_quality: None,
+            graph_rate: None,
+            quantum_frames: None,
+            device_rate: None,
+            device_format: None,
+            metrics: Default::default(),
+            session_underruns: 0,
+            session_missing_seconds: 0.0,
+        }));
+        for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+            playback.status = status;
+            assert_eq!(playback.source_pcm_format(7, &track), (48_000, 2));
+            assert_eq!(playback.source_pcm_format(8, &track), (0, 0));
+        }
+        playback.status = PlaybackStatus::Stopped;
+        assert_eq!(playback.source_pcm_format(7, &track), (0, 0));
+        track.sample_rate = 44_100;
+        track.channels = 1;
+        assert_eq!(playback.source_pcm_format(7, &track), (44_100, 1));
+        playback.status = PlaybackStatus::Playing;
+        assert_eq!(playback.source_pcm_format(8, &track), (44_100, 1));
+        assert_eq!(playback.source_pcm_format(7, &track), (48_000, 2));
+    }
+
     #[test]
     fn search_projection_identity_changes_with_query_not_page_demand() {
         for mut query in [

@@ -99,9 +99,7 @@ impl GuiSnapshot {
         let track = self.current_track()?;
         let (sample_rate, channels) = self
             .playback
-            .decoded_source_format(self.source_generation)
-            .map(|source| (source.sample_rate, source.channels.len()))
-            .unwrap_or_else(|| (track.sample_rate, usize::from(track.channels)));
+            .source_pcm_format(self.source_generation, track);
         Some(EqualizerFormat {
             track_id: track.id,
             generation: self.source_generation,

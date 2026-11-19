@@ -2948,13 +2948,21 @@ impl AudioProcessing {
             }
         }
         if let Some(track) = self.state.current_track() {
-            audio_details.push_str(&format!(
-                "\n{} · {} Hz · {} ch\n{}",
-                track.title,
-                track.sample_rate,
-                track.channels,
-                track.path.display()
-            ));
+            use std::fmt::Write as _;
+
+            let (sample_rate, channels) = self
+                .state
+                .playback
+                .source_pcm_format(self.state.source_generation, track);
+            audio_details.push('\n');
+            audio_details.push_str(&track.title);
+            if sample_rate > 0 {
+                write!(audio_details, " · {sample_rate} Hz").unwrap();
+            }
+            if channels > 0 {
+                write!(audio_details, " · {channels} ch").unwrap();
+            }
+            write!(audio_details, "\n{}", track.path.display()).unwrap();
         }
         let selected_audio = caption(theme, selected_audio_text)
             .min_w_0()
