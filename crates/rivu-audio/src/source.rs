@@ -1,12 +1,10 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
-#[cfg(feature = "midi")]
 mod file_loader;
 #[cfg(feature = "midi")]
 mod midi;
 mod vorbis_timing;
 
-#[cfg(feature = "midi")]
 pub(super) use file_loader::{FileLoad, FileLoader};
 use vorbis_timing::VorbisTiming;
 
@@ -806,7 +804,6 @@ impl Source {
     fn prime(mut self, selection: SourceSelection, cancelled: Option<&AtomicBool>) -> Result<Self> {
         self.select(selection, cancelled)?;
         while !self.poll_open_with_cancel(cancelled)? {
-            #[cfg(feature = "midi")]
             if let Some(ready) = self.opening_wait() {
                 if cancelled.is_some() {
                     // Offline callers have an AtomicBool, not a cancellation
@@ -1543,11 +1540,11 @@ impl Source {
         self.poll_open_with_cancel(None)
     }
 
-    #[cfg(feature = "midi")]
     pub(super) fn opening_wait(&self) -> Option<&crossbeam_channel::Receiver<()>> {
-        match &self.decode {
-            Decode::Midi(midi) => midi.opening_wait(),
-            _ => None,
+        #[cfg(feature = "midi")]
+        if let Decode::Midi(midi) = &self.decode {
+        None
+            return midi.opening_wait();
         }
     }
 
