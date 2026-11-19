@@ -1372,8 +1372,16 @@ impl AudioProcessing {
         for (key, label, value) in [
             (FieldKey::PresetName, "processing-preset-name", ""),
             (FieldKey::PresetPath, "processing-preset-path", ""),
-            (FieldKey::ProfileStart, "processing-profile-start", "0"),
-            (FieldKey::ProfileEnd, "processing-profile-end", "1"),
+            (
+                FieldKey::ProfileStart,
+                graph_editor::GraphField::ProfileStart.label(),
+                "0",
+            ),
+            (
+                FieldKey::ProfileEnd,
+                graph_editor::GraphField::ProfileEnd.label(),
+                "1",
+            ),
             (FieldKey::VocalGain, "processing-vocal-gain", "0"),
             (
                 FieldKey::AccompanimentGain,
@@ -1497,13 +1505,10 @@ impl AudioProcessing {
             FieldKey::Neural(field) => field
                 .path_help()
                 .or_else(|| processing_input_help(field.label_id())),
-            FieldKey::Graph(binding) => binding
-                .field
-                .path_help()
-                .or_else(|| processing_input_help(binding.field.label())),
+            FieldKey::Graph(binding) => binding.field.input_help(),
             FieldKey::PresetName => Some("processing-preset-name-input-help"),
-            FieldKey::ProfileStart => Some("processing-profile-start-input-help"),
-            FieldKey::ProfileEnd => Some("processing-profile-end-input-help"),
+            FieldKey::ProfileStart => graph_editor::GraphField::ProfileStart.input_help(),
+            FieldKey::ProfileEnd => graph_editor::GraphField::ProfileEnd.input_help(),
             FieldKey::VocalGain => Some("processing-vocal-gain-input-help"),
             FieldKey::AccompanimentGain => Some("processing-accompaniment-gain-input-help"),
             FieldKey::ExportRate => Some("processing-export-rate-help"),
@@ -2293,10 +2298,15 @@ impl AudioProcessing {
                 .child(self.field_view(
                     panel,
                     FieldKey::ProfileStart,
-                    "processing-profile-start",
+                    graph_editor::GraphField::ProfileStart.label(),
                     cx,
                 ))
-                .child(self.field_view(panel, FieldKey::ProfileEnd, "processing-profile-end", cx));
+                .child(self.field_view(
+                    panel,
+                    FieldKey::ProfileEnd,
+                    graph_editor::GraphField::ProfileEnd.label(),
+                    cx,
+                ));
         }
         let mut content = column().min_w_0().gap_3().child(rivu_ui::section_group(
             theme,

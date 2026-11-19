@@ -75,6 +75,11 @@ impl GraphField {
         }
     }
 
+    pub(in super::super) fn input_help(self) -> Option<&'static str> {
+        self.path_help()
+            .or_else(|| super::super::processing_input_help(self.label()))
+    }
+
     pub(super) fn choices(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::Implementation => &[
