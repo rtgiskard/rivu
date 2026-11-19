@@ -1,5 +1,215 @@
 use super::*;
 
+fn cached_midi_source(path: &Path) -> Result<std::sync::Arc<ScanRecord>> {
+    let metadata = fs::metadata(path)?;
+    Ok(std::sync::Arc::new(ScanRecord {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified_ns: cache_modified_ns(metadata.modified().ok()),
+        // Deliberately different from the file hash: reuse must not rehash.
+        fingerprint: Some(blake3::hash(b"retained fingerprint").to_hex().to_string()),
+        media: rivu_audio::MediaInfo {
+            title: "Cached MIDI".into(),
+            artist: "Cached artist".into(),
+            album: String::new(),
+            duration: Some(1.0),
+            codec: "MIDI".into(),
+            channels: 0,
+            sample_rate: 0,
+            bits_per_sample: None,
+            bitrate_bps: None,
+            bitrate_exact: false,
+            track_number: None,
+            disc_number: None,
+            release_date: None,
+            replaygain_track_gain: None,
+        },
+    }))
+}
+
+#[test]
+fn midi_warm_cache_matches_build_capability_for_ordinary_and_cue_admission() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let source = root.join("source.mid");
+    let sheet = root.join("album.cue");
+    fs::write(
+        &source,
+        b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0",
+    )?;
+    fs::write(
+        &sheet,
+        "FILE \"source.mid\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n",
+    )?;
+    let cached = cached_midi_source(&source)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&ScanResult {
+        roots: vec![root],
+        records: vec![cached.clone()],
+        segments: vec![CueRecord::registered(
+            cached.clone(),
+            CueSegment {
+                sheet: sheet.clone(),
+                number: 1,
+                start_frame: 0,
+                end_frame: None,
+            },
+            RegisteredCueMetadata {
+                title: "Cached segment".into(),
+                artist: "Cached artist".into(),
+                album: String::new(),
+                track_number: Some(1),
+                disc_number: None,
+                release_date: None,
+            },
+            Some(1.0),
+        )],
+        ..ScanResult::default()
+    })?;
+    let ids = [
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::File(&source))?
+            .context("seeded MIDI source")?,
+        store
+            .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
+            .context("seeded MIDI segment")?,
+    ];
+    store.set_favorite(&ids, true)?;
+    for ffmpeg_enabled in [false, true] {
+        for requested in [&source, &sheet] {
+            let known = [(source.clone(), store.known_source(&source)?.unwrap())];
+            let warm = scan_paths(std::slice::from_ref(requested), &known, ffmpeg_enabled)?;
+            let cold = scan_paths(std::slice::from_ref(requested), &[], ffmpeg_enabled)?;
+            assert_eq!(warm.track_count(), cold.track_count());
+            assert_eq!(warm.errors.is_empty(), cold.errors.is_empty());
+            if cfg!(feature = "midi") {
+                assert!(warm.errors.is_empty(), "{:?}", warm.errors);
+                let track = warm.tracks().next().context("admitted MIDI")?;
+                assert_eq!(track.source.media.artist, "Cached artist");
+                assert_eq!(track.source.media.sample_rate, 0);
+                assert_eq!(track.source.media.channels, 0);
+                assert_eq!(track.source.fingerprint, cached.fingerprint);
+            } else {
+                assert_eq!(warm.track_count(), 0);
+                if requested == &sheet {
+                    assert!(
+                        !warm.errors.is_empty(),
+                        "CUE must not bypass MIDI admission"
+                    );
+                }
+            }
+            store.apply_scan(&warm)?;
+            for id in ids {
+                let retained = store.track(id)?.context("retained MIDI identity")?;
+                assert!(!retained.missing);
+                assert!(retained.favorite);
+                assert_eq!(retained.fingerprint, cached.fingerprint);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn version_four_midi_cache_revalidates_ports_without_losing_fingerprints() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let valid = root.join("valid.mid");
+    let invalid = root.join("multiport.mid");
+    let sheet = root.join("multiport.cue");
+    fs::write(
+        &valid,
+        b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0",
+    )?;
+    fs::write(
+        &invalid,
+        b"MThd\0\0\0\x06\0\x01\0\x02\x01\xe0\
+            MTrk\0\0\0\x08\0\x90\x3c\x64\0\xff\x2f\0\
+            MTrk\0\0\0\x0d\0\xff\x21\x01\x01\0\x90\x3c\x64\0\xff\x2f\0",
+    )?;
+    fs::write(
+        &sheet,
+        "FILE \"multiport.mid\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n",
+    )?;
+    let records = vec![cached_midi_source(&valid)?, cached_midi_source(&invalid)?];
+    let database = root.join("library.sqlite");
+    let store = crate::store::Store::open(&database)?;
+    store.apply_scan(&ScanResult {
+        roots: vec![root],
+        records: records.clone(),
+        segments: vec![CueRecord::registered(
+            records[1].clone(),
+            CueSegment {
+                sheet: sheet.clone(),
+                number: 1,
+                start_frame: 0,
+                end_frame: None,
+            },
+            RegisteredCueMetadata {
+                title: "Cached segment".into(),
+                artist: "Cached artist".into(),
+                album: String::new(),
+                track_number: Some(1),
+                disc_number: None,
+                release_date: None,
+            },
+            Some(1.0),
+        )],
+        ..ScanResult::default()
+    })?;
+    // Version 4 admitted multiport MIDI before port validation was introduced.
+    rusqlite::Connection::open(&database)?.execute("UPDATE tracks SET probe_version=4", [])?;
+    for source in &records {
+        let known = store.known_source(&source.path)?.context("cached MIDI")?;
+        assert!(known.media.is_none());
+        assert_eq!(known.fingerprint, source.fingerprint);
+        assert_eq!(known.modified_ns, source.modified_ns);
+        assert_eq!(known.size, source.size);
+    }
+    let known: Vec<_> = records
+        .iter()
+        .map(|source| {
+            Ok((
+                source.path.clone(),
+                store.known_source(&source.path)?.unwrap(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let refreshed = scan_paths(std::slice::from_ref(&valid), &known, false)?;
+    assert!(refreshed.errors.is_empty(), "{:?}", refreshed.errors);
+    assert_eq!(refreshed.records.len(), 1);
+    assert_ne!(refreshed.records[0].media.artist, "Cached artist");
+    assert_eq!(refreshed.records[0].fingerprint, records[0].fingerprint);
+    store.apply_scan(&refreshed)?;
+    for (requested, identity) in [
+        (&invalid, crate::store::TrackIdentity::File(&invalid)),
+        (&sheet, crate::store::TrackIdentity::Cue(&sheet, 1)),
+    ] {
+        let rejected = scan_paths(std::slice::from_ref(requested), &known, false)?;
+        assert_eq!(rejected.track_count(), 0);
+        assert!(
+            rejected
+                .errors
+                .iter()
+                .any(|error| error.contains("multiple ports"))
+        );
+        store.apply_scan(&rejected)?;
+        let id = store
+            .track_id_for_identity(identity)?
+            .context("retained invalid MIDI")?;
+        let retained = store.track(id)?.context("retained invalid MIDI row")?;
+        assert!(!retained.missing);
+        assert_eq!(retained.fingerprint, records[1].fingerprint);
+        let cached = store
+            .known_source(&invalid)?
+            .context("retained fingerprint")?;
+        assert!(cached.media.is_none());
+        assert_eq!(cached.fingerprint, records[1].fingerprint);
+    }
+    Ok(())
+}
+
 #[test]
 fn rescans_keep_existing_midi_and_reconcile_deleted_sources() -> Result<()> {
     let directory = tempfile::tempdir()?;

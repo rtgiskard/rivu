@@ -30,6 +30,47 @@ fn record() -> ScanRecord {
     }
 }
 
+#[test]
+fn stale_probe_versions_invalidate_only_media_for_ordinary_and_cue_sources() {
+    for cue in [false, true] {
+        let source = std::sync::Arc::new(record());
+        let scan = ScanResult {
+            roots: vec!["/music".into()],
+            records: if cue { vec![] } else { vec![source.clone()] },
+            segments: if cue {
+                vec![CueRecord::registered(
+                    source.clone(),
+                    CueSegment {
+                        sheet: "/music/album.cue".into(),
+                        number: 1,
+                        start_frame: 0,
+                        end_frame: None,
+                    },
+                    cue_metadata(),
+                    source.media.duration,
+                )]
+            } else {
+                vec![]
+            },
+            ..ScanResult::default()
+        };
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.apply_scan(&scan).unwrap();
+        for version in [0, PROBE_VERSION - 1, PROBE_VERSION + 1, PROBE_VERSION] {
+            store
+                .conn
+                .execute("UPDATE tracks SET probe_version=?1", [version])
+                .unwrap();
+            let cached = store.stored_scan_files(&scan.roots).unwrap().remove(0);
+            assert_eq!(cached.media.is_some(), version == PROBE_VERSION);
+            assert_eq!(cached.fingerprint, source.fingerprint);
+            assert_eq!(cached.size, source.size);
+            assert_eq!(cached.modified_ns, source.modified_ns);
+            assert_eq!(cached.cue.is_some(), cue);
+        }
+    }
+}
+
 fn cue_metadata() -> RegisteredCueMetadata {
     RegisteredCueMetadata {
         title: "Title".into(),

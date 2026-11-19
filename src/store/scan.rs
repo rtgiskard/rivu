@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
-pub(super) const PROBE_VERSION: i64 = 4;
+pub(super) const PROBE_VERSION: i64 = 7;
 
 pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";

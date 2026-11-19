@@ -41,6 +41,16 @@ impl KnownFile {
     }
 }
 
+/// Reuse only facts that this build's source admission can still produce.
+/// MIDI has no catalog PCM format and is never an FFmpeg fallback source.
+fn cached_media_usable(media: &MediaInfo, ffmpeg_enabled: bool) -> bool {
+    if media.codec == "MIDI" {
+        cfg!(feature = "midi")
+    } else {
+        !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScanRecord {
     pub path: PathBuf,
@@ -278,10 +288,7 @@ impl PendingSource {
             if let Some(mut known) = unchanged {
                 self.fingerprint = known.fingerprint.take();
                 let media = known.media.take().filter(|media| {
-                    known.cue.is_none()
-                        && (!ffmpeg_enabled
-                            || (media.channels != 0 && media.sample_rate != 0)
-                            || (cfg!(feature = "midi") && media.codec == "MIDI"))
+                    known.cue.is_none() && cached_media_usable(media, ffmpeg_enabled)
                 });
                 if let (Some(budget), Some(media)) = (budget, &media) {
                     budget.reserve(media_retained_bytes(media))?;
