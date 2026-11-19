@@ -36,6 +36,19 @@ assessment or imply that every platform-specific chain is built on Linux.
 The GPUI `v0.2.2` migration removes `rustybuzz` 0.20.1 from the locked graph
 by updating the SVG stack to resvg/usvg 0.50 with `harfrust`.
 
+[[midi-short-sample-loops]]
+=== RustySynth can read past short sample loops at high pitch
+
+Status: unresolved, deferred, 2026-11-19. Rivu uses the published RustySynth
+1.3.8 without a downstream patch.
+
+The https://github.com/sinshu/rustysynth/blob/8aa60afb3c14be0fd53d3ef40ef44a7ff8b72a45/rustysynth/src/oscillator.rs#L140-L155[oscillator]
+subtracts at most one loop period per sample. With a short loop and a large
+pitch step, the sample position can remain outside the loop after wrapping and
+eventually index past the sample data. Validating SoundFont table boundaries
+does not address this playback behavior. Revisit when an upstream release
+handles steps that cross multiple loop periods.
+
 [[pipewire-context-retention]]
 === Native PipeWire context retirement retains libdbus allocations
 
