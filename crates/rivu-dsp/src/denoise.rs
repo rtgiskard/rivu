@@ -170,7 +170,7 @@ fn in_range(value: f32, low: f32, high: f32, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_format(sample_rate: u32, channels: usize, fft_size: usize) -> Result<()> {
+fn validate_format(sample_rate: u32, channels: usize) -> Result<()> {
     ensure!(
         (8000..=384_000).contains(&sample_rate),
         "unsupported denoise sample rate"
@@ -179,6 +179,10 @@ fn validate_format(sample_rate: u32, channels: usize, fft_size: usize) -> Result
         (1..=MAX_CHANNELS).contains(&channels),
         "unsupported denoise channel count"
     );
+    Ok(())
+}
+
+fn validate_fft_size(fft_size: usize) -> Result<()> {
     ensure!(
         (256..=8192).contains(&fft_size) && fft_size.is_power_of_two(),
         "denoise FFT size must be a power of two in 256..=8192"
@@ -214,10 +218,7 @@ impl DenoiseConfig {
 
     /// Validate persisted controls before a source format is available.
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            (256..=8192).contains(&self.fft_size) && self.fft_size.is_power_of_two(),
-            "denoise FFT size must be a power of two in 256..=8192"
-        );
+        validate_fft_size(self.fft_size)?;
         in_range(self.strength, 0.0, 4.0, "denoise strength")?;
         in_range(
             self.spectral_gain_floor_db,
@@ -266,7 +267,7 @@ impl DenoiseConfig {
 
     pub fn validate_for_format(&self, sample_rate: u32, channels: usize) -> Result<()> {
         self.validate()?;
-        validate_format(sample_rate, channels, self.fft_size)?;
+        validate_format(sample_rate, channels)?;
         if self.hum.enabled {
             ensure!(
                 self.hum.fundamental_hz * (self.hum.harmonics as f32) < 0.49 * sample_rate as f32,
@@ -310,7 +311,8 @@ pub struct NoiseProfile {
 
 impl NoiseProfile {
     pub fn validate(&self, sample_rate: u32, channels: usize, fft_size: usize) -> Result<()> {
-        validate_format(sample_rate, channels, fft_size)?;
+        validate_format(sample_rate, channels)?;
+        validate_fft_size(fft_size)?;
         ensure!(
             self.sample_rate == sample_rate
                 && self.channels == channels

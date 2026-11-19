@@ -58,7 +58,8 @@ impl ProfileCollector {
         fft_size: usize,
         max_frames: u64,
     ) -> Result<Self> {
-        validate_format(sample_rate, channels, fft_size)?;
+        validate_format(sample_rate, channels)?;
+        validate_fft_size(fft_size)?;
         ensure!(
             max_frames > 0,
             "profile capture needs an explicit nonzero frame bound"
