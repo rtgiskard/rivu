@@ -16,6 +16,14 @@ use rivu_protocol::{
 use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::{io::Write, path::Path};
 
+fn probe_format_component(i18n: &Localizer, value: u32, unit: &str) -> String {
+    if value == 0 {
+        i18n.text("core-unknown").to_owned()
+    } else {
+        format!("{value}{unit}")
+    }
+}
+
 pub(super) fn run(
     i18n: &Localizer,
     data_dir: &Path,
@@ -179,8 +187,14 @@ pub(super) fn run(
                         ("artist", terminal_text(&info.artist).into()),
                         ("album", terminal_text(&info.album).into()),
                         ("codec", terminal_text(&info.codec).into()),
-                        ("channels", info.channels.to_string().into()),
-                        ("sample-rate", info.sample_rate.to_string().into()),
+                        (
+                            "channels",
+                            probe_format_component(i18n, u32::from(info.channels), "").into()
+                        ),
+                        (
+                            "sample-rate",
+                            probe_format_component(i18n, info.sample_rate, " Hz").into()
+                        ),
                         (
                             "duration",
                             info.duration
@@ -564,6 +578,26 @@ fn translate(action: LibraryAction) -> Result<(Command, bool)> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn human_probe_omits_units_for_unknown_pcm_components() {
+        for locale in ["en-US", "zh-CN"] {
+            let i18n = Localizer::for_cli(locale);
+            let unknown = i18n.text("core-unknown");
+            for (rate, expected) in [(0, unknown.to_owned()), (48_000, "48000 Hz".into())] {
+                let text = i18n.format(
+                    "core-probe",
+                    &[(
+                        "sample-rate",
+                        probe_format_component(&i18n, rate, " Hz").into(),
+                    )],
+                );
+                let line = text.lines().nth(6).unwrap();
+                assert!(line.ends_with(&expected), "{line}");
+                assert!(rate != 0 || !line.contains("Hz"), "{line}");
+            }
+        }
+    }
 
     fn wav() -> Vec<u8> {
         let mut bytes = Vec::new();

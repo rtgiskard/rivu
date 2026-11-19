@@ -41,7 +41,7 @@ core-probe = { $path }
       album: { $album }
       codec: { $codec }
       channels: { $channels }
-      sample rate: { $sample-rate } Hz
+      sample rate: { $sample-rate }
       duration: { $duration }
       bitrate: { $bitrate }
       source bits/sample: { $bits }

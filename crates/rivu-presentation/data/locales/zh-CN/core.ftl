@@ -41,7 +41,7 @@ core-probe = { $path }
       专辑：{ $album }
       编码：{ $codec }
       声道：{ $channels }
-      采样率：{ $sample-rate } Hz
+      采样率：{ $sample-rate }
       时长：{ $duration }
       码率：{ $bitrate }
       源位深：{ $bits }
