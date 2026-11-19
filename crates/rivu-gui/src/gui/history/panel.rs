@@ -70,8 +70,6 @@ impl History {
             HistorySort::Title => ("history-sort-title", panel_id),
             HistorySort::Plays => ("history-sort-plays", panel_id),
         };
-        let theme = rivu_ui::theme::palette(cx);
-        let surface = crate::gui::appearance::material::surface(cx);
         sortable_header(
             id,
             label,
@@ -84,7 +82,6 @@ impl History {
                 cx.notify();
             },
         )
-        .hover(move |style| style.bg(surface.fill(theme.highlight)))
         .px(window.rem_size() * 0.5 - px(1.))
         .py_1()
         .rounded_sm()

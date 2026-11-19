@@ -69,6 +69,16 @@ fn control_surface(
     id: impl Into<ElementId>,
     surface: SurfaceStyle,
 ) -> Stateful<Div> {
+    control_base(theme, id, surface).group_hover("control", move |style| {
+        style.bg(surface.fill(theme.highlight))
+    })
+}
+
+fn control_base(
+    theme: &'static rivu_format::palette::Palette,
+    id: impl Into<ElementId>,
+    surface: SurfaceStyle,
+) -> Stateful<Div> {
     div()
         .id(id)
         .group("control")
@@ -87,9 +97,6 @@ fn control_surface(
         .bg(surface.fill(theme.control))
         .border_1()
         .border_color(surface.border(theme.border))
-        .group_hover("control", move |style| {
-            style.bg(surface.fill(theme.highlight))
-        })
 }
 
 /// Reusable visual button primitive. It has no application-specific behavior.
@@ -248,7 +255,7 @@ fn icon_button_surface(
         .flex()
         .items_center()
         .justify_center();
-    control_surface(theme, id, surface)
+    control_base(theme, id, surface)
         .role(Role::Button)
         .aria_label(hint.clone())
         .child(glyph)
@@ -379,7 +386,8 @@ impl IconButton {
         let theme = crate::theme::palette(cx);
         let mut control =
             icon_button_surface(theme, self.id, self.icon, self.hint, cx, self.surface);
-        let selected_fill = self.selected_fill && style != IconButtonStyle::RowAction;
+        let selected_fill =
+            self.selected && self.selected_fill && style != IconButtonStyle::RowAction;
         if density == IconButtonDensity::Compact {
             control = control.px_1().py_2().min_w_6().min_h_8();
         }
@@ -390,15 +398,7 @@ impl IconButton {
                 .text_color(rgb(theme.secondary));
         }
         if style == IconButtonStyle::RowAction {
-            control = control
-                .h_full()
-                .min_h_0()
-                .py_0()
-                .group_hover("control", move |style| {
-                    style
-                        .bg(gpui::transparent_black())
-                        .text_color(rgb(theme.accent))
-                });
+            control = control.h_full().min_h_0().py_0();
         }
         if let IconButtonSemantics::Toggled(on) | IconButtonSemantics::Switch(on) = self.semantics {
             control = control.aria_toggled(if on { Toggled::True } else { Toggled::False });
@@ -406,25 +406,32 @@ impl IconButton {
                 control = control.role(Role::Switch);
             }
         }
-        control = active_control(theme, control, self.selected && selected_fill, self.surface);
-        if self.selected && !selected_fill {
+        if selected_fill {
+            control = control.bg(self.surface.fill(theme.selected));
+        }
+        if self.selected {
             control = control.text_color(rgb(theme.accent));
         }
         if self.enabled {
-            if style == IconButtonStyle::Bare && !(self.selected && selected_fill) {
-                control = control.group_hover("control", |style| {
-                    style
+            let surface = self.surface;
+            control = control.group_hover("control", move |hover| {
+                if selected_fill {
+                    hover.bg(surface.fill(theme.selected_hover))
+                } else if matches!(style, IconButtonStyle::Bare | IconButtonStyle::RowAction) {
+                    hover
                         .bg(gpui::transparent_black())
                         .text_color(rgb(theme.accent))
-                });
-            }
+                } else {
+                    hover.bg(surface.fill(theme.highlight))
+                }
+            });
             control = activate_control(control, cx, action);
         }
         let control = customize(control);
         if self.enabled {
             control
         } else {
-            let background = if self.selected && selected_fill {
+            let background = if selected_fill {
                 self.surface.fill(theme.selected)
             } else if style == IconButtonStyle::Surface {
                 self.surface.fill(theme.control)
