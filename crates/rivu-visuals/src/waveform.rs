@@ -1103,6 +1103,7 @@ impl Waveform {
             return false;
         };
         let shared = self.shared.read();
+        let live_target = request.source.matches_target(&shared);
         if generation != self.generation
             || request.cancelled.load(Ordering::Relaxed)
             || request.request_epoch != shared.request_epoch
@@ -1111,7 +1112,7 @@ impl Waveform {
                 .as_ref()
                 .is_some_and(|source| source.same_target(&request.source))
             || !request.source.matches(frame)
-            || (request.source.matches_target(&shared) && !scan_matches_progressive(frame, &shared))
+            || (live_target && !scan_matches_progressive(frame, &shared))
         {
             return false;
         }
@@ -1123,7 +1124,7 @@ impl Waveform {
                 source: Rc::clone(&request.source),
                 generation,
                 live_generation: request.live_generation,
-                frame: if request.source.matches_target(&shared) {
+                frame: if live_target {
                     shared.clone()
                 } else {
                     frame.clone()
@@ -1137,12 +1138,14 @@ impl Waveform {
         let full = self.full.as_mut().unwrap();
         full.generation = generation;
         full.baseline_revision = request.progressive_revision;
-        merge_progressive(&mut full.frame, frame, 0, 0);
+        if reuse || live_target {
+            merge_progressive(&mut full.frame, frame, 0, 0);
+        }
         if let (Some(display), Some(result)) = (&mut full.frame.identity, frame.identity) {
             display.content = result.content;
         }
         full.frame.source_generation = frame.source_generation;
-        if request.source.matches_target(&shared) {
+        if live_target {
             merge_progressive(
                 &mut full.frame,
                 &shared,
@@ -2973,6 +2976,11 @@ mod tests {
         let mut selected = frame(vec![Some(0.5), Some(0.75)]);
         selected.path = Some(PathBuf::from("selected.flac"));
         selected.decoder_hint = DecoderHint::Ffmpeg;
+        assert!(waveform.update_full(generation, &selected));
+        assert_eq!(
+            waveform.full.as_ref().unwrap().frame.peaks,
+            [Some(0.5), Some(0.75)]
+        );
         assert!(waveform.finish_full(generation, Ok(selected)));
         let shared = waveform.shared.read();
         assert_eq!(
