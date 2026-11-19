@@ -1,9 +1,13 @@
 //! Container probing, decoding, seeking, and packet-accurate native-channel samples.
 
 #[cfg(feature = "midi")]
+mod file_loader;
+#[cfg(feature = "midi")]
 mod midi;
 mod vorbis_timing;
 
+#[cfg(feature = "midi")]
+pub(super) use file_loader::{FileLoad, FileLoader};
 use vorbis_timing::VorbisTiming;
 
 use super::{
@@ -499,6 +503,51 @@ pub(super) struct SourceSelection {
     pub(super) start: f64,
 }
 
+/// Intake does not initialize any decoder (including the shared MIDI bank).
+/// Transfer the admitted descriptor or the sequence and identity read from it.
+pub(super) struct FileInput(FileKind);
+
+enum FileKind {
+    Encoded(File),
+    #[cfg(feature = "midi")]
+    Midi(SourceIdentity, midi::Sequence),
+}
+
+impl FileInput {
+    pub(super) fn read_path(
+        path: &Path,
+        decoder_hint: DecoderHint,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
+        let file = open_regular_file(path).map_err(source_io_error)?;
+        Self::read_file(file, decoder_hint, cancelled)
+    }
+
+    fn read_file(
+        file: File,
+        decoder_hint: DecoderHint,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
+        #[cfg(feature = "midi")]
+        if midi::recognizes(&file).map_err(source_io_error)? {
+            check_cancelled(cancelled)?;
+            if decoder_hint == DecoderHint::Ffmpeg {
+                return Err(anyhow!("MIDI requires the native synthesizer, not FFmpeg")
+                    .context(SourceFailure));
+            }
+            let identity = crate::source_identity(&file)?;
+            let sequence = midi::Sequence::read(file, true, cancelled)?;
+            check_cancelled(cancelled)?;
+            return Ok(Self(FileKind::Midi(identity, sequence)));
+        }
+        #[cfg(not(feature = "midi"))]
+        let _ = decoder_hint;
+        Ok(Self(FileKind::Encoded(file)))
+    }
+}
+
 pub(super) struct Source {
     identity: SourceIdentity,
     format: Option<Box<dyn FormatReader>>,
@@ -666,8 +715,8 @@ impl Source {
         )
     }
 
-    /// Begin opening the selection; origin validation may defer positioning.
-    /// The worker retains this source between finite `poll_open` rounds.
+    /// Begin opening synchronously for tests exercising decoder work rounds.
+    #[cfg(test)]
     pub(super) fn begin_open(
         path: &Path,
         buffer_len: usize,
@@ -675,9 +724,28 @@ impl Source {
         ffmpeg_enabled: bool,
         selection: SourceSelection,
     ) -> Result<Self> {
-        let mut source = Self::open_file_unprimed(
+        Self::begin_open_from_input(
             path,
-            open_regular_file(path).map_err(source_io_error)?,
+            FileInput::read_path(path, decoder_hint, None)?,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            selection,
+        )
+    }
+
+    /// Begin decoding the admitted input; origin validation may defer positioning.
+    pub(super) fn begin_open_from_input(
+        path: &Path,
+        input: FileInput,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+        selection: SourceSelection,
+    ) -> Result<Self> {
+        let mut source = Self::open_input_unprimed(
+            path,
+            input,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
@@ -722,9 +790,10 @@ impl Source {
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
-        let source = Self::open_file_unprimed(
+        let input = FileInput::read_file(file, decoder_hint, cancelled)?;
+        let source = Self::open_input_unprimed(
             path,
-            file,
+            input,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
@@ -751,9 +820,9 @@ impl Source {
         Ok(self)
     }
 
-    fn open_file_unprimed(
+    fn open_input_unprimed(
         path: &Path,
-        file: File,
+        input: FileInput,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
@@ -761,28 +830,26 @@ impl Source {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        #[cfg(feature = "midi")]
-        if midi::recognizes(&file).map_err(source_io_error)? {
-            if decoder_hint == DecoderHint::Ffmpeg {
-                return Err(anyhow!("MIDI requires the native synthesizer, not FFmpeg")
-                    .context(SourceFailure));
+        match input.0 {
+            FileKind::Encoded(file) => Self::open_encoded_unprimed(
+                path,
+                file,
+                buffer_len,
+                decoder_hint,
+                ffmpeg_enabled,
+                descriptive,
+                cancelled,
+            ),
+            #[cfg(feature = "midi")]
+            FileKind::Midi(identity, sequence) => {
+                let info = sequence.info(path, true);
+                Ok(Self::from_midi(
+                    identity,
+                    info,
+                    midi::MidiSource::new(sequence),
+                ))
             }
-            let identity = crate::source_identity(&file)?;
-            let sequence = midi::Sequence::read(file, true, cancelled)?;
-            check_cancelled(cancelled)?;
-            let info = sequence.info(path, true);
-            let midi = midi::MidiSource::new(sequence);
-            return Ok(Self::from_midi(identity, info, midi));
         }
-        Self::open_encoded_unprimed(
-            path,
-            file,
-            buffer_len,
-            decoder_hint,
-            ffmpeg_enabled,
-            descriptive,
-            cancelled,
-        )
     }
 
     fn open_encoded_unprimed(
@@ -3896,9 +3963,9 @@ pub(super) mod tests {
                 .collect_pcm(file.path(), None, hint, &cancelled)
                 .unwrap();
             assert_eq!(frame.duration, Some(2.0));
-            let mut source = Source::open_file_unprimed(
+            let mut source = Source::open_input_unprimed(
                 file.path(),
-                open_regular_file(file.path()).unwrap(),
+                FileInput::read_path(file.path(), hint, None).unwrap(),
                 PROBE_BUFFER_LEN,
                 hint,
                 true,
@@ -4062,9 +4129,9 @@ pub(super) mod tests {
         file.write_all(&frames).unwrap();
         file.write_all(&std::fs::read(audio.path()).unwrap())
             .unwrap();
-        let mut source = Source::open_file_unprimed(
+        let mut source = Source::open_input_unprimed(
             file.path(),
-            open_regular_file(file.path()).unwrap(),
+            FileInput::read_path(file.path(), DecoderHint::Auto, None).unwrap(),
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
@@ -4175,9 +4242,9 @@ pub(super) mod tests {
         let original = crate::source_identity(&file).unwrap();
         let replacement = crate::source_identity(&open_regular_file(&path).unwrap()).unwrap();
         assert_ne!(original, replacement);
-        let mut source = Source::open_file_unprimed(
+        let mut source = Source::open_input_unprimed(
             &path,
-            file,
+            FileInput::read_file(file, DecoderHint::Auto, None).unwrap(),
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,

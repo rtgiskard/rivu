@@ -1,12 +1,14 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
+#[cfg(feature = "midi")]
+use super::source::{FileLoad, FileLoader};
 use super::{
     AudioCommand, AudioEvent, AudioFailureKind, AudioShutdownReceiver, AudioSnapshot,
     PlaybackMetadata, QueuedAudioCommand,
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
-    source::{Source, SourceSelection},
+    source::{FileInput, Source, SourceSelection},
 };
 use crate::capture::PcmControl;
 use anyhow::anyhow;
@@ -82,11 +84,20 @@ impl CommandInbox {
     }
 }
 
-// Only the worker owns an unfinished source. No output or lifecycle event is
-// published until its selected opening has completed in finite decode rounds.
+#[derive(Default)]
+enum OpeningInput {
+    #[default]
+    File,
+    Pcm(super::PcmAudio),
+    #[cfg(feature = "midi")]
+    Loading(FileLoad),
+}
+
+// Only the worker owns an unfinished decoder and can commit its opening.
+// A file intake result is private to this opening, even if two use the same path.
 struct Opening {
     path: PathBuf,
-    pcm: Option<super::PcmAudio>,
+    input: OpeningInput,
     range: Option<super::PlaybackRange>,
     decoder_hint: DecoderHint,
     generation: u64,
@@ -103,13 +114,41 @@ struct Opening {
 }
 
 impl Opening {
-    fn poll(&mut self, buffer_len: usize, ffmpeg_enabled: bool) -> anyhow::Result<bool> {
+    fn poll(
+        &mut self,
+        buffer_len: usize,
+        ffmpeg_enabled: bool,
+        #[cfg(feature = "midi")] file_loader: &FileLoader,
+    ) -> anyhow::Result<bool> {
         if self.source.is_none() {
-            self.source = Some(if let Some(pcm) = self.pcm.take() {
+            let source = if matches!(self.input, OpeningInput::Pcm(_)) {
+                let OpeningInput::Pcm(pcm) = std::mem::take(&mut self.input) else {
+                    unreachable!();
+                };
                 Source::from_pcm(pcm, self.start)?
             } else {
-                let source = Source::begin_open(
+                #[cfg(feature = "midi")]
+                let input = match &mut self.input {
+                    OpeningInput::Loading(load) => match load.poll()? {
+                        Some(input) => input,
+                        None => return Ok(false),
+                    },
+                    OpeningInput::File => {
+                        let path = self.path.clone();
+                        let hint = self.decoder_hint;
+                        self.input =
+                            OpeningInput::Loading(file_loader.start(move |cancelled| {
+                                FileInput::read_path(&path, hint, Some(cancelled))
+                            })?);
+                        return Ok(false);
+                    }
+                    OpeningInput::Pcm(_) => unreachable!(),
+                };
+                #[cfg(not(feature = "midi"))]
+                let input = FileInput::read_path(&self.path, self.decoder_hint, None)?;
+                let source = Source::begin_open_from_input(
                     &self.path,
+                    input,
                     buffer_len,
                     self.decoder_hint,
                     ffmpeg_enabled,
@@ -126,7 +165,9 @@ impl Opening {
                     );
                 }
                 source
-            });
+            };
+            self.input = OpeningInput::File;
+            self.source = Some(source);
         }
         if let Some((seconds, _)) = self.pending_seek {
             self.source.as_mut().unwrap().seek(seconds)?;
@@ -136,9 +177,18 @@ impl Opening {
         self.source.as_mut().unwrap().poll_open()
     }
 
+    #[cfg(feature = "midi")]
+    fn opening_wait(&self) -> Option<&Receiver<()>> {
+        if let OpeningInput::Loading(load) = &self.input {
+            Some(load.ready())
+        } else {
+            self.source.as_ref().and_then(Source::opening_wait)
+        }
+    }
+
     fn uses_ffmpeg(&self) -> bool {
         self.source.as_ref().map_or(
-            self.pcm.is_none() && self.decoder_hint == DecoderHint::Ffmpeg,
+            !matches!(self.input, OpeningInput::Pcm(_)) && self.decoder_hint == DecoderHint::Ffmpeg,
             Source::uses_ffmpeg,
         )
     }
@@ -152,6 +202,8 @@ pub(super) struct Worker {
     analyzer: Arc<PcmControl>,
     playback: Option<Playback>,
     opening: Option<Opening>,
+    #[cfg(feature = "midi")]
+    file_loader: FileLoader,
     device: Option<String>,
     volume: f32,
     speed: super::PlaybackSpeed,
@@ -190,6 +242,8 @@ impl Worker {
             analyzer,
             playback: None,
             opening: None,
+            #[cfg(feature = "midi")]
+            file_loader: FileLoader::default(),
             device: None,
             volume: 0.7,
             speed: super::PlaybackSpeed::NORMAL,
@@ -380,7 +434,7 @@ impl Worker {
                 self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
-                    pcm,
+                    input: pcm.map_or(OpeningInput::File, OpeningInput::Pcm),
                     range,
                     decoder_hint,
                     generation,
@@ -413,7 +467,7 @@ impl Worker {
                 self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
-                    pcm,
+                    input: pcm.map_or(OpeningInput::File, OpeningInput::Pcm),
                     range,
                     decoder_hint,
                     generation,
@@ -441,7 +495,7 @@ impl Worker {
                 self.seek_revision = 0;
                 self.opening = Some(Opening {
                     path,
-                    pcm: None,
+                    input: OpeningInput::File,
                     range,
                     decoder_hint,
                     generation,
@@ -600,7 +654,12 @@ impl Worker {
             return;
         };
         let generation = opening.generation;
-        let result = opening.poll(self.media_read_buffer_len, self.ffmpeg_enabled);
+        let result = opening.poll(
+            self.media_read_buffer_len,
+            self.ffmpeg_enabled,
+            #[cfg(feature = "midi")]
+            &self.file_loader,
+        );
         // Shutdown may disconnect during a single, non-interruptible backend
         // call. Do not create output or publish completion after cancellation.
         if matches!(
@@ -671,7 +730,9 @@ impl Worker {
             }
             Err(error)
                 if error.is::<super::SeekRejected>()
-                    && self.opening.as_ref().unwrap().pending_seek.is_some() =>
+                    && self.opening.as_ref().is_some_and(|opening| {
+                        opening.source.is_some() && opening.pending_seek.is_some()
+                    }) =>
             {
                 let (_, revision) = self.opening.as_mut().unwrap().pending_seek.take().unwrap();
                 self.reject_seek(revision, error);
@@ -716,13 +777,19 @@ impl Worker {
                 return;
             }
             if self.opening.is_some() {
+                // A later command may retire this opening. Do not start or
+                // collect file intake until queued control work catches up.
+                #[cfg(feature = "midi")]
+                if self.commands.has_ready()
+                    && self.opening.as_ref().is_some_and(|opening| {
+                        opening.source.is_none() && !matches!(opening.input, OpeningInput::Pcm(_))
+                    })
+                {
+                    continue;
+                }
                 self.poll_opening();
                 #[cfg(feature = "midi")]
-                if let Some(ready) = self
-                    .opening
-                    .as_ref()
-                    .and_then(|opening| opening.source.as_ref())
-                    .and_then(Source::opening_wait)
+                if let Some(ready) = self.opening.as_ref().and_then(Opening::opening_wait)
                     && !self.commands.has_ready()
                 {
                     select! {
@@ -894,6 +961,18 @@ mod tests {
     use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
     use futures::channel::oneshot;
+
+    fn poll_after_file_intake(worker: &mut Worker) {
+        worker.poll_opening();
+        #[cfg(feature = "midi")]
+        if let Some(OpeningInput::Loading(load)) = worker.opening.as_ref().map(|o| &o.input) {
+            assert_eq!(
+                load.ready().recv_timeout(Duration::from_secs(5)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+            );
+            worker.poll_opening();
+        }
+    }
 
     #[test]
     fn replaygain_live_updates_preserve_master_volume_and_clear_missing_values() {
@@ -1121,7 +1200,7 @@ mod tests {
             DecoderHint::Auto,
             72,
         );
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(matches!(
             events.try_recv(),
             Ok(AudioEvent::Failed {
@@ -1141,7 +1220,7 @@ mod tests {
         let (mut worker, _commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 74);
         worker.ffmpeg_enabled = false;
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(matches!(
             events.try_recv(),
             Ok(AudioEvent::Failed {
@@ -1169,7 +1248,7 @@ mod tests {
                 });
             }
             load_prefix(&mut worker, file.path(), DecoderHint::Native, 73);
-            worker.poll_opening();
+            poll_after_file_intake(&mut worker);
             assert!(matches!(
                 events.try_recv(),
                 Ok(AudioEvent::Failed {
@@ -1199,13 +1278,220 @@ mod tests {
     }
 
     #[cfg(feature = "midi")]
+    fn midi_file() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x04\0\xff\x2f\0",
+        )
+        .unwrap();
+        file
+    }
+
+    #[cfg(feature = "midi")]
+    fn hold_midi_intake(
+        worker: &mut Worker,
+        path: &std::path::Path,
+        generation: u64,
+    ) -> (crossbeam_channel::Sender<()>, Receiver<()>) {
+        load_prefix(worker, path, DecoderHint::Auto, generation);
+        let path = path.to_owned();
+        let (entered, waiting) = bounded(0);
+        let (release, wait) = bounded::<()>(0);
+        let load = worker
+            .file_loader
+            .start(move |_| {
+                // Hold a valid result across cancellation, as can happen if a
+                // non-interruptible read or parse finishes just after retirement.
+                let input = FileInput::read_path(&path, DecoderHint::Auto, None)?;
+                let _ = entered.send(());
+                let _ = wait.recv();
+                Ok(input)
+            })
+            .unwrap();
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ready = load.ready().clone();
+        worker.opening.as_mut().unwrap().input = OpeningInput::Loading(load);
+        (release, ready)
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn stop_and_replacement_do_not_wait_for_old_midi_intake() {
+        let file = midi_file();
+        let missing = tempfile::tempdir().unwrap();
+        for stop_first in [false, true] {
+            let (mut worker, mut engine) = admitted_worker();
+            let (release, old_ready) = hold_midi_intake(&mut worker, file.path(), 75);
+            (engine.command_wake, worker.commands_ready) = bounded(1);
+            engine.worker = Some(std::thread::spawn(move || worker.run()));
+
+            if stop_first {
+                let mut stop = engine.stop_request();
+                let stopped = futures::executor::block_on(stop.wait(|event| {
+                    assert!(matches!(event, AudioEvent::DecoderStopped { .. }));
+                }))
+                .unwrap();
+                assert_eq!(stopped.generation, 75);
+                engine.restore_events(stop.into_events());
+            }
+            engine
+                .send(AudioCommand::Load {
+                    path: missing.path().join("replacement.wav"),
+                    range: None,
+                    decoder_hint: DecoderHint::Native,
+                    metadata: Arc::default(),
+                    generation: 76,
+                    start_seconds: 0.0,
+                    paused: false,
+                })
+                .unwrap();
+            let event = futures::executor::block_on(async {
+                let event = engine.events.as_ref().unwrap().recv().fuse();
+                let deadline = async_io::Timer::after(Duration::from_secs(5)).fuse();
+                futures::pin_mut!(event, deadline);
+                futures::select! {
+                    event = event => event.unwrap(),
+                    _ = deadline => panic!("replacement waited for the old MIDI intake"),
+                }
+            });
+            assert!(matches!(
+                event,
+                AudioEvent::Failed {
+                    generation: 76,
+                    kind: AudioFailureKind::Source,
+                    ..
+                }
+            ));
+            assert_eq!(
+                old_ready.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            );
+
+            drop(release);
+            assert_eq!(
+                old_ready.recv_timeout(Duration::from_secs(5)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+            );
+            let mut stop = engine.stop_request();
+            let stopped = futures::executor::block_on(stop.wait(|event| {
+                assert!(matches!(event, AudioEvent::DecoderStopped { .. }));
+            }))
+            .unwrap();
+            assert_eq!(stopped.generation, 76);
+            engine.restore_events(stop.into_events());
+        }
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn retired_midi_intakes_hold_their_slots_until_they_finish() {
+        let file = midi_file();
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let (first, first_ready) = hold_midi_intake(&mut worker, file.path(), 75);
+        let (second, second_ready) = hold_midi_intake(&mut worker, file.path(), 76);
+        let missing = tempfile::tempdir().unwrap();
+        let path = missing.path().join("replacement.wav");
+        load_prefix(&mut worker, &path, DecoderHint::Native, 77);
+        worker.poll_opening();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed {
+                generation: 77,
+                kind: AudioFailureKind::Other,
+                ..
+            })
+        ));
+        assert!(worker.opening.is_none());
+
+        drop(first);
+        assert_eq!(
+            first_ready.recv_timeout(Duration::from_secs(5)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        load_prefix(&mut worker, &path, DecoderHint::Native, 78);
+        poll_after_file_intake(&mut worker);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed {
+                generation: 78,
+                kind: AudioFailureKind::Source,
+                ..
+            })
+        ));
+        assert_eq!(
+            second_ready.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        );
+        drop(second);
+        assert_eq!(
+            second_ready.recv_timeout(Duration::from_secs(5)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        assert!(events.is_empty());
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn file_intake_keeps_the_admitted_object_and_latest_seek() {
+        use std::os::unix::fs::symlink;
+
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let file = crate::source::opening_prefix_file(1024, true);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("alias.mka");
+        symlink(file.path(), &path).unwrap();
+        let identity = crate::source_identity(file.as_file()).unwrap();
+        load_prefix(&mut worker, &path, DecoderHint::Native, 79);
+        worker.poll_opening();
+        let opening = worker.opening.as_ref().unwrap();
+        assert!(opening.source.is_none());
+        assert_eq!(
+            opening
+                .opening_wait()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+
+        // Delete the alias, not its target: the queued result must hand off
+        // the same descriptor, without reopening the original pathname.
+        std::fs::remove_file(path).unwrap();
+        let target = 1.0 / 8000.0;
+        for (seconds, revision) in [(0.0, 1), (target, 2)] {
+            worker.command(AudioCommand::Seek { seconds, revision });
+        }
+        // The seek can reach the selected packet in its first decode round.
+        // Keep the source here rather than committing to a real audio device.
+        let opening = worker.opening.as_mut().unwrap();
+        let mut opened = false;
+        for _ in 0..64 {
+            if opening.poll(65_536, false, &worker.file_loader).unwrap() {
+                opened = true;
+                break;
+            }
+        }
+        assert!(opened, "finite fixture must finish opening");
+        let source = opening.source.as_mut().unwrap();
+        assert_eq!(source.identity(), identity);
+        let mut budget = crate::source::DECODE_WORK_BUDGET;
+        let crate::source::DecodeStep::Frames(span) =
+            source.next_frames_with_budget(&mut budget).unwrap()
+        else {
+            panic!("deferred seek must retain the selected PCM");
+        };
+        assert!((span.media_start - target).abs() < 1e-9);
+        assert_eq!(span.samples, [-0.5]);
+        assert_eq!(opening.start, target);
+        assert!(opening.pending_seek.is_none());
+        assert_eq!(worker.seek_revision, 2);
+        assert!(events.is_empty());
+    }
+
+    #[cfg(feature = "midi")]
     #[test]
     fn stop_acknowledges_a_midi_open_before_the_shared_bank_has_loaded() {
-        use std::io::Write;
-
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x04\0\xff\x2f\0")
-            .unwrap();
+        let file = midi_file();
         let (source, release) = Source::stalled_midi_for_test(file.path());
         let bank_ready = source.opening_wait().unwrap().clone();
         let (mut worker, mut engine) = admitted_worker();
@@ -1606,7 +1892,7 @@ mod tests {
             assert_eq!(opened.info().sample_rate, 8_000);
             assert_eq!(opened.info().channels, 1);
             assert_ne!(opened.identity(), expected_identity);
-            worker.poll_opening();
+            poll_after_file_intake(&mut worker);
             assert!(worker.opening.is_none());
             assert!(worker.playback.is_none());
             let event = events.try_recv().unwrap();
@@ -1660,7 +1946,16 @@ mod tests {
             ),
         });
         let opening = worker.opening.as_mut().unwrap();
-        assert!(opening.poll(65536, false).unwrap());
+        assert!(
+            opening
+                .poll(
+                    65536,
+                    false,
+                    #[cfg(feature = "midi")]
+                    &worker.file_loader,
+                )
+                .unwrap()
+        );
         let source = opening.source.as_ref().unwrap();
         assert_ne!(source.identity(), admitted);
         assert_eq!(source.identity(), identity);
@@ -1726,9 +2021,27 @@ mod tests {
         });
         let opening = worker.opening.as_mut().unwrap();
         assert!(!opening.uses_ffmpeg());
-        assert!(opening.poll(65536, false).unwrap());
+        assert!(
+            opening
+                .poll(
+                    65536,
+                    false,
+                    #[cfg(feature = "midi")]
+                    &worker.file_loader,
+                )
+                .unwrap()
+        );
         assert!(!opening.uses_ffmpeg());
-        assert!(opening.poll(65536, false).unwrap());
+        assert!(
+            opening
+                .poll(
+                    65536,
+                    false,
+                    #[cfg(feature = "midi")]
+                    &worker.file_loader,
+                )
+                .unwrap()
+        );
         let source = opening.source.as_mut().unwrap();
         assert_eq!(source.info().sample_rate, 8000);
         assert_eq!(source.info().channels, 1);
@@ -1775,7 +2088,7 @@ mod tests {
             worker.command(AudioCommand::Pause(true));
             for create_source in [false, true] {
                 if create_source {
-                    worker.poll_opening();
+                    poll_after_file_intake(&mut worker);
                 }
                 for target in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64] {
                     worker.command(AudioCommand::Seek {
@@ -1810,7 +2123,15 @@ mod tests {
             assert!(opening.paused);
             let mut opened = false;
             for _ in 0..64 {
-                if opening.poll(65_536, hint == DecoderHint::Ffmpeg).unwrap() {
+                if opening
+                    .poll(
+                        65_536,
+                        hint == DecoderHint::Ffmpeg,
+                        #[cfg(feature = "midi")]
+                        &worker.file_loader,
+                    )
+                    .unwrap()
+                {
                     opened = true;
                     break;
                 }
@@ -1841,7 +2162,7 @@ mod tests {
                 load_prefix(&mut worker, file.path(), hint, 41);
                 worker.command(AudioCommand::Pause(true));
                 if create_source {
-                    worker.poll_opening();
+                    poll_after_file_intake(&mut worker);
                 }
                 worker.command(AudioCommand::Seek {
                     seconds: 1e16,
@@ -1850,7 +2171,7 @@ mod tests {
                 if !create_source {
                     assert!(events.is_empty());
                     assert_eq!(worker.opening.as_ref().unwrap().start, 0.0);
-                    worker.poll_opening();
+                    poll_after_file_intake(&mut worker);
                 }
                 let opening = worker
                     .opening
@@ -1999,7 +2320,7 @@ mod tests {
             let file = crate::source::opening_prefix_file(1024, true);
             let (mut worker, _commands, events, _shutdown) = opening_worker();
             load_prefix(&mut worker, file.path(), hint, 41);
-            worker.poll_opening();
+            poll_after_file_intake(&mut worker);
             assert!(events.is_empty());
             let target = 1.0 / 8000.0;
             worker.command(AudioCommand::Seek {
@@ -2010,7 +2331,15 @@ mod tests {
             let opening = worker.opening.as_mut().unwrap();
             let mut opened = false;
             for _ in 0..64 {
-                if opening.poll(65_536, hint == DecoderHint::Ffmpeg).unwrap() {
+                if opening
+                    .poll(
+                        65_536,
+                        hint == DecoderHint::Ffmpeg,
+                        #[cfg(feature = "midi")]
+                        &worker.file_loader,
+                    )
+                    .unwrap()
+                {
                     opened = true;
                     break;
                 }
@@ -2039,7 +2368,7 @@ mod tests {
         let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(worker.opening.as_ref().unwrap().source.is_some());
 
         let edited = Arc::new(PlaybackMetadata {
@@ -2108,7 +2437,7 @@ mod tests {
         assert!(opening.paused);
         assert!(opening.source.is_none());
         assert!(Arc::ptr_eq(&opening.metadata, &replacement));
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(worker.opening.as_ref().unwrap().source.is_some());
         assert!(events.is_empty());
 
@@ -2129,7 +2458,7 @@ mod tests {
             for expired in [false, true] {
                 let (mut worker, commands, events, _shutdown) = opening_worker();
                 load_prefix(&mut worker, file.path(), hint, 41);
-                worker.poll_opening();
+                poll_after_file_intake(&mut worker);
                 assert!(worker.opening.is_some());
                 let (wake, _ready) = bounded(1);
                 let mut stop =
@@ -2176,7 +2505,7 @@ mod tests {
         load_prefix(&mut worker, valid.path(), DecoderHint::Native, 40);
         worker.stop();
         load_prefix(&mut worker, invalid.path(), DecoderHint::Native, 41);
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(matches!(
             events.try_recv(),
             Ok(AudioEvent::Failed {
@@ -2205,7 +2534,7 @@ mod tests {
         for hint in opening_hints() {
             let (mut worker, commands, events, _shutdown) = opening_worker();
             load_prefix(&mut worker, old.path(), hint, 41);
-            worker.poll_opening();
+            poll_after_file_intake(&mut worker);
             assert!(worker.opening.is_some());
             commands
                 .try_send(QueuedAudioCommand::test_unfenced(AudioCommand::Load {
@@ -2219,7 +2548,7 @@ mod tests {
                 }))
                 .unwrap();
             assert!(worker.control_round());
-            worker.poll_opening();
+            poll_after_file_intake(&mut worker);
             assert!(matches!(
                 events.try_recv(),
                 Ok(AudioEvent::Failed {
@@ -2241,7 +2570,7 @@ mod tests {
             for disconnect in [false, true] {
                 let (mut worker, commands, events, shutdown) = opening_worker();
                 load_prefix(&mut worker, file.path(), hint, 41);
-                worker.poll_opening();
+                poll_after_file_intake(&mut worker);
                 assert!(worker.opening.is_some());
                 if disconnect {
                     drop(shutdown);
@@ -2263,7 +2592,7 @@ mod tests {
         let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(worker.opening.is_some());
         commands
             .try_send(QueuedAudioCommand::test_unfenced(
@@ -2320,7 +2649,7 @@ mod tests {
         let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 41);
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(worker.opening.is_some());
         commands
             .try_send(QueuedAudioCommand::test_unfenced(
@@ -3022,7 +3351,7 @@ mod tests {
             paused: true,
             listened_seconds: 12.5,
         });
-        worker.poll_opening();
+        poll_after_file_intake(&mut worker);
         assert!(worker.opening.is_some(), "{:?}", events.try_recv());
         // Cancel an actual retained decoder after an in-range seek, before the
         // next opening poll can publish playback/output.
