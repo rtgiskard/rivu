@@ -812,9 +812,6 @@ fn processing_input_help(label: &str) -> Option<&'static str> {
         };
     }
     help_ids!(
-        "processing-preset-name",
-        "processing-vocal-gain",
-        "processing-accompaniment-gain",
         "processing-strength",
         "processing-spectral-gain-floor",
         "processing-attack",
@@ -836,8 +833,6 @@ fn processing_input_help(label: &str) -> Option<&'static str> {
         "processing-speech-attenuation",
         "processing-separation-overlap",
         "processing-graph-taps",
-        "processing-export-compression",
-        "processing-export-bitrate",
         "processing-graph-input-gain",
     )
 }
@@ -1234,10 +1229,14 @@ impl AudioProcessing {
         text: String,
         cx: &mut Context<Self>,
     ) -> Entity<Input> {
-        let placeholder = self
-            .field_placeholder(key)
-            .unwrap_or_else(|| label.to_owned().into());
-        cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx))
+        let placeholder = if key == FieldKey::ExportRate {
+            SharedString::default()
+        } else {
+            self.field_placeholder(key)
+                .unwrap_or_else(|| label.to_owned().into())
+        };
+        let help = self.field_help(key);
+        cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx).with_help(help))
     }
 
     fn field_placeholder(&self, key: FieldKey) -> Option<SharedString> {
@@ -1245,17 +1244,7 @@ impl AudioProcessing {
             FieldKey::Neural(field) => field.path_placeholder()?,
             FieldKey::PresetPath => "processing-preset-path-placeholder",
             FieldKey::ExportPath => "processing-export-path-placeholder",
-            FieldKey::ExportRate => "processing-export-rate-help",
             FieldKey::Graph(binding) => binding.field.path_placeholder()?,
-            _ => return None,
-        };
-        Some(self.tr(id))
-    }
-
-    fn path_help(&self, key: FieldKey) -> Option<SharedString> {
-        let id = match key {
-            FieldKey::Neural(field) => field.path_help()?,
-            FieldKey::Graph(binding) => binding.field.path_help()?,
             _ => return None,
         };
         Some(self.tr(id))
@@ -1502,12 +1491,27 @@ impl AudioProcessing {
         input
     }
 
-    fn field_help(&self, key: FieldKey, label_id: &str) -> Option<SharedString> {
-        if key == FieldKey::ExportRate {
-            return self.field_placeholder(key);
-        }
-        self.path_help(key)
-            .or_else(|| processing_input_help(label_id).map(|id| self.tr(id)))
+    fn field_help(&self, key: FieldKey) -> Option<SharedString> {
+        let id = match key {
+            FieldKey::Denoise(field) => processing_input_help(field.label_id()),
+            FieldKey::Neural(field) => field
+                .path_help()
+                .or_else(|| processing_input_help(field.label_id())),
+            FieldKey::Graph(binding) => binding
+                .field
+                .path_help()
+                .or_else(|| processing_input_help(binding.field.label())),
+            FieldKey::PresetName => Some("processing-preset-name-input-help"),
+            FieldKey::ProfileStart => Some("processing-profile-start-input-help"),
+            FieldKey::ProfileEnd => Some("processing-profile-end-input-help"),
+            FieldKey::VocalGain => Some("processing-vocal-gain-input-help"),
+            FieldKey::AccompanimentGain => Some("processing-accompaniment-gain-input-help"),
+            FieldKey::ExportRate => Some("processing-export-rate-help"),
+            FieldKey::ExportBitrate => Some("processing-export-bitrate-input-help"),
+            FieldKey::ExportCompression => Some("processing-export-compression-input-help"),
+            FieldKey::PresetPath | FieldKey::ExportPath => None,
+        }?;
+        Some(self.tr(id))
     }
 
     fn field_view(
@@ -1520,16 +1524,19 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let label = self.tr(label_id);
         let input = self.field_input(panel, key, &label, cx);
+        let hint = if key == FieldKey::ExportRate {
+            None
+        } else {
+            self.field_help(key)
+        };
         self.parameter_row(
             theme,
             SharedString::from(format!("field-label-{key:?}")),
             label,
-            div()
-                .id(SharedString::from(format!("field-input-{key:?}")))
-                .when_some(self.field_help(key, label_id), |view, help| {
-                    view.tooltip(rivu_ui::text_tooltip(help))
-                })
-                .child(input),
+            column()
+                .gap_1()
+                .child(input)
+                .when_some(hint, |view, help| view.child(caption(theme, help))),
         )
     }
 
@@ -2387,16 +2394,14 @@ impl AudioProcessing {
             cx,
         );
         if speech {
+            let help = self.tr("processing-speech-post-filter-help");
             parameters = parameters.child(
                 self.parameter_row(
                     theme,
                     "speech-post-filter-label",
                     self.tr("processing-speech-post-filter"),
-                    div()
-                        .id("speech-post-filter-control")
-                        .tooltip(rivu_ui::text_tooltip(
-                            self.tr("processing-speech-post-filter-help"),
-                        ))
+                    column()
+                        .gap_1()
                         .child(
                             checkbox(
                                 "neural.speech_post_filter",
@@ -2414,8 +2419,11 @@ impl AudioProcessing {
                                 },
                             )
                             .debug_selector(|| "speech-post-filter".to_owned())
-                            .aria_label(self.tr("processing-speech-post-filter")),
-                        ),
+                            .aria_label(self.tr("processing-speech-post-filter"))
+                            .aria_description(help.clone())
+                            .tooltip(rivu_ui::text_tooltip(help.clone())),
+                        )
+                        .child(caption(theme, help)),
                 ),
             );
         }

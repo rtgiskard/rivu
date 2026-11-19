@@ -481,11 +481,7 @@ impl AudioProcessing {
         let target = self.inspector_input(panel, binding.node);
         let label = self.graph_parameter_label(descriptor);
         let dirty = self.fields[&key].dirty;
-        let label = if dirty {
-            format!("{label} · {}", self.tr("processing-draft"))
-        } else {
-            label
-        };
+        let help = self.field_help(key);
         let text = self.text(key, cx);
         let choices = descriptor.choices();
         let control = if descriptor == GraphField::Denoise(DenoiseField::FftSize) {
@@ -531,6 +527,10 @@ impl AudioProcessing {
                     }
                 },
             )
+            .when_some(help.clone(), |view, help| {
+                view.aria_description(help.clone())
+                    .tooltip(rivu_ui::text_tooltip(help))
+            })
             .into_any_element()
         } else {
             let input = self.field_input(panel, key, &label, cx);
@@ -576,16 +576,17 @@ impl AudioProcessing {
             }
             editor.into_any_element()
         };
-        let control = div()
-            .id(SharedString::from(format!(
-                "graph-input-help-{panel}-{key:?}"
-            )))
-            .when_some(self.field_help(key, descriptor.label()), |view, help| {
-                view.tooltip(rivu_ui::text_tooltip(help))
-            })
-            .child(control);
+        let label = if dirty {
+            format!("{label} · {}", self.tr("processing-draft"))
+        } else {
+            label
+        };
         let apply_key = key;
-        let mut field = FormField::new(theme, label, control).action(disabled_control(
+        let mut field = FormField::new(theme, label, control);
+        if let Some(help) = help {
+            field = field.hint(help);
+        }
+        field = field.action(disabled_control(
             theme,
             crate::gui::appearance::material::button(
                 SharedString::from(format!("graph-apply-{panel}-{key:?}")),

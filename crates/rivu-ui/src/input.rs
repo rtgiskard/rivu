@@ -91,6 +91,7 @@ pub struct Input {
     focus_handle: FocusHandle,
     enabled: bool,
     name: SharedString,
+    help: Option<SharedString>,
     accessibility: Rc<RefCell<InputAccessibility>>,
     content: SharedString,
     placeholder: SharedString,
@@ -134,6 +135,7 @@ impl Input {
             focus_handle: cx.focus_handle().tab_stop(true),
             enabled: true,
             name: name.into(),
+            help: None,
             accessibility: Rc::default(),
             content,
             placeholder: placeholder.into(),
@@ -150,6 +152,12 @@ impl Input {
             last_bounds: None,
             selection_subscriptions: None,
         }
+    }
+
+    /// Adds a hover hint and accessible description without changing the name, value or placeholder.
+    pub fn with_help(mut self, help: Option<SharedString>) -> Self {
+        self.help = help;
+        self
     }
 
     /// Reserve room for an overlaid trailing control without overlapping text.
@@ -1140,6 +1148,10 @@ impl Render for Input {
             .role(Role::TextInput)
             .aria_label(self.name.clone())
             .aria_value(self.content.clone())
+            .when_some(self.help.clone(), |view, help| {
+                view.aria_description(help.clone())
+                    .tooltip(crate::text_tooltip(help))
+            })
             .a11y_synthetic_children(move |builder| {
                 let mut accessibility = accessibility.borrow_mut();
                 let run_id = builder.synthetic_node_id("text");
@@ -1366,6 +1378,27 @@ mod tests {
         })
         .unwrap();
         (input, other, handle)
+    }
+
+    #[gpui::test]
+    fn input_help_is_a_description_not_its_name_or_value(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let handle = cx.add_window(|_, _| gpui::Empty);
+        let input = cx.new(|cx| {
+            Input::new("Reduction attack", "12", "", cx).with_help(Some("0…2000 ms".into()))
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            input.update(cx, |input, cx| {
+                let element = input.render(window, cx).into_element();
+                let mut node = Node::new(element.a11y_role().unwrap());
+                element.write_a11y_info(&mut node);
+                assert_eq!(node.role(), Role::TextInput);
+                assert_eq!(node.label(), Some("Reduction attack"));
+                assert_eq!(node.value(), Some("12"));
+                assert_eq!(node.description(), Some("0…2000 ms"));
+            });
+        })
+        .unwrap();
     }
 
     #[test]

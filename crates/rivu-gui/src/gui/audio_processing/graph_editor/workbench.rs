@@ -757,11 +757,20 @@ impl AudioProcessing {
     ) -> Stateful<Div> {
         let open = self.graph_editor.workbench_menu == Some((panel, menu))
             && self.graph_editor.workbench_choices.is_open();
-        let hint = self.tr(match menu {
-            WorkbenchMenu::Add => "processing-workspace-add-node",
-            WorkbenchMenu::Mode => "processing-workspace-mode-help",
-            WorkbenchMenu::Fft => "processing-fft",
-        });
+        let (name, hint) = match menu {
+            WorkbenchMenu::Add => (label.clone(), None),
+            WorkbenchMenu::Mode => {
+                let hint = self.tr("processing-workspace-mode-help");
+                (hint.clone(), Some(hint))
+            }
+            WorkbenchMenu::Fft => {
+                let field = DenoiseField::FftSize;
+                (
+                    self.tr(field.label_id()),
+                    self.field_help(FieldKey::Denoise(field)),
+                )
+            }
+        };
         let measured = Rc::clone(&self.graph_editor.workbench.menu_bounds);
         let trigger_bounds = Rc::clone(&measured);
         let target = self.workbench_input(panel);
@@ -795,10 +804,10 @@ impl AudioProcessing {
             label,
         )
         .surface(crate::gui::appearance::material::surface(cx));
-        let select = if menu == WorkbenchMenu::Add {
-            select
+        let select = if let Some(hint) = hint {
+            select.with_hint(hint)
         } else {
-            select.with_hint(hint.clone())
+            select
         };
         select
             .build(
@@ -909,7 +918,7 @@ impl AudioProcessing {
             .w_auto()
             .flex_shrink_0()
             .relative()
-            .aria_label(hint)
+            .aria_label(name)
             .child(measure)
     }
 
@@ -1408,6 +1417,66 @@ mod tests {
             window.draw(cx).clear(cx);
         })
         .unwrap();
+    }
+
+    /// Isolate the real trigger so no ancestor hover hint can mask its behavior.
+    struct FftTrigger(Entity<AudioProcessing>);
+
+    impl Render for FftTrigger {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |this, cx| {
+                div().child(this.workbench_dropdown(PANEL, WorkbenchMenu::Fft, "1024".into(), cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn fft_trigger_exposes_the_constraint_as_hover_help_and_description(cx: &mut TestAppContext) {
+        const CONSTRAINT: &str = "power of two, 256…8192";
+        cx.executor().allow_parking();
+        let (_directory, _runtime, owner) = crate::gui::audio_processing::test_support::owner(
+            cx,
+            crate::gui::audio_processing::test_support::config(),
+        );
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let seen = seen.clone();
+            cx.observe_new::<rivu_ui::ButtonTooltip>(move |tooltip, _, _| {
+                seen.borrow_mut().push(tooltip.text.clone());
+            })
+        });
+        let window = cx.add_window(|_, _| FftTrigger(owner.clone()));
+        let handle = window.into();
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            let bounds = owner.read(cx).graph_editor.workbench.menu_bounds.get();
+            let position = bounds[WorkbenchMenu::Fft as usize].unwrap().center();
+            owner.update(cx, |this, cx| {
+                let trigger = this.workbench_dropdown(PANEL, WorkbenchMenu::Fft, "1024".into(), cx);
+                let mut node = gpui::accesskit::Node::new(trigger.a11y_role().unwrap());
+                trigger.write_a11y_info(&mut node);
+                assert_eq!(node.role(), Role::ComboBox);
+                assert_eq!(node.label(), Some("FFT size"));
+                assert_eq!(node.value(), Some("1024"));
+                assert_eq!(node.description(), Some(CONSTRAINT));
+            });
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let seen = seen.borrow();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|text| text.as_ref() == CONSTRAINT));
     }
 
     #[gpui::test]

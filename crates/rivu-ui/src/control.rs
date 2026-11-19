@@ -601,7 +601,8 @@ pub fn dropdown_trigger(
     dropdown_trigger_surface(theme, id, label.into(), expanded, None, surface, cx)
 }
 
-/// Explicit trigger information takes priority over truncated-label completion.
+/// Explicit trigger information is exposed as an accessible description and takes
+/// priority over truncated-label completion on hover.
 pub fn dropdown_trigger_with_hint(
     theme: &'static rivu_format::palette::Palette,
     id: impl Into<ElementId>,
@@ -640,7 +641,9 @@ fn dropdown_trigger_surface(
         .w_full()
         .gap_2()
         .when_some(hint.filter(|hint| !hint.is_empty()), |control, hint| {
-            control.tooltip(text_tooltip(hint))
+            control
+                .aria_description(hint.clone())
+                .tooltip(text_tooltip(hint))
         })
         .child(
             div()
