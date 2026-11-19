@@ -58,11 +58,7 @@ impl FileLoader {
             .name("rivu-audio-file".into())
             .spawn(move || {
                 let result = read(&load.cancelled);
-                if !load.cancelled.load(Ordering::Relaxed) {
-                    let _ = load.result.set(result);
-                } else {
-                    drop(result);
-                }
+                let _ = load.result.set(result);
                 drop(load);
                 drop(slot);
                 // No consumable message: readiness stays observable until the
@@ -104,7 +100,7 @@ impl FileLoad {
 impl Drop for FileLoad {
     fn drop(&mut self) {
         // This abandons the result, not the running syscall or its slot. The
-        // parser observes cancellation at its existing work checkpoints.
+        // reader and parser observe cancellation at their work checkpoints.
         self.state.cancelled.store(true, Ordering::Relaxed);
     }
 }

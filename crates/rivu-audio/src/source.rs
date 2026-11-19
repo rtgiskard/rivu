@@ -284,11 +284,10 @@ fn probe_open_file(
 ) -> Result<ProbeResult> {
     #[cfg(feature = "midi")]
     if midi::recognizes(&file).map_err(source_io_error)? {
-        let sequence = midi::Sequence::read(file, false, cancelled)?;
         return Ok(ProbeResult {
             probe_backend: AudioBackend::Native,
             decoder_backend: AudioBackend::Native,
-            info: sequence.info(path, false),
+            info: midi::probe(file, path, cancelled)?,
         });
     }
     let source = Source::open_encoded_unprimed(
@@ -508,7 +507,7 @@ pub(super) struct FileInput(FileKind);
 enum FileKind {
     Encoded(File),
     #[cfg(feature = "midi")]
-    Midi(SourceIdentity, midi::Sequence),
+    Midi(midi::Sequence),
 }
 
 impl FileInput {
@@ -535,10 +534,9 @@ impl FileInput {
                 return Err(anyhow!("MIDI requires the native synthesizer, not FFmpeg")
                     .context(SourceFailure));
             }
-            let identity = crate::source_identity(&file)?;
-            let sequence = midi::Sequence::read(file, true, cancelled)?;
+            let sequence = midi::Sequence::read(file, cancelled)?;
             check_cancelled(cancelled)?;
-            return Ok(Self(FileKind::Midi(identity, sequence)));
+            return Ok(Self(FileKind::Midi(sequence)));
         }
         #[cfg(not(feature = "midi"))]
         let _ = decoder_hint;
@@ -681,9 +679,9 @@ impl Source {
     #[cfg(all(test, feature = "midi"))]
     pub(super) fn stalled_midi_for_test(path: &Path) -> (Self, crossbeam_channel::Sender<()>) {
         let file = open_regular_file(path).unwrap();
-        let identity = crate::source_identity(&file).unwrap();
-        let sequence = midi::Sequence::read(file, true, None).unwrap();
-        let info = sequence.info(path, true);
+        let sequence = midi::Sequence::read(file, None).unwrap();
+        let identity = sequence.identity;
+        let info = sequence.info(path);
         let (midi, release) = midi::MidiSource::stalled_for_test(sequence);
         (Self::from_midi(identity, info, midi), release)
     }
@@ -838,10 +836,10 @@ impl Source {
                 cancelled,
             ),
             #[cfg(feature = "midi")]
-            FileKind::Midi(identity, sequence) => {
-                let info = sequence.info(path, true);
+            FileKind::Midi(sequence) => {
+                let info = sequence.info(path);
                 Ok(Self::from_midi(
-                    identity,
+                    sequence.identity,
                     info,
                     midi::MidiSource::new(sequence),
                 ))
@@ -1543,9 +1541,9 @@ impl Source {
     pub(super) fn opening_wait(&self) -> Option<&crossbeam_channel::Receiver<()>> {
         #[cfg(feature = "midi")]
         if let Decode::Midi(midi) = &self.decode {
-        None
             return midi.opening_wait();
         }
+        None
     }
 
     pub(super) fn disable_opening_fallback(&mut self) {
@@ -2503,6 +2501,116 @@ pub(super) mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn midi_probe_and_intake_use_the_admitted_file_after_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("admitted.mid");
+        std::fs::write(&path, midi::fixture::held_note()).unwrap();
+        let probe_descriptor = open_regular_file(&path).unwrap();
+        let intake_descriptor = open_regular_file(&path).unwrap();
+        std::fs::rename(&path, directory.path().join("original.mid")).unwrap();
+        std::fs::write(&path, b"not MIDI").unwrap();
+        let identity = source_identity(&intake_descriptor).unwrap();
+        let info = probe_file(&path, probe_descriptor, false).unwrap();
+        assert_eq!(info.duration, Some(2.0));
+        assert_eq!((info.sample_rate, info.channels), (0, 0));
+        let input = FileInput::read_file(intake_descriptor, DecoderHint::Native, None).unwrap();
+        let FileKind::Midi(sequence) = input.0 else {
+            panic!("admitted MIDI descriptor was not recognized")
+        };
+        assert_eq!(sequence.identity, identity);
+        let info = sequence.info(&path);
+        assert_eq!(info.duration, Some(2.0));
+        assert_eq!((info.sample_rate, info.channels), (48_000, 2));
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn midi_live_and_finite_render_share_pcm_cue_and_fixed_tail() {
+        let bytes = midi::fixture::held_note();
+        let open = |selection| {
+            midi::fixture::audio_source(&bytes)
+                .prime(selection, None)
+                .unwrap()
+        };
+        let mut live = open(SourceSelection::default());
+        let identity = live.identity();
+        assert_eq!(live.info().duration, Some(2.0));
+        assert_eq!((live.info().channels, live.info().sample_rate), (2, 48_000));
+        let expected = decode_remaining(&mut live);
+        assert_eq!(
+            expected.len(),
+            96_000 * 2,
+            "one second through EOT plus exactly one second of tail"
+        );
+        let cancelled = AtomicBool::new(false);
+        let mut finite = open(SourceSelection::default());
+        let rendered = finite
+            .collect_pcm(
+                Path::new("fixture.mid"),
+                None,
+                DecoderHint::Native,
+                &cancelled,
+            )
+            .unwrap();
+        assert_eq!(rendered.samples, expected);
+        assert_eq!(rendered.duration, Some(2.0));
+        assert_eq!(rendered.source_identity, Some(identity));
+
+        let start = 12_013;
+        let end = 42_017;
+        let selection = SourceSelection {
+            range: Some(crate::PlaybackRange {
+                start_seconds: start as f64 / 48_000.0,
+                end_seconds: Some(end as f64 / 48_000.0),
+            }),
+            start: 0.0,
+        };
+        let mut cue = open(selection);
+        let duration = end as f64 / 48_000.0 - start as f64 / 48_000.0;
+        assert_eq!(cue.info().duration, Some(duration));
+        assert_eq!(decode_remaining(&mut cue), expected[start * 2..end * 2]);
+        cue.seek(0.0).unwrap();
+        let rendered = cue
+            .collect_pcm(
+                Path::new("fixture.mid"),
+                None,
+                DecoderHint::Native,
+                &cancelled,
+            )
+            .unwrap();
+        assert_eq!(rendered.samples, expected[start * 2..end * 2]);
+        assert_eq!(rendered.duration, Some(duration));
+        cue.seek(duration).unwrap();
+        assert!(decode_remaining(&mut cue).is_empty());
+    }
+
+    #[cfg(feature = "midi")]
+    #[test]
+    fn midi_source_seek_uses_synthesized_cursor_and_preserves_eof() {
+        let bytes = midi::fixture::held_note();
+        let mut baseline = midi::fixture::audio_source(&bytes);
+        let expected = decode_remaining(&mut baseline);
+        let mut source = midi::fixture::audio_source(&bytes)
+            .prime(SourceSelection::default(), None)
+            .unwrap();
+        // The primed PCM is not consumed, but the synth has already advanced.
+        // A seek into that unread fragment must replay from a clean DSP state.
+        for frame in [503, 30_017, 4_019, 48_023, 96_000, 120_000, 12_029, 0] {
+            source.seek(frame as f64 / 48_000.0).unwrap();
+            assert_eq!(
+                decode_remaining(&mut source),
+                expected[(frame.min(96_000)) * 2..]
+            );
+            let mut budget = DECODE_WORK_BUDGET;
+            assert!(matches!(
+                source.next_frames_with_budget(&mut budget).unwrap(),
+                DecodeStep::Eof
+            ));
+        }
+    }
 
     #[test]
     fn retained_pcm_alias_reads_original_samples_after_lazy_buffer_creation() {
