@@ -19,6 +19,8 @@ pub struct AudioOutputState {
     pub stream: Arc<AudioStreamFormat>,
     pub sink: Option<Arc<str>>,
     pub remix_allowed: bool,
+    /// PipeWire playback stream property read after negotiation; not a device setting.
+    pub stream_resample_quality: Option<i32>,
     /// PipeWire graph clock observations, not the physical device format.
     pub graph_rate: Option<u32>,
     pub quantum_frames: Option<u32>,

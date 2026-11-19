@@ -38,6 +38,7 @@ fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
         }),
         sink: Some("test".into()),
         remix_allowed: false,
+        stream_resample_quality: None,
         graph_rate: None,
         quantum_frames: None,
         device_rate: None,

@@ -4,6 +4,19 @@ use rivu_protocol::model::AudioOutputState;
 
 /// Shared text presentation; all audio facts come from the runtime snapshot.
 pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, String)> {
+    let mut rows = Vec::with_capacity(20);
+    visit_output_fields(state, i18n, |key, value| {
+        rows.push((i18n.text(key).to_owned(), value));
+    });
+    rows
+}
+
+/// Visit formatted values with their localization keys, without imposing a layout.
+pub fn visit_output_fields(
+    state: &AudioOutputState,
+    i18n: &Localizer,
+    mut add: impl FnMut(&'static str, String),
+) {
     let unknown = i18n.text("audio-unknown");
     let on_off = |on| i18n.text(if on { "audio-on" } else { "audio-off" });
     let rate = |value: Option<u32>| value.map_or_else(|| unknown.to_owned(), |v| format!("{v} Hz"));
@@ -17,8 +30,6 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
     let ms = |frames: u64| frames as f64 * 1000.0 / f64::from(state.stream.sample_rate.max(1));
     let metrics = &state.metrics;
     let gain = &state.replaygain;
-    let mut rows = Vec::with_capacity(18);
-    let mut add = |key: &str, value: String| rows.push((i18n.text(key).to_owned(), value));
     add(
         "audio-source",
         format!(
@@ -63,10 +74,34 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
         format!(
             "{} · {}",
             rate(state.graph_rate),
-            state
-                .quantum_frames
-                .map_or_else(|| unknown.to_owned(), |v| format!("{v} frames"))
+            state.quantum_frames.map_or_else(
+                || unknown.to_owned(),
+                |frames| match state.graph_rate.filter(|&rate| rate > 0) {
+                    Some(rate) => format!(
+                        "{frames} frames ({:.2} ms)",
+                        f64::from(frames) * 1000.0 / f64::from(rate)
+                    ),
+                    None => format!("{frames} frames"),
+                },
+            )
         ),
+    );
+    let stream_rate = state.stream.sample_rate;
+    add(
+        "audio-stream-rate-conversion",
+        match state.graph_rate {
+            Some(graph_rate) if graph_rate == stream_rate => {
+                i18n.text("audio-matching-rates").to_owned()
+            }
+            Some(graph_rate) => format!("{stream_rate} → {graph_rate} Hz"),
+            None => unknown.to_owned(),
+        },
+    );
+    add(
+        "audio-stream-resample-quality",
+        state
+            .stream_resample_quality
+            .map_or_else(|| unknown.to_owned(), |quality| quality.to_string()),
     );
     add("audio-remix", on_off(state.remix_allowed).to_owned());
     add(
@@ -169,7 +204,6 @@ pub fn output_rows(state: &AudioOutputState, i18n: &Localizer) -> Vec<(String, S
             state.segment
         ),
     );
-    rows
 }
 
 /// Format the complete snapshot on demand, including rows outside the viewport.

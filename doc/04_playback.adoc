@@ -79,9 +79,14 @@ queue occurrence is selected; exiting the instance discards it.
 
 Details distinguish the actual decoded/audition source, applied processing and gain,
 negotiated application stream, connected PipeWire sink and permitted remixing.
-Graph clock observations are not physical-device parameters; unavailable hardware
-facts remain unknown. Permission to remix does not prove a remix occurred, and
-matching source/stream rates do not establish bit-perfect output.
+The PipeWire graph clock shows the quantum in frames and, when the rate is known,
+milliseconds. The stream-to-graph row compares the nominal rates: a mismatch
+shows the conversion direction, while equal rates do not establish bit-perfect
+output. Resampling quality is the `resample.quality` stream property read after
+negotiation, including client overrides; it is not a quality measurement and does
+not describe sink-side conversion. Graph clock observations are not physical-device
+parameters; unavailable hardware facts remain unknown. Permission to remix does
+not prove a remix occurred.
 
 Rivu supply-underrun events count contiguous shortages, with missing frames and
 callback counts. Startup wait, pause and confirmed EOF padding are not underruns.

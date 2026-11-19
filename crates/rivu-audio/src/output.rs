@@ -137,6 +137,7 @@ pub(super) struct OutputDiagnosticsSnapshot {
     pub(super) stream_layout: Arc<str>,
     pub(super) sink_name: Option<Arc<str>>,
     pub(super) remix_allowed: bool,
+    pub(super) stream_resample_quality: Option<i32>,
     pub(super) graph_rate: Option<u32>,
     pub(super) graph_quantum: Option<u64>,
     pub(super) hardware_rate: Option<u32>,
@@ -172,6 +173,7 @@ struct StreamFormat {
     layout: Arc<str>,
     sink_name: Option<Arc<str>>,
     remix_allowed: bool,
+    resample_quality: Option<i32>,
 }
 
 const INPUT_OPEN: u64 = u64::MAX;
@@ -789,6 +791,7 @@ impl Output {
             stream_layout: Arc::clone(&self.format.layout),
             sink_name: self.format.sink_name.clone(),
             remix_allowed: self.format.remix_allowed,
+            stream_resample_quality: self.format.resample_quality,
             graph_rate: (state.graph_rate != 0).then_some(state.graph_rate),
             graph_quantum: (state.graph_quantum != 0).then_some(state.graph_quantum),
             hardware_rate: None,
@@ -1657,6 +1660,10 @@ fn run(
                         layout: Arc::clone(&positions),
                         sink_name: Some(Arc::from(target.name.as_str())),
                         remix_allowed: auto_mix,
+                        resample_quality: stream
+                            .properties()
+                            .get("resample.quality")
+                            .and_then(|value| value.parse().ok()),
                     }));
                     started = true;
                 }
@@ -2581,6 +2588,7 @@ mod pcm_tests {
                 ),
                 sink_name: None,
                 remix_allowed: false,
+                resample_quality: None,
             },
             final_diagnostics: None,
             on_close: None,

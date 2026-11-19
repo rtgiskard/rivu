@@ -764,6 +764,9 @@ impl Playback {
             row()
                 .justify_between()
                 .flex_shrink_0()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .pb_2()
                 .child(caption(theme, self.context.tr("audio-output")))
                 .child(
                     row()
@@ -803,17 +806,89 @@ impl Playback {
                 ),
         );
         if let Some(state) = self.state.playback.audio_output.as_deref() {
-            for (label, value) in
-                rivu_presentation::audio_output::output_rows(state, &self.context.i18n)
-            {
-                details = details.child(
-                    column()
-                        .gap_0()
-                        .flex_shrink_0()
-                        .child(caption(theme, label).text_xs())
-                        .child(div().min_w_0().text_sm().whitespace_normal().child(value)),
-                );
-            }
+            let section = |title, body: gpui::Div| {
+                column()
+                    .gap_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(title)
+                            .role(gpui::Role::Heading)
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text))
+                            .child(self.context.tr(title)),
+                    )
+                    .child(body.pl(rems(1.)))
+            };
+            let facts = || column().min_w_0().gap_1();
+            let mut output = facts();
+            let mut pipewire = facts();
+            let mut levels = facts();
+            let mut buffer = facts();
+            let mut conversion = String::new();
+            rivu_presentation::audio_output::visit_output_fields(
+                state,
+                &self.context.i18n,
+                |key, value| {
+                    // The shared formatter emits conversion before quality.
+                    if key == "audio-stream-rate-conversion" {
+                        conversion = value;
+                        return;
+                    }
+                    let value = if key == "audio-stream-resample-quality" {
+                        conversion.push_str(" · ");
+                        conversion.push_str(&value);
+                        std::mem::take(&mut conversion)
+                    } else {
+                        value
+                    };
+                    let label = match key {
+                        "audio-graph-clock" => "audio-popup-graph-clock",
+                        "audio-stream-resample-quality" => "audio-popup-resample-quality",
+                        "audio-remix" => "audio-popup-remix",
+                        "audio-underruns" => "audio-popup-underruns-segment",
+                        "audio-session-underruns" => "audio-popup-underruns-session",
+                        _ => key,
+                    };
+                    let field = column()
+                        .min_w_0()
+                        .gap_0p5()
+                        .line_height(gpui::relative(1.25))
+                        .child(caption(theme, self.context.tr(label)).whitespace_normal())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .pl(rems(1.))
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(value),
+                        );
+                    let group = match key {
+                        "audio-graph-clock" | "audio-stream-resample-quality" | "audio-remix" => {
+                            &mut pipewire
+                        }
+                        "audio-processing"
+                        | "audio-master-gain"
+                        | "audio-replaygain"
+                        | "audio-source-loudness"
+                        | "audio-peaks"
+                        | "audio-overs" => &mut levels,
+                        "audio-buffer"
+                        | "audio-wait"
+                        | "audio-underruns"
+                        | "audio-session-underruns"
+                        | "audio-last-underrun" => &mut buffer,
+                        _ => &mut output,
+                    };
+                    group.extend([field.into_any_element()]);
+                },
+            );
+            details = details
+                .child(section("audio-popup-output", output))
+                .child(section("audio-popup-pipewire", pipewire))
+                .child(section("audio-popup-levels", levels))
+                .child(section("audio-popup-buffer", buffer));
             details = details.child(
                 caption(theme, self.context.tr("audio-output-note"))
                     .text_xs()

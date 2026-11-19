@@ -148,6 +148,7 @@ impl Playback {
             stream: Arc::clone(stream),
             sink: output.sink_name,
             remix_allowed: output.remix_allowed,
+            stream_resample_quality: output.stream_resample_quality,
             graph_rate: output.graph_rate,
             quantum_frames: output
                 .graph_quantum

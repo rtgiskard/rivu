@@ -629,7 +629,7 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 #[test]
 fn current_page_schema_has_contiguous_query_and_response_tags() {
     use crate::{model::Page, response::ViewResponse};
-    assert_eq!(PROTOCOL_VERSION, 47);
+    assert_eq!(PROTOCOL_VERSION, 48);
     let query = WireQuery::DirectoryPage {
         path: std::path::PathBuf::new(),
         query: None,
