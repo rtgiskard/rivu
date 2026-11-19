@@ -886,7 +886,12 @@ impl Output {
         &self.shared.notifications
     }
 
-    pub(super) fn check_timing(&self) -> Result<()> {
+    pub(super) fn check_error(&self) -> Result<()> {
+        // Backend failures take precedence over a clock invalidated by the same
+        // owner shutdown. After close joins the owner this includes its last error.
+        if let Ok(error) = self.errors.try_recv() {
+            return Err(error.into());
+        }
         self.shared.check_timing()
     }
     pub(super) fn close(&mut self) -> f64 {
@@ -915,6 +920,21 @@ impl Output {
     #[cfg(test)]
     pub(super) fn on_close_for_test(&mut self, on_close: impl FnOnce() + Send + 'static) {
         self.on_close = Some(Box::new(on_close));
+    }
+
+    #[cfg(test)]
+    pub(super) fn on_close_error_for_test(
+        &mut self,
+        message: &str,
+        on_close: impl FnOnce() + Send + 'static,
+    ) {
+        let (send, errors) = bounded(4);
+        self.errors = errors;
+        let error = OutputError(message.into());
+        self.on_close_for_test(move || {
+            on_close();
+            send.send(error).unwrap();
+        });
     }
 }
 
@@ -3034,7 +3054,7 @@ mod pcm_tests {
         output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
         callback.render(&mut data, timestamp(81, 101));
-        assert!(output.check_timing().is_err());
+        assert!(output.check_error().is_err());
         output.shared.forward_notifications();
         assert_eq!(output.notifications().try_recv(), Ok(()));
     }
@@ -3110,7 +3130,7 @@ mod pcm_tests {
         assert_eq!(callback.consumer.occupied_len(), 8);
         assert!(output.shared.pause_settled.load(Ordering::Acquire));
         assert!(!output.drained());
-        output.check_timing().unwrap();
+        output.check_error().unwrap();
     }
 
     #[test]
@@ -3169,7 +3189,7 @@ mod pcm_tests {
                 assert!(output.notifications().try_recv().is_err());
                 assert!(updates.try_recv().is_err());
                 drop(callback);
-                output.check_timing()
+                output.check_error()
             };
 
             assert_eq!(result.is_err(), fail);
@@ -3235,11 +3255,11 @@ mod pcm_tests {
         callback.render(&mut data, timestamp(0, 100));
         callback.render(&mut data, timestamp(1, 50));
         callback.render(&mut data, timestamp(60, 60));
-        assert!(output.check_timing().is_ok());
+        assert!(output.check_error().is_ok());
         assert_eq!(output.heard(), 0.0);
 
         callback.render(&mut data, timestamp(108, 108));
-        assert!(output.check_timing().is_ok());
+        assert!(output.check_error().is_ok());
         assert_eq!(output.heard(), 0.008);
         assert!(output.drained());
     }
@@ -3274,7 +3294,7 @@ mod pcm_tests {
         let mut data = [0.0_f32; 2];
         callback.render(&mut data, timestamp(10, 30));
         callback.render(&mut data, timestamp(9, 31));
-        assert!(output.check_timing().is_err());
+        assert!(output.check_error().is_err());
         assert_eq!(output.heard(), 0.0);
         assert!(!output.drained());
 
@@ -3283,7 +3303,7 @@ mod pcm_tests {
             output.push([[0.5, -0.5]; 1].as_flattened());
             callback.render(&mut data, timestamp(0, 30));
         }
-        assert!(output.check_timing().is_err());
+        assert!(output.check_error().is_err());
         assert_eq!(output.heard(), 0.0);
         assert!(!output.drained());
         assert_eq!(callback.consumer.occupied_len(), 2);

@@ -393,19 +393,21 @@ impl Playback {
         target: Option<f64>,
         create: impl FnOnce(&Source, bool) -> Result<Output>,
     ) -> Result<()> {
-        let (position, output_heard) = if let Some(position) = target {
+        if let Some(position) = target {
             // Explicit input rejection must leave queued PCM and analysis intact.
             self.source.seek(position)?;
-            (position, self.output.close())
+        }
+        // Retire the owner before checking its final backend and clock status.
+        // Explicit seeks already ran so rejection remains nonmutating; implicit
+        // restarts must not seek from a failed retiring output's audible cursor.
+        let output_heard = self.output.close();
+        self.output.check_error()?;
+        let position = if let Some(position) = target {
+            position
         } else {
-            // The callback can confirm more audible frames while retiring. Resume
-            // from that final cursor, not a snapshot taken before a decoder seek.
-            let output_heard = self.output.close();
-            // The final callback can also invalidate the retiring clock.
-            self.output.check_timing()?;
             let position = self.base_position + self.speed.source_seconds(output_heard);
             self.source.seek(position)?;
-            (position, output_heard)
+            position
         };
         self.archive_output_diagnostics();
         self.source_loudness = diagnostics::SourceLoudness::new(
@@ -608,7 +610,7 @@ impl Playback {
     }
 
     fn fill_with(&mut self, mut after_packet: impl FnMut()) -> Result<bool> {
-        self.output.check_timing()?;
+        self.output.check_error()?;
         if self.paused {
             return Ok(false);
         }
@@ -2616,6 +2618,52 @@ pub(super) mod tests {
                         std::array::from_fn(|offset| (first + offset) as f32 / 32768.0)
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn output_restart_preserves_backend_error_reported_during_retirement() {
+        for target in [None, Some(0.5)] {
+            let file = pcm_samples(16_000);
+            let (mut playback, _) = test_playback_selected(file.path(), None);
+            let (output, mut render) =
+                crate::output::test_backend(8_000, false, playback.source.layout());
+            playback.output = output;
+            let mut budget = DECODE_WORK_BUDGET;
+            let DecodeStep::Frames(span) = playback
+                .source
+                .next_frames_with_budget(&mut budget)
+                .unwrap()
+            else {
+                panic!("expected source PCM");
+            };
+            let next_position = span.media_start + span.samples.len() as f64 / 8_000.0;
+            playback.output.push(&[0.25; 64]);
+            render(&mut [0.0; 64], 24);
+            playback
+                .output
+                .on_close_error_for_test("injected disconnect failure", move || {
+                    render(&mut [0.0; 64], 0)
+                });
+            let error = playback
+                .restart_output_with(target, |_, _| {
+                    panic!("failed retiring output must not be replaced")
+                })
+                .unwrap_err();
+            // The backend failure wins even when the final callback also
+            // invalidates the clock during owner shutdown.
+            assert_eq!(error.to_string(), "injected disconnect failure");
+            if target.is_none() {
+                let mut budget = DECODE_WORK_BUDGET;
+                let DecodeStep::Frames(span) = playback
+                    .source
+                    .next_frames_with_budget(&mut budget)
+                    .unwrap()
+                else {
+                    panic!("expected unchanged source traversal");
+                };
+                assert_eq!(span.media_start, next_position);
             }
         }
     }
