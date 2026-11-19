@@ -556,13 +556,7 @@ impl AudioProcessing {
             } else {
                 row().gap_1().child(div().flex_1().min_w_0().child(input))
             };
-            let mut editor = editor
-                .id(SharedString::from(format!(
-                    "graph-path-help-{panel}-{key:?}"
-                )))
-                .when_some(self.path_help(key), |view, help| {
-                    view.tooltip(rivu_ui::text_tooltip(help))
-                });
+            let mut editor = editor;
             if descriptor.is_path() {
                 let target = target.clone();
                 editor = editor.child(disabled_control(
@@ -582,6 +576,14 @@ impl AudioProcessing {
             }
             editor.into_any_element()
         };
+        let control = div()
+            .id(SharedString::from(format!(
+                "graph-input-help-{panel}-{key:?}"
+            )))
+            .when_some(self.field_help(key, descriptor.label()), |view, help| {
+                view.tooltip(rivu_ui::text_tooltip(help))
+            })
+            .child(control);
         let apply_key = key;
         let mut field = FormField::new(theme, label, control).action(disabled_control(
             theme,
@@ -786,22 +788,29 @@ impl AudioProcessing {
         if let GraphNodeKind::Denoise { profile: None, .. } = &node.kind {
             let snapshot = Rc::clone(&self.state);
             let target = target.clone();
-            content = content.child(disabled_control(
-                theme,
-                crate::gui::appearance::material::button(
-                    ("graph-profile", panel),
-                    self.tr("processing-graph-add-profile"),
-                    cx,
-                    move |this, _, cx| {
-                        if !target.current(this, cx) {
-                            return;
-                        }
-                        this.activate_graph_profile(id, &snapshot, cx);
-                    },
-                )
-                .self_start(),
-                busy || drafts > 0,
-            ));
+            content = content.child(
+                div()
+                    .id(("graph-profile-help", panel))
+                    .tooltip(rivu_ui::text_tooltip(
+                        self.tr("processing-graph-add-profile-input-help"),
+                    ))
+                    .child(disabled_control(
+                        theme,
+                        crate::gui::appearance::material::button(
+                            ("graph-profile", panel),
+                            self.tr("processing-graph-add-profile"),
+                            cx,
+                            move |this, _, cx| {
+                                if !target.current(this, cx) {
+                                    return;
+                                }
+                                this.activate_graph_profile(id, &snapshot, cx);
+                            },
+                        )
+                        .self_start(),
+                        busy || drafts > 0,
+                    )),
+            );
         }
         if let GraphNodeKind::Mix { gains_db, .. } = &node.kind {
             content = content.child(

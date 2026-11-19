@@ -675,25 +675,6 @@ impl AudioProcessing {
                 busy || no_input || target.is_none() || audition_blocked,
             ));
         }
-        let export_target = self.graph_editor.selected.map(|node| GraphPort {
-            node,
-            port: self.graph_editor.target_port,
-        });
-        controls = controls.child(disabled_control(
-            theme,
-            crate::gui::appearance::material::button(
-                ("graph-configure-export", panel),
-                self.tr("processing-export-configure"),
-                cx,
-                move |this, _, cx| {
-                    if let Some(target) = export_target {
-                        this.open_graph_export(target, cx);
-                    }
-                },
-            )
-            .debug_selector(move || format!("graph-configure-export-{panel}")),
-            no_input || export_target.is_none(),
-        ));
         let mut footer = column()
             .flex_shrink_0()
             .gap_1()

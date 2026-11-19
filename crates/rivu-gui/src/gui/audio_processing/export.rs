@@ -120,22 +120,6 @@ impl AudioProcessing {
         snapshot
     }
 
-    pub(super) fn open_original_export(&mut self, monitor_eq: bool, cx: &mut Context<Self>) {
-        self.initialize_export(cx);
-        self.export.source = Source::Original;
-        self.export.track = self.input_track().cloned();
-        self.export.monitor_eq = monitor_eq.then(|| self.export_monitor_snapshot());
-        self.show_export(cx);
-    }
-
-    pub(super) fn open_graph_export(&mut self, target: GraphPort, cx: &mut Context<Self>) {
-        self.initialize_export(cx);
-        self.export.source = Source::Graph(target);
-        self.export.track = self.input_track().cloned();
-        self.export.monitor_eq = None;
-        self.show_export(cx);
-    }
-
     pub(super) fn open_frozen_export(
         &mut self,
         id: u64,
@@ -425,18 +409,21 @@ impl AudioProcessing {
         self.initialize_export(cx);
         let theme = rivu_ui::theme::palette(cx);
         let mut sources = row().flex_wrap().gap_1();
-        let graph_output = self
-            .state
-            .system
-            .config
-            .processing_graph
+        let graph = &self.state.system.config.processing_graph;
+        let selected_port = self.graph_editor.selected_output().filter(|port| {
+            graph
+                .node(port.node)
+                .is_ok_and(|node| usize::from(port.port) < node.kind.outputs())
+        });
+        let initial_target = graph
             .nodes
             .iter()
             .find(|node| matches!(node.kind, GraphNodeKind::Output))
             .map(|node| GraphPort {
                 node: node.id,
                 port: 0,
-            });
+            })
+            .or(selected_port);
         for (graph, label) in [
             (false, "processing-export-original"),
             (true, "processing-export-graph"),
@@ -446,6 +433,11 @@ impl AudioProcessing {
             } else {
                 self.export.source == Source::Original
             };
+            let source = if graph {
+                initial_target.map(Source::Graph)
+            } else {
+                Some(Source::Original)
+            };
             sources = sources.child(disabled_control(
                 theme,
                 crate::gui::appearance::material::button(
@@ -453,16 +445,10 @@ impl AudioProcessing {
                     self.tr(label),
                     cx,
                     move |this, _, cx| {
-                        if selected {
+                        let Some(source) = source.filter(|_| !selected) else {
                             return;
-                        }
-                        if graph {
-                            if let Some(target) = graph_output {
-                                this.export.source = Source::Graph(target);
-                            }
-                        } else {
-                            this.export.source = Source::Original;
-                        }
+                        };
+                        this.export.source = source;
                         this.export.generation = this.export.generation.wrapping_add(1);
                         cx.notify();
                     },
@@ -476,21 +462,24 @@ impl AudioProcessing {
                         crate::gui::appearance::material::surface(cx),
                     )
                 }),
-                graph && graph_output.is_none() && !selected,
+                source.is_none() && !selected,
             ));
         }
         let mut source = column().min_w_0().gap_2().child(sources);
         match self.export.source {
             Source::Frozen { id, target } => {
-                source = source.child(caption(
-                    theme,
-                    format!(
-                        "{} #{id} · #{}:{}",
-                        self.tr("processing-export-frozen"),
-                        target.node,
-                        target.port
-                    ),
-                ));
+                source = source.child(
+                    caption(
+                        theme,
+                        format!(
+                            "{} #{id} · #{}:{}",
+                            self.tr("processing-export-frozen"),
+                            target.node,
+                            target.port
+                        ),
+                    )
+                    .text_color(rgb(theme.text)),
+                );
                 if let Some(path) = &self.export.frozen_path {
                     source = source
                         .child(caption(theme, path.display().to_string()).overflow_x_hidden());
@@ -500,15 +489,18 @@ impl AudioProcessing {
             Source::Original | Source::Graph(_) => {
                 if let Some(track) = &self.export.track {
                     source = source
-                        .child(caption(
-                            theme,
-                            format!(
-                                "{}: {} · #{}",
-                                self.tr("processing-export-pinned"),
-                                track.title,
-                                track.id
-                            ),
-                        ))
+                        .child(
+                            caption(
+                                theme,
+                                format!(
+                                    "{}: {} · #{}",
+                                    self.tr("processing-export-pinned"),
+                                    track.title,
+                                    track.id
+                                ),
+                            )
+                            .text_color(rgb(theme.text)),
+                        )
                         .child(
                             caption(theme, track.path.display().to_string()).overflow_x_hidden(),
                         );
@@ -544,10 +536,9 @@ impl AudioProcessing {
                             target.node,
                             target.port,
                             self.tr("processing-export-revision"),
-                            self.state.system.config.processing_graph.revision
+                            graph.revision
                         ),
                     ));
-                    let selected = self.graph_editor.selected_output();
                     source = source.child(disabled_control(
                         theme,
                         crate::gui::appearance::material::button(
@@ -555,7 +546,7 @@ impl AudioProcessing {
                             self.tr("processing-export-use-port"),
                             cx,
                             move |this, _, cx| {
-                                if let Some(target) = selected {
+                                if let Some(target) = selected_port {
                                     this.export.source = Source::Graph(target);
                                     this.export.generation = this.export.generation.wrapping_add(1);
                                     cx.notify();
@@ -563,7 +554,7 @@ impl AudioProcessing {
                             },
                         )
                         .self_start(),
-                        selected.is_none(),
+                        selected_port.is_none(),
                     ));
                     source = source.child(caption(
                         theme,
@@ -573,52 +564,59 @@ impl AudioProcessing {
             }
         }
         let has_eq = self.export.monitor_eq.is_some();
-        let mut eq = column()
-            .gap_1()
-            .child(
-                crate::gui::appearance::material::button(
-                    ("audio-export-eq", panel),
-                    self.tr(if has_eq {
-                        "processing-export-eq-on"
-                    } else {
-                        "processing-export-eq-off"
-                    }),
-                    cx,
-                    |this, _, cx| {
-                        this.export.monitor_eq = if this.export.monitor_eq.is_some() {
-                            None
-                        } else {
-                            Some(this.export_monitor_snapshot())
-                        };
-                        cx.notify();
-                    },
-                )
-                .debug_selector(move || format!("audio-export-eq-{panel}"))
-                .self_start()
-                .map(|view| {
-                    rivu_ui::active_control(
-                        theme,
-                        view,
-                        has_eq,
-                        crate::gui::appearance::material::surface(cx),
-                    )
+        let mut eq_actions = row().items_center().gap_1().child(
+            crate::gui::appearance::material::button(
+                ("audio-export-eq", panel),
+                self.tr(if has_eq {
+                    "processing-export-eq-on"
+                } else {
+                    "processing-export-eq-off"
                 }),
+                cx,
+                |this, _, cx| {
+                    this.export.monitor_eq = if this.export.monitor_eq.is_some() {
+                        None
+                    } else {
+                        Some(this.export_monitor_snapshot())
+                    };
+                    cx.notify();
+                },
             )
-            .child(caption(theme, self.tr("processing-export-eq-help")));
+            .debug_selector(move || format!("audio-export-eq-{panel}"))
+            .map(|view| {
+                rivu_ui::active_control(
+                    theme,
+                    view,
+                    has_eq,
+                    crate::gui::appearance::material::surface(cx),
+                )
+            }),
+        );
         if has_eq {
-            eq = eq.child(
-                crate::gui::appearance::material::button(
+            eq_actions = eq_actions.child(
+                IconButton::new(
                     ("audio-export-refresh-eq", panel),
+                    "󰑐",
                     self.tr("processing-export-refresh-eq"),
+                )
+                .surface(crate::gui::appearance::material::surface(cx))
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Compact,
                     cx,
                     |this, _, cx| {
                         this.export.monitor_eq = Some(this.export_monitor_snapshot());
                         cx.notify();
                     },
                 )
-                .self_start(),
+                .debug_selector(move || format!("audio-export-refresh-eq-{panel}"))
+                .flex_shrink_0(),
             );
         }
+        let eq = column()
+            .gap_1()
+            .child(eq_actions)
+            .child(caption(theme, self.tr("processing-export-eq-help")));
         let mut formats = row().flex_wrap().gap_1();
         for format in [
             AudioExportFormat::Wav,
@@ -702,8 +700,10 @@ impl AudioProcessing {
                         }),
                     );
                 }
-                encoding = encoding.child(Self::parameter_row(
-                    caption(theme, self.tr("processing-export-depth")),
+                encoding = encoding.child(self.parameter_row(
+                    theme,
+                    "export-depth-label",
+                    self.tr("processing-export-depth"),
                     bits,
                 ));
                 if self.export.encoding.format == AudioExportFormat::Flac {
@@ -711,7 +711,7 @@ impl AudioProcessing {
                         self.field_view(
                             panel,
                             FieldKey::ExportCompression,
-                            self.tr("processing-export-compression"),
+                            "processing-export-compression",
                             cx,
                         )
                         .id(("audio-export-compression", panel))
@@ -724,7 +724,7 @@ impl AudioProcessing {
                     self.field_view(
                         panel,
                         FieldKey::ExportBitrate,
-                        self.tr("processing-export-bitrate"),
+                        "processing-export-bitrate",
                         cx,
                     )
                     .id(("audio-export-bitrate", panel))
@@ -756,25 +756,23 @@ impl AudioProcessing {
         )
         .debug_selector(move || format!("audio-export-choose-{panel}"))
         .flex_shrink_0();
-        let destination = column()
-            .gap_1()
+        let destination = row()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .id(("audio-export-path", panel))
+            .debug_selector(move || format!("audio-export-path-{panel}"))
             .child(
-                Self::parameter_row(
-                    caption(theme, path_label),
-                    row()
-                        .min_w_0()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_1().min_w_0().child(path_input))
-                        .child(choose_path),
-                )
-                .id(("audio-export-path", panel))
-                .debug_selector(move || format!("audio-export-path-{panel}")),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .id(("audio-export-path-input", panel))
+                    .tooltip(rivu_ui::text_tooltip(
+                        self.tr("processing-export-destination-help"),
+                    ))
+                    .child(path_input),
             )
-            .child(caption(
-                theme,
-                self.tr("processing-export-destination-help"),
-            ));
+            .child(choose_path);
         let mut advanced = column().gap_2().child(
             activate_control(
                 dropdown_trigger(
@@ -823,42 +821,45 @@ impl AudioProcessing {
             }
             advanced = advanced
                 .child(
-                    self.field_view(
-                        panel,
-                        FieldKey::ExportRate,
-                        self.tr("processing-export-rate"),
-                        cx,
-                    )
-                    .id(("audio-export-rate", panel))
-                    .debug_selector(move || format!("audio-export-rate-{panel}")),
+                    self.field_view(panel, FieldKey::ExportRate, "processing-export-rate", cx)
+                        .id(("audio-export-rate", panel))
+                        .debug_selector(move || format!("audio-export-rate-{panel}")),
                 )
-                .child(caption(theme, self.tr("processing-export-rate-help")))
-                .child(Self::parameter_row(
-                    caption(theme, self.tr("processing-export-channels")),
+                .child(self.parameter_row(
+                    theme,
+                    "export-channels-label",
+                    self.tr("processing-export-channels"),
                     channels,
                 ));
         }
+        let heading = |key| {
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.text))
+                .child(self.tr(key))
+        };
         let mut body = column()
             .min_w_0()
             .gap_3()
             .child(rivu_ui::section_group(
                 theme,
-                self.tr("processing-export-source"),
+                heading("processing-export-source"),
                 source,
             ))
             .child(rivu_ui::section_group(
                 theme,
-                self.tr("processing-export-monitor"),
+                heading("processing-export-monitor"),
                 eq,
             ))
             .child(rivu_ui::section_group(
                 theme,
-                self.tr("processing-export-encoding"),
+                heading("processing-export-encoding"),
                 encoding,
             ))
             .child(rivu_ui::section_group(
                 theme,
-                self.tr("processing-export-destination"),
+                heading("processing-export-destination"),
                 destination,
             ))
             .child(advanced);
@@ -900,7 +901,8 @@ mod tests {
             Rc::make_mut(&mut this.state).current_track = Some(Arc::new(track.clone()));
             Rc::make_mut(&mut this.state).system.export_formats =
                 Some(vec![AudioExportFormat::Wav]);
-            this.open_original_export(true, cx);
+            this.show_export(cx);
+            this.export.monitor_eq = Some(this.export_monitor_snapshot());
             this.stage_graph_text(FieldKey::ExportPath, " result.wav ".into(), cx);
             let captured_eq = this.export.monitor_eq.clone();
             track.id = 42;
@@ -937,7 +939,8 @@ mod tests {
             Rc::make_mut(&mut this.state).system.export_formats =
                 Some(vec![AudioExportFormat::Wav]);
             let target = GraphPort { node: 3, port: 1 };
-            this.open_graph_export(target, cx);
+            this.show_export(cx);
+            this.export.source = Source::Graph(target);
             this.stage_graph_text(FieldKey::ExportPath, "out.wav".into(), cx);
             this.stage_graph_text(FieldKey::ExportBitrate, "irrelevant".into(), cx);
             this.stage_graph_text(FieldKey::ExportCompression, "irrelevant".into(), cx);
@@ -1049,6 +1052,51 @@ mod tests {
     }
 
     #[gpui::test]
+    fn graph_export_accepts_selected_port_without_output_node(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(Input::init);
+        let (_directory, _runtime, owner) = test_support::owner(cx, test_support::config());
+        let target = GraphPort { node: 2, port: 1 };
+        owner.update(cx, |this, cx| {
+            let state = Rc::make_mut(&mut this.state);
+            let mut track = crate::test_support::artwork_track("source.wav".into());
+            track.id = 7;
+            state.current_track = Some(Arc::new(track));
+            state.system.export_formats = Some(vec![AudioExportFormat::Wav]);
+            let graph = &mut Arc::make_mut(&mut state.system.config).processing_graph;
+            graph.revision = 9;
+            graph.nodes[1].kind = GraphNodeKind::Separate {
+                config: Default::default(),
+            };
+            graph.validate().unwrap();
+            this.reconcile_graph(cx);
+        });
+        let window = cx.open_window(size(px(1200.), px(1000.)), {
+            let owner = owner.clone();
+            move |_, _| ExportWindow(owner)
+        });
+        let handle = window.into();
+        draw(cx, handle);
+        click(cx, handle, "graph-port-7-2-true-1");
+        click(cx, handle, "processing-page-7-processing-tab-export");
+        owner.update(cx, |this, cx| {
+            this.stage_graph_text(FieldKey::ExportPath, "out.wav".into(), cx);
+        });
+        draw(cx, handle);
+        click(cx, handle, "audio-export-source-7-true");
+        owner.read_with(cx, |this, cx| {
+            assert_eq!(
+                this.export_request(cx).unwrap().source,
+                AudioExportSource::Graph {
+                    track_id: 7,
+                    target,
+                    revision: 9
+                }
+            );
+        });
+    }
+
+    #[gpui::test]
     fn native_export_controls_preserve_drafts_and_submit_selected_format(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         cx.update(Input::init);
@@ -1060,7 +1108,7 @@ mod tests {
             ));
             Rc::make_mut(&mut this.state).system.export_formats =
                 Some(vec![AudioExportFormat::Wav, AudioExportFormat::Mp3]);
-            this.open_original_export(false, cx);
+            this.show_export(cx);
         });
         let window = cx.open_window(size(px(1200.), px(1000.)), {
             let owner = owner.clone();

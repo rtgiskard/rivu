@@ -1105,7 +1105,10 @@ impl AudioProcessing {
                         .items_center()
                         .truncate()
                         .text_size(scaled(12.))
-                        .child(format!("{} #{id}", self.tr(node_label(&node.kind)))),
+                        .child(rivu_ui::truncated_label(
+                            ("graph-node-title", id),
+                            format!("{} #{id}", self.tr(node_label(&node.kind))),
+                        )),
                 );
             for output in [false, true] {
                 let count = if output {
@@ -1129,6 +1132,7 @@ impl AudioProcessing {
                         .id(SharedString::from(format!(
                             "graph-port-{panel}-{id}-{output}-{port}"
                         )))
+                        .debug_selector(move || format!("graph-port-{panel}-{id}-{output}-{port}"))
                         .absolute()
                         .top(scaled(HEADER + PORT_ROW * port as f32))
                         .h(scaled(PORT_ROW))
@@ -1155,7 +1159,12 @@ impl AudioProcessing {
                         )))
                         .focus(|v| v.bg(rgb(theme.selected)))
                         .when(!output, |view| view.child(div().flex_shrink_0().child("●")))
-                        .child(div().min_w_0().truncate().child(label))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(rivu_ui::truncated_label("graph-port-label", label)),
+                        )
                         .when(output, |view| view.child(div().flex_shrink_0().child("●")))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !connect_frame.current(this) {

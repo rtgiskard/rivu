@@ -45,7 +45,7 @@ pub use row::{
     row_action_region, row_background, single_line_row_height, tree_row, tree_row_height,
     two_line_text,
 };
-pub use scrollbar::scrollable_area;
+pub use scrollbar::{horizontally_scrollable_area, scrollable_area};
 pub use slider::{ProgressBar, Slider, SliderInput, SliderKey};
 pub use surface::{Dialog, Popover, checked_menu_item};
 

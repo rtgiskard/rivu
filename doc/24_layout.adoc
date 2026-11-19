@@ -424,6 +424,9 @@ panels; switching or duplicating a named layout starts new view-local scroll
 state. No per-layout scroll snapshots are kept.
 Albums routes PageUp/PageDown only to its displayed grid or track-list viewport;
 switching regions preserves the grid's retained position.
+Audio Processing's tab strip retains its horizontal offset independently of the
+page viewport. Drag the scrollbar under the tabs when they overflow; the strip
+does not receive the vertical PageUp/PageDown shortcuts.
 
 [[material-appearance]]
 == Material appearance

@@ -1471,6 +1471,11 @@ impl EqualizerEditor {
             _ => ("", None),
         };
         let help = match key {
+            EqField::PreampDb => Some("processing-preamp-input-help"),
+            EqField::OutputGainDb => Some("processing-output-gain-input-help"),
+            EqField::Band(_, BandField::FrequencyHz) => Some("processing-frequency-input-help"),
+            EqField::Band(_, BandField::GainDb) => Some("processing-gain-input-help"),
+            EqField::Band(_, BandField::ShelfSlope) => Some("processing-shelf-slope-input-help"),
             EqField::Band(_, BandField::Channels) => Some("processing-channel-help"),
             EqField::Band(_, BandField::Stages) => Some("processing-stage-help"),
             _ => None,
@@ -1480,6 +1485,10 @@ impl EqualizerEditor {
                 .min_w_0()
                 .w(rems(5.))
                 .flex_shrink_0()
+                .id(SharedString::from(format!("eq-input-help-{key}")))
+                .when_some(help, |view, help| {
+                    view.tooltip(rivu_ui::text_tooltip(self.tr(help)))
+                })
                 .child(field.input.clone()),
         );
         if !compact {
@@ -1489,14 +1498,16 @@ impl EqualizerEditor {
             .gap_1()
             .when(compact, |view| view.flex_shrink_0())
             .child(
-                caption(theme, label.clone())
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.secondary))
                     .when(!compact, |view| view.w(rems(7.)))
                     .flex_shrink_0()
                     .truncate()
-                    .id(SharedString::from(format!("eq-label-{key}")))
-                    .when_some(help, |view, help| {
-                        view.tooltip(rivu_ui::text_tooltip(self.tr(help)))
-                    }),
+                    .child(rivu_ui::truncated_label(
+                        SharedString::from(format!("eq-label-{key}")),
+                        label.clone(),
+                    )),
             )
             .child(
                 div()
@@ -3074,18 +3085,7 @@ impl AudioProcessing {
             window,
             cx,
         );
-        column().gap_3().child(editor).child(disabled_control(
-            rivu_ui::theme::palette(cx),
-            crate::gui::appearance::material::button(
-                ("eq-configure-export", panel),
-                self.tr("processing-export-with-eq"),
-                cx,
-                |this, _, cx| this.open_original_export(true, cx),
-            )
-            .debug_selector(move || format!("eq-configure-export-{panel}"))
-            .self_start(),
-            self.input_track().is_none(),
-        ))
+        column().child(editor)
     }
 
     pub(super) fn node_equalizer_view(

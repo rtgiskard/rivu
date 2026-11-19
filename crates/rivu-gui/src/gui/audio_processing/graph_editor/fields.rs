@@ -61,7 +61,7 @@ pub(in super::super) enum GraphField {
 }
 
 impl GraphField {
-    pub(super) fn label(self) -> &'static str {
+    pub(in super::super) fn label(self) -> &'static str {
         match self {
             Self::Implementation => "processing-fields-implementation",
             Self::Taps => "processing-graph-taps",

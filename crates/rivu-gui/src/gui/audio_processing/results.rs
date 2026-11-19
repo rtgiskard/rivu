@@ -15,7 +15,75 @@ pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus
     task.graph_run_id.filter(|_| task.graph_actions_available)
 }
 
+fn captured_label_id(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "mode" => "processing-denoise-mode",
+        "device" => "processing-device",
+        "strength" => "processing-strength",
+        "spectral_gain_floor_db" => "processing-spectral-gain-floor",
+        "attack_ms" => "processing-attack",
+        "release_ms" => "processing-release",
+        "smoothing_bins" => "processing-smoothing",
+        "transient_protection" => "processing-transients",
+        "wet" => "processing-wet",
+        "fft_size" => "processing-fft",
+        "stationary_noise_dbfs" => "processing-stationary-floor",
+        "enabled" => "processing-enabled",
+        "fundamental_hz" => "processing-hum-frequency",
+        "hum" => "processing-hum",
+        "impulse" => "processing-impulse",
+        "max_width" => "processing-impulse-width",
+        "floor_dbfs" => "processing-impulse-floor",
+        "speech_interpreter" => "processing-speech-interpreter",
+        "separation_interpreter" => "processing-separation-interpreter",
+        "speech_wet_mix" => "processing-speech-wet",
+        "speech_attenuation_limit_db" => "processing-speech-attenuation",
+        "speech_post_filter" => "processing-speech-post-filter",
+        "separation_overlap" => "processing-separation-overlap",
+        "frequency_hz" => "processing-frequency",
+        "harmonics" => "processing-harmonics",
+        "q" => "processing-q",
+        "threshold" => "processing-threshold",
+        "worker" => "processing-worker",
+        "speech_manifest" => "processing-speech-manifest",
+        "separation_manifest" => "processing-separation-manifest",
+        "threads" => "processing-threads",
+        _ => return None,
+    })
+}
+
 impl AudioProcessing {
+    fn captured_line(&self, label: &str, text: &str, id: Option<&str>) -> String {
+        let count_line = match id {
+            Some("processing-smoothing") => Some("processing-result-bins"),
+            Some("processing-fft" | "processing-impulse-width") => {
+                Some("processing-result-samples")
+            }
+            _ => None,
+        };
+        if let Some(id) = count_line
+            && let Ok(count) = text.parse::<u32>()
+        {
+            return self
+                .context
+                .i18n
+                .format(id, &[("label", label.into()), ("count", count.into())]);
+        }
+        let unit = match id {
+            Some(
+                "processing-spectral-gain-floor"
+                | "processing-speech-attenuation"
+                | "processing-graph-input-gain",
+            ) => "dB",
+            Some("processing-stationary-floor" | "processing-impulse-floor") => "dBFS",
+            Some("processing-attack" | "processing-release") => "ms",
+            Some("processing-frequency" | "processing-hum-frequency") => "Hz",
+            Some("processing-profile-start" | "processing-profile-end") => "s",
+            _ => return format!("{label}: {text}"),
+        };
+        format!("{label}: {text} {unit}")
+    }
+
     fn captured_parameters(&self, prefix: &str, value: &Value, cx: &App) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let mut content = column().min_w_0().gap_1();
@@ -29,7 +97,12 @@ impl AudioProcessing {
                     ));
                     continue;
                 }
-                let label = self.parameter_path_label(prefix, key);
+                let id = captured_label_id(key);
+                let label = id.map_or_else(|| key.replace('_', " "), |id| self.tr(id).to_string());
+                let label = match prefix.strip_prefix("denoise.").and_then(captured_label_id) {
+                    Some(group) => format!("{} · {label}", self.tr(group)),
+                    None => label,
+                };
                 let text = match value {
                     Value::Null => "—".to_owned(),
                     Value::Bool(value) => self
@@ -55,7 +128,8 @@ impl AudioProcessing {
                     Value::String(value) => value.clone(),
                     _ => value.to_string(),
                 };
-                content = content.child(caption(theme, format!("{label}: {text}")));
+                let unit = if value.is_number() { id } else { None };
+                content = content.child(caption(theme, self.captured_line(&label, &text, unit)));
             }
         }
         content
@@ -105,7 +179,7 @@ impl AudioProcessing {
             content = content.child(caption(
                 theme,
                 format!(
-                    "{}: {} · {}: {}",
+                    "{}: {} s · {}: {} s",
                     self.context.i18n.text("processing-profile-start"),
                     profile.start_seconds,
                     self.context.i18n.text("processing-profile-end"),
@@ -220,13 +294,13 @@ impl AudioProcessing {
                         .child(self.field_view(
                             panel,
                             FieldKey::VocalGain,
-                            self.tr("processing-vocal-gain"),
+                            "processing-vocal-gain",
                             cx,
                         ))
                         .child(self.field_view(
                             panel,
                             FieldKey::AccompanimentGain,
-                            self.tr("processing-accompaniment-gain"),
+                            "processing-accompaniment-gain",
                             cx,
                         ))
                         .child(disabled_control(
@@ -688,15 +762,22 @@ impl AudioProcessing {
                         let text = field.text(&node.kind);
                         content = content.child(caption(
                             theme,
-                            format!("{}: {text}", self.graph_parameter_label(field)),
+                            self.captured_line(
+                                &self.graph_parameter_label(field),
+                                &text,
+                                Some(field.label()),
+                            ),
                         ));
                     }
                     if let GraphNodeKind::Equalizer { config, .. } = &node.kind {
                         use rivu_dsp::equalizer::config::{ChannelTarget, FilterKind};
                         for (label, text) in [
                             ("processing-enabled", config.enabled.to_string()),
-                            ("processing-preamp", config.preamp_db.to_string()),
-                            ("processing-output-gain", config.output_gain_db.to_string()),
+                            ("processing-preamp", format!("{} dB", config.preamp_db)),
+                            (
+                                "processing-output-gain",
+                                format!("{} dB", config.output_gain_db),
+                            ),
                         ] {
                             content = content
                                 .child(caption(theme, format!("{}: {text}", self.tr(label))));
@@ -723,8 +804,8 @@ impl AudioProcessing {
                                 ("processing-enabled", band.enabled.to_string()),
                                 ("processing-graph-input-solo", band.solo.to_string()),
                                 ("processing-graph-filter-kind", kind.to_string()),
-                                ("processing-frequency", band.frequency_hz.to_string()),
-                                ("processing-gain", band.gain_db.to_string()),
+                                ("processing-frequency", format!("{} Hz", band.frequency_hz)),
+                                ("processing-gain", format!("{} dB", band.gain_db)),
                                 ("processing-q", band.q.to_string()),
                                 ("processing-shelf-slope", band.shelf_slope.to_string()),
                                 ("processing-stages", band.stages.to_string()),

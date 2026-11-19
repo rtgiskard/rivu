@@ -185,6 +185,9 @@ Choose one source from <<playback-and-export-routes,the export route>>; a comple
 processing task is not required for an original or current-graph export. The
 Results shortcut binds the frozen run rather than later editor changes. Track
 identity stays explicit; changing the playing track does not retarget an export draft.
+In Export, Current graph starts at the first Output node, or uses the selected
+graph port if there is no Output node. Use selected port explicitly changes the
+draft target; selecting another port in Graph does not retarget an existing draft.
 
 Export's captured Monitor EQ is optional post-processing, not an automatic repeat
 of graph EQ nodes. Playback volume, ReplayGain and temporary bypass do not enter

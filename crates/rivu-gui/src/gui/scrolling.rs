@@ -6,23 +6,32 @@ type Target = (&'static str, u64);
 
 #[derive(Clone)]
 enum Handle {
-    Content(Rc<ScrollHandle>),
+    Content {
+        scroll: Rc<ScrollHandle>,
+        horizontal: bool,
+    },
     List(UniformListScrollHandle),
 }
 
 impl Handle {
-    fn base(&self) -> ScrollHandle {
+    fn vertical_handle(&self) -> Option<ScrollHandle> {
         match self {
-            Self::Content(handle) => handle.as_ref().clone(),
-            Self::List(handle) => handle.0.borrow().base_handle.clone(),
+            Self::Content {
+                scroll,
+                horizontal: false,
+            } => Some(scroll.as_ref().clone()),
+            Self::Content {
+                horizontal: true, ..
+            } => None,
+            Self::List(handle) => Some(handle.0.borrow().base_handle.clone()),
         }
     }
 
-    fn page(&self, down: bool) {
+    fn page(&self, down: bool) -> Option<()> {
+        let handle = self.vertical_handle()?;
         if let Self::List(handle) = self {
             handle.0.borrow_mut().deferred_scroll_to_item = None;
         }
-        let handle = self.base();
         let mut offset = handle.offset();
         offset.y = page_offset(
             offset.y,
@@ -31,6 +40,7 @@ impl Handle {
             down,
         );
         handle.set_offset(offset);
+        Some(())
     }
 }
 
@@ -124,20 +134,38 @@ impl ScrollViews {
     }
 
     pub(super) fn content(&mut self, target: Target) -> Rc<ScrollHandle> {
+        self.content_on_axis(target, false)
+    }
+
+    pub(super) fn horizontal_content(&mut self, target: Target) -> Rc<ScrollHandle> {
+        self.content_on_axis(target, true)
+    }
+
+    fn content_on_axis(&mut self, target: Target, horizontal: bool) -> Rc<ScrollHandle> {
         let region = self.regions.entry(target).or_insert_with(|| Region {
-            handle: Handle::Content(Rc::new(ScrollHandle::new())),
+            handle: Handle::Content {
+                scroll: Rc::new(ScrollHandle::new()),
+                horizontal,
+            },
             visible: true,
         });
         region.visible = true;
-        let Handle::Content(handle) = &region.handle else {
-            unreachable!("content target uses a content handle")
-        };
-        handle.clone()
+        match &region.handle {
+            Handle::Content {
+                scroll,
+                horizontal: registered,
+            } if *registered == horizontal => scroll.clone(),
+            _ => unreachable!("region target uses the same scroll kind and axis"),
+        }
     }
 
     fn under_pointer(&self, position: Point<Pixels>) -> Option<Target> {
         self.regions.iter().find_map(|(&target, region)| {
-            (region.visible && region.handle.base().bounds().contains(&position)).then_some(target)
+            let handle = region
+                .visible
+                .then(|| region.handle.vertical_handle())
+                .flatten()?;
+            handle.bounds().contains(&position).then_some(target)
         })
     }
 
@@ -153,7 +181,7 @@ impl ScrollViews {
     pub(super) fn page(&self, down: bool, position: Point<Pixels>) -> Option<u64> {
         let target = self.active.or_else(|| self.under_pointer(position))?;
         let region = self.regions.get(&target).filter(|region| region.visible)?;
-        region.handle.page(down);
+        region.handle.page(down)?;
         Some(target.1)
     }
 }

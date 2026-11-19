@@ -17,20 +17,47 @@ const MIN_THUMB_HEIGHT: f32 = 24.;
 enum ScrollSource {
     List(UniformListScrollHandle),
     Area(Rc<gpui::ScrollHandle>),
+    HorizontalArea(Rc<gpui::ScrollHandle>),
 }
 
 impl ScrollSource {
     fn handle(&self) -> gpui::ScrollHandle {
         match self {
             Self::List(scroll) => scroll.0.borrow().base_handle.clone(),
-            Self::Area(scroll) => scroll.as_ref().clone(),
+            Self::Area(scroll) | Self::HorizontalArea(scroll) => scroll.as_ref().clone(),
         }
+    }
+
+    fn horizontal(&self) -> bool {
+        matches!(self, Self::HorizontalArea(_))
+    }
+
+    // Normalize the scrolling axis to Y for the shared thumb geometry and gestures.
+    fn orient(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        if self.horizontal() {
+            Bounds::new(
+                point(bounds.origin.y, bounds.origin.x),
+                size(bounds.size.height, bounds.size.width),
+            )
+        } else {
+            bounds
+        }
+    }
+
+    fn along(&self, value: gpui::Point<Pixels>) -> Pixels {
+        if self.horizontal() { value.x } else { value.y }
+    }
+
+    fn offset(&self) -> Pixels {
+        self.along(self.handle().offset())
     }
 
     fn same_handle(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::List(a), Self::List(b)) => Rc::ptr_eq(&a.0, &b.0),
-            (Self::Area(a), Self::Area(b)) => Rc::ptr_eq(a, b),
+            (Self::Area(a), Self::Area(b)) | (Self::HorizontalArea(a), Self::HorizontalArea(b)) => {
+                Rc::ptr_eq(a, b)
+            }
             _ => false,
         }
     }
@@ -55,6 +82,25 @@ pub fn scrollable_area(
         None,
         surface,
     )
+}
+
+/// Add a horizontal scrollbar beneath a content-height viewport.
+pub fn horizontally_scrollable_area(
+    id: impl Into<ElementId>,
+    viewport: gpui::Stateful<gpui::Div>,
+    scroll: &Rc<gpui::ScrollHandle>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .flex_shrink_0()
+        .child(viewport.min_w_0().overflow_x_scroll().track_scroll(scroll))
+        .child(Scrollbar {
+            scroll: ScrollSource::HorizontalArea(scroll.clone()),
+            edge_fade: None,
+        })
 }
 
 pub(super) fn scrollable_list(
@@ -103,8 +149,7 @@ fn scrollable(
         // including wheel offsets, deferred scroll requests and shrink clamping.
         .child(Scrollbar {
             scroll,
-            edge_fade_color,
-            surface,
+            edge_fade: Some((edge_fade_color, surface)),
         })
 }
 
@@ -119,8 +164,9 @@ struct Geometry {
 impl Geometry {
     fn read(track: Bounds<Pixels>, scroll: &ScrollSource) -> Self {
         let handle = scroll.handle();
-        let viewport = handle.bounds();
-        let max_offset = handle.max_offset().y.max(px(0.));
+        let track = scroll.orient(track);
+        let viewport = scroll.orient(handle.bounds());
+        let max_offset = scroll.along(handle.max_offset()).max(px(0.));
         Self {
             track,
             viewport,
@@ -231,12 +277,17 @@ impl ScrollbarState {
     fn set_offset(&self, y: Pixels) {
         let handle = self.scroll.handle();
         let mut offset = handle.offset();
-        offset.y = y.clamp(-self.geometry.max_offset, px(0.));
+        let value = y.clamp(-self.geometry.max_offset, px(0.));
+        if self.scroll.horizontal() {
+            offset.x = value;
+        } else {
+            offset.y = value;
+        }
         handle.set_offset(offset);
     }
 
     fn begin(&mut self, y: Pixels) {
-        let offset = self.scroll.handle().offset().y;
+        let offset = self.scroll.offset();
         let Some(thumb) = self.geometry.thumb(offset) else {
             return;
         };
@@ -271,13 +322,12 @@ impl ScrollbarState {
 
 struct Scrollbar {
     scroll: ScrollSource,
-    edge_fade_color: Option<u32>,
-    surface: crate::SurfaceStyle,
+    edge_fade: Option<(Option<u32>, crate::SurfaceStyle)>,
 }
 
 struct FrameState {
     state: Entity<ScrollbarState>,
-    hitbox: Hitbox,
+    hitbox: Option<Hitbox>,
 }
 
 impl IntoElement for Scrollbar {
@@ -293,7 +343,14 @@ impl Element for Scrollbar {
     type PrepaintState = FrameState;
 
     fn id(&self) -> Option<ElementId> {
-        Some("vertical-scrollbar".into())
+        Some(
+            if self.scroll.horizontal() {
+                "horizontal-scrollbar"
+            } else {
+                "vertical-scrollbar"
+            }
+            .into(),
+        )
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -307,8 +364,13 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        let size = if self.scroll.horizontal() {
+            size(relative(1.).into(), px(SLOT_WIDTH).into())
+        } else {
+            size(px(SLOT_WIDTH).into(), relative(1.).into())
+        };
         let style = Style {
-            size: size(px(SLOT_WIDTH).into(), relative(1.).into()),
+            size,
             flex_shrink: 0.,
             ..Style::default()
         };
@@ -350,7 +412,7 @@ impl Element for Scrollbar {
                     retained.update_geometry(geometry);
                     // UniformList already clamps before laying out its rows.
                     // Retain the same invariant for empty lists as well.
-                    let offset = self.scroll.handle().offset().y;
+                    let offset = self.scroll.offset();
                     retained.set_offset(offset);
                 });
                 (state.clone(), state)
@@ -358,7 +420,8 @@ impl Element for Scrollbar {
         );
         FrameState {
             state,
-            hitbox: window.insert_hitbox(bounds, HitboxBehavior::BlockMouse),
+            hitbox: (!self.scroll.horizontal() || geometry.max_offset > px(0.))
+                .then(|| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse)),
         }
     }
 
@@ -373,18 +436,22 @@ impl Element for Scrollbar {
         cx: &mut App,
     ) {
         let theme = crate::theme::palette(cx);
-        let hovered = frame.hitbox.is_hovered(window);
+        let hovered = frame
+            .hitbox
+            .as_ref()
+            .is_some_and(|hitbox| hitbox.is_hovered(window));
         frame.state.update(cx, |state, _| state.hovered = hovered);
         {
             let state = frame.state.read(cx);
-            let offset = self.scroll.handle().offset().y;
-            paint_scroll_edges(
-                self.surface
-                    .fill(self.edge_fade_color.unwrap_or(theme.panel)),
-                state.geometry,
-                offset,
-                window,
-            );
+            let offset = self.scroll.offset();
+            if let Some((color, surface)) = self.edge_fade {
+                paint_scroll_edges(
+                    surface.fill(color.unwrap_or(theme.panel)),
+                    state.geometry,
+                    offset,
+                    window,
+                );
+            }
             if let Some(mut thumb) = state.geometry.thumb(offset) {
                 let expanded = state.gesture.is_some() || state.hovered;
                 let width = px(if expanded {
@@ -399,16 +466,22 @@ impl Element for Scrollbar {
                 } else {
                     rgb(theme.muted).alpha(0.22)
                 };
-                window.paint_quad(fill(thumb, color).corner_radii(width / 2.));
+                window.paint_quad(fill(self.scroll.orient(thumb), color).corner_radii(width / 2.));
             }
         }
 
         let state = frame.state.clone();
         let hitbox = frame.hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Capture && hitbox.is_hovered(window) {
+            if phase == DispatchPhase::Capture
+                && hitbox
+                    .as_ref()
+                    .is_some_and(|hitbox| hitbox.is_hovered(window))
+            {
                 if event.button == MouseButton::Left {
-                    state.update(cx, |state, _| state.begin(event.position.y));
+                    state.update(cx, |state, _| {
+                        state.begin(state.scroll.along(event.position))
+                    });
                     window.refresh();
                 }
                 window.prevent_default();
@@ -423,12 +496,14 @@ impl Element for Scrollbar {
                 return;
             }
             let (hover_changed, owned) = state.update(cx, |state, _| {
-                let hovered = hitbox.is_hovered(window);
+                let hovered = hitbox
+                    .as_ref()
+                    .is_some_and(|hitbox| hitbox.is_hovered(window));
                 let hover_changed = hovered != state.hovered;
                 state.hovered = hovered;
                 (
                     hover_changed,
-                    state.move_pointer(event.position.y, event.dragging()),
+                    state.move_pointer(state.scroll.along(event.position), event.dragging()),
                 )
             });
             if hover_changed || owned {
@@ -445,7 +520,11 @@ impl Element for Scrollbar {
             if phase == DispatchPhase::Capture {
                 let owned = event.button == MouseButton::Left
                     && state.update(cx, |state, _| state.release());
-                if owned || hitbox.is_hovered(window) {
+                if owned
+                    || hitbox
+                        .as_ref()
+                        .is_some_and(|hitbox| hitbox.is_hovered(window))
+                {
                     window.refresh();
                     cx.stop_propagation();
                 }
@@ -470,10 +549,19 @@ impl Element for Scrollbar {
         let state = frame.state.clone();
         let hitbox = frame.hitbox.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+            if phase == DispatchPhase::Bubble
+                && hitbox
+                    .as_ref()
+                    .is_some_and(|hitbox| hitbox.should_handle_scroll(window))
+            {
                 let state = state.read(cx);
-                let delta = event.delta.pixel_delta(window.line_height()).y;
-                let offset = state.scroll.handle().offset().y;
+                let delta = event.delta.pixel_delta(window.line_height());
+                let delta = if state.scroll.horizontal() && delta.x != px(0.) {
+                    delta.x
+                } else {
+                    delta.y
+                };
+                let offset = state.scroll.offset();
                 state.set_offset(offset + delta);
                 window.refresh();
                 cx.stop_propagation();

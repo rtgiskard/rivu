@@ -799,6 +799,49 @@ pub(super) struct AudioProcessing {
     export: ExportState,
 }
 
+fn processing_input_help(label: &str) -> Option<&'static str> {
+    if label == "processing-speech-post-filter" {
+        return Some("processing-speech-post-filter-help");
+    }
+    macro_rules! help_ids {
+        ($($id:literal),+ $(,)?) => {
+            match label {
+                $($id => Some(concat!($id, "-input-help")),)+
+                _ => None,
+            }
+        };
+    }
+    help_ids!(
+        "processing-preset-name",
+        "processing-vocal-gain",
+        "processing-accompaniment-gain",
+        "processing-strength",
+        "processing-spectral-gain-floor",
+        "processing-attack",
+        "processing-release",
+        "processing-smoothing",
+        "processing-transients",
+        "processing-wet",
+        "processing-fft",
+        "processing-stationary-floor",
+        "processing-hum-frequency",
+        "processing-harmonics",
+        "processing-impulse-width",
+        "processing-impulse-floor",
+        "processing-threshold",
+        "processing-profile-start",
+        "processing-profile-end",
+        "processing-threads",
+        "processing-speech-wet",
+        "processing-speech-attenuation",
+        "processing-separation-overlap",
+        "processing-graph-taps",
+        "processing-export-compression",
+        "processing-export-bitrate",
+        "processing-graph-input-gain",
+    )
+}
+
 impl AudioProcessing {
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
@@ -1184,11 +1227,25 @@ impl AudioProcessing {
         request
     }
 
-    fn path_placeholder(&self, key: FieldKey) -> Option<SharedString> {
+    fn new_field_input(
+        &self,
+        key: FieldKey,
+        label: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Entity<Input> {
+        let placeholder = self
+            .field_placeholder(key)
+            .unwrap_or_else(|| label.to_owned().into());
+        cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx))
+    }
+
+    fn field_placeholder(&self, key: FieldKey) -> Option<SharedString> {
         let id = match key {
             FieldKey::Neural(field) => field.path_placeholder()?,
             FieldKey::PresetPath => "processing-preset-path-placeholder",
             FieldKey::ExportPath => "processing-export-path-placeholder",
+            FieldKey::ExportRate => "processing-export-rate-help",
             FieldKey::Graph(binding) => binding.field.path_placeholder()?,
             _ => return None,
         };
@@ -1216,10 +1273,7 @@ impl AudioProcessing {
             }
             return;
         }
-        let placeholder = self
-            .path_placeholder(key)
-            .unwrap_or_else(|| label.to_owned().into());
-        let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
+        let input = self.new_field_input(key, label, value.clone(), cx);
         let subscription = self.subscribe_field(&input, key, cx);
         self.fields.insert(
             key,
@@ -1421,53 +1475,6 @@ impl AudioProcessing {
         );
     }
 
-    fn parameter_path_label(&self, prefix: &str, key: &str) -> String {
-        let label = self.parameter_label(key);
-        if let Some(group) = prefix.strip_prefix("denoise.") {
-            format!("{} · {label}", self.parameter_label(group))
-        } else {
-            label
-        }
-    }
-
-    fn parameter_label(&self, key: &str) -> String {
-        let id = match key {
-            "mode" => "processing-denoise-mode",
-            "device" => "processing-device",
-            "strength" => "processing-strength",
-            "spectral_gain_floor_db" => "processing-spectral-gain-floor",
-            "attack_ms" => "processing-attack",
-            "release_ms" => "processing-release",
-            "smoothing_bins" => "processing-smoothing",
-            "transient_protection" => "processing-transients",
-            "wet" => "processing-wet",
-            "fft_size" => "processing-fft",
-            "stationary_noise_dbfs" => "processing-stationary-floor",
-            "enabled" => "processing-enabled",
-            "fundamental_hz" => "processing-hum-frequency",
-            "hum" => "processing-hum",
-            "impulse" => "processing-impulse",
-            "max_width" => "processing-impulse-width",
-            "floor_dbfs" => "processing-impulse-floor",
-            "speech_interpreter" => "processing-speech-interpreter",
-            "separation_interpreter" => "processing-separation-interpreter",
-            "speech_wet_mix" => "processing-speech-wet",
-            "speech_attenuation_limit_db" => "processing-speech-attenuation",
-            "speech_post_filter" => "processing-speech-post-filter",
-            "separation_overlap" => "processing-separation-overlap",
-            "frequency_hz" => "processing-frequency",
-            "harmonics" => "processing-harmonics",
-            "q" => "processing-q",
-            "threshold" => "processing-threshold",
-            "worker" => "processing-worker",
-            "speech_manifest" => "processing-speech-manifest",
-            "separation_manifest" => "processing-separation-manifest",
-            "threads" => "processing-threads",
-            _ => return key.replace('_', " "),
-        };
-        self.context.i18n.text(id).to_owned()
-    }
-
     fn field_input(
         &mut self,
         panel: u64,
@@ -1478,10 +1485,7 @@ impl AudioProcessing {
         self.bind_panel(panel, cx);
         if self.fields[&key].native_epoch != Some(self.input_epoch) {
             let text = self.fields[&key].input.read(cx).text().to_owned();
-            let placeholder = self
-                .path_placeholder(key)
-                .unwrap_or_else(|| label.to_owned().into());
-            let input = cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx));
+            let input = self.new_field_input(key, label, text, cx);
             let subscription = self.subscribe_field(&input, key, cx);
             let field = self
                 .fields
@@ -1498,38 +1502,60 @@ impl AudioProcessing {
         input
     }
 
+    fn field_help(&self, key: FieldKey, label_id: &str) -> Option<SharedString> {
+        if key == FieldKey::ExportRate {
+            return self.field_placeholder(key);
+        }
+        self.path_help(key)
+            .or_else(|| processing_input_help(label_id).map(|id| self.tr(id)))
+    }
+
     fn field_view(
         &mut self,
         panel: u64,
         key: FieldKey,
-        label: impl Into<SharedString>,
+        label_id: &str,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let label: SharedString = label.into();
+        let label = self.tr(label_id);
         let input = self.field_input(panel, key, &label, cx);
-        Self::parameter_row(
+        self.parameter_row(
+            theme,
+            SharedString::from(format!("field-label-{key:?}")),
+            label,
             div()
-                .text_xs()
-                .text_color(rgb(theme.secondary))
-                .id(SharedString::from(format!("field-label-{key:?}")))
-                .map(|view| {
-                    if let Some(help) = self.path_help(key) {
-                        view.child(label).tooltip(rivu_ui::text_tooltip(help))
-                    } else {
-                        view.child(rivu_ui::truncated_label("field-label-text", label))
-                    }
-                }),
-            input,
+                .id(SharedString::from(format!("field-input-{key:?}")))
+                .when_some(self.field_help(key, label_id), |view, help| {
+                    view.tooltip(rivu_ui::text_tooltip(help))
+                })
+                .child(input),
         )
     }
 
-    fn parameter_row(label: impl IntoElement + Styled, control: impl IntoElement) -> Div {
+    fn parameter_row(
+        &self,
+        theme: &'static rivu_format::palette::Palette,
+        label_id: impl Into<gpui::ElementId>,
+        label: SharedString,
+        control: impl IntoElement,
+    ) -> Div {
+        let compact = self.page == Page::Export;
         row()
             .min_w_0()
             .items_center()
             .gap_2()
-            .child(label.w(relative(0.42)).flex_shrink_0().min_w_0().truncate())
+            .child(
+                div()
+                    .w(relative(0.42))
+                    .when(compact, |label| label.max_w_32())
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(theme.secondary))
+                    .child(rivu_ui::truncated_label(label_id, label)),
+            )
             .child(div().flex_1().min_w_0().child(control))
     }
 
@@ -1991,18 +2017,10 @@ impl AudioProcessing {
                 .as_ref()
                 .is_some_and(|popup| popup.panel == panel && popup.manage)
         }) {
-            let name_field = self.field_view(
-                panel,
-                FieldKey::PresetName,
-                self.tr("processing-preset-name"),
-                cx,
-            );
-            let path_field = self.field_view(
-                panel,
-                FieldKey::PresetPath,
-                self.tr("processing-preset-path"),
-                cx,
-            );
+            let name_field =
+                self.field_view(panel, FieldKey::PresetName, "processing-preset-name", cx);
+            let path_field =
+                self.field_view(panel, FieldKey::PresetPath, "processing-preset-path", cx);
             let popup = self.preset_popup.as_ref().expect("open preset management");
             content = content.child(
                 deferred(
@@ -2191,7 +2209,7 @@ impl AudioProcessing {
             content = content.child(self.field_view(
                 panel,
                 FieldKey::Denoise(field),
-                self.tr(field.label_id()),
+                field.label_id(),
                 cx,
             ));
         }
@@ -2268,15 +2286,10 @@ impl AudioProcessing {
                 .child(self.field_view(
                     panel,
                     FieldKey::ProfileStart,
-                    self.tr("processing-profile-start"),
+                    "processing-profile-start",
                     cx,
                 ))
-                .child(self.field_view(
-                    panel,
-                    FieldKey::ProfileEnd,
-                    self.tr("processing-profile-end"),
-                    cx,
-                ));
+                .child(self.field_view(panel, FieldKey::ProfileEnd, "processing-profile-end", cx));
         }
         let mut content = column().min_w_0().gap_3().child(rivu_ui::section_group(
             theme,
@@ -2345,7 +2358,7 @@ impl AudioProcessing {
             content = content.child(self.field_view(
                 panel,
                 FieldKey::Neural(field),
-                self.tr(field.label_id()),
+                field.label_id(),
                 cx,
             ));
         }
@@ -2374,30 +2387,37 @@ impl AudioProcessing {
             cx,
         );
         if speech {
-            parameters = parameters.child(Self::parameter_row(
-                caption(theme, self.tr("processing-speech-post-filter-label"))
-                    .id("speech-post-filter-label")
-                    .tooltip(rivu_ui::text_tooltip(
-                        self.tr("processing-speech-post-filter-help"),
-                    )),
-                checkbox(
-                    "neural.speech_post_filter",
-                    self.tr("processing-speech-post-filter-model"),
-                    neural.speech_post_filter,
-                    true,
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::ToggleProcessing {
-                                target: ProcessingToggle::SpeechPostFilter,
-                            },
-                            cx,
-                        )
-                    },
-                )
-                .debug_selector(|| "speech-post-filter".to_owned())
-                .aria_label(self.tr("processing-speech-post-filter")),
-            ));
+            parameters = parameters.child(
+                self.parameter_row(
+                    theme,
+                    "speech-post-filter-label",
+                    self.tr("processing-speech-post-filter"),
+                    div()
+                        .id("speech-post-filter-control")
+                        .tooltip(rivu_ui::text_tooltip(
+                            self.tr("processing-speech-post-filter-help"),
+                        ))
+                        .child(
+                            checkbox(
+                                "neural.speech_post_filter",
+                                self.tr("processing-speech-post-filter-model"),
+                                neural.speech_post_filter,
+                                true,
+                                cx,
+                                |this, _, cx| {
+                                    this.send(
+                                        Command::ToggleProcessing {
+                                            target: ProcessingToggle::SpeechPostFilter,
+                                        },
+                                        cx,
+                                    )
+                                },
+                            )
+                            .debug_selector(|| "speech-post-filter".to_owned())
+                            .aria_label(self.tr("processing-speech-post-filter")),
+                        ),
+                ),
+            );
         }
         let model = self.neural_fields(
             panel,
@@ -2468,8 +2488,10 @@ impl AudioProcessing {
                     }),
                 );
             }
-            runtime = runtime.child(Self::parameter_row(
-                caption(theme, self.tr("processing-device")),
+            runtime = runtime.child(self.parameter_row(
+                theme,
+                "device-label",
+                self.tr("processing-device"),
                 devices,
             ));
             model = model.child(runtime).child(
@@ -3033,14 +3055,17 @@ impl AudioProcessing {
             .p_2()
             .gap_1()
             .child(self.processing_workbench_measure(panel, cx))
-            .child(
+            .child(rivu_ui::horizontally_scrollable_area(
+                ("processing-tab-scrollbar", panel),
                 row()
-                    .min_w_0()
-                    .flex_shrink_0()
                     .id(("processing-tabs", panel))
-                    .overflow_x_scroll()
-                    .child(tabs),
-            )
+                    .child(tabs.flex_shrink_0()),
+                &self
+                    .context
+                    .scroll
+                    .borrow_mut()
+                    .horizontal_content(("processing-tabs", panel)),
+            ))
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .child(footer.flex_shrink_0())
             .into_any_element()
