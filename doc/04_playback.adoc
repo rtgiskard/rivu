@@ -518,7 +518,8 @@ The default build scans and plays Standard MIDI files (`.mid`, `.midi`, formats
 probing read the sequence without loading an instrument bank. Playback
 synthesizes stereo audio in Rivu, without FFmpeg or a separate audio output.
 Full waveforms and exports use the same bank.
-System-exclusive messages and MIDI hardware input/output are not supported.
+Files that use more than one MIDI port are rejected. System-exclusive messages
+and MIDI hardware input/output are not supported.
 
 Playback requires a General MIDI SoundFont (`.sf2`). On Arch Linux, install
 `soundfont-fluid` for `/usr/share/soundfonts/FluidR3_GM.sf2`. On other distributions,

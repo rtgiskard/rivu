@@ -126,7 +126,33 @@ impl Sequence {
         parsed.context(super::SourceFailure)
     }
 
+    fn validate_headers(mut bytes: &[u8], cancelled: Option<&AtomicBool>) -> Result<()> {
+        // Midly decodes a header before rejecting a duplicate. Validate all
+        // chunk boundaries without touching track payloads before handing off.
+        let mut seen = false;
+        while !bytes.is_empty() {
+            check_cancelled(cancelled)?;
+            let (chunk, rest) = bytes
+                .split_at_checked(8)
+                .context("Truncated MIDI chunk header")?;
+            let len = u32::from_be_bytes(chunk[4..].try_into()?) as usize;
+            let (body, rest) = rest.split_at_checked(len).context("Truncated MIDI chunk")?;
+            if &chunk[..4] == b"MThd" {
+                ensure!(!seen, "Duplicate MIDI header");
+                seen = true;
+                let division = *body.get(4).context("Truncated MIDI header")?;
+                ensure!(
+                    division < 0x80 || matches!(division, 0xe8 | 0xe7 | 0xe3 | 0xe2),
+                    "Invalid MIDI SMPTE frame rate"
+                );
+            }
+            bytes = rest;
+        }
+        Ok(())
+    }
+
     fn parse(bytes: &[u8], retain_notes: bool, cancelled: Option<&AtomicBool>) -> Result<Self> {
+        Self::validate_headers(bytes, cancelled)?;
         let (header, tracks) = midly::parse(bytes).context("Parsing standard MIDI file")?;
         ensure!(
             header.format != Format::Sequential,
@@ -138,11 +164,13 @@ impl Sequence {
         let mut last_tick = 0;
         let mut total = 0;
         let mut tracks_seen = 0;
+        let mut used_port = None;
         for (index, track) in tracks.enumerate() {
             ensure!(index < 1024, "MIDI file exceeds 1024 tracks");
             tracks_seen += 1;
             let mut tick = 0;
             let mut ended = false;
+            let mut port = 0;
             let mut track = track?;
             while let Some(event) = track.next() {
                 total += 1;
@@ -153,15 +181,21 @@ impl Sequence {
                 let event = event?;
                 tick += u64::from(event.delta.as_int());
                 match event.kind {
-                    TrackEventKind::Midi { channel, message }
+                    TrackEventKind::Meta(MetaMessage::MidiPort(value)) => port = value.as_int(),
+                    TrackEventKind::Midi { channel, message } => {
+                        ensure!(
+                            *used_port.get_or_insert(port) == port,
+                            "MIDI files using multiple ports are not supported"
+                        );
                         if retain_notes
                             && !matches!(
                                 message,
                                 MidiMessage::Aftertouch { .. }
                                     | MidiMessage::ChannelAftertouch { .. }
-                            ) =>
-                    {
-                        events.push((tick, Event::Midi(channel.as_int(), message)));
+                            )
+                        {
+                            events.push((tick, Event::Midi(channel.as_int(), message)));
+                        }
                     }
                     TrackEventKind::Meta(MetaMessage::Tempo(tempo))
                         if matches!(header.timing, Timing::Metrical(_)) =>
@@ -645,6 +679,36 @@ mod tests {
         for bytes in [&missing[..], &extra[..]] {
             assert!(Sequence::parse(bytes, false, None).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_invalid_smpte_timing_in_primary_and_duplicate_headers() {
+        let bad_header = b"MThd\0\0\0\x06\0\0\0\x01\x80\x64";
+        let track = b"MTrk\0\0\0\x04\0\xff\x2f\0";
+        let invalid = [&bad_header[..], &track[..]].concat();
+        let duplicate = [
+            &b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0"[..],
+            &track[..],
+            &bad_header[..],
+        ]
+        .concat();
+        for (bytes, message) in [(invalid, "SMPTE"), (duplicate, "Duplicate")] {
+            let error = Sequence::parse(&bytes, false, None).err().unwrap();
+            assert!(error.to_string().contains(message));
+        }
+    }
+
+    #[test]
+    fn rejects_multiple_used_ports_for_probe_and_render() {
+        let mut bytes = *b"MThd\0\0\0\x06\0\x01\0\x02\x01\xe0\
+            MTrk\0\0\0\x08\0\x90\x3c\x64\0\xff\x2f\0\
+            MTrk\0\0\0\x0d\0\xff\x21\x01\x01\0\x90\x3c\x64\0\xff\x2f\0";
+        for retain in [false, true] {
+            let error = Sequence::parse(&bytes, retain, None).err().unwrap();
+            assert!(error.to_string().contains("multiple ports"));
+        }
+        bytes[42] = 0; // Explicit port zero and the implicit default are identical.
+        assert!(Sequence::parse(&bytes, true, None).is_ok());
     }
 
     #[test]
