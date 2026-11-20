@@ -354,12 +354,7 @@ impl Core {
         if active {
             self.processing.cancel(id)?;
         }
-        if self
-            .pending_processing_audition
-            .is_some_and(|(task, _)| task == id)
-        {
-            self.pending_processing_audition = None;
-        }
+        self.take_pending_processing_audition(id);
         if selected {
             if let Err(error) = self.restore_original_processing_source(id) {
                 self.stop()?;
@@ -594,16 +589,25 @@ impl Core {
         self.processing.status(id).cloned()
     }
 
-    fn retain_processing_terminal(&mut self, id: u64) {
+    fn take_pending_processing_audition(&mut self, id: u64) -> Option<u64> {
+        let (pending_id, generation) = self.pending_processing_audition?;
+        if pending_id != id {
+            return None;
+        }
+        self.pending_processing_audition = None;
+        Some(generation)
+    }
+
+    fn complete_processing_task(&mut self, id: u64) {
         self.processing.retain_terminal(id);
+        self.task_completed(TaskTarget::Processing { id });
     }
 
     pub(in crate::core) fn shutdown_processing(&mut self) {
         let active = self.processing.active_id();
         self.processing.shutdown();
         if let Some(id) = active {
-            self.retain_processing_terminal(id);
-            self.task_completed(TaskTarget::Processing { id });
+            self.complete_processing_task(id);
         }
     }
 
@@ -672,13 +676,12 @@ impl Core {
                 phase,
             } => self.processing.progress(id, completed, total, phase),
             Event::Finished { id, result } => {
-                if self.processing.active_id() != Some(id) {
+                let Some(cancelled) = self.processing.finish_task(id) else {
                     if let Ok(result) = result {
                         self.processing.retire(result);
                     }
                     return;
-                }
-                let cancelled = self.processing.finish_task(id).unwrap();
+                };
                 let abort_phase = if cancelled {
                     ProcessingPhase::Cancelled
                 } else {
@@ -704,56 +707,45 @@ impl Core {
                         false
                     }
                 };
-                if let Some((pending_id, generation)) = self.pending_processing_audition
-                    && pending_id == id
+                let audition_generation = self.take_pending_processing_audition(id);
+                if published
+                    && !self.preferences.settings().processing_bypassed
+                    && audition_generation == Some(self.transport.generation)
                 {
-                    self.pending_processing_audition = None;
-                    if published
-                        && !self.preferences.settings().processing_bypassed
-                        && generation == self.transport.generation
-                    {
-                        let outcome = if let Some(runner) = self.processing.take_graph_runner(id) {
-                            self.processing_graph_audition_prepared(id, runner)
-                        } else {
-                            let target = self
-                                .processing
-                                .status(id)
-                                .and_then(|status| status.settings.graph_target);
-                            target.map_or(Ok(()), |target| {
-                                self.processing_graph_audition(id, target).map(|_| ())
-                            })
-                        };
-                        if let Err(error) = outcome {
-                            let error = format!("{error:#}");
-                            self.state.system.last_error = Some(error.clone());
-                            self.processing
-                                .outcome(id, ProcessingPhase::Failed, Some(error));
-                        }
+                    let outcome = if let Some(runner) = self.processing.take_graph_runner(id) {
+                        self.processing_graph_audition_prepared(id, runner)
+                    } else {
+                        let target = self
+                            .processing
+                            .status(id)
+                            .and_then(|status| status.settings.graph_target);
+                        target.map_or(Ok(()), |target| {
+                            self.processing_graph_audition(id, target).map(|_| ())
+                        })
+                    };
+                    if let Err(error) = outcome {
+                        let error = format!("{error:#}");
+                        self.state.system.last_error = Some(error.clone());
+                        self.processing
+                            .outcome(id, ProcessingPhase::Failed, Some(error));
                     }
                 }
-                self.retain_processing_terminal(id);
-                self.task_completed(TaskTarget::Processing { id });
+                self.complete_processing_task(id);
             }
             Event::MixFinished {
                 id,
                 generation,
                 result,
             } => {
-                if self.processing.active_id() != Some(id) {
+                let Some(cancelled) = self.processing.finish_task(id) else {
                     if let Ok(pcm) = result {
                         self.processing.retire_pcm(pcm);
                     }
                     return;
-                }
-                let cancelled = self.processing.finish_task(id).unwrap();
+                };
+                let audition_generation = self.take_pending_processing_audition(id);
                 let requested = !self.preferences.settings().processing_bypassed
-                    && self.pending_processing_audition == Some((id, generation));
-                if self
-                    .pending_processing_audition
-                    .is_some_and(|(task, _)| task == id)
-                {
-                    self.pending_processing_audition = None;
-                }
+                    && audition_generation == Some(generation);
                 let outcome = match result {
                     Ok(pcm)
                         if !cancelled
@@ -809,8 +801,7 @@ impl Core {
                 {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
-                self.retain_processing_terminal(id);
-                self.task_completed(TaskTarget::Processing { id });
+                self.complete_processing_task(id);
             }
         }
         self.publish();
