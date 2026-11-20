@@ -27,10 +27,10 @@ pub struct PcmControl {
     wake: async_channel::Sender<()>,
     updates: async_channel::Receiver<()>,
 }
-impl Default for PcmControl {
-    fn default() -> Self {
+impl PcmControl {
+    pub fn new() -> anyhow::Result<Self> {
         let (wake, updates) = async_channel::bounded(1);
-        Self {
+        Ok(Self {
             epoch: AtomicU64::new(0),
             desired_intent: AtomicU64::new(0),
             applied_intent: AtomicU64::new(0),
@@ -43,13 +43,12 @@ impl Default for PcmControl {
             visualization_enabled: AtomicBool::new(true),
             capture: AtomicU64::new(0),
             signal_after: AtomicBool::new(true),
-            window: Arc::new(SharedPcmWindow::new().expect("Cannot allocate shared PCM window")),
+            window: Arc::new(SharedPcmWindow::new()?),
             wake,
             updates,
-        }
+        })
     }
-}
-impl PcmControl {
+
     pub fn state(&self) -> PcmState {
         loop {
             let epoch = self.epoch.load(Ordering::Acquire);
@@ -448,7 +447,7 @@ mod tests {
     use Channel::{FrontLeft, FrontRight};
 
     fn capture() -> (Arc<PcmControl>, PcmProducer, TestCapture) {
-        let control = Arc::new(PcmControl::default());
+        let control = Arc::new(PcmControl::new().unwrap());
         control.set_generation(17);
         control.reset(96_000, &[FrontLeft, FrontRight]);
         control.set_playback_active(true);

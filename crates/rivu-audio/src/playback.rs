@@ -944,7 +944,7 @@ pub(super) mod tests {
         playback: &mut Playback,
         signal: VisualizationSignal,
     ) -> (Arc<PcmControl>, crate::capture::TestCapture) {
-        let worker = Arc::new(PcmControl::default());
+        let worker = Arc::new(PcmControl::new().unwrap());
         worker.set_playback_active(true);
         worker.set_enabled(true);
         let (producer, captured) = PcmProducer::capture_for_test(&worker, playback.source.layout());
@@ -1315,7 +1315,7 @@ pub(super) mod tests {
                     )
                     .unwrap();
                 }
-                let worker = Arc::new(PcmControl::default());
+                let worker = Arc::new(PcmControl::new().unwrap());
                 worker.set_playback_active(true);
                 let (producer, mut captured) =
                     PcmProducer::capture_for_test(&worker, playback.source.layout());
@@ -1381,7 +1381,7 @@ pub(super) mod tests {
         use crate::Channel::{FrontCenter, FrontLeft, FrontRight, Lfe, SideLeft, SideRight};
         let file = pcm();
         let (mut playback, _) = test_playback_selected(file.path(), None);
-        let worker = Arc::new(PcmControl::default());
+        let worker = Arc::new(PcmControl::new().unwrap());
         worker.set_playback_active(true);
         worker.set_enabled(true);
         let layout = [FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight];
@@ -1673,7 +1673,7 @@ pub(super) mod tests {
             for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
                 for processed in [false, true] {
                     let (mut playback, _) = test_playback_selected(file.path(), None);
-                    let worker = Arc::new(PcmControl::default());
+                    let worker = Arc::new(PcmControl::new().unwrap());
                     worker.reset(rate, playback.source.layout());
                     worker.set_playback_active(true);
                     worker.set_enabled(true);
@@ -1844,7 +1844,7 @@ pub(super) mod tests {
             playback.before_skip_frames = graph.source_lead_frames();
             playback.graph_output_remaining = Some(published);
             playback.graph = Some(graph);
-            let worker = Arc::new(PcmControl::default());
+            let worker = Arc::new(PcmControl::new().unwrap());
             worker.set_playback_active(true);
             worker.set_enabled(true);
             let (producer, mut captured) =
@@ -2783,7 +2783,7 @@ pub(super) mod tests {
     fn before_pcm_stays_continuous_across_monitor_eq_bypass_roundtrip() {
         let file = pcm_samples(24_000);
         let (mut playback, _) = test_playback_selected(file.path(), None);
-        let worker = Arc::new(PcmControl::default());
+        let worker = Arc::new(PcmControl::new().unwrap());
         worker.reset(8_000, playback.source.layout());
         worker.set_playback_active(true);
         worker.set_enabled(true);
@@ -2866,7 +2866,7 @@ pub(super) mod tests {
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             for volume in [0.0, 0.25, 1.0] {
                 let (mut playback, mut render) = test_playback_selected(file.path(), None);
-                let worker = Arc::new(PcmControl::default());
+                let worker = Arc::new(PcmControl::new().unwrap());
                 worker.set_playback_active(true);
                 worker.set_enabled(true);
                 let (producer, mut captured) =

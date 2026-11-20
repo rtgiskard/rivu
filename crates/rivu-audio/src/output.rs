@@ -2841,7 +2841,7 @@ mod pcm_tests {
         device: &[Channel],
         capacity: usize,
     ) -> (Output, OutputCallback, Arc<PcmControl>) {
-        let analyzer = Arc::new(PcmControl::default());
+        let analyzer = Arc::new(PcmControl::new().unwrap());
         analyzer
             .window()
             .retain_output(capacity / source.len(), rate, source.len())

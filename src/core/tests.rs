@@ -283,7 +283,7 @@ fn pcm_fixture() -> (
     Arc<audio::capture::PcmControl>,
     mpsc::Receiver<Request>,
 ) {
-    let pcm = Arc::new(audio::capture::PcmControl::default());
+    let pcm = Arc::new(audio::capture::PcmControl::new().unwrap());
     let (sender, receiver) = async_channel::bounded(1);
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),

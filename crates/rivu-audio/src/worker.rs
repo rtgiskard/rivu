@@ -1977,7 +1977,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, receive) = async_channel::bounded(16);
         let (stop, shutdown) = shutdown_channel();
-        let analyzer = Arc::new(PcmControl::default());
+        let analyzer = Arc::new(PcmControl::new().unwrap());
         let worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 65536);
         (worker, send, receive, stop)
     }
@@ -2776,7 +2776,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, receive) = async_channel::bounded(2);
         let (_stop, shutdown) = shutdown_channel();
-        let analyzer = Arc::new(PcmControl::default());
+        let analyzer = Arc::new(PcmControl::new().unwrap());
         let mut worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 1024);
         for (index, target) in [
             "invalid-first-target",
@@ -2819,7 +2819,7 @@ mod tests {
                 })
                 .unwrap();
             let (shutdown, cancelled) = shutdown_channel();
-            let analyzer = Arc::new(PcmControl::default());
+            let analyzer = Arc::new(PcmControl::new().unwrap());
             let worker = Worker::new(
                 receive,
                 commands_ready,
@@ -2873,7 +2873,7 @@ mod tests {
                 commands,
                 command_wake,
                 event_receive,
-                Arc::new(PcmControl::default()),
+                Arc::new(PcmControl::new().unwrap()),
             );
             let mut retired = Vec::new();
             assert!(
@@ -2975,7 +2975,7 @@ mod tests {
                     commands,
                     command_wake,
                     event_receive,
-                    Arc::new(PcmControl::default()),
+                    Arc::new(PcmControl::new().unwrap()),
                 );
                 assert!(stop.deadline >= created + Duration::from_secs(5));
                 assert!(stop.deadline <= Instant::now() + Duration::from_secs(5));
@@ -3002,7 +3002,7 @@ mod tests {
         let (_wake, commands_ready) = bounded(1);
         let (events, _receive) = async_channel::bounded(1);
         let (_stop, shutdown) = shutdown_channel();
-        let analyzer = Arc::new(PcmControl::default());
+        let analyzer = Arc::new(PcmControl::new().unwrap());
         let mut worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 65536);
         worker.command(AudioCommand::Volume(0.3));
         worker.analyzer.set_enabled(true);
@@ -3278,7 +3278,7 @@ mod tests {
                     })
                     .unwrap();
                 let (shutdown, cancelled) = shutdown_channel();
-                let pcm = Arc::new(PcmControl::default());
+                let pcm = Arc::new(PcmControl::new().unwrap());
                 let analyzer = Arc::clone(&pcm);
                 let worker =
                     Worker::new(receive, commands_ready, events, cancelled, analyzer, 1024);

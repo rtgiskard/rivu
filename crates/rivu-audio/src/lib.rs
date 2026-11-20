@@ -528,7 +528,7 @@ impl AudioEngine {
         let (command_wake, commands_ready) = bounded(1);
         let (send_events, events) = async_channel::bounded(128);
         let (shutdown, cancelled) = shutdown_channel();
-        let pcm = Arc::new(PcmControl::default());
+        let pcm = Arc::new(PcmControl::new()?);
         let analyzer = Arc::clone(&pcm);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
             .expect("media read buffer size does not fit usize")
