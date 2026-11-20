@@ -110,6 +110,69 @@ fn library_order(sort: rivu_protocol::model::LibrarySort) -> &'static str {
     }
 }
 
+enum FlatLibraryScope<'a> {
+    All,
+    Root(&'a str),
+    Other(&'a str),
+}
+
+struct FlatLibraryPage<'a> {
+    scope: FlatLibraryScope<'a>,
+    query: Option<&'a str>,
+    favorite: Option<bool>,
+    missing: Option<bool>,
+    sort: rivu_protocol::model::LibrarySort,
+    offset: usize,
+    limit: usize,
+}
+
+impl FlatLibraryPage<'_> {
+    fn load(
+        self,
+        conn: &Connection,
+        total: usize,
+    ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
+        if self.limit == 0
+            || (matches!(self.scope, FlatLibraryScope::Other(_)) && self.offset >= total)
+        {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
+        let (scope, bound_scope) = match self.scope {
+            FlatLibraryScope::All => ("", None),
+            FlatLibraryScope::Root(prefix) => (DIRECTORY_SCOPE, Some(prefix)),
+            FlatLibraryScope::Other(roots) => (OTHER_SCOPE, Some(roots)),
+        };
+        let order = library_order(self.sort);
+        let bounds = if bound_scope.is_some() {
+            "LIMIT ?5 OFFSET ?6"
+        } else {
+            "LIMIT ?4 OFFSET ?5"
+        };
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{scope} ORDER BY {order} {bounds}"
+        ))?;
+        let limit = self.limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
+        let offset = self.offset.min(i64::MAX as usize) as i64;
+        let filters: [&dyn rusqlite::ToSql; 3] = [&self.query, &self.favorite, &self.missing];
+        let paging: [&dyn rusqlite::ToSql; 2] = [&limit, &offset];
+        let bindings = filters
+            .into_iter()
+            .chain(
+                bound_scope
+                    .as_ref()
+                    .map(|scope| scope as &dyn rusqlite::ToSql),
+            )
+            .chain(paging);
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(bindings), library_row_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Page { total, rows })
+    }
+}
+
 /// Consumed immediately by the same core dispatch; stopping playback cannot
 /// change the validated catalog identities. The JSON and cache IDs stay paired.
 pub(crate) struct PreparedTrackRemoval<'a> {
@@ -232,27 +295,16 @@ impl Store {
                     })? as usize)
             },
         )?;
-        let mut rows = Vec::new();
-        if limit != 0 && offset < total {
-            let mut statement = self.conn.prepare_cached(&format!(
-                "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE} ORDER BY {} LIMIT ?5 OFFSET ?6",
-                library_order(sort)
-            ))?;
-            rows = statement
-                .query_map(
-                    params![
-                        query,
-                        favorite,
-                        missing,
-                        roots,
-                        limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
-                        offset.min(i64::MAX as usize) as i64
-                    ],
-                    library_row_from_row,
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+        FlatLibraryPage {
+            scope: FlatLibraryScope::Other(&roots),
+            query: query.as_deref(),
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
         }
-        Ok(Page { total, rows })
+        .load(&self.conn, total)
     }
 
     pub(crate) fn other_tracks_location(
@@ -441,33 +493,18 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
-        let query = query
-            .filter(|query| !query.is_empty())
-            .map(str::to_lowercase);
+        let query = search_query(query);
         let total = self.filtered_track_count(query.as_deref(), favorite, missing, None)?;
-        if limit == 0 {
-            return Ok(Page {
-                total,
-                rows: Vec::new(),
-            });
+        FlatLibraryPage {
+            scope: FlatLibraryScope::All,
+            query: query.as_deref(),
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
         }
-        let order = library_order(sort);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY {order} LIMIT ?4 OFFSET ?5"
-        ))?;
-        let rows = stmt
-            .query_map(
-                params![
-                    query,
-                    favorite,
-                    missing,
-                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
-                    offset.min(i64::MAX as usize) as i64
-                ],
-                library_row_from_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Page { total, rows })
+        .load(&self.conn, total)
     }
 
     #[expect(
@@ -488,36 +525,19 @@ impl Store {
         if prefix.is_empty() {
             return self.library_view_page(query, favorite, missing, sort, offset, limit);
         }
-        let query = query
-            .filter(|query| !query.is_empty())
-            .map(str::to_lowercase);
-        let scope = DIRECTORY_SCOPE;
+        let query = search_query(query);
         let total =
             self.filtered_track_count(query.as_deref(), favorite, missing, Some(&prefix))?;
-        if limit == 0 {
-            return Ok(Page {
-                total,
-                rows: Vec::new(),
-            });
+        FlatLibraryPage {
+            scope: FlatLibraryScope::Root(&prefix),
+            query: query.as_deref(),
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
         }
-        let order = library_order(sort);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{scope} ORDER BY {order} LIMIT ?5 OFFSET ?6"
-        ))?;
-        let rows = stmt
-            .query_map(
-                params![
-                    query,
-                    favorite,
-                    missing,
-                    prefix,
-                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
-                    offset.min(i64::MAX as usize) as i64
-                ],
-                library_row_from_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Page { total, rows })
+        .load(&self.conn, total)
     }
 
     #[expect(
