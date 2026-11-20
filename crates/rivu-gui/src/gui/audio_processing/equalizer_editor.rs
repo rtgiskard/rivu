@@ -51,6 +51,17 @@ impl BandField {
             Self::Channels => "channels",
         }
     }
+
+    fn numeric_edit(self, value: f64) -> EqBandEdit {
+        match self {
+            Self::FrequencyHz => EqBandEdit::FrequencyHz(value),
+            Self::GainDb => EqBandEdit::GainDb(value),
+            Self::Q => EqBandEdit::Q(value),
+            Self::ShelfSlope => EqBandEdit::ShelfSlope(value),
+            Self::Stages => EqBandEdit::Stages(value as u8),
+            Self::Channels => unreachable!("channels are not a numeric field"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -444,12 +455,13 @@ impl EqualizerEditor {
         if (config_changed || retired_release) && !preview_matches
             || response_format_changed
             || retired_preview
-            || taps_changed
         {
             self.response_dirty = true;
             if self.active {
                 self.update_response(cx);
             }
+        } else if taps_changed && self.active {
+            self.request_realized(cx);
         }
         cx.notify();
     }
@@ -1111,10 +1123,6 @@ impl EqualizerEditor {
             }
             EqField::Band(index, name) => {
                 let field = match name {
-                    BandField::FrequencyHz => EqBandEdit::FrequencyHz(number()?),
-                    BandField::GainDb => EqBandEdit::GainDb(number()?),
-                    BandField::Q => EqBandEdit::Q(number()?),
-                    BandField::ShelfSlope => EqBandEdit::ShelfSlope(number()?),
                     BandField::Stages => {
                         let stages = value.parse::<u8>().map_err(|error| error.to_string())?;
                         if !(1..=4).contains(&stages) {
@@ -1145,6 +1153,7 @@ impl EqualizerEditor {
                             ChannelTarget::Selected(channels)
                         })
                     }
+                    _ => name.numeric_edit(number()?),
                 };
                 EqualizerEdit::BandField { index, field }
             }
@@ -1254,15 +1263,10 @@ impl EqualizerEditor {
         self.restore_preview_field(&drag.key, cx);
         self.update_response(cx);
         if let (EqField::Band(index, field), Some(value)) = (drag.key, drag.value) {
-            let field = match field {
-                BandField::FrequencyHz => EqBandEdit::FrequencyHz(value),
-                BandField::GainDb => EqBandEdit::GainDb(value),
-                BandField::Q => EqBandEdit::Q(value),
-                BandField::ShelfSlope => EqBandEdit::ShelfSlope(value),
-                BandField::Stages => EqBandEdit::Stages(value as u8),
-                BandField::Channels => unreachable!("channels have no slider"),
+            let edit = EqualizerEdit::BandField {
+                index,
+                field: field.numeric_edit(value),
             };
-            let edit = EqualizerEdit::BandField { index, field };
             if !equalizer_field_matches_config(&edit, &self.config) {
                 self.eq(edit, cx);
             }
@@ -1666,15 +1670,12 @@ impl EqualizerEditor {
             ..
         }) = &self.field_drag
         {
-            let band = &mut self.preview_config.bands[*index];
-            match field {
-                BandField::FrequencyHz => band.frequency_hz = *value,
-                BandField::GainDb => band.gain_db = *value,
-                BandField::Q => band.q = *value,
-                BandField::ShelfSlope => band.shelf_slope = *value,
-                BandField::Stages => band.stages = *value as u8,
-                BandField::Channels => unreachable!("channels have no slider"),
+            let _ = EqualizerEdit::BandField {
+                index: *index,
+                field: field.numeric_edit(*value),
             }
+            .apply_config(&mut self.preview_config, Some(sample_rate))
+            .expect("slider preview band still exists");
             &self.preview_config
         } else {
             &self.config
@@ -1708,23 +1709,23 @@ impl EqualizerEditor {
     /// superseded result keeps the previous curve but hides deviation marks.
     fn request_realized(&mut self, cx: &mut Context<Self>) {
         self.realized_generation = self.realized_generation.wrapping_add(1);
+        self.realized_current = false;
         let Some(request) = self.realized_inputs() else {
             self.realized_task = None;
-            self.realized_current = false;
             if !self.realized.is_empty() {
                 self.realized = Arc::new(Vec::new());
             }
             return;
         };
-        self.realized_current = false;
         if self.realized_task.is_some() {
             // The running job notices the newer generation and restarts.
             return;
         }
+        let (config, sample_rate, channels, channel, taps) = request;
+        let config = config.clone();
         let generation = self.realized_generation;
         let frequencies = self.frequencies;
         let job = cx.background_executor().spawn(async move {
-            let (config, sample_rate, channels, channel, taps) = request;
             let mut realized = vec![0.; frequencies.len()];
             rivu_dsp::equalizer::fir::FirEqualizer::sample_response_db(
                 &config,
@@ -1753,7 +1754,7 @@ impl EqualizerEditor {
         }));
     }
 
-    fn realized_inputs(&self) -> Option<(EqualizerConfig, u32, usize, usize, usize)> {
+    fn realized_inputs(&self) -> Option<(&EqualizerConfig, u32, usize, usize, usize)> {
         let taps = target_fir_taps(&self.state, self.target)?;
         if !self.active || self.response_error.is_some() || self.response.is_empty() {
             return None;
@@ -1766,7 +1767,7 @@ impl EqualizerEditor {
                 &self.config
             };
         Some((
-            config.clone(),
+            config,
             format.known_sample_rate()?,
             format.channels,
             self.response_channel,
@@ -5229,14 +5230,23 @@ mod tests {
         let short = depth(cx);
         assert!(short > -6., "257 taps cannot follow a Q=8 notch: {short}");
         draw(cx, handle);
-        // Same config, only taps change: the realized curve must follow. The
-        // 257-point plot grid misses the exact null, so compare coarsely.
+        let (target_samples, target_computations, short_samples) =
+            editor.read_with(cx, |editor, _| {
+                (
+                    Arc::clone(&editor.response),
+                    editor.response_computations,
+                    Arc::clone(&editor.realized),
+                )
+            });
+        // Supersede a tap-only request before its result can publish on the UI thread.
+        replace(EqImplementation::LinearPhase { taps: 513 }, cx);
         replace(EqImplementation::LinearPhase { taps: 8_193 }, cx);
-        // Superseding an in-flight design publishes only the newest request.
-        editor.update(cx, |editor, cx| {
+        editor.read_with(cx, |editor, _| {
             assert!(editor.realized_task.is_some() && !editor.realized_current);
-            editor.response_channel = 0;
-            editor.update_response(cx);
+            assert!(editor.fir_deviation_caption().is_none());
+            assert!(Arc::ptr_eq(&short_samples, &editor.realized));
+            assert!(Arc::ptr_eq(&target_samples, &editor.response));
+            assert_eq!(editor.response_computations, target_computations);
         });
         let long = depth(cx);
         assert!(long < short - 10., "{long} vs {short}");
@@ -5249,10 +5259,15 @@ mod tests {
             caption.bottom() + px(4.) >= graph.bottom(),
             "{caption:?} in {graph:?}"
         );
+        // IIR clears the displayed FIR curve and cancels any queued publication.
+        replace(EqImplementation::LinearPhase { taps: 257 }, cx);
         replace(EqImplementation::Iir, cx);
         cx.run_until_parked();
         editor.read_with(cx, |editor, _| {
             assert!(editor.realized.is_empty() && editor.realized_task.is_none());
+            assert!(!editor.realized_current);
+            assert!(Arc::ptr_eq(&target_samples, &editor.response));
+            assert_eq!(editor.response_computations, target_computations);
         });
     }
 
