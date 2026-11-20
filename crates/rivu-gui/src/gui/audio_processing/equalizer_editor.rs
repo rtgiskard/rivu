@@ -95,6 +95,7 @@ struct EqAvailability {
 pub(super) struct EqualizerEditors {
     editors: HashMap<EqTarget, Entity<EqualizerEditor>>,
     active: Option<(u64, EqTarget)>,
+    released_target: Option<EqTarget>,
     pointer_count: Rc<Cell<usize>>,
     removing: HashMap<EqTarget, (EqualizerConfig, usize)>,
     // Replacement intent follows serialized command start/ack, not refreshes.
@@ -240,6 +241,7 @@ struct EqualizerEditor {
     frequencies: [f64; 257],
     frequency_limit: f64,
     drag: Option<NodeDrag>,
+    released_band: Option<usize>,
     drag_epoch: u64,
     response_frame_pending: bool,
     #[cfg(test)]
@@ -308,6 +310,7 @@ impl EqualizerEditor {
             error: None,
             maximum_frequency: 20_000.,
             drag: None,
+            released_band: None,
             drag_epoch: 0,
             response_frame_pending: false,
             #[cfg(test)]
@@ -353,6 +356,10 @@ impl EqualizerEditor {
         let config_changed = &self.config != config;
         let revision = state.system.config.processing_graph.revision;
         let fence_changed = matches!(self.target, EqTarget::Node(_)) && self.revision != revision;
+        let release = self
+            .released_band
+            .filter(|_| config_changed || format_changed || fence_changed);
+        let preview_matches = release.is_some() && &self.preview_config == config;
         if config_changed
             || format_changed
             || self.revision != revision
@@ -433,7 +440,12 @@ impl EqualizerEditor {
             self.sync_fields(cx);
             self.removing_band = None;
         }
-        if config_changed || response_format_changed || retired_preview || taps_changed {
+        let retired_release = release.is_some() && self.retire_node_preview(cx);
+        if (config_changed || retired_release) && !preview_matches
+            || response_format_changed
+            || retired_preview
+            || taps_changed
+        {
             self.response_dirty = true;
             if self.active {
                 self.update_response(cx);
@@ -459,6 +471,7 @@ impl EqualizerEditor {
                 .update(cx, |input, cx| input.set_enabled(false, cx));
         }
         self.retire_band_focus();
+        self.retire_node_preview(cx);
         self.cancel_pointer(cx);
         self.prune_inputs();
     }
@@ -558,6 +571,14 @@ impl EqualizerEditor {
                 .set(self.pointer_count.get().saturating_sub(1));
         }
         drag
+    }
+
+    fn retire_node_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(band) = self.released_band.take() else {
+            return false;
+        };
+        self.restore_position_fields(band, cx);
+        true
     }
 
     fn node_geometry_valid(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
@@ -1391,12 +1412,23 @@ impl EqualizerEditor {
         {
             return drag.value;
         }
-        match (key, &self.drag) {
-            (EqField::Band(index, BandField::FrequencyHz), Some(drag)) if *index == drag.band => {
-                Some(drag.frequency)
+        let position = self
+            .drag
+            .as_ref()
+            .map(|drag| (drag.band, drag.frequency, drag.gain))
+            .or_else(|| {
+                let index = self.released_band?;
+                let band = &self.preview_config.bands[index];
+                Some((index, band.frequency_hz, band.gain_db))
+            });
+        match (key, position) {
+            (EqField::Band(index, BandField::FrequencyHz), Some((band, hz, _)))
+                if *index == band =>
+            {
+                Some(hz)
             }
-            (EqField::Band(index, BandField::GainDb), Some(drag)) if *index == drag.band => {
-                Some(drag.gain)
+            (EqField::Band(index, BandField::GainDb), Some((band, _, db))) if *index == band => {
+                Some(db)
             }
             _ => None,
         }
@@ -1625,6 +1657,9 @@ impl EqualizerEditor {
                 band.gain_db = drag.gain;
             }
             &self.preview_config
+        } else if self.released_band.is_some() {
+            // A released drag keeps its final response until the snapshot takes over.
+            &self.preview_config
         } else if let Some(FieldDrag {
             key: EqField::Band(index, field),
             value: Some(value),
@@ -1724,11 +1759,12 @@ impl EqualizerEditor {
             return None;
         }
         let format = self.format?;
-        let config = if self.drag.is_some() || self.field_drag.is_some() {
-            &self.preview_config
-        } else {
-            &self.config
-        };
+        let config =
+            if self.drag.is_some() || self.field_drag.is_some() || self.released_band.is_some() {
+                &self.preview_config
+            } else {
+                &self.config
+            };
         Some((
             config.clone(),
             format.known_sample_rate()?,
@@ -1838,21 +1874,8 @@ impl EqualizerEditor {
                     {
                         this.move_node(event.position);
                         if let Some(drag) = this.take_drag() {
-                            this.restore_position_fields(drag.band, cx);
                             if drag.moved {
-                                this.update_response(cx);
-                                let band = &this.config.bands[drag.band];
-                                if band.frequency_hz != drag.frequency || band.gain_db != drag.gain
-                                {
-                                    this.band_edit(
-                                        drag.band,
-                                        EqBandEdit::Position {
-                                            frequency_hz: drag.frequency,
-                                            gain_db: drag.gain,
-                                        },
-                                        cx,
-                                    );
-                                }
+                                this.release_node_position(drag, cx);
                             } else if drag.member_count > 1 {
                                 let current = drag.members[..drag.member_count]
                                     .iter()
@@ -1872,6 +1895,46 @@ impl EqualizerEditor {
                 let _ = weak.update(cx, |this, cx| this.cancel_pointer(cx));
             }
         });
+    }
+
+    fn release_node_position(&mut self, drag: NodeDrag, cx: &mut Context<Self>) {
+        let band = &self.config.bands[drag.band];
+        let changed = band.frequency_hz != drag.frequency || band.gain_db != drag.gain;
+        let admitted = changed
+            && self
+                .owner
+                .update(cx, |owner, owner_cx| {
+                    owner.submit_target_equalizer(
+                        (self.target, self.revision, &self.config, self.format),
+                        EqualizerEdit::BandField {
+                            index: drag.band,
+                            field: EqBandEdit::Position {
+                                frequency_hz: drag.frequency,
+                                gain_db: drag.gain,
+                            },
+                        },
+                        None,
+                        owner_cx,
+                    )
+                })
+                .unwrap_or(false);
+        if admitted {
+            self.released_band = Some(drag.band);
+            let band = &mut self.preview_config.bands[drag.band];
+            band.frequency_hz = drag.frequency;
+            band.gain_db = drag.gain;
+            for (field, value) in [
+                (BandField::FrequencyHz, drag.frequency),
+                (BandField::GainDb, drag.gain),
+            ] {
+                self.update_preview_field(&EqField::Band(drag.band, field), value, cx);
+            }
+        } else {
+            self.restore_position_fields(drag.band, cx);
+        }
+        if self.response_dirty || !admitted {
+            self.update_response(cx);
+        }
     }
 
     fn graph(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2255,7 +2318,7 @@ impl EqualizerEditor {
                     div()
                         .absolute()
                         .bottom(px(2.))
-                        .left(px(4.))
+                        .right(px(4.))
                         .px_1()
                         .rounded_sm()
                         .bg(rgb(theme.bg).alpha(0.75))
@@ -2565,20 +2628,6 @@ impl EqualizerEditor {
             curve = curve.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         } else if self.format.is_none() {
             curve = curve.child(caption(theme, self.tr("processing-response-unknown")));
-        }
-        if self.format.is_some()
-            && self
-                .band_numeric_range(&EqField::Band(0, BandField::FrequencyHz))
-                .is_some()
-        {
-            curve = curve.child(caption(
-                theme,
-                format!(
-                    "{:.0}–{:.0} Hz · ±24 dB",
-                    graph_minimum_frequency(self.maximum_frequency),
-                    self.maximum_frequency
-                ),
-            ));
         }
         let mut precision = column().gap_1().min_w_0();
         let presets = row()
@@ -3037,12 +3086,14 @@ impl AudioProcessing {
         }
         .unwrap_or_else(|| reset_equalizer_config(&config));
         match target {
-            EqTarget::Monitor => self.submit_target_equalizer(
-                (target, revision, &config, format),
-                EqualizerEdit::Replace { config: next },
-                None,
-                cx,
-            ),
+            EqTarget::Monitor => {
+                self.submit_target_equalizer(
+                    (target, revision, &config, format),
+                    EqualizerEdit::Replace { config: next },
+                    None,
+                    cx,
+                );
+            }
             EqTarget::Node(id) => {
                 let mut submission = NodeEqualizerSubmission {
                     config: next,
@@ -3101,7 +3152,17 @@ impl AudioProcessing {
         edit: EqualizerEdit,
         submitted: Option<SubmittedField>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        let releases_node = matches!(
+            edit,
+            EqualizerEdit::BandField {
+                field: EqBandEdit::Position { .. },
+                ..
+            }
+        );
+        if releases_node && self.pending != 0 {
+            return false;
+        }
         let (target, revision, expected, expected_format) = source;
         let snapshot = self.context.snapshot();
         if target_config(&snapshot, target) != Some(expected)
@@ -3113,7 +3174,7 @@ impl AudioProcessing {
         {
             self.error = Some(self.context.i18n.text("processing-editor-stale").to_owned());
             cx.notify();
-            return;
+            return false;
         }
         if matches!(target, EqTarget::Node(_))
             && let EqualizerEdit::RemoveBand { index } = &edit
@@ -3143,14 +3204,14 @@ impl AudioProcessing {
                     .iter()
                     .find(|node| node.id == id)
                 else {
-                    return;
+                    return false;
                 };
                 let GraphNodeKind::Equalizer {
                     config,
                     implementation,
                 } = &node.kind
                 else {
-                    return;
+                    return false;
                 };
                 let mut next = config.clone();
                 let sample_rate = expected_format.map(|format| format.sample_rate);
@@ -3189,13 +3250,37 @@ impl AudioProcessing {
                                 .to_owned(),
                         );
                         cx.notify();
+                        return false;
                     }
                     Err(error) => {
                         self.error = Some(error.to_string());
                         cx.notify();
+                        return false;
                     }
                 }
             }
+        }
+        if releases_node {
+            // Releases require an empty queue: the very next completion owns this preview.
+            self.equalizer_editors.released_target = Some(target);
+        }
+        true
+    }
+
+    pub(super) fn finish_released_equalizer_position(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.equalizer_editors.released_target.take() else {
+            return;
+        };
+        if let Some(editor) = self.equalizer_editors.editors.get(&target) {
+            editor.update(cx, |editor, cx| {
+                if editor.retire_node_preview(cx) {
+                    editor.response_dirty = true;
+                    if editor.active {
+                        editor.update_response(cx);
+                    }
+                    cx.notify();
+                }
+            });
         }
     }
 
@@ -4781,6 +4866,7 @@ mod tests {
             if let Some(field) = submission.equalizer_field {
                 owner.finish_equalizer_field(field, success, cx);
             }
+            owner.finish_released_equalizer_position(cx);
             owner.reconcile(owner.context.snapshot(), cx);
         });
         cx.run_until_parked();
@@ -5648,9 +5734,27 @@ mod tests {
         .unwrap();
         draw(cx, handle);
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
+        let released_center = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("eq-node-7-0")
+            .unwrap()
+            .center();
+        assert!((released_center.y - release.y).abs() < px(1.));
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.config.bands[0].gain_db),
+            -8.
+        );
         acknowledge_front(cx, &runtime, &owner, true);
+        draw(cx, handle);
+        assert_eq!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-node-7-0")
+                .unwrap()
+                .center(),
+            released_center
+        );
         editor.read_with(cx, |editor, cx| {
             assert!(editor.drag.is_none());
+            assert!(editor.released_band.is_none());
             assert_eq!(editor.pointer_count.get(), 0);
             assert_eq!(
                 editor.fields[&EqField::Band(0, BandField::GainDb)]

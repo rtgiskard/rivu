@@ -1174,6 +1174,7 @@ impl AudioProcessing {
                         this.finish_equalizer_field(field, success, cx);
                     }
                 }
+                this.finish_released_equalizer_position(cx);
                 this.dispatch_next(cx);
                 cx.notify();
             });
