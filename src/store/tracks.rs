@@ -567,6 +567,19 @@ impl Store {
         let Some(rest) = source.strip_prefix(&prefix).filter(|rest| !rest.is_empty()) else {
             return Ok(LibraryLocateResult::OutsideRoot);
         };
+        if !tree
+            && prefix.is_empty()
+            && query.is_none_or(str::is_empty)
+            && favorite.is_none()
+            && missing.is_none()
+        {
+            let (offset, total) = self.unfiltered_library_rank(track_id, sort)?;
+            return Ok(LibraryLocateResult::Located(LibraryLocation {
+                offset,
+                total,
+                child: None,
+            }));
+        }
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
@@ -635,6 +648,48 @@ impl Store {
                 })
             }),
         )
+    }
+
+    fn unfiltered_library_rank(
+        &self,
+        track_id: i64,
+        sort: rivu_protocol::model::LibrarySort,
+    ) -> Result<(usize, usize)> {
+        use rivu_protocol::model::LibrarySort;
+        let sql = match sort {
+            LibrarySort::Id => {
+                "SELECT (SELECT COUNT(*) FROM tracks WHERE id<?1), (SELECT COUNT(*) FROM tracks)"
+            }
+            LibrarySort::MostPlayed => {
+                "SELECT (
+                SELECT COUNT(*) FROM tracks WHERE play_count>target.play_count
+            ) + (
+                SELECT COUNT(*) FROM tracks WHERE play_count=target.play_count AND id<target.id
+            ), (SELECT COUNT(*) FROM tracks) FROM tracks AS target WHERE target.id=?1"
+            }
+            // Match library_order: blank albums sort only by title and ID;
+            // named albums put missing disc/track numbers after numbered ones.
+            LibrarySort::Album => {
+                "SELECT CASE WHEN target.album='' THEN (
+                SELECT COUNT(*) FROM tracks WHERE album='' AND (title,id)<(target.title,target.id)
+            ) ELSE (
+                SELECT COUNT(*) FROM tracks WHERE
+                (album, CASE WHEN album<>'' THEN COALESCE(disc_number,4294967295) END,
+                 CASE WHEN album<>'' THEN COALESCE(track_number,4294967295) END, title,id)
+                < (target.album,COALESCE(target.disc_number,4294967295),
+                   COALESCE(target.track_number,4294967295),target.title,target.id)
+            ) END, (SELECT COUNT(*) FROM tracks) FROM tracks AS target WHERE target.id=?1"
+            }
+        };
+        Ok(self
+            .conn
+            .prepare_cached(sql)?
+            .query_row([track_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)? as usize,
+                ))
+            })?)
     }
 
     /// One aggregate query for all roots; overlapping and duplicate inputs remain independent.
