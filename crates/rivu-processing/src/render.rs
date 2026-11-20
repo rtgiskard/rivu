@@ -180,6 +180,8 @@ pub(super) fn run(
         status.settings.graph_mode = Some(GraphExecutionMode::Offline);
     }
     if let Some(mode) = status.settings.graph_mode {
+        let boundary = status.settings.graph_boundary;
+        super::complete_prepared_nodes(&mut status, mode, boundary);
         let _ = tx.send_blocking(Event::GraphPrepared {
             id: status.id,
             mode,
@@ -193,9 +195,6 @@ pub(super) fn run(
             SourceStamp::read(&track.path)? == stamp,
             "Source changed while preparing graph"
         );
-        for node in &mut status.graph_nodes {
-            node.phase = ProcessingPhase::Processing;
-        }
         status.phase = ProcessingPhase::Complete;
         drop(validated);
         status.settings.graph = frozen_graph;

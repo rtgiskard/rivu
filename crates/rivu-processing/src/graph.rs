@@ -886,13 +886,6 @@ fn publish(
     for &id in order {
         node_event(status, id, ProcessingPhase::Complete, None, tx);
     }
-    if status.settings.graph_mode == Some(GraphExecutionMode::Hybrid) {
-        for node in &mut status.graph_nodes {
-            if node.phase == ProcessingPhase::Queued {
-                node.phase = ProcessingPhase::Processing;
-            }
-        }
-    }
     Ok(BTreeMap::from([(
         target,
         GraphAudioOutput { pcm, context },

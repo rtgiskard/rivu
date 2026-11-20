@@ -672,8 +672,10 @@ resampling batches. Registered source/media changes invalidate publication, but
 later configuration/graph edits cannot change the captured snapshot.
 Starting another source, Stop or clearing the queue revokes pending automatic
 audition even without physical playback. It does not cancel processing or erase
-valid retained audio. Task status describes work; the selected-audio line
-describes playback.
+valid retained audio. A realtime node is `complete` once its runner is prepared;
+in Hybrid mode the prepared suffix stays `complete` even if rendering the offline
+prefix fails or is cancelled. Node phases describe
+work, not whether that runner is playing. The selected-audio line describes playback.
 
 Numeric progress is coalesced at 100 ms and cannot accumulate behind a slow
 consumer. Phase changes, graph-node stages and terminal results remain reliable.
@@ -681,6 +683,9 @@ consumer. Phase changes, graph-node stages and terminal results remain reliable.
 Node-specific preparation errors identify that node. Failures or cancellations
 during final graph compilation, rendering or output publication identify the
 requested output node; an earlier node-specific error is not reported again.
+If Core rejects publication after the worker succeeded, the receipt identifies
+the unpublished node and port without changing completed node phases. A cached
+export identifies the port in the receipt without inventing node execution.
 
 Preparation/backend validation runs on workers, so accepted starts can fail
 asynchronously; Queued may include waiting for retired audio's reservation.

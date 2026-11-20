@@ -18,7 +18,7 @@ type Release = mpsc::Sender<std::result::Result<(), String>>;
 )]
 enum Work {
     Retire(Box<ProcessingResult>),
-    RetireRetained(RetainedResult),
+    RetireRetained(RetainedResult, Option<tempfile::NamedTempFile>),
     RetirePcm(audio::PcmAudio),
     RetireAudition(RetainedAudition),
     ReleaseAudio {
@@ -45,7 +45,7 @@ impl Work {
     fn execute(self) {
         match self {
             Work::Retire(result) => drop(result),
-            Work::RetireRetained(result) => drop(result),
+            Work::RetireRetained(result, temporary) => drop((result, temporary)),
             Work::RetirePcm(pcm) => drop(pcm),
             Work::RetireAudition(audition) => drop(audition),
             Work::ReleaseAudio {
@@ -115,8 +115,12 @@ impl Reclaimer {
     pub(super) fn retire(&self, result: Box<ProcessingResult>) {
         self.send_wave(Work::Retire(result));
     }
-    pub(super) fn retire_retained(&self, result: RetainedResult) {
-        self.send_wave(Work::RetireRetained(result));
+    pub(super) fn retire_retained(
+        &self,
+        result: RetainedResult,
+        temporary: Option<tempfile::NamedTempFile>,
+    ) {
+        self.send_wave(Work::RetireRetained(result, temporary));
     }
     pub(super) fn retire_pcm(&self, pcm: audio::PcmAudio) {
         self.send_wave(Work::RetirePcm(pcm));

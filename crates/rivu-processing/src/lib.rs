@@ -286,6 +286,30 @@ impl Default for Service {
     }
 }
 
+fn complete_prepared_nodes(
+    status: &mut ProcessingTaskStatus,
+    mode: GraphExecutionMode,
+    boundary: Option<GraphPort>,
+) {
+    // Admitted nodes are in dependency order. The Hybrid boundary is the
+    // runner's only input, and is itself produced by the offline prefix.
+    let first = match (mode, boundary) {
+        (GraphExecutionMode::Realtime, None) => 0,
+        (GraphExecutionMode::Hybrid, Some(port)) => {
+            status
+                .graph_nodes
+                .iter()
+                .position(|node| node.node == port.node)
+                .expect("admitted Hybrid boundary")
+                + 1
+        }
+        _ => return,
+    };
+    for node in &mut status.graph_nodes[first..] {
+        node.phase = ProcessingPhase::Complete;
+    }
+}
+
 impl Service {
     pub fn new() -> Self {
         let (sender, receiver) = bounded(8);
@@ -435,6 +459,7 @@ impl Service {
             status.settings.graph_mode = Some(mode);
             status.settings.graph_boundary = boundary;
             status.graph_plan = plan;
+            complete_prepared_nodes(status, mode, boundary);
         }
     }
 
@@ -664,6 +689,40 @@ impl Service {
     /// Later audition failure changes its operation receipt, never its resources.
     pub fn accept_result(&mut self, result: Box<ProcessingResult>) {
         let retains_audio = result.retains_audio();
+        self.finish_result(result, retains_audio);
+    }
+
+    /// A worker succeeded but Core rejected its output. Keep the worker's computation
+    /// record (including an empty node list for cached exports), not its resources.
+    pub fn reject_publication(
+        &mut self,
+        mut result: Box<ProcessingResult>,
+        phase: ProcessingPhase,
+        error: anyhow::Error,
+    ) {
+        let status = &mut result.status;
+        let error = if let Some(port) = status.settings.graph_target {
+            let message = format!(
+                "Graph output #{}:{} was not published: {error:#}",
+                port.node, port.port
+            );
+            if let Some(node) = status
+                .graph_nodes
+                .iter_mut()
+                .find(|node| node.node == port.node)
+            {
+                node.error = Some(message.clone());
+            }
+            message
+        } else {
+            format!("{error:#}")
+        };
+        status.phase = phase;
+        status.error = Some(error);
+        self.finish_result(result, false);
+    }
+
+    fn finish_result(&mut self, result: Box<ProcessingResult>, retains_audio: bool) {
         let ProcessingResult {
             track,
             stamp,
@@ -671,7 +730,7 @@ impl Service {
             outputs,
             graph_outputs,
             runner,
-            ..
+            pending_export,
         } = *result;
         let retained = RetainedResult {
             id: status.id,
@@ -689,11 +748,17 @@ impl Service {
                     .position(|result| Some(result.id) != self.audition_id())
                     .expect("only one retained result can be pinned");
                 let result = self.results.remove(index).unwrap();
-                self.reclaimer.as_ref().unwrap().retire_retained(result);
+                self.reclaimer
+                    .as_ref()
+                    .unwrap()
+                    .retire_retained(result, None);
             }
             self.results.push_back(retained);
         } else {
-            self.reclaimer.as_ref().unwrap().retire_retained(retained);
+            self.reclaimer
+                .as_ref()
+                .unwrap()
+                .retire_retained(retained, pending_export.map(|(file, _)| file));
         }
         self.accept_status(status);
     }
@@ -707,7 +772,7 @@ impl Service {
     }
 
     pub fn stop_live_audition(&mut self, id: u64) {
-        let Some(status) = self.records.get_mut(&id) else {
+        let Some(status) = self.records.get(&id) else {
             return;
         };
         if !matches!(
@@ -716,22 +781,11 @@ impl Service {
         ) {
             return;
         }
-        if status.phase != ProcessingPhase::Cancelled
-            || status.error.as_deref() != Some("Live audition stopped")
-            || status
-                .graph_nodes
-                .iter()
-                .any(|node| node.phase == ProcessingPhase::Processing)
-        {
-            let status = Arc::make_mut(status);
-            status.phase = ProcessingPhase::Cancelled;
-            status.error = Some("Live audition stopped".into());
-            for node in &mut status.graph_nodes {
-                if node.phase == ProcessingPhase::Processing {
-                    node.phase = ProcessingPhase::Cancelled;
-                }
-            }
-        }
+        self.outcome(
+            id,
+            ProcessingPhase::Cancelled,
+            Some("Live audition stopped".into()),
+        );
         self.retain_terminal(id);
     }
     pub fn start(

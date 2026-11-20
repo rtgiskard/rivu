@@ -628,13 +628,26 @@ impl Core {
         Ok(track)
     }
 
-    fn admit_processing_result(
+    fn publish_processing_result(
         &self,
-        result: &rivu_processing::ProcessingResult,
+        result: &mut rivu_processing::ProcessingResult,
         cancelled: bool,
     ) -> Result<()> {
         ensure!(!cancelled, "Processing cancelled");
         self.processing_source(&result.track, result.stamp)?;
+        if let Some((_, destination)) = &result.pending_export {
+            ensure!(
+                self.processing.export_destination(destination)? == *destination,
+                "Export destination parent changed after admission"
+            );
+        }
+        if let Some((temporary, destination)) = result.pending_export.take() {
+            if let Err(error) = temporary.persist_noclobber(&destination) {
+                result.pending_export = Some((error.file, destination));
+                return Err(error.error.into());
+            }
+            result.status.graph_exported_path = Some(destination);
+        }
         Ok(())
     }
 
@@ -662,85 +675,57 @@ impl Core {
                     }
                     return;
                 }
-                let cancelled = self.processing.cancellation_requested(id).unwrap();
-                let result = result.and_then(|result| {
-                    if let Err(error) = self.admit_processing_result(&result, cancelled) {
-                        self.processing.retire(result);
-                        return Err(error);
-                    }
-                    Ok(result)
-                });
-                self.processing.finish_task(id).unwrap();
-                let result = result.and_then(|mut result| {
-                    if let Some((temporary, destination)) = result.pending_export.take() {
-                        if let Err(error) = self
-                            .processing
-                            .export_destination(&destination)
-                            .and_then(|canonical| {
-                                ensure!(
-                                    canonical == destination,
-                                    "Export destination parent changed after admission"
-                                );
-                                Ok(())
-                            })
-                        {
-                            self.processing.retire(result);
-                            return Err(error);
-                        }
-                        if let Err(error) = temporary.persist_noclobber(&destination) {
-                            self.processing.retire(result);
-                            return Err(error.error.into());
-                        }
-                        result.status.graph_exported_path = Some(destination);
-                    }
-                    Ok(result)
-                });
-                match result {
-                    Ok(result) => {
-                        self.processing.accept_result(result);
-                        if let Some((pending_id, generation)) = self.pending_processing_audition
-                            && pending_id == id
-                        {
-                            self.pending_processing_audition = None;
-                            let outcome = if self.preferences.settings().processing_bypassed
-                                || generation != self.transport.generation
-                            {
-                                Ok(())
-                            } else if let Some(runner) = self.processing.take_graph_runner(id) {
-                                self.processing_graph_audition_prepared(id, runner)
-                            } else {
-                                let target = self
-                                    .processing
-                                    .status(id)
-                                    .and_then(|status| status.settings.graph_target);
-                                target.map_or(Ok(()), |target| {
-                                    self.processing_graph_audition(id, target).map(|_| ())
-                                })
-                            };
-                            if let Err(error) = outcome {
-                                let error = format!("{error:#}");
-                                self.state.system.last_error = Some(error.clone());
+                let cancelled = self.processing.finish_task(id).unwrap();
+                let abort_phase = if cancelled {
+                    ProcessingPhase::Cancelled
+                } else {
+                    ProcessingPhase::Failed
+                };
+                let published = match result {
+                    Ok(mut result) => {
+                        match self.publish_processing_result(&mut result, cancelled) {
+                            Ok(()) => {
+                                self.processing.accept_result(result);
+                                true
+                            }
+                            Err(error) => {
                                 self.processing
-                                    .outcome(id, ProcessingPhase::Failed, Some(error));
+                                    .reject_publication(result, abort_phase, error);
+                                false
                             }
                         }
                     }
                     Err(error) => {
-                        if self
-                            .pending_processing_audition
-                            .is_some_and(|(task, _)| task == id)
-                        {
-                            self.pending_processing_audition = None;
+                        self.processing
+                            .outcome(id, abort_phase, Some(format!("{error:#}")));
+                        false
+                    }
+                };
+                if let Some((pending_id, generation)) = self.pending_processing_audition
+                    && pending_id == id
+                {
+                    self.pending_processing_audition = None;
+                    if published
+                        && !self.preferences.settings().processing_bypassed
+                        && generation == self.transport.generation
+                    {
+                        let outcome = if let Some(runner) = self.processing.take_graph_runner(id) {
+                            self.processing_graph_audition_prepared(id, runner)
+                        } else {
+                            let target = self
+                                .processing
+                                .status(id)
+                                .and_then(|status| status.settings.graph_target);
+                            target.map_or(Ok(()), |target| {
+                                self.processing_graph_audition(id, target).map(|_| ())
+                            })
+                        };
+                        if let Err(error) = outcome {
+                            let error = format!("{error:#}");
+                            self.state.system.last_error = Some(error.clone());
+                            self.processing
+                                .outcome(id, ProcessingPhase::Failed, Some(error));
                         }
-                        self.processing.outcome(
-                            id,
-                            if cancelled {
-                                ProcessingPhase::Cancelled
-                            } else {
-                                ProcessingPhase::Failed
-                            },
-                            Some(format!("{error:#}")),
-                        );
                     }
                 }
                 self.retain_processing_terminal(id);

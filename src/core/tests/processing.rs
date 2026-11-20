@@ -2246,6 +2246,13 @@ fn graph_port(node: u64, port: u16) -> GraphPort {
     GraphPort { node, port }
 }
 
+fn assert_completed_graph_nodes(status: &ProcessingTaskStatus) {
+    assert!(!status.graph_nodes.is_empty());
+    for node in &status.graph_nodes {
+        assert_eq!(node.phase, ProcessingPhase::Complete, "{node:?}");
+    }
+}
+
 fn finished_graph_pcm(
     mut runner: audio::GraphRunner,
     mut pcm: Vec<f32>,
@@ -2459,6 +2466,54 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
             "sample={index}: cached boundary={actual}, uncut={expected}"
         );
     }
+}
+
+#[test]
+fn hybrid_prefix_failure_preserves_prepared_suffix() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    edit_preferences(&mut core, |config| {
+        let graph = &mut config.processing_graph;
+        graph.next_id = 4;
+        graph.nodes.push(GraphNode {
+            id: 3,
+            position: [0.0; 2],
+            kind: GraphNodeKind::Denoise {
+                config: rivu_dsp::denoise::DenoiseConfig {
+                    mode: rivu_dsp::denoise::DenoiseMode::Profile,
+                    ..Default::default()
+                },
+                // The selection is valid but lies beyond the end of the source.
+                profile: Some(NoiseSelection {
+                    start_seconds: 1.0,
+                    end_seconds: 2.0,
+                }),
+            },
+        });
+        graph.edges = [(1, 3), (3, 2)]
+            .into_iter()
+            .map(|(from, to)| GraphEdge {
+                from: graph_port(from, 0),
+                to: graph_port(to, 0),
+            })
+            .collect();
+    });
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Hybrid)
+        .unwrap();
+    complete(&mut core);
+    let status = core.processing_status(1).unwrap();
+    assert_eq!(status.settings.graph_boundary, Some(graph_port(3, 0)));
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    let phase = |id| {
+        status
+            .graph_nodes
+            .iter()
+            .find(|n| n.node == id)
+            .unwrap()
+            .phase
+    };
+    assert_eq!(phase(3), ProcessingPhase::Failed);
+    assert_eq!(phase(2), ProcessingPhase::Complete);
 }
 
 #[test]
@@ -2933,6 +2988,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert!(core.processing.audition_id().is_none());
     assert!(core.processing.audition_projection().is_none());
     let cancelled = core.processing_status(1).unwrap();
+    assert_completed_graph_nodes(&cancelled);
     assert_eq!(core.processing.history().next().unwrap(), &cancelled);
     assert_eq!(
         core.processing
@@ -2974,6 +3030,7 @@ fn graph_audition_failure_keeps_retained_output_and_failed_operation_receipt() {
         Some(GraphExecutionMode::Hybrid)
     );
     assert_eq!(failed.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
+    assert_completed_graph_nodes(&failed);
     assert!(!failed.graph_outputs.is_empty());
     assert!(failed.graph_actions_available);
     assert_eq!(core.processing.results().len(), 1);
@@ -3403,6 +3460,7 @@ fn master_bypass_stop_and_next_source_revoke_retained_selection() {
         }
         assert!(core.processing.audition_projection().is_none());
         assert!(core.processing.resume_audition().is_err());
+        assert_completed_graph_nodes(&core.processing_status(1).unwrap());
         core.processing_bypass(false).unwrap();
         core.publish();
         assert!(core.shared.read().processing_selection.is_none());
@@ -3863,7 +3921,11 @@ fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
 
 #[test]
 fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
-    for mode in [GraphExecutionMode::Auto, GraphExecutionMode::Offline] {
+    for mode in [
+        GraphExecutionMode::Auto,
+        GraphExecutionMode::Hybrid,
+        GraphExecutionMode::Offline,
+    ] {
         let (directory, mut core) = fixture();
         let expected = source(directory.path());
         let _commands = recording_audio(&mut core);
@@ -3882,10 +3944,9 @@ fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
             .unwrap();
         assert_eq!(core.processing.cancellation_requested(1), Some(false));
         core.processing_event(event);
-        assert_eq!(
-            core.processing_status(1).unwrap().phase,
-            ProcessingPhase::Complete
-        );
+        let status = core.processing_status(1).unwrap();
+        assert_eq!(status.phase, ProcessingPhase::Complete);
+        assert_completed_graph_nodes(&status);
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_eq!(core.transport.generation, generation);
         assert!(core.state.current_track.is_none());
@@ -4124,7 +4185,9 @@ fn graph_export_rechecks_canonical_parent_before_publication() {
     assert_eq!(status.phase, ProcessingPhase::Failed);
     assert_eq!(
         status.error.as_deref(),
-        Some("Export destination parent changed after admission")
+        Some(
+            "Graph output #2:0 was not published: Export destination parent changed after admission"
+        )
     );
     assert!(status.graph_exported_path.is_none());
     assert!(!scratch.join("export.wav").exists());
@@ -4580,6 +4643,22 @@ fn streamed_graph_exports_recheck_publication_and_reclaim_unpublished_files() {
                 ProcessingPhase::Failed
             }
         );
+        assert_completed_graph_nodes(&status);
+        let target = status.settings.graph_target.unwrap();
+        let error = status.error.as_deref().unwrap();
+        assert!(error.contains("Graph output #2:0 was not published"));
+        assert!(
+            status
+                .graph_nodes
+                .iter()
+                .any(|node| node.node == target.node)
+        );
+        for node in &status.graph_nodes {
+            assert_eq!(
+                node.error.as_deref(),
+                (node.node == target.node).then_some(error)
+            );
+        }
         assert!(status.graph_exported_path.is_none());
         assert_eq!(core.processing.memory_bytes(), 0);
         drop(core);
@@ -4681,6 +4760,17 @@ fn export_failure_and_cancellation_keep_source_capabilities_until_directory_evic
         assert!(receipt.graph_actions_available);
         assert!(receipt.graph_outputs.is_empty());
         assert!(receipt.graph_exported_path.is_none());
+        assert!(
+            receipt.graph_nodes.is_empty(),
+            "cached export executed nodes"
+        );
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Graph output #2:0 was not published")
+        );
         receipts.push(export);
     }
     let _commands = recording_audio(&mut core);
