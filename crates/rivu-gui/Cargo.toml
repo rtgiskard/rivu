@@ -8,7 +8,7 @@ default = []
 embed-nerd-font = []
 
 [dependencies]
-rivu-dsp = { path = "../rivu-dsp", default-features = false }
+rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-utils = { path = "../rivu-utils", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }

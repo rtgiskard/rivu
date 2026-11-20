@@ -87,6 +87,7 @@ processing-band-count-invalid = 请输入 0 到 32 之间的整数频段总数�
 processing-graph-help = 对数频率，±24 dB，采用当前曲目采样率；超范围衰减显示在底部。悬停或聚焦显示控制点；拖动预览，松开应用。有效数值和滑杆即时生效；无效输入保留草稿，声道需回车或“应用”。曲线声道仅切换显示，不改变音频声道。
 processing-response-unknown = 无法显示响应：请播放采样率和声道布局已知的曲目，不会假定采样率。
 processing-response-channel = 曲线声道
+processing-fir-deviation = 实线：实际 FIR · 虚线：目标 · 着色 ≥ { $threshold } dB · 最大 { $deviation } dB @ { $frequency } Hz（计算值）
 processing-overlap-count = { $count } 个频段 · 第 { $band } 段
 processing-overlap-help = 重叠频段保留真实频率和增益。单击而不拖动可轮选成员；拖动编辑当前所选成员。也可通过频段选择器或 Tab／回车逐个选择。
 processing-remove-band = 删除频段

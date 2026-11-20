@@ -159,6 +159,59 @@ impl FirEqualizer {
         }
     }
 
+    /// Plot the realized zero-phase magnitude of the kernel `new` prepares for
+    /// `channel`, excluding the constant group delay. Unlike the parametric
+    /// response this includes truncation and windowing error. Call outside
+    /// audio callbacks; work is bounded by `taps * frequencies_hz.len()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_response_db(
+        config: &EqualizerConfig,
+        sample_rate: u32,
+        channels: usize,
+        channel: usize,
+        taps: usize,
+        frequencies_hz: &[f64],
+        decibels: &mut [f64],
+    ) -> Result<()> {
+        validate_taps(taps)?;
+        config.validate_for_stream(sample_rate, channels)?;
+        ensure!(
+            frequencies_hz.len() == decibels.len(),
+            "FIR response buffers differ in length"
+        );
+        ensure!(channel < channels, "FIR response channel is out of range");
+        let nyquist = f64::from(sample_rate) * 0.5;
+        ensure!(
+            frequencies_hz
+                .iter()
+                .all(|frequency| frequency.is_finite() && (0.0..=nyquist).contains(frequency)),
+            "FIR response frequency must be between DC and Nyquist"
+        );
+        if !config.enabled {
+            // Disabled FIR processing is a bit-exact bypass, not a unity kernel.
+            decibels.fill(0.0);
+            return Ok(());
+        }
+        KernelDesigner::with_cached(sample_rate, taps, |designer| {
+            let impulse = designer.design(config, sample_rate, channels, channel)?;
+            let center = (taps - 1) / 2;
+            for (&frequency, decibel) in frequencies_hz.iter().zip(decibels.iter_mut()) {
+                // Symmetric kernel: A(w) = h[c] + 2 sum h[c-k] cos(kw). The
+                // Chebyshev recurrence avoids one trigonometric call per tap.
+                let omega = 2.0 * PI * frequency / f64::from(sample_rate);
+                let twice_cos = 2.0 * omega.cos();
+                let (mut previous, mut current) = (1.0, omega.cos());
+                let mut amplitude = f64::from(impulse[center]);
+                for offset in 1..=center {
+                    amplitude += 2.0 * f64::from(impulse[center - offset]) * current;
+                    (previous, current) = (current, twice_cos * current - previous);
+                }
+                *decibel = 20.0 * amplitude.abs().log10();
+            }
+            Ok(())
+        })
+    }
+
     pub fn reset(&mut self) {
         self.poisoned = false;
         self.position = 0;
@@ -432,6 +485,88 @@ impl KernelDesigner {
 mod tests {
     use super::super::config::{ChannelTarget, EqBand};
     use super::*;
+
+    #[test]
+    fn realized_response_matches_processed_tones_and_reveals_short_kernel_error() {
+        // A narrow notch is the representative case where the finite kernel
+        // departs from its parametric target, and more taps track it better.
+        let config = EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                kind: FilterKind::Notch,
+                frequency_hz: 1_000.0,
+                q: 8.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let frequencies = [100.0, 900.0, 1_000.0, 4_000.0];
+        let mut target = [0.0; 4];
+        config
+            .sample_response_db(48_000, 1, 0, &frequencies, &mut target)
+            .unwrap();
+        let depth = |taps| {
+            let mut realized = [0.0; 4];
+            FirEqualizer::sample_response_db(
+                &config,
+                48_000,
+                1,
+                0,
+                taps,
+                &frequencies,
+                &mut realized,
+            )
+            .unwrap();
+            realized
+        };
+        let (short, long) = (depth(257), depth(8_193));
+        assert!(target[2] < -100.0, "IIR notch is a true null");
+        assert!(
+            short[2] > -6.0,
+            "257 taps cannot resolve a Q=8 notch: {short:?}"
+        );
+        assert!(long[2] < short[2] - 20.0, "{long:?} vs {short:?}");
+        assert!(
+            (short[0] - target[0]).abs() < 0.1,
+            "passband stays on target"
+        );
+
+        // Independent evidence: steady-state tone gain through the processor.
+        let taps = 1_025;
+        let mut realized = [0.0; 4];
+        FirEqualizer::sample_response_db(&config, 48_000, 1, 0, taps, &frequencies, &mut realized)
+            .unwrap();
+        for (&frequency, &expected) in frequencies.iter().zip(&realized) {
+            let mut fir = FirEqualizer::new(&config, 48_000, 1, taps).unwrap();
+            let frames = fir.tail_frames() + 48_000;
+            let mut signal: Vec<f32> = (0..frames)
+                .map(|i| (2.0 * PI * frequency * i as f64 / 48_000.0).sin() as f32)
+                .collect();
+            fir.process_interleaved(&mut signal).unwrap();
+            let settled = &signal[fir.tail_frames()..];
+            let rms = (settled.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>()
+                / settled.len() as f64)
+                .sqrt();
+            let measured = 20.0 * (rms * 2.0_f64.sqrt()).log10();
+            assert!(
+                (measured - expected).abs() < 0.1,
+                "{frequency} Hz: {measured} vs {expected}"
+            );
+        }
+
+        let mut disabled = [1.0; 4];
+        FirEqualizer::sample_response_db(
+            &EqualizerConfig::default(),
+            48_000,
+            1,
+            0,
+            taps,
+            &frequencies,
+            &mut disabled,
+        )
+        .unwrap();
+        assert_eq!(disabled, [0.0; 4]);
+    }
 
     #[test]
     fn kernel_design_refreshes_rate_taps_and_response_between_uses() {

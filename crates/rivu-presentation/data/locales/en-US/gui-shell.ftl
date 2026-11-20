@@ -87,6 +87,7 @@ processing-band-count-invalid = Enter a whole band count from 0 to 32.
 processing-graph-help = Log frequency, ±24 dB, at the current track’s sample rate; deeper cuts appear at the floor. Hover or focus for handles; drag to preview, release to apply. Valid values and sliders apply immediately; invalid input stays a draft. Channels need Enter or Apply; Curve channel only changes the display, not the audio channels.
 processing-response-unknown = Response unavailable: play a track with a known sample rate and channel layout. No assumed sample rate is used.
 processing-response-channel = Curve channel
+processing-fir-deviation = Solid: realized FIR · dashed: target · shaded ≥ { $threshold } dB · max { $deviation } dB @ { $frequency } Hz (computed)
 processing-overlap-count = { $count } bands · #{ $band }
 processing-overlap-help = Overlapping bands keep their true frequency and gain. Click without dragging to cycle members; drag to edit the selected member. The band selector and Tab/Enter also choose individual bands.
 processing-remove-band = Remove band

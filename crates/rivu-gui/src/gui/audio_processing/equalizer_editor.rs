@@ -6,9 +6,13 @@ use crate::projection::EqualizerFormat;
 use rivu_dsp::equalizer::config::{
     ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO,
 };
-use rivu_format::config::processing_graph::{GraphEdit, GraphNodeKind};
+use rivu_format::config::processing_graph::{EqImplementation, GraphEdit, GraphNodeKind};
 use rivu_protocol::model::EqBandEdit;
 use rivu_ui::{Slider, SliderInput, SliderKey};
+
+/// Realized-vs-target FIR gaps at least this large are shaded on the curve.
+/// A display aid, not an audibility or acceptance threshold.
+const FIR_DEVIATION_DB: f64 = 0.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum EqTarget {
@@ -223,6 +227,12 @@ struct EqualizerEditor {
     channel_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
     response: Arc<Vec<f64>>,
     response_buffer: Arc<Vec<f64>>,
+    /// Realized FIR magnitude on `frequencies`; empty for IIR targets.
+    realized: Arc<Vec<f64>>,
+    /// Whether `realized` belongs to the currently displayed target.
+    realized_current: bool,
+    realized_generation: u64,
+    realized_task: Option<Task<()>>,
     preview_config: EqualizerConfig,
     response_error: Option<String>,
     error: Option<String>,
@@ -289,6 +299,10 @@ impl EqualizerEditor {
             channel_anchor: Rc::new(Cell::new(None)),
             response: Arc::new(Vec::new()),
             response_buffer: Arc::new(Vec::new()),
+            realized: Arc::new(Vec::new()),
+            realized_current: false,
+            realized_generation: 0,
+            realized_task: None,
             preview_config: EqualizerConfig::default(),
             response_error: None,
             error: None,
@@ -308,7 +322,7 @@ impl EqualizerEditor {
             pointer_count: Rc::clone(&parent.equalizer_editors.pointer_count),
         };
         editor.sync_fields(cx);
-        editor.update_response();
+        editor.update_response(cx);
         editor
     }
 
@@ -333,6 +347,8 @@ impl EqualizerEditor {
         let had_preview = self.drag.is_some() || self.field_drag.is_some();
         let format_changed = self.format != format;
         let dimensions = |format: EqualizerFormat| (format.sample_rate, format.channels);
+        let taps_changed =
+            target_fir_taps(&self.state, self.target) != target_fir_taps(&state, self.target);
         let response_format_changed = self.format.map(dimensions) != format.map(dimensions);
         let config_changed = &self.config != config;
         let revision = state.system.config.processing_graph.revision;
@@ -373,7 +389,8 @@ impl EqualizerEditor {
             || self.collecting_revision != collecting_revision
             || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
                 && self.state.system.config.ui_scale != state.system.config.ui_scale
-            || self.pending != pending;
+            || self.pending != pending
+            || taps_changed;
         self.state = state;
         self.format = format;
         if config_changed {
@@ -416,10 +433,10 @@ impl EqualizerEditor {
             self.sync_fields(cx);
             self.removing_band = None;
         }
-        if config_changed || response_format_changed || retired_preview {
+        if config_changed || response_format_changed || retired_preview || taps_changed {
             self.response_dirty = true;
             if self.active {
-                self.update_response();
+                self.update_response(cx);
             }
         }
         cx.notify();
@@ -428,6 +445,10 @@ impl EqualizerEditor {
     fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.native_epoch = self.native_epoch.wrapping_add(1);
         self.active = false;
+        // Dropping the task cancels publication; a hidden editor recomputes on reveal.
+        self.realized_task = None;
+        self.realized_current = false;
+        self.response_dirty = true;
         self.bounds.set(None);
         self.channel_anchor.set(None);
         self.channel_choices.close();
@@ -499,7 +520,7 @@ impl EqualizerEditor {
         if self.retire_pointer(cx) {
             self.response_dirty = true;
             if self.active {
-                self.update_response();
+                self.update_response(cx);
             }
             cx.notify();
         }
@@ -1210,7 +1231,7 @@ impl EqualizerEditor {
             return;
         };
         self.restore_preview_field(&drag.key, cx);
-        self.update_response();
+        self.update_response(cx);
         if let (EqField::Band(index, field), Some(value)) = (drag.key, drag.value) {
             let field = match field {
                 BandField::FrequencyHz => EqBandEdit::FrequencyHz(value),
@@ -1551,7 +1572,7 @@ impl EqualizerEditor {
     }
     // Numeric controls and curve nodes share the same committed target. A graph
     // drag previews its position locally; the existing release path commits it.
-    fn update_response(&mut self) {
+    fn update_response(&mut self, cx: &mut Context<Self>) {
         self.response_dirty = false;
         // The previous scene can still hold the displayed buffer. Reuse the spare
         // once released; never copy old samples just to overwrite all of them.
@@ -1569,6 +1590,7 @@ impl EqualizerEditor {
                 .clear();
             self.response_error = None;
             std::mem::swap(&mut self.response, &mut self.response_buffer);
+            self.request_realized(cx);
             return;
         };
         let Some((_, maximum_frequency, _)) = self
@@ -1585,6 +1607,7 @@ impl EqualizerEditor {
                     .to_owned(),
             );
             std::mem::swap(&mut self.response, &mut self.response_buffer);
+            self.request_realized(cx);
             return;
         };
         self.maximum_frequency = maximum_frequency;
@@ -1641,6 +1664,78 @@ impl EqualizerEditor {
             }
         }
         std::mem::swap(&mut self.response, &mut self.response_buffer);
+        self.request_realized(cx);
+    }
+
+    /// Graph FIR nodes plot the finite kernel next to its parametric target.
+    /// Kernel design costs up to tens of milliseconds, so it runs off the UI
+    /// thread: one job at a time, and only the latest request publishes. A
+    /// superseded result keeps the previous curve but hides deviation marks.
+    fn request_realized(&mut self, cx: &mut Context<Self>) {
+        self.realized_generation = self.realized_generation.wrapping_add(1);
+        let Some(request) = self.realized_inputs() else {
+            self.realized_task = None;
+            self.realized_current = false;
+            if !self.realized.is_empty() {
+                self.realized = Arc::new(Vec::new());
+            }
+            return;
+        };
+        self.realized_current = false;
+        if self.realized_task.is_some() {
+            // The running job notices the newer generation and restarts.
+            return;
+        }
+        let generation = self.realized_generation;
+        let frequencies = self.frequencies;
+        let job = cx.background_executor().spawn(async move {
+            let (config, sample_rate, channels, channel, taps) = request;
+            let mut realized = vec![0.; frequencies.len()];
+            rivu_dsp::equalizer::fir::FirEqualizer::sample_response_db(
+                &config,
+                sample_rate,
+                channels,
+                channel,
+                taps,
+                &frequencies,
+                &mut realized,
+            )
+            .map(|()| realized)
+        });
+        self.realized_task = Some(cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.realized_task = None;
+                if this.realized_generation != generation {
+                    this.request_realized(cx);
+                    return;
+                }
+                // A failed design hides only the realized curve, never the target.
+                this.realized = Arc::new(result.unwrap_or_default());
+                this.realized_current = true;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn realized_inputs(&self) -> Option<(EqualizerConfig, u32, usize, usize, usize)> {
+        let taps = target_fir_taps(&self.state, self.target)?;
+        if !self.active || self.response_error.is_some() || self.response.is_empty() {
+            return None;
+        }
+        let format = self.format?;
+        let config = if self.drag.is_some() || self.field_drag.is_some() {
+            &self.preview_config
+        } else {
+            &self.config
+        };
+        Some((
+            config.clone(),
+            format.known_sample_rate()?,
+            format.channels,
+            self.response_channel,
+            taps,
+        ))
     }
 
     fn schedule_drag_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1677,7 +1772,7 @@ impl EqualizerEditor {
                         }
                     }
                     if this.response_dirty {
-                        this.update_response();
+                        this.update_response(cx);
                     }
                     cx.notify();
                 }
@@ -1745,7 +1840,7 @@ impl EqualizerEditor {
                         if let Some(drag) = this.take_drag() {
                             this.restore_position_fields(drag.band, cx);
                             if drag.moved {
-                                this.update_response();
+                                this.update_response(cx);
                                 let band = &this.config.bands[drag.band];
                                 if band.frequency_hz != drag.frequency || band.gain_db != drag.gain
                                 {
@@ -1783,6 +1878,8 @@ impl EqualizerEditor {
         let theme = rivu_ui::theme::palette(cx);
         let measured = Rc::clone(&self.bounds);
         let curve = Arc::clone(&self.response);
+        let realized_current = self.realized_current;
+        let realized = Arc::clone(&self.realized);
         let nodes = self
             .config
             .bands
@@ -1955,6 +2052,7 @@ impl EqualizerEditor {
         }
         div()
             .id(("eq-graph", panel))
+            .debug_selector(move || format!("eq-graph-{panel}"))
             .group("eq-curve")
             .relative()
             .w_full()
@@ -2095,22 +2193,53 @@ impl EqualizerEditor {
                         if let Ok(path) = grid.build() {
                             window.paint_path(path, rgb(theme.border));
                         }
-                        let mut path = PathBuilder::stroke(px(2.));
-                        for (i, db) in curve.iter().enumerate() {
-                            let p = point(
-                                bounds.origin.x + bounds.size.width * (i as f32 / 256.),
-                                bounds.origin.y
-                                    + bounds.size.height
-                                        * (0.5 - (*db).clamp(-24., 24.) as f32 / 48.),
-                            );
-                            if i == 0 {
-                                path.move_to(p);
-                            } else {
-                                path.line_to(p);
+                        let x = |i: usize| bounds.origin.x + bounds.size.width * (i as f32 / 256.);
+                        let y = |db: f64| {
+                            bounds.origin.y
+                                + bounds.size.height * (0.5 - db.clamp(-24., 24.) as f32 / 48.)
+                        };
+                        let line = |values: &[f64], builder: PathBuilder| {
+                            let mut path = builder;
+                            for (i, &db) in values.iter().enumerate() {
+                                if i == 0 {
+                                    path.move_to(point(x(i), y(db)));
+                                } else {
+                                    path.line_to(point(x(i), y(db)));
+                                }
                             }
-                        }
-                        if !curve.is_empty()
-                            && let Ok(path) = path.build()
+                            path.build().ok()
+                        };
+                        if realized.len() == curve.len() && !curve.is_empty() {
+                            // Shade only visible gaps, and only when both curves
+                            // describe the same edit; one quad per sample keeps
+                            // the path bounded by the 257-point frequency grid.
+                            let mut gap = PathBuilder::fill();
+                            let mut any = false;
+                            for i in (1..curve.len()).filter(|_| realized_current) {
+                                let deviates =
+                                    |j: usize| (realized[j] - curve[j]).abs() >= FIR_DEVIATION_DB;
+                                if !deviates(i - 1) && !deviates(i) {
+                                    continue;
+                                }
+                                any = true;
+                                gap.move_to(point(x(i - 1), y(curve[i - 1])));
+                                gap.line_to(point(x(i), y(curve[i])));
+                                gap.line_to(point(x(i), y(realized[i])));
+                                gap.line_to(point(x(i - 1), y(realized[i - 1])));
+                                gap.close();
+                            }
+                            if any && let Ok(path) = gap.build() {
+                                window.paint_path(path, rgb(theme.warning).alpha(0.35));
+                            }
+                            let dash = PathBuilder::stroke(px(1.5)).dash_array(&[px(5.), px(4.)]);
+                            if let Some(path) = line(&curve, dash) {
+                                window.paint_path(path, rgb(theme.muted));
+                            }
+                            if let Some(path) = line(&realized, PathBuilder::stroke(px(2.))) {
+                                window.paint_path(path, rgb(theme.accent));
+                            }
+                        } else if !curve.is_empty()
+                            && let Some(path) = line(&curve, PathBuilder::stroke(px(2.)))
                         {
                             window.paint_path(path, rgb(theme.accent));
                         }
@@ -2119,7 +2248,59 @@ impl EqualizerEditor {
                 .size_full(),
             )
             .children(controls)
+            .when_some(self.fir_deviation_caption(), |graph, text| {
+                // Painted text only: no id or listeners, so presses fall through
+                // to the graph's node hit-testing underneath.
+                graph.child(
+                    div()
+                        .absolute()
+                        .bottom(px(2.))
+                        .left(px(4.))
+                        .px_1()
+                        .rounded_sm()
+                        .bg(rgb(theme.bg).alpha(0.75))
+                        .text_xs()
+                        .text_color(rgb(theme.muted))
+                        .debug_selector(move || format!("eq-fir-caption-{panel}"))
+                        .child(text),
+                )
+            })
             .into_any_element()
+    }
+
+    /// Compact in-plot legend and largest realized-vs-target FIR deviation.
+    fn fir_deviation_caption(&self) -> Option<String> {
+        if !self.realized_current
+            || self.realized.len() != self.response.len()
+            || self.response.is_empty()
+        {
+            return None;
+        }
+        let (index, deviation) = self
+            .realized
+            .iter()
+            .zip(self.response.iter())
+            .map(|(realized, target)| realized - target)
+            .enumerate()
+            .filter(|(_, deviation)| deviation.is_finite())
+            .fold((0, 0.0_f64), |best, (index, deviation)| {
+                if deviation.abs() > best.1.abs() {
+                    (index, deviation)
+                } else {
+                    best
+                }
+            });
+        Some(self.context.i18n.format(
+            "processing-fir-deviation",
+            &[
+                ("deviation", format!("{deviation:+.1}").into()),
+                (
+                    "frequency",
+                    format!("{:.0}", self.frequencies[index]).into(),
+                ),
+                ("threshold", format!("{FIR_DEVIATION_DB}").into()),
+            ],
+        ))
     }
 
     fn node_key(&mut self, index: usize, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -2246,7 +2427,7 @@ impl EqualizerEditor {
     fn choose_response_channel(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(channel) = self.channel_choices.item(index).map(|item| item.value) {
             self.response_channel = channel;
-            self.update_response();
+            self.update_response(cx);
         }
         self.channel_choices.close();
         cx.notify();
@@ -2781,6 +2962,25 @@ fn target_config(state: &GuiSnapshot, target: EqTarget) -> Option<&EqualizerConf
     }
 }
 
+fn target_fir_taps(state: &GuiSnapshot, target: EqTarget) -> Option<usize> {
+    let EqTarget::Node(id) = target else {
+        return None;
+    };
+    state
+        .system
+        .config
+        .processing_graph
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            GraphNodeKind::Equalizer {
+                implementation: EqImplementation::LinearPhase { taps },
+                ..
+            } if node.id == id => Some(*taps),
+            _ => None,
+        })
+}
+
 impl AudioProcessing {
     fn reset_target_equalizer(
         &mut self,
@@ -3038,7 +3238,7 @@ impl AudioProcessing {
                     editor.active = true;
                     editor.sync_fields(cx);
                     if editor.response_dirty {
-                        editor.update_response();
+                        editor.update_response(cx);
                     }
                 }
             });
@@ -3986,7 +4186,7 @@ mod tests {
                     channels: 2,
                 });
                 editor.sync_fields(cx);
-                editor.update_response();
+                editor.update_response(cx);
                 cx.notify();
             });
             draw(cx, handle);
@@ -4063,7 +4263,7 @@ mod tests {
         editor.update(cx, |editor, cx| {
             editor.format = Some(test_format(3, 2));
             editor.sync_fields(cx);
-            editor.update_response();
+            editor.update_response(cx);
             cx.notify();
         });
         draw(cx, handle);
@@ -4866,6 +5066,110 @@ mod tests {
     }
 
     #[gpui::test]
+    fn fir_node_plots_realized_kernel_and_refreshes_when_only_taps_change(cx: &mut TestAppContext) {
+        let (_directory, runtime, owner, editor, handle) = fixture_with_owner(cx);
+        let id = select_node_target(cx, &runtime, &owner, &editor);
+        let notch = EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                kind: FilterKind::Notch,
+                frequency_hz: 1_000.,
+                q: 8.,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let replace = |implementation, cx: &mut TestAppContext| {
+            let revision = runtime
+                .handle
+                .gui_snapshot()
+                .system
+                .config
+                .processing_graph
+                .revision;
+            assert!(
+                futures::executor::block_on(runtime.handle.request_ack(
+                    Command::ProcessingGraphEdit {
+                        expected_revision: revision,
+                        edit: Box::new(GraphEdit::Replace {
+                            id,
+                            kind: GraphNodeKind::Equalizer {
+                                config: notch.clone(),
+                                implementation,
+                            },
+                        }),
+                    }
+                ))
+                .ack
+                .is_success()
+            );
+            // The headless fixture has no stream; pin the plotting format and
+            // let the editor's own reconcile decide whether to recompute.
+            let state = runtime.handle.gui_snapshot();
+            editor.update(cx, |editor, cx| {
+                editor.format = Some(test_format(48_000, 1));
+                let config = target_config(&state, editor.target).unwrap().clone();
+                editor.reconcile(
+                    Rc::new(state),
+                    &config,
+                    EqAvailability {
+                        blocked: false,
+                        pending: 0,
+                        format: editor.format,
+                        collecting_revision: None,
+                    },
+                    editor.geometry_epoch,
+                    cx,
+                );
+            });
+        };
+        // Deepest realized cut near the notch, after the background design
+        // settles; the parametric target there is a true null.
+        let depth = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            editor.read_with(cx, |editor, _| {
+                assert!(editor.realized_current && editor.realized_task.is_none());
+                assert_eq!(editor.realized.len(), editor.response.len());
+                editor
+                    .realized
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min)
+            })
+        };
+        replace(EqImplementation::LinearPhase { taps: 257 }, cx);
+        editor.update(cx, |editor, cx| editor.update_response(cx));
+        let short = depth(cx);
+        assert!(short > -6., "257 taps cannot follow a Q=8 notch: {short}");
+        draw(cx, handle);
+        // Same config, only taps change: the realized curve must follow. The
+        // 257-point plot grid misses the exact null, so compare coarsely.
+        replace(EqImplementation::LinearPhase { taps: 8_193 }, cx);
+        // Superseding an in-flight design publishes only the newest request.
+        editor.update(cx, |editor, cx| {
+            assert!(editor.realized_task.is_some() && !editor.realized_current);
+            editor.response_channel = 0;
+            editor.update_response(cx);
+        });
+        let long = depth(cx);
+        assert!(long < short - 10., "{long} vs {short}");
+        draw(cx, handle);
+        let mut window = VisualTestContext::from_window(handle, cx);
+        let graph = window.debug_bounds("eq-graph-7").unwrap();
+        let caption = window.debug_bounds("eq-fir-caption-7").unwrap();
+        assert!(graph.contains(&caption.origin) && graph.contains(&caption.bottom_right()));
+        assert!(
+            caption.bottom() + px(4.) >= graph.bottom(),
+            "{caption:?} in {graph:?}"
+        );
+        replace(EqImplementation::Iir, cx);
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| {
+            assert!(editor.realized.is_empty() && editor.realized_task.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn accepted_node_revision_rebases_latest_draft_but_external_revision_never_replays_it(
         cx: &mut TestAppContext,
     ) {
@@ -5157,8 +5461,8 @@ mod tests {
                 // Supply the headless fixture's plotting format; pointer fences
                 // still use its real, unchanged no-stream snapshot.
                 editor.format = Some(test_format(48_000, 2));
-                editor.update_response();
-                editor.update_response();
+                editor.update_response(cx);
+                editor.update_response(cx);
                 cx.notify();
             });
             draw(cx, handle);
@@ -6118,12 +6422,12 @@ mod tests {
     #[gpui::test]
     fn viewing_another_channel_changes_the_curve_without_changing_eq(cx: &mut TestAppContext) {
         let (_directory, _runtime, editor, handle) = fixture(cx);
-        let original = editor.update(cx, |editor, _| {
+        let original = editor.update(cx, |editor, cx| {
             editor.format = Some(test_format(48_000, 2));
             for band in &mut editor.config.bands {
                 band.channels = ChannelTarget::Selected(vec![1]);
             }
-            editor.update_response();
+            editor.update_response(cx);
             assert!(editor.response.iter().all(|db| db.abs() < 1e-10));
             editor.config.clone()
         });
@@ -6136,9 +6440,9 @@ mod tests {
             assert!(editor.response.iter().any(|db| db.abs() > 1.));
             assert_eq!(editor.config, original);
         });
-        editor.update(cx, |editor, _| {
+        editor.update(cx, |editor, cx| {
             editor.format = Some(test_format(48_000, 1));
-            editor.update_response();
+            editor.update_response(cx);
         });
         draw(cx, handle);
         assert!(

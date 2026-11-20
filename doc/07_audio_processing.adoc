@@ -257,7 +257,15 @@ uses its channel count during playback, including when paused. Without a
 decoded source, the editor uses the selected track's catalog format if known.
 An unknown catalog format, including unplayed MIDI, permits parameter editing
 without drawing a response curve; it is not treated as a low-rate PCM stream.
-For FIR the curve is the design target, not the realized finite response or
+For FIR the accent curve is the realized finite kernel's zero-phase magnitude,
+computed from the same kernel design that processing uses; the dashed curve is
+the parametric design target. Where they differ by at least 0.5 dB the gap is
+shaded, and a small legend at the bottom of the plot reports the largest
+deviation. The threshold is a display
+aid, not an audibility criterion, and both curves are computed, not measured.
+The realized curve is designed off the UI thread; until the latest edit's design
+arrives, the previous realized curve stays visible without shading or legend.
+Changing only the tap count updates the realized curve. Neither curve shows
 phase. Graph execution aligns branches and compensates published audio to the
 source timeline.
 
