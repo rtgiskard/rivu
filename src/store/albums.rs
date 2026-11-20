@@ -37,21 +37,30 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<AlbumSummary>> {
-        let filter = "?1 IS NULL OR instr(lower(title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=albums.directory AND title=albums.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
+        let filter = "?1 IS NULL OR instr(lower(p.title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=p.directory AND title=p.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
         let total =
             self.cached_count(super::CountDomain::Albums, &[query.unwrap_or("")], || {
                 Ok(self
                     .conn
-                    .prepare_cached(&format!("SELECT COUNT(*) FROM albums WHERE {filter}"))?
+                    .prepare_cached(&format!("SELECT COUNT(*) FROM albums AS p WHERE {filter}"))?
                     .query_row([query], |row| row.get::<_, i64>(0))? as usize)
             })?;
         let order = match sort {
-            AlbumSort::Title => "title,directory",
-            AlbumSort::Artist => "COALESCE(artist,'Unknown artist'),title,directory",
+            AlbumSort::Title => "p.title,p.directory",
+            AlbumSort::Artist => "COALESCE(p.artist,'Unknown artist'),p.title,p.directory",
         };
-        let mut statement = self.conn.prepare_cached(&format!("SELECT directory,title,track_count,artist FROM albums WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3"))?;
-        let mut representative = self.conn.prepare_cached(&format!(
-            "SELECT id,path,fingerprint FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}=?1 AND {TITLE}=?2 ORDER BY {ORDER} LIMIT 1"
+        // Unary + removes the directory column's TEXT affinity so SQLite can
+        // seek the directory expression in tracks_album_members.
+        let mut statement = self.conn.prepare_cached(&format!(
+            "WITH page AS (
+                SELECT directory,title,track_count,artist FROM albums AS p
+                WHERE {filter} ORDER BY {order} LIMIT ?2 OFFSET ?3
+             )
+             SELECT p.directory,p.title,p.track_count,p.artist,r.id,r.path,r.fingerprint
+             FROM page AS p LEFT JOIN tracks AS r ON r.id=(
+                SELECT id FROM tracks INDEXED BY tracks_album_members
+                WHERE {DIRECTORY}=+p.directory AND {TITLE}=p.title ORDER BY {ORDER} LIMIT 1
+             ) ORDER BY {order}"
         ))?;
         let mut rows = statement.query(params![
             query,
@@ -64,18 +73,13 @@ impl Store {
                 directory: row.get::<_, String>(0)?.into(),
                 title: row.get(1)?,
             };
-            let directory = key
-                .directory
-                .to_str()
-                .context("Album directory is not UTF-8")?;
-            let representative =
-                representative.query_row(params![directory, key.title], |row| {
-                    Ok(ArtworkSource {
-                        id: row.get(0)?,
-                        path: row.get::<_, String>(1)?.into(),
-                        fingerprint: fingerprint_from_row(row, 2)?,
-                    })
-                })?;
+            let representative = ArtworkSource {
+                id: row
+                    .get::<_, Option<i64>>(4)?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+                path: row.get::<_, String>(5)?.into(),
+                fingerprint: fingerprint_from_row(row, 6)?,
+            };
             summaries.push(AlbumSummary {
                 representative,
                 key,
