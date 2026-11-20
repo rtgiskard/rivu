@@ -557,6 +557,25 @@ impl Input {
             && !unsafe { (*format).name }.is_null()
             && unsafe { CStr::from_ptr((*format).name) } == name
     }
+
+    /// FFmpeg estimates DSF duration from the file size, which counts block
+    /// padding and trailing ID3 data. The fmt chunk records the exact count;
+    /// trust it only when the data chunk can hold that many frames.
+    fn dsf_frames(&self, channels: c_int) -> Option<u64> {
+        use std::os::unix::fs::FileExt;
+        if !self.demuxer_is(c"dsf") {
+            return None;
+        }
+        // Sample count, block size, reserved, then the `data` chunk header
+        // directly after the fixed 52-byte fmt chunk.
+        let mut header = [0; 28];
+        self.file.as_ref()?.read_exact_at(&mut header, 64).ok()?;
+        let field = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
+        // One frame of the 8:1 byte-packed stream carries eight 1-bit samples.
+        let frames = field(0) / 8;
+        let capacity = field(20).checked_sub(12)? / u64::try_from(channels).ok()?.max(1);
+        (&header[16..20] == b"data" && frames > 0 && frames <= capacity).then_some(frames)
+    }
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -716,14 +735,15 @@ impl Decoder {
             }
         };
         let stream_ref = unsafe { &*stream_ptr };
-        let duration = rational_seconds(stream_ref.duration, stream_ref.time_base).or_else(|| {
-            let d = unsafe { (*format).duration };
-            if d == NOPTS {
-                None
-            } else {
-                Some(d as f64 / AV_TIME_BASE as f64)
-            }
-        });
+        let duration = input
+            .dsf_frames(p.ch_layout.nb_channels)
+            .filter(|_| p.sample_rate > 0)
+            .map(|frames| frames as f64 / f64::from(p.sample_rate))
+            .or_else(|| rational_seconds(stream_ref.duration, stream_ref.time_base))
+            .or_else(|| {
+                let d = unsafe { (*format).duration };
+                (d != NOPTS).then(|| d as f64 / AV_TIME_BASE as f64)
+            });
         // libopenmpt emits synthesized PCM packets, not encoded file payloads.
         let pcm = !tracker && codec_name.starts_with("pcm_");
         let lossless = matches!(
@@ -1360,6 +1380,56 @@ mod tests {
         file.write_all(&bytes.to_le_bytes()).unwrap();
         file.write_all(&vec![0; bytes as usize]).unwrap();
         file
+    }
+
+    #[test]
+    fn dsf_duration_uses_sample_count_rather_than_padded_file_size() {
+        use std::io::Write;
+
+        // 0.5 s of stereo DSD64: the second 4096-byte block is mostly padding,
+        // and trailing ID3 bytes enlarge the file further.
+        let (rate, block) = (2_822_400_u32, 4096_usize);
+        let data = vec![0x69; 2 * block * (rate as usize / 16).div_ceil(block)];
+        let tail = [0; 64 * 1024];
+        let fmt_len = 52_u64;
+        let data_len = 12 + data.len() as u64;
+        let id3 = 28 + fmt_len + data_len;
+        let mut file = tempfile::Builder::new().suffix(".dsf").tempfile().unwrap();
+        file.write_all(b"DSD \x1c\0\0\0\0\0\0\0").unwrap();
+        file.write_all(&(id3 + tail.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&id3.to_le_bytes()).unwrap();
+        file.write_all(b"fmt ").unwrap();
+        file.write_all(&fmt_len.to_le_bytes()).unwrap();
+        for field in [1, 0, 2, 2, rate, 1] {
+            file.write_all(&u32::to_le_bytes(field)).unwrap();
+        }
+        file.write_all(&u64::from(rate / 2).to_le_bytes()).unwrap();
+        file.write_all(&(block as u32).to_le_bytes()).unwrap();
+        file.write_all(&[0; 4]).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+        file.write_all(&data).unwrap();
+        file.write_all(&tail).unwrap();
+        let duration = |file: &tempfile::NamedTempFile| {
+            let decoder = Decoder::from_file(
+                file.path(),
+                open_regular_file(file.path()).unwrap(),
+                Tags::default(),
+                None,
+            )
+            .unwrap();
+            decoder.info.duration.unwrap()
+        };
+        assert_eq!(duration(&file), 0.5);
+        // A count the data chunk cannot hold falls back to FFmpeg's estimate.
+        std::os::unix::fs::FileExt::write_all_at(
+            file.as_file(),
+            &u64::from(rate * 60).to_le_bytes(),
+            64,
+        )
+        .unwrap();
+        assert!(duration(&file) < 1.0);
     }
 
     #[test]
