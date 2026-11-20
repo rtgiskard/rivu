@@ -53,8 +53,16 @@ error. Messages still share the bottom row rather than adding extra rows.
 |`:q`, `:quit` |Close this TUI only; Core and playback continue
 |`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
 |`:now` |Jump to the playing or paused occurrence in Queue without changing playback. If a Queue search hides it, clear the search and retry.
+|`:save [NAME]` |In Queue, save the entire queue as a new playlist, including order and duplicates even under search
+|`:rename [NAME]` |In the Playlists list, rename the selected playlist
 |`:help` |Open the scrollable help page, including command descriptions
 |===
+
+Type a name directly (for example, `:save Friday Night`; no quotes are needed),
+or omit it to open the name editor. Rename starts with the current name. Enter
+submits; Esc discards an unsubmitted draft. Names are trimmed and cannot replace
+an existing playlist of the same name. A failed save keeps the draft for editing.
+Neither command changes playback or queue contents.
 
 Bare `q` has no action outside editors and remains ordinary text inside them.
 Escape cancels or returns; it never closes the client. Unknown commands and

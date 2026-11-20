@@ -292,15 +292,33 @@ where
         };
         let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
         while let Some(completion) = commands.take_result()? {
+            let unknown = i18n.text("terminal-playlist-name-unknown");
             let result = match completion.result {
+                Ok(ack)
+                    if completion.playlist_name
+                        && ack.status == rivu_protocol::response::AckStatus::Unknown =>
+                {
+                    Err(unknown.into())
+                }
                 Ok(ack) if !ack.is_success() => Err(ack
                     .error
                     .unwrap_or_else(|| i18n.text("terminal-command-rejected").into())),
                 Ok(_) => Ok(()),
-                Err(error) => Err(error.into_message()?),
+                Err(error) => {
+                    let outcome_unknown =
+                        completion.playlist_name && error.command_outcome_unknown();
+                    let message = error.into_message()?;
+                    Err(if outcome_unknown {
+                        unknown.into()
+                    } else {
+                        message
+                    })
+                }
             };
             if completion.reorder {
                 tui.ui.complete_reorder(result);
+            } else if completion.playlist_name {
+                tui.ui.complete_playlist_name(result);
             } else if let Err(error) = result {
                 tui.ui.set_notice(error, NoticeKind::Error);
             }
@@ -383,12 +401,14 @@ where
                         }
                         action @ (KeyAction::Command(_)
                         | KeyAction::SaveOrder(_)
+                        | KeyAction::WritePlaylistName(_)
                         | KeyAction::Shutdown) => {
                             let is_reorder = matches!(action, KeyAction::SaveOrder(_));
+                            let writes_name = matches!(action, KeyAction::WritePlaylistName(_));
                             let command = match action {
-                                KeyAction::Command(command) | KeyAction::SaveOrder(command) => {
-                                    command.into()
-                                }
+                                KeyAction::Command(command)
+                                | KeyAction::SaveOrder(command)
+                                | KeyAction::WritePlaylistName(command) => command.into(),
                                 _ => rivu_protocol::AppCommand::Shutdown,
                             };
                             if commands.request(command)? {
@@ -399,6 +419,8 @@ where
                                 let message = i18n.text("terminal-command-busy").into();
                                 if is_reorder {
                                     tui.ui.reorder_busy(message);
+                                } else if writes_name {
+                                    tui.ui.complete_playlist_name(Err(message));
                                 } else {
                                     tui.ui.set_notice(message, NoticeKind::Warning);
                                 }

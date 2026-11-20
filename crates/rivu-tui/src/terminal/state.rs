@@ -1141,11 +1141,29 @@ impl ReadCoordinator {
     }
 }
 
+pub(super) struct PlaylistName {
+    target: Option<i64>,
+    pub(super) text: String,
+    pub(super) error: Option<String>,
+    pub(super) pending: bool,
+}
+
+impl PlaylistName {
+    pub(super) fn label(&self) -> &'static str {
+        if self.target.is_some() {
+            ":rename "
+        } else {
+            ":save "
+        }
+    }
+}
+
 pub(super) struct UiState {
     pub(super) i18n: Arc<Localizer>,
     pub(super) view: View,
     pub(super) search: SearchState,
     pub(super) command_input: Option<String>,
+    pub(super) playlist_name: Option<PlaylistName>,
     // Each slot owns only its tab's view; switching moves bounded page caches.
     pub(super) cached_library: Option<View>,
     pub(super) cached_playlists: Option<View>,
@@ -1174,6 +1192,7 @@ impl UiState {
             view: View::default(),
             search: SearchState::default(),
             command_input: None,
+            playlist_name: None,
             cached_library: None,
             cached_playlists: None,
             cached_recent: None,
@@ -1721,6 +1740,105 @@ impl UiState {
         }
     }
 
+    fn open_playlist_name(&mut self, verb: &str, name: &str) -> KeyAction {
+        let (target, initial) = match (verb, &self.view) {
+            ("save", View::Queue) => (None, ""),
+            ("rename", View::Playlists(rows)) => {
+                let Some(row) = rows.selected() else {
+                    self.set_notice(
+                        self.i18n.text("terminal-rename-selection").into(),
+                        NoticeKind::Warning,
+                    );
+                    return KeyAction::Ignored;
+                };
+                (Some(row.id), row.name.as_str())
+            }
+            _ => {
+                let hint = if verb == "save" {
+                    "terminal-command-save"
+                } else {
+                    "terminal-command-rename"
+                };
+                self.set_notice(self.i18n.text(hint).into(), NoticeKind::Warning);
+                return KeyAction::Ignored;
+            }
+        };
+        self.playlist_name = Some(PlaylistName {
+            target,
+            text: if name.is_empty() {
+                initial.into()
+            } else {
+                name.into()
+            },
+            error: None,
+            pending: false,
+        });
+        if name.is_empty() {
+            KeyAction::Ignored
+        } else {
+            self.submit_playlist_name()
+        }
+    }
+
+    fn submit_playlist_name(&mut self) -> KeyAction {
+        let draft = self.playlist_name.as_mut().unwrap();
+        let name = draft.text.trim();
+        if name.is_empty() {
+            draft.error = Some(self.i18n.text("terminal-playlist-name-required").into());
+            return KeyAction::Ignored;
+        }
+        draft.error = None;
+        draft.pending = true;
+        let name = name.to_owned();
+        KeyAction::WritePlaylistName(match draft.target {
+            Some(playlist_id) => Command::RenamePlaylist { playlist_id, name },
+            None => Command::CreatePlaylistFromQueue { name },
+        })
+    }
+
+    pub(super) fn complete_playlist_name(&mut self, result: Result<(), String>) {
+        let Some(draft) = self.playlist_name.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                let key = if draft.target.is_some() {
+                    "terminal-playlist-renamed"
+                } else {
+                    "terminal-playlist-saved"
+                };
+                self.playlist_name = None;
+                self.set_notice(self.i18n.text(key).into(), NoticeKind::Success);
+            }
+            Err(error) => {
+                draft.pending = false;
+                draft.error = Some(error);
+            }
+        }
+        self.mark_local_change();
+    }
+
+    fn playlist_name_key(&mut self, key: KeyEvent) -> KeyAction {
+        let draft = self.playlist_name.as_mut().unwrap();
+        if draft.pending || !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+            return KeyAction::Ignored;
+        }
+        self.mark_local_change();
+        let draft = self.playlist_name.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.playlist_name = None,
+            KeyCode::Enter => return self.submit_playlist_name(),
+            KeyCode::Backspace => {
+                draft.text.pop();
+            }
+            KeyCode::Char(c) if !c.is_control() && draft.text.len() + c.len_utf8() <= 256 => {
+                draft.text.push(c)
+            }
+            _ => {}
+        }
+        KeyAction::Ignored
+    }
+
     fn command_key(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         const MAX_COMMAND_BYTES: usize = 256;
         if key.modifiers.intersects(
@@ -1737,6 +1855,11 @@ impl UiState {
             KeyCode::Enter => {
                 let input = self.command_input.take().unwrap_or_default();
                 self.mark_local_change();
+                let input = input.trim();
+                let (verb, name) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+                if matches!(verb, "save" | "rename") {
+                    return self.open_playlist_name(verb, name.trim());
+                }
                 return match input.trim() {
                     "" => KeyAction::Ignored,
                     "q" | "quit" => KeyAction::Quit,
@@ -1782,6 +1905,9 @@ impl UiState {
         if resolve_key(key, KeyboardContext::TuiHelp) == Some(Action::Close) {
             self.queue_replace = None;
             return KeyAction::Quit;
+        }
+        if self.playlist_name.is_some() {
+            return self.playlist_name_key(key);
         }
         if self.reorder.is_some() {
             return self.reorder_key(key);
@@ -2530,6 +2656,7 @@ pub(super) enum KeyAction {
     Search,
     Command(Command),
     SaveOrder(Command),
+    WritePlaylistName(Command),
     Ignored,
 }
 

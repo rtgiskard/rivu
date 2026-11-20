@@ -152,12 +152,18 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
 pub(super) struct WorkerFailure {
     error: QueryError,
     instance_changed: bool,
+    command_outcome_unknown: bool,
 }
 
 impl From<anyhow::Error> for WorkerFailure {
     fn from(error: anyhow::Error) -> Self {
         Self {
             instance_changed: error.is::<rivu_client::InstanceChanged>(),
+            command_outcome_unknown: error
+                .downcast_ref::<rivu_client::CommandFailure>()
+                .is_some_and(|failure| {
+                    failure.status == rivu_protocol::response::AckStatus::Unknown
+                }),
             error: QueryError::Message(format!("{error:#}")),
         }
     }
@@ -168,11 +174,16 @@ impl From<QueryError> for WorkerFailure {
         Self {
             error,
             instance_changed: false,
+            command_outcome_unknown: false,
         }
     }
 }
 
 impl WorkerFailure {
+    pub(super) fn command_outcome_unknown(&self) -> bool {
+        self.command_outcome_unknown
+    }
+
     pub(super) fn into_message(self) -> Result<String> {
         Ok(match self.into_query_error()? {
             QueryError::Message(message) => message,
@@ -190,6 +201,7 @@ impl WorkerFailure {
 
 pub(super) struct CommandCompletion {
     pub(super) reorder: bool,
+    pub(super) playlist_name: bool,
     pub(super) result: Result<Ack, WorkerFailure>,
 }
 
@@ -272,13 +284,19 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
                         | Command::MovePlaylistEntries { .. }
                 )
             );
+            let playlist_name = matches!(
+                &command,
+                AppCommand::Core(
+                    Command::CreatePlaylistFromQueue { .. } | Command::RenamePlaylist { .. }
+                )
+            );
             let result = match &mut session {
                 Ok(session) => session.request_ack(command).map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
             crossbeam_channel::select! {
-                send(result_sender, CommandCompletion { reorder, result }) -> _ => {}
+                send(result_sender, CommandCompletion { reorder, playlist_name, result }) -> _ => {}
                 recv(stop_receiver) -> _ => break,
             }
             if instance_changed {

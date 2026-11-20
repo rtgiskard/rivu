@@ -719,6 +719,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
             (":q / :quit", "terminal-command-close"),
             (":qa / :qall", "terminal-command-shutdown"),
             (":now", "terminal-command-now"),
+            (":save [NAME]", "terminal-command-save"),
+            (":rename [NAME]", "terminal-command-rename"),
             (":help", "terminal-command-help"),
         ];
         let key_width = bindings
@@ -1024,7 +1026,21 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Paragraph::new(time).style(Style::default().fg(colors.secondary)),
         progress[1],
     );
-    draw_status(frame, status, state, ui, colors);
+    let name_feedback = ui.playlist_name.as_ref().and_then(|draft| {
+        if draft.pending {
+            Some((i18n.text("terminal-playlist-name-saving"), colors.command))
+        } else {
+            draft.error.as_deref().map(|error| (error, colors.error))
+        }
+    });
+    if let Some((text, color)) = name_feedback {
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(color)),
+            status,
+        );
+    } else {
+        draw_status(frame, status, state, ui, colors);
+    }
     let messages = Rect {
         y: outer[3].bottom().saturating_sub(1),
         height: 1.min(outer[3].height),
@@ -1032,6 +1048,20 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     };
     if let Some((prompt, notice)) = ui.reorder_footer() {
         draw_reorder_footer(frame, messages, prompt, notice, colors);
+        return;
+    }
+    if let Some(draft) = &ui.playlist_name {
+        let label = draft.label();
+        let width = messages.width as usize;
+        let (tail, cursor) = query_tail(&draft.text, width.saturating_sub(label.len() + 1));
+        frame.render_widget(
+            Paragraph::new(format!("{label}{tail}"))
+                .style(Style::default().fg(colors.command).bg(colors.selected)),
+            messages,
+        );
+        if !draft.pending && messages.height > 0 && label.len() + cursor < width {
+            frame.set_cursor_position((messages.x + (label.len() + cursor) as u16, messages.y));
+        }
         return;
     }
     if let Some(input) = &ui.command_input {
