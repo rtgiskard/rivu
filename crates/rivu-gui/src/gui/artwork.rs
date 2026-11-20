@@ -118,7 +118,6 @@ impl ArtworkImageRegistry {
         } else if Rc::strong_count(&image.owner) == 1 {
             // A previously built Img may still hold the entity, not its lease.
             image.owner.image.update(cx, |image, _| {
-                image.released = true;
                 image.artwork = None;
             });
         }
@@ -440,7 +439,7 @@ impl ArtworkImageSizing {
     pub(super) fn request(&self, side: Pixels, window: &mut Window, cx: &mut App) {
         let view = window.current_view();
         self.image.update(cx, |image, cx| {
-            if image.released {
+            if image.artwork.is_none() {
                 return;
             }
             image.views.insert(self.token, (view, image.generation));
@@ -491,9 +490,7 @@ impl ArtworkSource {
             return None;
         }
         self.sizing.image.update(cx, |image, cx| {
-            if image.released {
-                return None;
-            }
+            image.artwork.as_ref()?;
             image
                 .views
                 .insert(self.sizing.token, (window.current_view(), image.generation));
@@ -807,7 +804,6 @@ struct ArtworkImage {
     replaced: Vec<ReplacedArtworkImage>,
     downgrade: Option<(u32, Task<()>)>,
     registry: Weak<RefCell<ArtworkImageRegistryState>>,
-    released: bool,
     ambient: Option<ImageCacheItem>,
 }
 
@@ -834,7 +830,6 @@ impl ArtworkImage {
             replaced: Vec::new(),
             downgrade: None,
             registry,
-            released: false,
         });
         cx.observe_release(&image, |image, cx| {
             for decoded in image.take_pixels() {
@@ -890,7 +885,6 @@ impl ArtworkImage {
     }
 
     fn clear(&mut self, window: &mut Window, cx: &mut App) {
-        self.released = true;
         self.artwork = None;
         for decoded in self.take_pixels() {
             cx.drop_image(decoded, Some(window));
@@ -916,7 +910,7 @@ impl ArtworkImage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.released {
+        if self.artwork.is_none() {
             return;
         }
         let physical = (f32::from(side).max(0.) * window.scale_factor()).ceil() as u32;
@@ -928,7 +922,7 @@ impl ArtworkImage {
     }
 
     fn reconcile_demand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.released {
+        if self.artwork.is_none() {
             return;
         }
         let Some(target) = self.demands.values().copied().max() else {
@@ -1096,9 +1090,6 @@ impl ImageCache for ArtworkImage {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let artwork = self.artwork.as_ref()?;
         debug_assert_eq!(resource, &Resource::from(artwork.path()));
-        if self.released {
-            return None;
-        }
         if self.item.is_none() {
             self.tier = self.target;
             self.item = Some(self.decode_item(self.tier, cx));
@@ -1108,9 +1099,9 @@ impl ImageCache for ArtworkImage {
         if self.source.get().is_some_and(|source| source.animated) {
             return Some(current);
         }
-        if current.is_err() {
+        let Ok(mut current) = current else {
             return Some(current);
-        }
+        };
         if let Some((tier, pending)) = &self.pending
             && let Some(result) = pending.use_image(window)
         {
@@ -1121,38 +1112,35 @@ impl ImageCache for ArtworkImage {
             } else {
                 tier >= self.target && tier < self.tier
             };
-            if result.is_ok() && useful {
-                self.generation = self.generation.wrapping_add(1);
-                if let Some(Ok(decoded)) = self.item.replace(pending).and_then(|item| item.get()) {
+            if let Ok(decoded) = result {
+                if useful {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.item = Some(pending);
                     self.replaced.push(ReplacedArtworkImage {
-                        image: decoded,
+                        image: std::mem::replace(&mut current, decoded),
                         generation: self.generation,
                         source_pixels: true,
                     });
+                    // A cached sibling may never have requested this pending load.
+                    // Invalidate every measured consumer, and retain its old atlas
+                    // pixels until all consumers have prepainted the new generation.
+                    self.invalidate_consumers(cx);
+                    self.flush_replaced();
+                    self.tier = tier;
+                    self.failed_tier = None;
+                } else {
+                    self.retire_pixels(decoded);
                 }
-                // A cached sibling may never have requested this pending load.
-                // Invalidate every measured consumer, and retain its old atlas
-                // pixels until all consumers have prepainted the new generation.
-                self.invalidate_consumers(cx);
-                self.flush_replaced();
-                self.tier = tier;
-                self.failed_tier = None;
-            } else if let Ok(decoded) = result {
-                // A superseded downgrade must not replace a still-suitable
-                // current image; a superseded upgrade must not grow it needlessly.
-                self.retire_pixels(decoded);
             } else {
                 self.failed_tier = Some(tier);
             }
         }
-        let current = self.item.as_ref()?.use_image(window)?;
-        let native_satisfies = current.as_ref().is_ok_and(|image| {
-            let size = image.size(0);
-            let side = size.width.0.max(size.height.0) as u32;
-            self.source
-                .get()
-                .is_some_and(|source| source.longest() == side && self.target >= side)
-        });
+        let size = current.size(0);
+        let side = size.width.0.max(size.height.0) as u32;
+        let native_satisfies = self
+            .source
+            .get()
+            .is_some_and(|source| source.longest() == side && self.target >= side);
         if self.pending.is_none()
             && !native_satisfies
             && self.tier != self.target
@@ -1162,7 +1150,7 @@ impl ImageCache for ArtworkImage {
             self.pending.as_ref().unwrap().1.use_image(window);
         }
         // Never replace a usable old image with a loading or failed upgrade.
-        Some(current)
+        Some(Ok(current))
     }
 }
 
@@ -1748,7 +1736,7 @@ mod tests {
             material.replace(None, cx);
             images.release_retired(window);
             window.simulate_next_frame(cx);
-            assert!(!cache.read(cx).released);
+            assert!(cache.read(cx).artwork.is_some());
             assert_eq!(cache.read(cx).demands.len(), 1);
             assert!(material.ready_static_source(window, cx).is_none());
         });
@@ -1758,7 +1746,7 @@ mod tests {
             assert!(cache.read(cx).pending.is_none());
             sibling.release_all_images(window, cx);
             images.release_all_retired(window, cx);
-            assert!(cache.read(cx).released);
+            assert!(cache.read(cx).artwork.is_none());
             assert!(cache.read(cx).item.is_none());
         });
         draw_source(window, source.static_image());
@@ -1848,7 +1836,7 @@ mod tests {
             window.run_until_parked();
             window.update(|window, cx| {
                 let image = source.sizing.image.read(cx);
-                assert_eq!(image.released, !shared);
+                assert_eq!(image.artwork.is_some(), shared);
                 assert!(image.source.get().is_none());
                 assert!(image.item.is_none());
                 assert!(image.pending.is_none());
@@ -2000,11 +1988,10 @@ mod tests {
             window.simulate_next_frame(cx);
             assert_eq!(cache.read(cx).demands.len(), 1);
             assert!(cache.read(cx).item.is_some());
-            assert!(!cache.read(cx).released);
+            assert!(cache.read(cx).artwork.is_some());
             material.replace(None, cx);
             images.release_retired(window);
             window.simulate_next_frame(cx);
-            assert!(cache.read(cx).released);
             assert!(cache.read(cx).artwork.is_none());
             assert!(cache.read(cx).item.is_none());
         });
@@ -2096,7 +2083,7 @@ mod tests {
                     images.release_retired(window);
                     window.simulate_next_frame(cx);
                 }
-                assert!(cache.read(cx).released);
+                assert!(cache.read(cx).artwork.is_none());
                 assert!(cache.read(cx).views.is_empty());
                 assert!(cache.read(cx).ambient.is_none());
                 assert!(ambient_pixels.upgrade().is_none());
@@ -2208,7 +2195,10 @@ mod tests {
             material.replace(None, cx);
             images.release_retired(window);
             window.simulate_next_frame(cx);
-            assert!(!cache.read(cx).released, "another consumer owns the source");
+            assert!(
+                cache.read(cx).artwork.is_some(),
+                "another consumer owns the source"
+            );
             assert_eq!(cache.read(cx).demands.len(), 1);
         });
         draw_source(window, stale);
@@ -2772,7 +2762,7 @@ mod tests {
             window.update(|window, cx| {
                 view.release_all_images(window, cx);
                 images.release_all_retired(window, cx);
-                assert!(cache.read(cx).released);
+                assert!(cache.read(cx).artwork.is_none());
             });
         }
     }
