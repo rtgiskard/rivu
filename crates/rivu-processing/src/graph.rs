@@ -4,7 +4,7 @@ use super::*;
 use anyhow::bail;
 use rivu_dsp::denoise::{DenoiseMode, NoiseProfile, ProfileCollector};
 use rivu_format::config::processing_graph::ValidatedGraph;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const BLOCK: usize = 256;
 
@@ -221,7 +221,7 @@ impl Engine {
             }
             processor = None;
         } else {
-            for input_port in 0..kind.inputs() {
+            for (input_port, gain) in kind.input_gains().enumerate() {
                 let edge = graph
                     .edges
                     .iter()
@@ -235,20 +235,6 @@ impl Engine {
                     .context("Disconnected graph input")?;
                 let node = self.compile(graph, edge.from, boundaries, profiles, cancel)?;
                 latency = latency.max(self.nodes[node].latency);
-                let gain = if let GraphNodeKind::Mix {
-                    gains_db,
-                    muted,
-                    solo,
-                } = kind
-                {
-                    if muted[input_port] || (solo.iter().any(|value| *value) && !solo[input_port]) {
-                        0.0
-                    } else {
-                        10.0_f64.powf(f64::from(gains_db[input_port]) / 20.0)
-                    }
-                } else {
-                    1.0
-                };
                 inputs.push(Edge {
                     node,
                     gain,
@@ -542,25 +528,20 @@ fn input_port(graph: &ProcessingGraph, node: u64) -> Result<GraphPort> {
         .context("Disconnected graph input")
 }
 
-fn reachable_boundaries(
+/// Visit the required ports without crossing a PCM boundary; report whether they need the source.
+fn visit_pcm_ports(
     graph: &ProcessingGraph,
     port: GraphPort,
     boundaries: &BTreeMap<GraphPort, GraphPcm>,
-    visited: &mut std::collections::BTreeSet<GraphPort>,
-    retained: &mut std::collections::BTreeSet<GraphPort>,
+    visited: &mut BTreeSet<GraphPort>,
     stop_at: Option<u64>,
-) -> Result<()> {
-    if !visited.insert(port) {
-        return Ok(());
+) -> Result<bool> {
+    if !visited.insert(port) || stop_at == Some(port.node) || boundaries.contains_key(&port) {
+        return Ok(false);
     }
-    if stop_at == Some(port.node) {
-        return Ok(());
-    }
-    if boundaries.contains_key(&port) {
-        retained.insert(port);
-        return Ok(());
-    }
-    for input in 0..graph.node(port.node)?.kind.inputs() {
+    let node = graph.node(port.node)?;
+    let mut source_reachable = matches!(node.kind, GraphNodeKind::Source);
+    for input in 0..node.kind.inputs() {
         let from = graph
             .edges
             .iter()
@@ -573,46 +554,9 @@ fn reachable_boundaries(
             })
             .context("Disconnected graph input")?
             .from;
-        reachable_boundaries(graph, from, boundaries, visited, retained, stop_at)?;
+        source_reachable |= visit_pcm_ports(graph, from, boundaries, visited, stop_at)?;
     }
-    Ok(())
-}
-fn retains_source(
-    graph: &ProcessingGraph,
-    target: GraphPort,
-    boundaries: &BTreeMap<GraphPort, GraphPcm>,
-    stop_at: Option<u64>,
-) -> Result<bool> {
-    let mut visited = std::collections::BTreeSet::new();
-    reachable_boundaries(
-        graph,
-        target,
-        boundaries,
-        &mut visited,
-        &mut std::collections::BTreeSet::new(),
-        stop_at,
-    )?;
-    for port in visited {
-        if !boundaries.contains_key(&port)
-            && matches!(graph.node(port.node)?.kind, GraphNodeKind::Source)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn release_unreachable_source(
-    graph: &ProcessingGraph,
-    target: GraphPort,
-    boundaries: &BTreeMap<GraphPort, GraphPcm>,
-    stop_at: Option<u64>,
-    input: &mut Option<audio::PcmAudio>,
-) -> Result<()> {
-    if !retains_source(graph, target, boundaries, stop_at)? {
-        *input = None;
-    }
-    Ok(())
+    Ok(source_reachable)
 }
 
 fn release_unreachable_pcm(
@@ -621,36 +565,22 @@ fn release_unreachable_pcm(
     boundaries: &mut BTreeMap<GraphPort, GraphPcm>,
     stop_at: Option<u64>,
     input: &mut Option<audio::PcmAudio>,
-) -> Result<()> {
-    let mut retained = std::collections::BTreeSet::new();
-    reachable_boundaries(
-        graph,
-        target,
-        boundaries,
-        &mut std::collections::BTreeSet::new(),
-        &mut retained,
-        stop_at,
-    )?;
-    boundaries.retain(|port, _| retained.contains(port));
-    release_unreachable_source(graph, target, boundaries, stop_at, input)
+) -> Result<BTreeSet<GraphPort>> {
+    let mut visited = BTreeSet::new();
+    let source_reachable = visit_pcm_ports(graph, target, boundaries, &mut visited, stop_at)?;
+    // The stopped model's ports are needed as outputs, not as existing PCM.
+    boundaries.retain(|port, _| stop_at != Some(port.node) && visited.contains(port));
+    if !source_reachable {
+        *input = None;
+    }
+    Ok(visited)
 }
 
 fn model_output_retention(
-    graph: &ProcessingGraph,
-    target: GraphPort,
-    boundaries: &BTreeMap<GraphPort, GraphPcm>,
+    needed: &BTreeSet<GraphPort>,
     node: u64,
     operation: ProcessingOperation,
 ) -> Result<ModelOutputRetention> {
-    let mut needed = std::collections::BTreeSet::new();
-    reachable_boundaries(
-        graph,
-        target,
-        boundaries,
-        &mut needed,
-        &mut std::collections::BTreeSet::new(),
-        Some(node),
-    )?;
     let first = needed.contains(&GraphPort { node, port: 0 });
     if operation == ProcessingOperation::Speech {
         ensure!(first, "Speech output is not required by graph target");
@@ -824,8 +754,14 @@ pub(super) fn execute(
                     // This model now owns its materialized input. Future graph
                     // traversals stop at its outputs before inference allocates
                     // them; a bypass alias still retains its own PCM storage.
-                    release_unreachable_pcm(graph, target, &mut boundaries, Some(id), &mut input)?;
-                    let retain = model_output_retention(graph, target, &boundaries, id, operation)?;
+                    let needed = release_unreachable_pcm(
+                        graph,
+                        target,
+                        &mut boundaries,
+                        Some(id),
+                        &mut input,
+                    )?;
+                    let retain = model_output_retention(&needed, id, operation)?;
                     let outcome = neural::run(
                         ModelRequest {
                             task_id: status.id,
@@ -1644,7 +1580,7 @@ mod tests {
         let rendered = render(&chain(vec![iir()]), &input, &budget);
         assert_eq!(budget.used_bytes(), 2 * bytes);
         let mut input = Some(input);
-        release_unreachable_source(&graph, target, &BTreeMap::new(), Some(3), &mut input).unwrap();
+        release_unreachable_pcm(&graph, target, &mut BTreeMap::new(), Some(3), &mut input).unwrap();
         assert!(input.is_none());
         assert_eq!(budget.used_bytes(), bytes);
         let boundaries = BTreeMap::from([(boundary, rendered)]);
@@ -1702,7 +1638,7 @@ mod tests {
             },
         )]);
         let mut input = Some(input);
-        release_unreachable_source(&graph, target, &boundaries, None, &mut input).unwrap();
+        release_unreachable_pcm(&graph, target, &mut boundaries, None, &mut input).unwrap();
         assert!(input.is_none());
         assert_eq!(budget.used_bytes(), bytes);
         let cancel = AtomicBool::new(false);
@@ -1755,17 +1691,17 @@ mod tests {
             from: GraphPort { node: 1, port: 0 },
             to: GraphPort { node: 4, port: 1 },
         });
-        let boundaries = BTreeMap::from([(
+        let mut boundaries = BTreeMap::from([(
             GraphPort { node: 3, port: 0 },
             GraphPcm {
                 pcm: pcm(&[0.5; 1000], &budget),
                 start_frame: 0,
             },
         )]);
-        release_unreachable_source(
+        release_unreachable_pcm(
             &graph,
             GraphPort { node: 2, port: 0 },
-            &boundaries,
+            &mut boundaries,
             None,
             &mut input,
         )

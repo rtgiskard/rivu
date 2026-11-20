@@ -71,6 +71,27 @@ impl GraphNodeKind {
             _ => 1,
         }
     }
+
+    /// Linear input gains in port order for a validated node. Muted inputs still
+    /// participate in graph timing, and any solo (even muted) suppresses non-solos.
+    pub fn input_gains(&self) -> impl Iterator<Item = f64> + '_ {
+        let any_solo = matches!(self, Self::Mix { solo, .. } if solo.contains(&true));
+        (0..self.inputs()).map(move |port| match self {
+            Self::Mix {
+                gains_db,
+                muted,
+                solo,
+            } => {
+                if muted[port] || (any_solo && !solo[port]) {
+                    0.0
+                } else {
+                    10.0_f64.powf(f64::from(gains_db[port]) / 20.0)
+                }
+            }
+            _ => 1.0,
+        })
+    }
+
     pub fn outputs(&self) -> usize {
         if matches!(self, Self::Separate { .. }) {
             2
@@ -539,5 +560,21 @@ mod tests {
                 .is_err()
         );
         assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn muted_solo_still_suppresses_non_solos() {
+        for (solo, expected) in [
+            ([false, false, false], [0.0, 0.1, 1.0]),
+            ([true, false, false], [0.0, 0.0, 0.0]),
+            ([true, true, false], [0.0, 0.1, 0.0]),
+        ] {
+            let mix = GraphNodeKind::Mix {
+                gains_db: vec![0.0, -20.0, 0.0],
+                muted: vec![true, false, false],
+                solo: solo.to_vec(),
+            };
+            assert_eq!(mix.input_gains().collect::<Vec<_>>(), expected);
+        }
     }
 }

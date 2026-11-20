@@ -350,7 +350,7 @@ impl GraphRunner {
                         delay: DelayLine::new(0, channels),
                     });
                 }
-                for (input_port, input) in inputs.iter_mut().enumerate() {
+                for (input, gain) in inputs.iter_mut().zip(graph_node.kind.input_gains()) {
                     let delay = upstream_latency - nodes[input.node].latency;
                     state_bytes = state_bytes.saturating_add(delay * channels * 4);
                     ensure!(
@@ -358,20 +358,7 @@ impl GraphRunner {
                         "realtime graph exceeds 64 MiB state budget"
                     );
                     upstream_tail = upstream_tail.max(nodes[input.node].tail + delay);
-                    if let GraphNodeKind::Mix {
-                        gains_db,
-                        muted,
-                        solo,
-                    } = &graph_node.kind
-                    {
-                        let audible = !muted[input_port]
-                            && (!solo.iter().any(|value| *value) || solo[input_port]);
-                        input.gain = if audible {
-                            10.0_f64.powf(f64::from(gains_db[input_port]) / 20.0)
-                        } else {
-                            0.0
-                        };
-                    }
+                    input.gain = gain;
                 }
             }
             let native = if is_source {
