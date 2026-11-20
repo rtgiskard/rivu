@@ -371,7 +371,7 @@ impl Store {
         )?;
         ensure!(nonempty, "Playlist is empty or not found");
         delete_queue_rows(&tx)?;
-        tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist])?;
+        super::positions::copy_into_empty_collection(&tx, playlist, 0)?;
         tx.commit()?;
         Ok(())
     }

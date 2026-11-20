@@ -1,6 +1,19 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 
+/// Copy all occurrences to an empty destination, preserving their positions.
+pub(super) fn copy_into_empty_collection(
+    tx: &Transaction<'_>,
+    source: i64,
+    destination: i64,
+) -> Result<usize> {
+    Ok(tx.execute(
+        "INSERT INTO playlist_entries(playlist_id,track_id,position)
+         SELECT ?2,track_id,position FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id",
+        params![source, destination],
+    )?)
+}
+
 /// Stage incoming occurrences; directory unions alone are set selections.
 pub(super) fn insert_tracks(
     tx: &Transaction<'_>,

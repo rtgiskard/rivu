@@ -427,23 +427,17 @@ impl Store {
     }
 
     pub fn create_playlist_with_tracks(&self, name: &str, tracks: &[i64]) -> Result<i64> {
-        Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
-        available_playlist_name(&tx, name)?;
-        tx.execute("INSERT INTO playlists(name,position) SELECT ?1,COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0", [name])?;
-        let id = tx.last_insert_rowid();
+        let id = insert_playlist(&tx, name)?;
         append_tracks(&tx, id, tracks)?;
         tx.commit()?;
         Ok(id)
     }
     /// Returns the new identity and whether the committed playlist has members.
     pub fn create_playlist_from_queue(&self, name: &str) -> Result<(i64, bool)> {
-        Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
-        available_playlist_name(&tx, name)?;
-        tx.execute("INSERT INTO playlists(name,position) SELECT ?1,COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0", [name])?;
-        let id = tx.last_insert_rowid();
-        let inserted = tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=0 ORDER BY position,id", [id])?;
+        let id = insert_playlist(&tx, name)?;
+        let inserted = super::positions::copy_into_empty_collection(&tx, 0, id)?;
         tx.commit()?;
         Ok((id, inserted != 0))
     }
@@ -708,6 +702,13 @@ fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<usize>
     let tracks = serde_json::to_string(tracks)?;
     validate_encoded_track_ids(tx, &tracks)?;
     Ok(tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,value,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+CAST(key AS INTEGER) FROM json_each(?2) ORDER BY CAST(key AS INTEGER)", params![id, tracks])?)
+}
+
+fn insert_playlist(tx: &Transaction<'_>, name: &str) -> Result<i64> {
+    Store::validate_playlist_name(name)?;
+    available_playlist_name(tx, name)?;
+    tx.execute("INSERT INTO playlists(name,position) SELECT ?1,COALESCE(MAX(position)+1,0) FROM playlists WHERE id>0", [name])?;
+    Ok(tx.last_insert_rowid())
 }
 
 fn available_playlist_name(tx: &Transaction<'_>, name: &str) -> Result<()> {
