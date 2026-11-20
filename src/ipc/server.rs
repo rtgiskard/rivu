@@ -22,7 +22,7 @@ use rivu_protocol::{AppCommand, query_wait_timeout};
 use rivu_protocol::{
     model::Query,
     query_tracking::QueryEpoch,
-    response::{Ack, QueryResponse, StateRevisions, StateWatch},
+    response::{Ack, QueryError, QueryResponse, StateRevisions, StateWatch, TaskOutcome},
 };
 use std::{
     fs,
@@ -142,7 +142,7 @@ async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
 }
 
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
-const QUERY_WAIT_BUDGET: usize = 32;
+const WAIT_INPUT_BUDGET: usize = 32;
 
 #[derive(Default)]
 struct RequestReader {
@@ -160,6 +160,24 @@ impl RequestReader {
         let frame = read_request_frame(stream, &mut self.pending).await?;
         self.complete -= before - self.pending.len();
         Ok(frame)
+    }
+
+    // With no query in flight, only a decoded cancellation is inert. Leave
+    // decode and framing failures to the wait's existing error path.
+    async fn read_wait_interrupt(
+        &mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Result<Result<WireRequest>> {
+        loop {
+            for _ in 0..WAIT_INPUT_BUDGET {
+                match self.read(stream).await? {
+                    Ok(WireRequest::QueryCancel(_)) => {}
+                    other => return Ok(other),
+                }
+            }
+            // Even buffered controls must not starve the wait or shutdown.
+            futures_lite::future::yield_now().await;
+        }
     }
 
     fn next_is_query_cancel(&self) -> bool {
@@ -284,7 +302,7 @@ async fn wait_for_query(
     }
     .fuse();
     futures::pin_mut!(query);
-    let mut remaining = QUERY_WAIT_BUDGET;
+    let mut remaining = WAIT_INPUT_BUDGET;
     loop {
         // This control frame never owns a reply. A late cancellation can be
         // consumed during the next read, but its identity cannot retire it.
@@ -306,7 +324,7 @@ async fn wait_for_query(
                     // Yield inside the select so replies and shutdown still win
                     // while a cancellation backlog waits for its next batch.
                     futures_lite::future::yield_now().await;
-                    remaining = QUERY_WAIT_BUDGET;
+                    remaining = WAIT_INPUT_BUDGET;
                     Ok(())
                 } else {
                     remaining -= 1;
@@ -357,12 +375,42 @@ fn wait_for_revisions<'a>(
             futures::select! {
                 changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
                 _ = shutdown.recv().fuse() => return Ok(None),
-                frame = reader.read(stream).fuse() => {
+                frame = reader.read_wait_interrupt(stream).fuse() => {
                     *pending_request = Some(frame?);
                     return Ok(Some(WatchResult::Request));
                 },
             }
         }
+    }
+}
+
+// True if the task replied and the session can accept another request.
+async fn serve_task_wait(
+    stream: &mut UnixStream,
+    reader: &mut RequestReader,
+    write_buffer: &mut Vec<u8>,
+    task: impl Future<Output = Result<TaskOutcome, QueryError>>,
+    shutdown: &Receiver<()>,
+) -> Result<bool> {
+    let outcome = futures::select! {
+        outcome = task.fuse() => Some(outcome),
+        _ = shutdown.recv().fuse() => return Ok(false),
+        frame = reader.read_wait_interrupt(stream).fuse() => {
+            let _ = frame?;
+            None
+        }
+    };
+    if let Some(outcome) = outcome {
+        write_frame_buffered(stream, &WireResponse::Task(outcome), write_buffer).await?;
+        Ok(true)
+    } else {
+        write_error_frame(
+            stream,
+            write_buffer,
+            "Concurrent IPC requests are not allowed during a task wait",
+        )
+        .await?;
+        Ok(false)
     }
 }
 
@@ -543,25 +591,17 @@ async fn serve_connection(
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
             WireRequest::WaitTask(target) => {
-                let outcome = futures::select! {
-                    outcome = handle.wait_task(target).fuse() => Some(outcome),
-                    _ = shutdown.recv().fuse() => return Ok(()),
-                    frame = reader.read(&mut stream).fuse() => {
-                        let _ = frame?;
-                        None
-                    }
-                };
-                let Some(outcome) = outcome else {
-                    write_error_frame(
-                        &mut stream,
-                        &mut write_buffer,
-                        "Concurrent IPC requests are not allowed during a task wait",
-                    )
-                    .await?;
+                if !serve_task_wait(
+                    &mut stream,
+                    &mut reader,
+                    &mut write_buffer,
+                    handle.wait_task(target),
+                    &shutdown,
+                )
+                .await?
+                {
                     return Ok(());
-                };
-                write_frame_buffered(&mut stream, &WireResponse::Task(outcome), &mut write_buffer)
-                    .await?;
+                }
             }
             WireRequest::Watch(expected) => {
                 let Some(result) = wait_for_revisions(
@@ -884,7 +924,7 @@ mod tests {
             let (stop, shutdown) = async_channel::bounded(1);
             let mut encoded = Vec::new();
             encode_request_frame_into(&WireRequest::QueryCancel(40), &mut encoded).unwrap();
-            let buffered = encoded.repeat(QUERY_WAIT_BUDGET * 4);
+            let buffered = encoded.repeat(WAIT_INPUT_BUDGET * 4);
             let mut reader = RequestReader {
                 pending: BytesMut::from(buffered.as_slice()),
                 complete: buffered.len(),
@@ -893,7 +933,7 @@ mod tests {
             encode_request_frame_into(&WireRequest::QueryCancel(41), &mut encoded).unwrap();
             let consumed = Arc::new(AtomicUsize::new(0));
             let mut flood = CancelFlood {
-                limit: encoded.len() * QUERY_WAIT_BUDGET * 16,
+                limit: encoded.len() * WAIT_INPUT_BUDGET * 16,
                 frame: encoded,
                 consumed: consumed.clone(),
             };
@@ -1327,6 +1367,96 @@ mod tests {
     }
 
     #[test]
+    fn wait_interrupt_yields_without_losing_the_next_frame() {
+        async_io::block_on(async {
+            let mut frame = Vec::new();
+            encode_request_frame_into(&WireRequest::QueryCancel(42), &mut frame).unwrap();
+            // The budget applies to complete read-ahead and immediately ready
+            // input alike. The first real request must stay in order after both.
+            let cancels = frame.repeat(WAIT_INPUT_BUDGET * 2);
+            for buffered in [false, true] {
+                let mut reader = RequestReader::default();
+                let mut bytes = Vec::new();
+                if buffered {
+                    reader.pending.extend_from_slice(&cancels);
+                    reader.complete = cancels.len();
+                } else {
+                    bytes.extend_from_slice(&cancels);
+                }
+                encode_request_frame_into(&WireRequest::RegisterDesktop, &mut frame).unwrap();
+                bytes.extend_from_slice(&frame);
+                let mut input = bytes.as_slice();
+                let mut waiting = Box::pin(reader.read_wait_interrupt(&mut input));
+                assert!(waiting.as_mut().now_or_never().is_none());
+                assert!(matches!(
+                    waiting.await.unwrap().unwrap(),
+                    WireRequest::RegisterDesktop
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn late_query_cancel_does_not_retire_a_task_wait() {
+        use rivu_protocol::{
+            model::{RelocationPhase, RelocationTaskStatus},
+            transport::read_response_frame,
+        };
+        async_io::block_on(async {
+            for concurrent_request in [false, true] {
+                let (mut peer, mut stream) = socket_pair();
+                let mut reader = RequestReader::default();
+                let mut write_buffer = Vec::new();
+                let (_stop, shutdown) = async_channel::bounded(1);
+                let (complete, result) = futures::channel::oneshot::channel();
+                let mut waiting = Box::pin(serve_task_wait(
+                    &mut stream,
+                    &mut reader,
+                    &mut write_buffer,
+                    async { result.await.unwrap() },
+                    &shutdown,
+                ));
+                let mut frame = Vec::new();
+                encode_request_frame_into(&WireRequest::QueryCancel(42), &mut frame).unwrap();
+                peer.write_all(&frame).await.unwrap();
+                assert!(waiting.as_mut().now_or_never().is_none());
+                if concurrent_request {
+                    encode_request_frame_into(&WireRequest::RegisterDesktop, &mut frame).unwrap();
+                    peer.write_all(&frame).await.unwrap();
+                } else {
+                    complete
+                        .send(Ok(TaskOutcome::Relocation(RelocationTaskStatus {
+                            id: 7,
+                            source_id: 1,
+                            target_id: 2,
+                            phase: RelocationPhase::Completed,
+                            error: None,
+                        })))
+                        .unwrap();
+                }
+                let keep_session = timeout(Duration::from_secs(2), waiting)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(keep_session, !concurrent_request);
+                drop(stream);
+                let response = read_response_frame(&mut peer, &mut BytesMut::new())
+                    .await
+                    .unwrap();
+                if concurrent_request {
+                    assert!(
+                        matches!(response, WireResponse::Error(message) if message.contains("Concurrent IPC requests"))
+                    );
+                } else {
+                    assert!(
+                        matches!(response, WireResponse::Task(Ok(TaskOutcome::Relocation(task))) if task.id == 7)
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
     fn watch_rechecks_revision_after_registration_without_a_notification() {
         async_io::block_on(async {
             let (handle, _queries) = CoreHandle::test_query_port();
@@ -1372,7 +1502,7 @@ mod tests {
         ) {
             return;
         }
-        for exit in 0..4 {
+        for exit in 0..5 {
             async_io::block_on(async {
                 let (handle, _queries) = CoreHandle::test_query_port();
                 let (mut peer, mut stream) = socket_pair();
@@ -1389,6 +1519,11 @@ mod tests {
                     &shutdown,
                 ));
                 assert!(waiting.as_mut().now_or_never().is_none());
+                let mut cancel = Vec::new();
+                encode_request_frame_into(&WireRequest::QueryCancel(42), &mut cancel).unwrap();
+                peer.write_all(&cancel).await.unwrap();
+                assert!(waiting.as_mut().now_or_never().is_none());
+                assert_eq!(handle.test_revision_subscriptions(), (1, 1));
                 match exit {
                     0 => {
                         handle.test_advance_revision(true);
@@ -1398,13 +1533,25 @@ mod tests {
                             Some(WatchResult::Revisions(revisions)) if revisions == current
                         ));
                     }
-                    1 => {
+                    1 | 4 => {
                         let mut encoded = Vec::new();
-                        encode_request_frame_into(
-                            &WireRequest::State(StateSections::ALL.into()),
-                            &mut encoded,
-                        )
-                        .unwrap();
+                        if exit == 1 {
+                            encode_request_frame_into(
+                                &WireRequest::State(StateSections::ALL.into()),
+                                &mut encoded,
+                            )
+                            .unwrap();
+                        } else {
+                            // A cancel tag without its ID is a decode error, not a control.
+                            encoded.extend_from_slice(&[
+                                2,
+                                0,
+                                0,
+                                0,
+                                rivu_protocol::wire::PROTOCOL_VERSION,
+                                RequestTag::QueryCancel as u8,
+                            ]);
+                        }
                         peer.write_all(&encoded).await.unwrap();
                         assert!(matches!(
                             timeout(Duration::from_secs(2), waiting)
@@ -1413,7 +1560,11 @@ mod tests {
                                 .unwrap(),
                             Some(WatchResult::Request)
                         ));
-                        assert!(matches!(pending, Some(Ok(WireRequest::State(_)))));
+                        if exit == 1 {
+                            assert!(matches!(pending, Some(Ok(WireRequest::State(_)))));
+                        } else {
+                            assert!(matches!(pending, Some(Err(_))));
+                        }
                     }
                     2 => {
                         stop.close();

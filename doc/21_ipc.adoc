@@ -667,9 +667,10 @@ The bounded track cache and current/recent snapshots receive these scalar change
 without reloading complete metadata. Count threshold and activity timing remain
 independent.
 
-Watch has no fixed expiry. A complete new request on that connection supersedes
-a pending Watch without a Watch response. The preserved input then becomes the
-next request; disconnect or server shutdown terminates the wait.
+Watch has no fixed expiry. A decoded `QueryCancel` receives no reply and leaves
+the pending Watch active. Any other complete request on that connection supersedes
+the Watch without a Watch response and becomes the next request. Disconnect or
+server shutdown terminates the wait.
 
 [[query-results-and-pagination]]
 === Query results and pagination
