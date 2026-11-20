@@ -954,9 +954,11 @@ fn new_configuration_only_materializes_changed_nested_fields() {
     config.ui_scale = 1.25;
     config.gpu_filter_budget_mib = 256;
     config.gpu_filter_max_depth = 2;
+    config.oscilloscope_gain = 1.5;
     let saved = update_toml("", None, &config).unwrap();
     let expected: toml::Value = toml::from_str(
-        "[interface]\nscale = 1.25\ngpu_filter_budget_mib = 256\ngpu_filter_max_depth = 2\n[neural]\nthreads = 2\n",
+        "[interface]\nscale = 1.25\ngpu_filter_budget_mib = 256\ngpu_filter_max_depth = 2\n\
+         [neural]\nthreads = 2\n[visualizations.oscilloscope]\ngain = 1.5\n",
     )
     .unwrap();
     let actual: toml::Value = toml::from_str(&saved).unwrap();

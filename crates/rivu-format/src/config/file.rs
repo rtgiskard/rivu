@@ -8,6 +8,7 @@ use toml_edit::TableLike;
 macro_rules! patch_field {
     ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?) => {{
         if $baseline.$field != $config.$field {
+            let table: &mut dyn TableLike = $table;
             #[derive(Serialize)]
             struct Field<'a> {
                 $(#[$attr])*
@@ -17,12 +18,12 @@ macro_rules! patch_field {
             let mut after = toml_edit::ser::to_document(&Field { $key: &$config.$field })?;
             // Required structured payloads need every member on first write.
             // Existing fields still preserve unchanged values and decoration.
-            let before = if patch_field!(@complete $($mode)?) && !$table.contains_key(stringify!($key)) {
+            let before = if patch_field!(@complete $($mode)?) && !table.contains_key(stringify!($key)) {
                 None
             } else {
                 before.get(stringify!($key))
             };
-            super::edit::patch($table, stringify!($key), before, after.remove(stringify!($key)))?
+            super::edit::patch(table, stringify!($key), before, after.remove(stringify!($key)))?
         } else {
             Patch::Unchanged
         }
@@ -33,6 +34,7 @@ macro_rules! patch_field {
 
 // Each leaf declares its file key, runtime field and type once. Loading overlays
 // supplied values on one Config::default(); saving borrows the runtime fields.
+// The patch resolves its group only when a changed field needs it.
 macro_rules! file_group {
     ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)*) => {
         #[derive(Default, Deserialize)]
@@ -48,19 +50,14 @@ macro_rules! file_group {
                 $( self.$nested.apply(config); )*
             }
 
-            fn changed(baseline: &Config, config: &Config) -> bool {
-                $( baseline.$field != config.$field || )*
-                $( $nested_owned::changed(baseline, config) || )*
-                false
-            }
-
-            fn patch(parent: &mut dyn TableLike, key: &str, baseline: &Config, config: &Config) -> Result<()> {
-                if !Self::changed(baseline, config) {
-                    return Ok(());
-                }
-                let table = super::edit::group(parent, key)?;
-                $( patch_field!(table, baseline, config, $(#[$attr])* $key => $field: $ty $(=> $mode)?); )*
-                $( $nested_owned::patch(table, stringify!($nested), baseline, config)?; )*
+            fn patch<'a>(
+                open: impl FnOnce() -> Result<&'a mut dyn TableLike>,
+                baseline: &Config,
+                config: &Config,
+            ) -> Result<()> {
+                let mut group = edit::PatchGroup::new(open);
+                $( patch_field!(group.table()?, baseline, config, $(#[$attr])* $key => $field: $ty $(=> $mode)?); )*
+                $( $nested_owned::patch(|| edit::group(group.table()?, stringify!($nested)), baseline, config)?; )*
                 Ok(())
             }
         }
@@ -333,11 +330,11 @@ impl FileConfig {
         baseline: &Config,
         config: &Config,
     ) -> Result<Patch> {
-        Library::patch(table, "library", baseline, config)?;
-        Playback::patch(table, "playback", baseline, config)?;
-        Interface::patch(table, "interface", baseline, config)?;
-        Logging::patch(table, "logging", baseline, config)?;
-        Visualizations::patch(table, "visualizations", baseline, config)?;
+        Library::patch(|| edit::group(table, "library"), baseline, config)?;
+        Playback::patch(|| edit::group(table, "playback"), baseline, config)?;
+        Interface::patch(|| edit::group(table, "interface"), baseline, config)?;
+        Logging::patch(|| edit::group(table, "logging"), baseline, config)?;
+        Visualizations::patch(|| edit::group(table, "visualizations"), baseline, config)?;
         patch_field!(table, baseline, config, equalizer => equalizer: EqualizerConfig);
         patch_field!(table, baseline, config, denoise => denoise: DenoiseConfig);
         patch_field!(table, baseline, config, neural => neural: NeuralConfig);

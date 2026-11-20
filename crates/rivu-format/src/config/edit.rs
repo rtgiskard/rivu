@@ -14,6 +14,27 @@ pub(super) fn group<'a>(parent: &'a mut dyn TableLike, key: &str) -> Result<&'a 
         .with_context(|| format!("configuration group {key} is not a table"))
 }
 
+pub(super) struct PatchGroup<'a, F> {
+    open: Option<F>,
+    table: Option<&'a mut dyn TableLike>,
+}
+
+impl<'a, F: FnOnce() -> Result<&'a mut dyn TableLike>> PatchGroup<'a, F> {
+    pub(super) fn new(open: F) -> Self {
+        Self {
+            open: Some(open),
+            table: None,
+        }
+    }
+
+    pub(super) fn table(&mut self) -> Result<&mut dyn TableLike> {
+        if let Some(open) = self.open.take() {
+            self.table = Some(open()?);
+        }
+        Ok(self.table.as_deref_mut().expect("opened patch group"))
+    }
+}
+
 pub(super) enum Patch {
     Unchanged,
     Replaced,
