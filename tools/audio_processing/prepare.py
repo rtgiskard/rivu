@@ -174,11 +174,8 @@ def provision(args, parser):
     if args.populate_new:
         if native or target != original.parent or (target / "runtime").exists():
             parser.error("internal populate requires newly prepared Python directory without runtime")
-        try:
-            return populate(target, manifest)
-        except BaseException:
-            shutil.rmtree(target)
-            raise
+        # The parent owns this directory and rolls it back if population fails.
+        return populate(target, manifest)
     if target.exists() or not target.parent.is_dir():
         parser.error("directory must not exist and parent must already exist")
     return reprovision(original, target, manifest)

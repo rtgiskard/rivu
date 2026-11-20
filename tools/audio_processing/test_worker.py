@@ -213,6 +213,12 @@ class ProvisionTests(unittest.TestCase):
                 self.assertEqual(validate_manifest(bundled / "manifest.json", "speech")["id"], "MossFormer2_SE_48K")
                 self.assertEqual(manifest_path.read_bytes(), construction)
                 with patch.object(sys, "argv", ["prepare.py", "--manifest", str(manifest_path),
+                                               "--directory", str(source), "--populate-new"]), \
+                     patch.object(prepare, "populate", side_effect=OSError("cannot populate bundle")):
+                    with self.assertRaisesRegex(OSError, "cannot populate bundle"):
+                        prepare.main()
+                self.assertEqual(manifest_path.read_bytes(), construction)
+                with patch.object(sys, "argv", ["prepare.py", "--manifest", str(manifest_path),
                                                "--directory", str(source), "--populate-new"]):
                     prepare.main()
                 self.assertEqual(validate_manifest(manifest_path, "speech")["id"], "MossFormer2_SE_48K")
