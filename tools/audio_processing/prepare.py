@@ -29,10 +29,10 @@ import sys
 sys.dont_write_bytecode = True
 if __package__:
     from . import models
-    from .common import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
+    from .common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifacts, write_bundle_manifest
 else:
     import models
-    from common import RUNTIME_FILES, check_packages, digest, read_json, validate_artifacts, validate_manifest
+    from common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifacts, write_bundle_manifest
 
 ENVIRONMENTS = {
     "default": ("3.12", ["torch>=2.13", "torchaudio>=2.11"], [
@@ -43,13 +43,21 @@ ENVIRONMENTS = {
         "scipy==1.11.4", "soundfile==0.12.1", "packaging==23.2",
         "appdirs==1.4.4", "loguru==0.7.3", "requests==2.32.5", "sympy==1.13.3"]),
 }
-def populate(base, manifest):
+def populate(base, manifest, *, reuse_verified=False):
+    written = set()
+
+    def copy_artifact(source, target):
+        shutil.copyfile(source, target)
+        name = str(target.relative_to(base))
+        written.add(name)
+        return name
+
     runtime=base/"runtime"
     runtime.mkdir()
     source=Path(__file__).resolve().parent / "runtime"
     for name in RUNTIME_FILES:
-        shutil.copyfile(source/name,runtime/name)
-    shutil.copyfile(Path(__file__).with_name("common.py"), base / "common.py")
+        copy_artifact(source / name, runtime / name)
+    copy_artifact(Path(__file__).with_name("common.py"), base / "common.py")
     notices=base/"resources/licenses/dependencies"
     dependencies={}
     for distribution in sorted(importlib.metadata.distributions(),key=lambda item:item.metadata["Name"].lower()):
@@ -68,23 +76,27 @@ def populate(base, manifest):
                 continue
             target=notices/name/relative
             target.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copyfile(origin,target)
-            records.append(str(target.relative_to(base)))
+            records.append(copy_artifact(origin, target))
         dependencies[name]={"version":distribution.version,"license_expression":distribution.metadata.get("License-Expression"),
                             "license_classifiers":[value for value in distribution.metadata.get_all("Classifier",[]) if value.startswith("License ::")],
                             "notices":records,"notice_status":"bundled distribution notices" if records else "no license file supplied by this distribution; metadata is not a substitute for upstream permission"}
     worker_notice=base/"resources/licenses/RIVU-WORKER-NOTICE.txt"
     worker_notice.parent.mkdir(parents=True,exist_ok=True)
     worker_notice.write_text("Rivu local audio-processing worker source snapshot. This local provisioning command makes no new or separate redistribution license grant; consult the Rivu project's own terms. Third-party code and pretrained weights retain their respective recorded licenses and notices; source-code permission alone does not establish pretrained-weight permission. Models are never implicitly downloaded by inference.\n")
+    notice_name = str(worker_notice.relative_to(base))
+    written.add(notice_name)
     manifest["dependencies"]=dependencies
     manifest["runtime"]={"worker":str((runtime/"worker.py").resolve()),"interpreter":os.path.abspath(sys.executable),
-                         "interpreter_sha256":digest(sys.executable),"model_manifest":str((base/"manifest.json").resolve()),
-                         "worker_notice":str(worker_notice.relative_to(base)),"cwd_independent":True,
+                         "model_manifest":str((base/"manifest.json").resolve()),
+                         "worker_notice":notice_name,"cwd_independent":True,
                          "provisioning":"explicit local bundle; installed application alone does not include Python dependencies, models or this worker"}
-    manifest["files"]={str(path.relative_to(base)):digest(path) for path in sorted(base.rglob("*"))
-                       if path.is_file() and path.name!="manifest.json" and "__pycache__" not in path.parts}
-    (base/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
-    validate_manifest(base/"manifest.json", manifest["operation"])
+    names = {str(path.relative_to(base)) for path in base.rglob("*")
+             if path.is_file() and path.name != "manifest.json" and "__pycache__" not in path.parts}
+    verified = manifest["files"] if reuse_verified else {}
+    files = {name: verified[name] for name in names - written if name in verified}
+    files.update(hash_bundle_files(base, names - files.keys()))
+    manifest["files"] = files
+    write_bundle_manifest(base / "manifest.json", manifest)
     return {"worker":manifest["runtime"]["worker"],"interpreter":manifest["runtime"]["interpreter"],
             "model_manifest":manifest["runtime"]["model_manifest"],"model":manifest["id"]}
 
@@ -175,7 +187,7 @@ def provision(args, parser):
         if native or target != original.parent or (target / "runtime").exists():
             parser.error("internal populate requires newly prepared Python directory without runtime")
         # The parent owns this directory and rolls it back if population fails.
-        return populate(target, manifest)
+        return populate(target, manifest, reuse_verified=True)
     if target.exists() or not target.parent.is_dir():
         parser.error("directory must not exist and parent must already exist")
     return reprovision(original, target, manifest)
@@ -225,7 +237,7 @@ def main():
             temporary = args.temporary_directory or target.parent / ".cache/neural"
             args.interpreter, lock = install_environment(args.model, environment, Path(os.path.abspath(temporary)))
         fetch = partial(models.download, proxy=args.proxy)
-        manifest = models.prepare_model(args, target, fetch)
+        manifest, pinned_hashes = models.prepare_model(args, target, fetch)
         if args.model in ("moss", "separate"):
             manifest["packages"] = json.loads(subprocess.check_output([
                 str(args.interpreter), "-c",
@@ -233,10 +245,14 @@ def main():
                 *manifest["packages"],
             ], text=True))
         manifest["license_evidence"] = "weight-license.txt"
-        manifest["files"] = {str(path.relative_to(target)): digest(path) for path in sorted(target.rglob("*")) if path.is_file()}
-        (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        names = (str(path.relative_to(target)) for path in target.rglob("*") if path.is_file())
+        files = hash_bundle_files(target, names)
+        for name, expected in pinned_hashes.items():
+            require(files.get(name) == expected, "model_hash",
+                    "Bundle file differs from pinned publisher artifact: " + name)
+        manifest["files"] = files
+        write_bundle_manifest(target / "manifest.json", manifest)
         if native:
-            validate_artifacts(target / "manifest.json", manifest["operation"])
             result = {"model_manifest": str(target / "manifest.json"), "backend": "onnx"}
         else:
             result = json.loads(subprocess.check_output([

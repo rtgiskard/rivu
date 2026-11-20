@@ -77,7 +77,7 @@ def prepare_moss(args, target, download):
         download(MOSS_WEIGHT_URL, checkpoint, 221552019)
     else:
         shutil.copyfile(args.weights, checkpoint)
-    if checkpoint.stat().st_size != 221552019 or digest(checkpoint) != WEIGHT_SHA:
+    if checkpoint.stat().st_size != 221552019:
         raise ValueError("MossFormer2 SE48K checkpoint differs from pinned publisher artifact")
     return {"version":1,"operation":"speech","id":"MossFormer2_SE_48K",
             "packages":["torch", "torchaudio", "numpy", "scipy", "soundfile", "einops",
@@ -85,7 +85,7 @@ def prepare_moss(args, target, download):
             "provenance":{"weights":MOSS_WEIGHT_URL,"code_revision":CODE_REVISION,"model_revision":MODEL_REVISION,
                           "weight_license":"Apache-2.0","code_license":"Apache-2.0","license_source":LICENSE_CARD},
             "geometry":{"core_seconds":8,"context_seconds":2,"window_samples":1920,"hop_samples":384,
-                        "mel_bands":60,"fbank_dither":1.0,"seed":0}}
+                        "mel_bands":60,"fbank_dither":1.0,"seed":0}}, {checkpoint.name: WEIGHT_SHA}
 GTCRN_REV = "502ebfab64da7c4a9af78dcb9c6ceef1ebb01c73"
 ULUNAS_REV = "00f7c700da43d38347f30a6ccebd86fcbc798e07"
 # local name, upstream path, exact bytes, SHA256. All sources are immutable.
@@ -112,7 +112,7 @@ def prepare_onnx(args, target, download):
     else:
         raise ValueError("unsupported native speech model")
     base = f"https://raw.githubusercontent.com/Xiaobin-Rong/{repo}/{revision}/"
-    files = {}
+    pins = {}
     for name, source, size, expected in artifacts:
         destination = target / name
         if name == "model.onnx" and not args.download:
@@ -121,13 +121,12 @@ def prepare_onnx(args, target, download):
             shutil.copyfile(args.weights, destination)
         else:
             download(base + source, destination, size)
-        actual = digest(destination)
-        if destination.stat().st_size != size or actual != expected:
-            raise ValueError(f"{model_id} {name} differs from pinned official size/SHA256")
-        files[name] = actual
+        if destination.stat().st_size != size:
+            raise ValueError(f"{model_id} {name} differs from pinned official size")
+        pins[name] = expected
     return {
         "version": 1, "operation": "speech", "id": model_id, "backend": "onnx",
-        "model": "model.onnx", "files": files, "license_evidence": "weight-license.txt",
+        "model": "model.onnx", "license_evidence": "weight-license.txt",
         "provenance": {
             "weights": base + artifacts[0][1], "weights_sha256": artifacts[0][3],
             "weights_size_bytes": artifacts[0][2], "revision": revision,
@@ -140,7 +139,7 @@ def prepare_onnx(args, target, download):
                      "window": "sqrt_hann_periodic" if model_id == "GTCRN" else "hann_periodic",
                      "center": True, "pad_mode": "reflect", "channels": "independent recurrent state",
                      "synthesis": "complete final reflected hop; ceil(N/256)+1 spectra (minimum two), crop to N"},
-    }
+    }, pins
 REVISION = "978576aa8400552a4ce9730838c635aa30db5e61"
 BASE = f"https://raw.githubusercontent.com/Rikorose/DeepFilterNet/{REVISION}/"
 WEIGHT_URL = BASE + "models/DeepFilterNet3.zip"
@@ -198,7 +197,7 @@ def prepare_kim(args, target, download):
         download(KIM_URL.replace("huggingface.co", args.hf_host) + "?download=true", checkpoint, 912885624)
     else:
         shutil.copyfile(args.weights, checkpoint)
-    if checkpoint.stat().st_size != 912885624 or digest(checkpoint) != KIM_SHA:
+    if checkpoint.stat().st_size != 912885624:
         raise ValueError("Kim safetensors differs from pinned unblend 1.0.0 checkpoint")
     # The original trainer's immutable card, not the converter's code license.
     download(KIM_CARD.replace("huggingface.co", args.hf_host), target / "weight-license.txt", 65536)
@@ -211,9 +210,14 @@ def prepare_kim(args, target, download):
             "packages":["unblend", "torch", "torchaudio", "torchcodec", "numpy", "scipy", "soundfile"],
             "provenance":{"weights":KIM_URL,"weight_license":KIM_CARD,"transport_host":args.hf_host,
                           "code":"https://github.com/Ryan5453/unblend/tree/64fd0216b9f0309c9d055457002d6910dc245950",
-                          "code_license":"MIT", "weights_license":"MIT"}}
+                          "code_license":"MIT", "weights_license":"MIT"}}, {checkpoint.name: KIM_SHA}
 
 
 def prepare_model(args, target, download):
-    return {"moss": prepare_moss, "separate": prepare_kim, "df3": prepare_df3,
-            "ul_unas": prepare_onnx, "gtcrn": prepare_onnx}[args.model](args, target, download)
+    if args.model == "moss":
+        return prepare_moss(args, target, download)
+    if args.model == "separate":
+        return prepare_kim(args, target, download)
+    if args.model in ("ul_unas", "gtcrn"):
+        return prepare_onnx(args, target, download)
+    return prepare_df3(args, target, download), {}

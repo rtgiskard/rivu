@@ -22,11 +22,11 @@ from types import SimpleNamespace
 
 if __package__:
     from .export import FileInput
-    from .common import validate_manifest, check_packages, digest
+    from .common import read_validated_manifest_with_digest, check_packages, digest
     from .runtime.worker import deny_network
 else:
     from export import FileInput
-    from common import validate_manifest, check_packages, digest
+    from common import read_validated_manifest_with_digest, check_packages, digest
     from runtime.worker import deny_network
 
 
@@ -85,8 +85,7 @@ def main():
     args=parser.parse_args()
     if args.output.exists() or not 1<=args.threads<=8 or not 0<=args.overlap<=0.875:
         parser.error("output must not exist; threads1..8; overlap0..0.875")
-    raw=json.loads(args.model_manifest.read_text())
-    manifest=validate_manifest(args.model_manifest,raw["operation"])
+    manifest, manifest_sha256 = read_validated_manifest_with_digest(args.model_manifest)
     check_packages(manifest)
     for key in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS"):
         os.environ[key]=str(args.threads)
@@ -126,7 +125,7 @@ def main():
     with args.output.open("xb") as output:
         sf.write(output,result,rate,format="WAV",subtype="FLOAT")
     print(json.dumps({"output":str(args.output.resolve()),"sha256":digest(args.output),"source_sha256":source_sha256,
-                      "manifest_sha256":digest(args.model_manifest),"command":sys.argv,"frames":len(result),"rate":rate}))
+                      "manifest_sha256":manifest_sha256,"command":sys.argv,"frames":len(result),"rate":rate}))
 
 if __name__=="__main__":
     main()

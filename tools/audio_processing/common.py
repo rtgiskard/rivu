@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
+MAX_JSON_BYTES = 1024**2
 MAX_REPORT_BYTES = 8 * 1024**2
 
 class WorkerError(Exception):
@@ -32,8 +33,8 @@ def absolute_path(value, field):
 
 def _json_bytes(path):
     with path.open("rb") as stream:
-        data = stream.read(1024**2 + 1)
-    require(len(data) <= 1024**2, "invalid_request", "JSON exceeds 1 MiB")
+        data = stream.read(MAX_JSON_BYTES + 1)
+    require(len(data) <= MAX_JSON_BYTES, "invalid_request", "JSON exceeds 1 MiB")
     return data
 
 def read_json(path):
@@ -53,9 +54,7 @@ def read_export_report(path, source_sha256, *, mismatch):
         raise ValueError(mismatch)
     return report
 
-def validate_artifacts(path, operation):
-    """Validate model construction inputs, never authorize inference."""
-    manifest = read_json(path)
+def _validate_artifact_metadata(manifest, operation):
     require(isinstance(manifest, dict) and manifest.get("version") == 1 and manifest.get("operation") == operation,
             "model_manifest", "manifest version/operation mismatch")
     native = manifest.get("backend") == "onnx"
@@ -67,19 +66,32 @@ def validate_artifacts(path, operation):
             isinstance(name, str) and name and isinstance(version, str) and version for name, version in packages.items())),
             "model_manifest", "exact model dependency pins required")
     require(isinstance(manifest.get("files"), dict) and manifest["files"], "model_manifest", "manifest has no hashed files")
+    require(manifest.get("license_evidence") in manifest["files"], "model_license", "hashed factual weight-license/provenance record required; not a permission gate")
+
+
+def _artifact_path(base, name):
+    require(isinstance(name, str) and name and not Path(name).is_absolute() and ".." not in Path(name).parts,
+            "model_manifest", "artifact names must be bundle-relative")
+    candidate = (base / name).resolve()
+    require(candidate.is_relative_to(base) and candidate.is_file(), "model_missing", "missing/nonlocal model artifact: " + name)
+    return candidate
+
+
+def _validate_artifacts(path, manifest, operation):
+    _validate_artifact_metadata(manifest, operation)
     base = path.parent.resolve()
     for name, checksum in manifest["files"].items():
-        require(isinstance(name, str) and name and not Path(name).is_absolute() and ".." not in Path(name).parts,
-                "model_manifest", "artifact names must be bundle-relative")
-        candidate = (base / name).resolve()
-        require(candidate.is_relative_to(base) and candidate.is_file(), "model_missing", "missing/nonlocal model artifact: " + name)
+        candidate = _artifact_path(base, name)
         require(isinstance(checksum, str) and digest(candidate) == checksum, "model_hash", "SHA256 mismatch: " + name)
-    require(manifest.get("license_evidence") in manifest["files"], "model_license", "hashed factual weight-license/provenance record required; not a permission gate")
     return manifest
 
-def validate_manifest(path, operation):
-    """Admit only a complete current provisioned bundle to inference."""
-    manifest = validate_artifacts(path, operation)
+
+def validate_artifacts(path, operation):
+    """Validate model construction inputs, never authorize inference."""
+    return _validate_artifacts(path, read_json(path), operation)
+
+
+def _validate_runtime_metadata(path, manifest):
     base = path.parent.resolve()
     runtime = manifest.get("runtime")
     require(isinstance(runtime, dict), "model_runtime", "provisioned runtime metadata required; run prepare.py")
@@ -88,7 +100,6 @@ def validate_manifest(path, operation):
     interpreter = runtime.get("interpreter")
     require(isinstance(interpreter, str) and Path(interpreter).is_absolute() and Path(interpreter).is_file(),
             "model_runtime", "provisioned interpreter missing")
-    require(runtime.get("interpreter_sha256") == digest(interpreter), "model_runtime", "provisioned interpreter SHA256 mismatch")
     require("common.py" in manifest["files"], "model_runtime", "hashed shared bundle module required: common.py")
     for name in RUNTIME_FILES:
         require("runtime/" + name in manifest["files"], "model_runtime", "hashed runtime sidecar required: " + name)
@@ -109,7 +120,43 @@ def validate_manifest(path, operation):
         recorded = normalized.get(name.lower().replace("_", "-").replace(".", "-"))
         require(recorded is not None and recorded.split("+")[0] == version.split("+")[0],
                 "model_dependencies", "dependency metadata does not match model pin: " + name)
+    return interpreter
+
+
+def _validate_manifest(path, manifest, operation):
+    _validate_artifacts(path, manifest, operation)
+    interpreter = _validate_runtime_metadata(path, manifest)
+    require(manifest["runtime"].get("interpreter_sha256") == digest(interpreter), "model_runtime", "provisioned interpreter SHA256 mismatch")
     return manifest
+
+
+def validate_manifest(path, operation):
+    """Admit a provisioned bundle for the requested operation."""
+    return _validate_manifest(path, read_json(path), operation)
+
+
+def read_validated_manifest_with_digest(path):
+    """Use the bundle's operation and identify the exact bytes validated."""
+    manifest, checksum = read_json_with_digest(path)
+    operation = manifest.get("operation") if isinstance(manifest, dict) else None
+    require(operation in ("speech", "separate"), "model_manifest", "unsupported manifest operation")
+    return _validate_manifest(path, manifest, operation), checksum
+
+
+def hash_bundle_files(base, names):
+    return {name: digest(_artifact_path(base, name)) for name in names}
+
+
+def write_bundle_manifest(path, manifest):
+    """Validate and write a manifest with its final artifact hashes."""
+    manifest["files"] = dict(sorted(manifest["files"].items()))
+    _validate_artifact_metadata(manifest, manifest["operation"])
+    if "runtime" in manifest:
+        interpreter = _validate_runtime_metadata(path, manifest)
+        manifest["runtime"]["interpreter_sha256"] = digest(interpreter)
+    data = (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
+    require(len(data) <= MAX_JSON_BYTES, "invalid_request", "JSON exceeds 1 MiB")
+    path.write_bytes(data)
 
 def check_packages(manifest):
     for name, expected in manifest["packages"].items():

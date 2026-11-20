@@ -133,24 +133,27 @@ class ProducerIdentityTests(unittest.TestCase):
             source, replacement, _ = self.make_sources(root, rate=48000)
             expected_digest = digest(source)
             manifest = root / "manifest.json"
-            manifest.write_text('{"operation":"speech"}')
+            bundle_fixture(root)
+            expected_manifest_digest = digest(manifest)
             fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
                 set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
                 backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
             def infer(base, audio, device):
                 replacement.replace(source)
+                manifest.write_text('{"operation":"separate"}')
                 return audio
             stdout = io.StringIO()
             argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
                     "--output", str(root / "reference.wav")]
             with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
-                 patch.object(reference, "validate_manifest", return_value={"operation":"speech", "id":"MossFormer2_SE_48K"}), \
                  patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
                  patch.object(reference, "upstream_moss", side_effect=infer), redirect_stdout(stdout):
                 reference.main()
             report = json.loads(stdout.getvalue())
             self.assertEqual(report["source_sha256"], expected_digest)
             self.assertNotEqual(report["source_sha256"], digest(source))
+            self.assertEqual(report["manifest_sha256"], expected_manifest_digest)
+            self.assertNotEqual(report["manifest_sha256"], digest(manifest))
             self.assertEqual(report["frames"], 2)
 
     def test_reference_preserves_destination_created_during_inference(self):
@@ -162,7 +165,7 @@ class ProducerIdentityTests(unittest.TestCase):
             root = Path(directory)
             source, _, _ = self.make_sources(root, rate=48000)
             manifest = root / "manifest.json"
-            manifest.write_text('{"operation":"speech"}')
+            bundle_fixture(root)
             destination = root / "reference.wav"
             sentinel = b"created by another operation during inference"
             fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
@@ -174,7 +177,6 @@ class ProducerIdentityTests(unittest.TestCase):
             argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
                     "--output", str(destination)]
             with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
-                 patch.object(reference, "validate_manifest", return_value={"operation":"speech", "id":"MossFormer2_SE_48K"}), \
                  patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
                  patch.object(reference, "upstream_moss", side_effect=infer):
                 with self.assertRaises(FileExistsError):
@@ -233,33 +235,49 @@ class ProvisionTests(unittest.TestCase):
             self.assertEqual((target / "weight-license.txt").read_bytes(), evidence.read_bytes())
 
 class PreparationTests(unittest.TestCase):
-    def test_native_cli_never_installs_environment_and_emits_nullable_paths(self):
+    def test_native_preparation_binds_pins_without_installing_environment(self):
         import io
         import sys
         from contextlib import redirect_stdout
         from types import SimpleNamespace
         import prepare
-        for model, model_id in (("gtcrn", "GTCRN"), ("ul_unas", "UL_UNAS")):
-            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
-                target = Path(directory) / "bundle"
-                def construct(args, base, fetch):
-                    self.assertEqual(args.model, model)
-                    (base / "model.onnx").write_bytes(b"fixture graph")
-                    (base / "weight-license.txt").write_text("factual provenance")
-                    return {"version":1, "operation":"speech", "id":model_id, "backend":"onnx", "model":"model.onnx"}
-                stdout = io.StringIO()
-                with patch.object(sys, "argv", ["prepare.py", model, "--directory", str(target), "--download"]), \
-                     patch.object(prepare.models, "prepare_model", side_effect=construct), \
-                     patch.object(prepare, "install_environment", side_effect=AssertionError("native environment install")), \
-                     patch.object(prepare.subprocess, "check_output", side_effect=AssertionError("native Python subprocess")), \
-                     patch.object(prepare.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)), redirect_stdout(stdout):
-                    prepare.main()
-                result = json.loads(stdout.getvalue())
-                self.assertEqual(result["model_manifest"], str(target / "manifest.json"))
-                self.assertIsNone(result["environment_directory"])
-                self.assertIsNone(result["installed_lock"])
-                self.assertNotIn("interpreter", result)
-                self.assertEqual(validate_artifacts(target / "manifest.json", "speech")["id"], model_id)
+        from hashlib import sha256
+        payloads = {"model.onnx": b"fixture graph", "weight-license.txt": b"factual provenance"}
+        pins = {name: sha256(data).hexdigest() for name, data in payloads.items()}
+        artifacts = tuple((name, name, len(data), pins[name]) for name, data in payloads.items())
+        for model, model_id, artifact_list in (("gtcrn", "GTCRN", "GTCRN_FILES"),
+                                              ("ul_unas", "UL_UNAS", "ULUNAS_FILES")):
+            for corrupt in (False, True):
+                with self.subTest(model=model, corrupt=corrupt), tempfile.TemporaryDirectory() as directory:
+                    target = Path(directory) / "bundle"
+                    def download(_url, path, _maximum, *, proxy):
+                        data = payloads[path.name]
+                        if corrupt and path.name == "model.onnx":
+                            data = b"!" + data[1:]
+                        path.write_bytes(data)
+                    stdout = io.StringIO()
+                    with patch.object(sys, "argv", ["prepare.py", model, "--directory", str(target), "--download"]), \
+                         patch.object(prepare.models, artifact_list, artifacts), \
+                         patch.object(prepare.models, "download", side_effect=download), \
+                         patch.object(prepare, "install_environment", side_effect=AssertionError("native environment install")), \
+                         patch.object(prepare.subprocess, "check_output", side_effect=AssertionError("native Python subprocess")), \
+                         patch.object(prepare.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)), redirect_stdout(stdout):
+                        if corrupt:
+                            with self.assertRaises(WorkerError) as failure:
+                                prepare.main()
+                            self.assertEqual(failure.exception.code, "model_hash")
+                            self.assertFalse(target.exists())
+                            self.assertEqual(stdout.getvalue(), "")
+                            continue
+                        prepare.main()
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(result["model_manifest"], str(target / "manifest.json"))
+                    self.assertIsNone(result["environment_directory"])
+                    self.assertIsNone(result["installed_lock"])
+                    self.assertNotIn("interpreter", result)
+                    manifest = validate_artifacts(target / "manifest.json", "speech")
+                    self.assertEqual(manifest["id"], model_id)
+                    self.assertEqual(manifest["files"], pins)
 
     def test_failed_preparation_removes_new_bundle_but_preserves_environment(self):
         import sys
