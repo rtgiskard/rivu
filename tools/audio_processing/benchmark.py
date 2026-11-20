@@ -12,13 +12,13 @@ import subprocess
 import sys
 import time
 if __package__:
-    from .runtime.worker import EVENT_VERSION
-    from .common import digest, read_json
+    from .common import read_json, read_json_with_digest
+    from .export import completed_export_report
     from ..audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
-    from runtime.worker import EVENT_VERSION
-    from common import digest, read_json
+    from common import read_json, read_json_with_digest
+    from export import completed_export_report
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
     from audio_quality.evaluate import load_identified, require_alignment
@@ -66,20 +66,22 @@ class PreparedReference:
                             for channel in range(reference.shape[1])]
         # Only frame indices/statistics persist, never a float64 track copy.
         self.frame_width = max(1, rate//50)
-        frames = len(reference)//self.frame_width
-        energies = np.empty(frames, dtype="float64")
-        for index in range(frames):
-            ref = reference[index*self.frame_width:(index+1)*self.frame_width].astype("float64")
-            energies[index] = np.mean(ref**2)
+        channels = reference.shape[1]
+        frame_size = self.frame_width * channels
+        frames = len(reference) // self.frame_width
+        frame_energy = np.empty(frames, dtype="float64")
+        frames_per_block = max(1, self.block_size // self.frame_width)
+        for start in range(0, frames, frames_per_block):
+            end = min(start + frames_per_block, frames)
+            ref = reference[start*self.frame_width:end*self.frame_width].astype("float64", copy=False)
+            frame_energy[start:end] = np.sum(ref.reshape(-1, frame_size)**2, axis=1)
         self.weak_frames = np.empty(0, dtype="intp")
         if frames:
+            energies = frame_energy / frame_size
             active = energies > max(float(energies.max())*1e-3, 1e-14)
             if active.any():
                 self.weak_frames = np.flatnonzero(active & (energies <= np.quantile(energies[active], 0.2)))
-        self.weak_energy = 0.0
-        for index in self.weak_frames:
-            target = reference[index*self.frame_width:(index+1)*self.frame_width].astype("float64")
-            self.weak_energy += float(np.sum(target**2))
+        self.weak_energy = float(frame_energy[self.weak_frames].sum())
 
     def score(self, estimate, core_seconds=24):
         import numpy as np
@@ -133,12 +135,12 @@ class PreparedReference:
                 product += float(np.sum((target+residual)*target))
             results["weak_active_frame_snr_db"] = db_ratio(self.weak_energy, residual_energy)
             results["weak_active_frame_reference_gain"] = product/self.weak_energy
-        from scipy.signal import correlate, correlation_lags
+        from scipy.signal import correlate
         count = min(len(reference), rate*60)
         correlation = correlate(estimate[:count,0].astype("float64"), reference[:count,0].astype("float64"), mode="full", method="fft")
-        lags = correlation_lags(count, count)
-        keep = np.abs(lags) <= rate//20
-        results["estimated_lag_samples"] = int(lags[keep][np.argmax(correlation[keep])])
+        center = count - 1  # Zero lag in full correlation.
+        radius = min(rate // 20, center)
+        results["estimated_lag_samples"] = int(np.argmax(correlation[center-radius:center+radius+1])) - radius
         return results
 
 
@@ -154,11 +156,11 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.repeats <= 10:
         parser.error("repeats must be 1..10")
-    import numpy as np
     request = read_json(args.request)
     base = Path(request["output_dir"])
-    report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":digest(args.corpus_manifest),
-              "corpus_provenance":read_json(args.corpus_manifest),"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
+    provenance, checksum = read_json_with_digest(args.corpus_manifest)
+    report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":checksum,
+              "corpus_provenance":provenance,"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
     reference_pcm = load_identified(args.reference, dtype="float32", max_frames=None)
     input_pcm = reference_pcm if args.reference.resolve() == Path(request["input_path"]).resolve() else load_identified(request["input_path"], dtype="float32", max_frames=None)
     require_alignment(reference_pcm, input_pcm, "benchmark input")
@@ -189,13 +191,7 @@ def main():
         completed = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("export.py")), "--request", str(request_path)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         worker_seconds = time.perf_counter()-worker_start
-        events = [json.loads(line) for line in completed.stdout.splitlines()]
-        if completed.returncode or not events or events[-1]["type"] != "complete" or events[-1].get("version") != EVENT_VERSION or events[-1].get("task_id") != request["task_id"]:
-            raise RuntimeError(json.dumps({"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
-        with (Path(run_request["output_dir"]) / "result.json").open() as stream:
-            result = json.load(stream)
-        if result.get("source_sha256") != report["input_sha256"]:
-            raise ValueError("worker input does not match benchmark input")
+        result = completed_export_report(completed, run_request, report["input_sha256"])
         stem = "speech" if request["operation"] == "speech" else "vocals"
         output_pcm = load_identified(result["outputs"][stem], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, output_pcm, "output")

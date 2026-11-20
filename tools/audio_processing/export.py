@@ -22,7 +22,18 @@ else:
     from runtime import worker
     import common
 
-MAX_REPORT_BYTES = 8 * 1024**2
+
+def completed_export_report(completed, request, source_sha256):
+    """Read a report only after the exporter confirms this task completed."""
+    task_id = request["task_id"]
+    events = [json.loads(line) for line in completed.stdout.splitlines()]
+    last = events[-1] if events else None
+    if (completed.returncode or not isinstance(last, dict) or last.get("type") != "complete"
+            or last.get("version") != worker.EVENT_VERSION or last.get("task_id") != task_id):
+        raise RuntimeError(json.dumps({"task_id": task_id, "exit": completed.returncode,
+                                       "events": events, "stderr": completed.stderr}))
+    return common.read_export_report(Path(request["output_dir"]) / "result.json", source_sha256,
+                                     mismatch=f"worker input does not match task {task_id!r}")
 
 
 class FileInput:
@@ -126,7 +137,7 @@ def _export_admitted(request, emit, destination, source_input):
             size = 1
             for text in json.JSONEncoder(indent=2, allow_nan=False).iterencode(report):
                 size += len(text.encode("utf-8"))
-                common.require(size <= MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
+                common.require(size <= common.MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
                 stream.write(text)
             stream.write("\n")
         common.require(completion is not None, "protocol", "missing PCM completion")

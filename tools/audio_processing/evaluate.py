@@ -33,15 +33,15 @@ import sys
 import time
 if __package__:
     from .benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
-    from .runtime.worker import EVENT_VERSION
-    from .common import digest, read_json
+    from .common import digest, read_json_with_digest
+    from .export import completed_export_report
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_identified, require_alignment
 else:
     from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
-    from runtime.worker import EVENT_VERSION
-    from common import digest, read_json
+    from common import digest, read_json_with_digest
+    from export import completed_export_report
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_identified, require_alignment
@@ -85,26 +85,31 @@ def cases(kind, root, selected):
         for folder in sorted(root.glob("speech-*")):
             if not folder.is_dir():
                 continue
+            checksum = None
             for source in sorted(folder.glob("*.wav")):
                 if not re.fullmatch(r"clean|(?:white|fan|varying|impulsive)_[+-]\d+dB",source.stem):
                     continue
                 if selected and source.stem not in selected:
                     continue
                 matched.add(source.stem)
-                yield folder.name+"-"+source.stem,source,folder/"clean.wav",folder/"manifest.json",None,False,None
+                if checksum is None:
+                    checksum = digest(folder / "manifest.json")
+                yield folder.name+"-"+source.stem,source,folder/"clean.wav",checksum,None,False,None
     elif kind == "paired":
-        for name, record in _paired_records(read_json(root / "manifest.json"), root):
+        manifest, checksum = read_json_with_digest(root / "manifest.json")
+        for name, record in _paired_records(manifest, root):
             source = root / "noisy" / name
             if selected and source.stem not in selected:
                 continue
             matched.add(source.stem)
-            yield source.stem,source,root/"clean"/name,root/"manifest.json",None,False,record
+            yield source.stem,source,root/"clean"/name,checksum,None,False,record
     else:
-        for folder, record in music_records(read_json(root/"manifest.json"), root):
+        manifest, checksum = read_json_with_digest(root / "manifest.json")
+        for folder, record in music_records(manifest, root):
             if selected and folder.name not in selected:
                 continue
             matched.add(folder.name)
-            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",record["diagnostic_only"],record
+            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",checksum,folder/"accompaniment.wav",record["diagnostic_only"],record
     missing = selected - matched
     if missing:
         raise ValueError("unknown " + kind + " case selection: " + ", ".join(sorted(missing)))
@@ -129,14 +134,14 @@ def main():
         parser.error(str(error))
     if not records:
         parser.error("no matching corpus files")
-    import numpy as np
     model=args.model_manifest.resolve()
     operation="separate" if args.kind=="music" else "speech"
-    if read_json(model)["operation"]!=operation:
+    model_config, model_checksum = read_json_with_digest(model)
+    if model_config["operation"]!=operation:
         parser.error("model operation differs from corpus")
     args.output_dir.mkdir(mode=0o700)
     output=args.output_dir.resolve()
-    report={"command":sys.argv,"model_manifest_sha256":digest(model),"runs":[],
+    report={"command":sys.argv,"model_manifest_sha256":model_checksum,"runs":[],
             "timing_boundaries":{**TIMING_BOUNDARIES,
                 "evaluation_wall_seconds":"Before each case's source/reference/backing reads and identity checks through completed run scoring, including reference metric preparation, request creation, worker subprocess, artifact reads/writes and intelligibility metrics. Excludes corpus/model setup, appending the record, progress printing, aggregate summaries and final report serialization/write."},
             "human_listening":"not performed; objective results do not establish listening approval"}
@@ -144,7 +149,7 @@ def main():
         import importlib.metadata
         from pystoi import stoi
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
-    for index,(name,source,reference,provenance,backing,diagnostic,source_identity) in enumerate(records):
+    for index,(name,source,reference,corpus_checksum,backing,diagnostic,source_identity) in enumerate(records):
         evaluation_start=time.perf_counter()
         reference_pcm = load_identified(reference, dtype="float32", max_frames=None)
         input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32", max_frames=None)
@@ -170,22 +175,16 @@ def main():
         completed=subprocess.run([sys.executable,"-B",str(Path(__file__).with_name("export.py")),"--request",str(request_path)],
                                  stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         worker_seconds=time.perf_counter()-worker_start
-        events=[json.loads(line) for line in completed.stdout.splitlines()]
         (output/(name+"-events.jsonl")).write_text(completed.stdout)
         (output/(name+"-stderr.txt")).write_text(completed.stderr)
-        if completed.returncode or not events or events[-1]["type"]!="complete" or events[-1].get("version")!=EVENT_VERSION or events[-1].get("task_id")!=request["task_id"]:
-            raise RuntimeError(json.dumps({"case":name,"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
-        with (Path(request["output_dir"])/"result.json").open() as stream:
-            result=json.load(stream)
-        if result.get("source_sha256") != input_pcm.identity["sha256"]:
-            raise ValueError("worker input does not match evaluation input: " + name)
+        result = completed_export_report(completed, request, input_pcm.identity["sha256"])
         estimate_pcm = load_identified(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, estimate_pcm, "output")
         estimate = estimate_pcm.data
         core=result["processing"]["core_seconds"]
         record={"name":name,"diagnostic_only":diagnostic,"input_path":str(source),"reference_path":str(reference),
                 "input_sha256":input_pcm.identity["sha256"],
-                "reference_sha256":reference_pcm.identity["sha256"],"corpus_manifest_sha256":digest(provenance),"worker":result,
+                "reference_sha256":reference_pcm.identity["sha256"],"corpus_manifest_sha256":corpus_checksum,"worker":result,
                 "worker_subprocess_wall_seconds":worker_seconds,"input_quality":prepared.score(input_audio,core),
                 "output_quality":prepared.score(estimate,core)}
         if args.kind == "music":

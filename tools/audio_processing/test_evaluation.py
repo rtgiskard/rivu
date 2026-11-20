@@ -18,13 +18,14 @@ import numpy as np
 import soundfile as sf
 
 if __package__:
-    from . import benchmark, evaluate
+    from . import benchmark, evaluate, export
     from ..audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
     from ..audio_quality.metric_core import projection_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
 else:
     import benchmark
     import evaluate
+    import export
     from audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
     from audio_quality.metric_core import projection_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
@@ -113,7 +114,7 @@ class MetricSemanticsTests(unittest.TestCase):
     def test_prepared_reference_preserves_weak_frames_and_per_output_boundaries(self):
         rate = 1000
         width = rate//50
-        levels = np.tile([0, 1e-8, 0.001, 0.04, 0.04, 0.05, 0.06, 0.5, 1], 15)
+        levels = np.tile([0, 1e-8, 0.001, 0.04, 0.04, 0.05, 0.06, 0.5, 1], 200)
         mono = np.repeat(levels, width) * np.tile([-1, 1], len(levels)*width//2)
         reference = np.column_stack((mono, -mono*0.5))
         # An incomplete, loud tail must not participate in weak-frame selection.
@@ -143,6 +144,16 @@ class MetricSemanticsTests(unittest.TestCase):
                                            rtol=1e-12, atol=1e-14)
         with self.assertRaisesRegex(ValueError, "channel or frame mismatch"):
             prepared.score(reference[:-1])
+
+    def test_lag_search_preserves_sign_and_clips_to_short_inputs(self):
+        reference = np.zeros((8, 1))
+        reference[3] = 1
+        prepared = benchmark.PreparedReference(reference, 8000)
+        for shift in (-2, 0, 4):
+            with self.subTest(shift=shift):
+                estimate = np.zeros_like(reference)
+                estimate[3 + shift] = 1
+                self.assertEqual(prepared.score(estimate)["estimated_lag_samples"], shift)
 
     def test_projection_and_reconstruction_never_cast_whole_track(self):
         class BoundedCast(np.ndarray):
@@ -265,7 +276,7 @@ class MusicIdentityTests(unittest.TestCase):
                     result = {"source_sha256":evaluate.digest(request["input_path"]), "outputs":outputs,
                               "processing":{"core_seconds":1}, "metrics":{"real_time_factor":1}}
                     (destination / "result.json").write_text(json.dumps(result))
-                    event = {"version":evaluate.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
+                    event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
                     return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
                 argv = ["evaluate.py", "--kind", "music", "--corpus-root", str(root),
                         "--model-manifest", str(model), "--output-dir", str(output)]
@@ -382,6 +393,7 @@ class CaseSelectionTests(unittest.TestCase):
             if kind == "synthetic":
                 folder = root / ("speech-" + str(index))
                 folder.mkdir()
+                (folder / "manifest.json").write_text("{}\n")
                 for condition in ("clean", "white_+0dB", "not-canonical"):
                     sf.write(folder / (condition + ".wav"), samples, 8000, subtype="FLOAT")
             elif kind == "paired":
@@ -579,6 +591,28 @@ class EvaluationIdentityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "audio changed while loading"):
                         compare_separation.compare(args)
 
+    def test_separation_comparison_accepts_reports_through_the_export_byte_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder, audio, _ = self.music_corpus(root)
+            mixture = folder / "mixture.wav"
+            result = {"source_sha256":quality.identity(mixture)["sha256"],
+                      "sample_rate":8000, "frames":len(audio), "channels":2,
+                      "outputs":{stem:str(folder / (stem + ".wav")) for stem in ("vocals", "accompaniment")},
+                      "model":{}, "request_sha256":"request", "worker_sha256":"worker",
+                      "packages":{}, "device":"cpu", "threads":1, "processing":{}, "metrics":{}}
+            path = root / "result.json"
+            report_bytes = json.dumps(result).encode("utf-8")
+            args = SimpleNamespace(mixture=mixture, reference=folder / "vocals.wav",
+                                   provenance="test corpus", result=[path])
+            path.write_bytes(report_bytes.ljust(8 * 1024**2 - 1) + b"\n")
+            report = compare_separation.compare(args)
+            self.assertEqual(report["models"][0]["worker_result"]["bytes"], 8 * 1024**2)
+            with path.open("ab") as stream:
+                stream.write(b"\n")
+            with self.assertRaisesRegex(ValueError, "worker result JSON exceeds 8 MiB"):
+                compare_separation.compare(args)
+
     def test_missing_or_different_worker_source_is_rejected_before_output_scoring(self):
         for source_hash in (None, "b"*64):
             with self.subTest(source_hash=source_hash), tempfile.TemporaryDirectory() as temporary:
@@ -589,7 +623,7 @@ class EvaluationIdentityTests(unittest.TestCase):
                     destination = Path(request["output_dir"])
                     destination.mkdir()
                     (destination / "result.json").write_text(json.dumps({"source_sha256":source_hash}))
-                    event = {"version":evaluate.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
+                    event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
                     return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
                 with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run", side_effect=worker):
                     with self.assertRaisesRegex(ValueError, "worker input does not match"):
@@ -599,6 +633,8 @@ class EvaluationIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             folder, audio, argv = self.music_corpus(root)
+            manifest = root / "manifest.json"
+            admitted_checksum = hashlib.sha256(manifest.read_bytes()).hexdigest()
             identities = {name:quality.identity(folder / (name + ".wav"))["sha256"]
                           for name in ("mixture", "vocals", "accompaniment")}
             def worker(command, **kwargs):
@@ -613,15 +649,18 @@ class EvaluationIdentityTests(unittest.TestCase):
                 # Later reference changes must not relabel the snapshot already loaded.
                 sf.write(folder / "vocals.wav", audio * 0.25, 8000, subtype="FLOAT")
                 sf.write(folder / "accompaniment.wav", audio * 0.25, 8000, subtype="FLOAT")
+                # A later edit must not relabel the admitted records.
+                manifest.write_text("{}")
                 result = {"source_sha256":identities["mixture"], "outputs":outputs,
                           "processing":{"core_seconds":24}, "metrics":{"real_time_factor":1.0}}
                 (destination / "result.json").write_text(json.dumps(result))
-                event = {"version":evaluate.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
+                event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
                 return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
             with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run", side_effect=worker), patch("builtins.print"):
                 evaluate.main()
             report = json.loads((root / "evaluation" / "report.json").read_text())
             run = report["runs"][0]
+            self.assertEqual(run["corpus_manifest_sha256"], admitted_checksum)
             self.assertEqual(run["input_sha256"], identities["mixture"])
             self.assertEqual(run["reference_sha256"], identities["vocals"])
             self.assertEqual(run["accompaniment_reference_sha256"], identities["accompaniment"])
@@ -857,6 +896,20 @@ class PreparedQualityTests(unittest.TestCase):
 
 
 class BenchmarkRepeatTests(unittest.TestCase):
+    def test_export_report_requires_matching_successful_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request = {"task_id": "expected", "output_dir": str(root)}
+            report = {"source_sha256": "a" * 64}
+            (root / "result.json").write_text(json.dumps(report))
+            event = {"version": export.worker.EVENT_VERSION, "type": "complete", "task_id": "expected"}
+            for event_changes, status in (({"task_id": "other"}, 0), ({"version": 0}, 0),
+                                          ({"type": "progress"}, 0), ({}, 1)):
+                with self.subTest(event_changes=event_changes, status=status):
+                    completed = subprocess.CompletedProcess([], status, json.dumps(event | event_changes), "")
+                    with self.assertRaises(RuntimeError):
+                        export.completed_export_report(completed, request, report["source_sha256"])
+
     def benchmark_inputs(self, root):
         audio = np.array([[-0.25], [0.25], [-0.125], [0.125]], dtype="float32")
         paths = {name:root / (name + ".wav") for name in ("reference", "input", "upstream", "backing")}
@@ -898,7 +951,7 @@ class BenchmarkRepeatTests(unittest.TestCase):
                     destination = Path(request["output_dir"])
                     destination.mkdir()
                     (destination / "result.json").write_text(json.dumps({"source_sha256":source_hash}))
-                    event = {"version":benchmark.EVENT_VERSION, "type":"complete", "task_id":"identity"}
+                    event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":"identity"}
                     return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
                 with patch.object(sys, "argv", argv), patch.object(benchmark.subprocess, "run", side_effect=worker):
                     with self.assertRaisesRegex(ValueError, "worker input does not match"):
@@ -930,9 +983,9 @@ class BenchmarkRepeatTests(unittest.TestCase):
                 sf.write(output_path, outputs[len(requests)], rate, subtype="FLOAT")
                 requests.append(current)
                 result = {"outputs":{"speech":str(output_path)}, "processing":{"core_seconds":24},
-                          "source_sha256":benchmark.digest(input_path)}
+                          "source_sha256":hashlib.sha256(input_path.read_bytes()).hexdigest()}
                 (destination/"result.json").write_text(json.dumps(result))
-                event = {"version":benchmark.EVENT_VERSION, "type":"complete", "task_id":"repeat"}
+                event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":"repeat"}
                 return subprocess.CompletedProcess(command, 0, json.dumps(event)+"\n", "")
             report_path = root/"report.json"
             argv = ["benchmark.py", "--request", str(request_path), "--reference", str(reference_path),

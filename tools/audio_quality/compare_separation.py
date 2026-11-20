@@ -15,6 +15,14 @@ name standing in for output. Results from different input contents are rejected.
 import argparse
 import json
 from pathlib import Path
+import sys
+
+if __package__ and "." in __package__:
+    from ..audio_processing.common import read_export_report
+else:
+    if not __package__:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from audio_processing.common import read_export_report
 
 if __package__:
     from .evaluate import ReferenceEvaluation, channel_metrics, identity, load_identified, stereo_metrics
@@ -39,11 +47,8 @@ def compare(args):
               "models":[],"limits":"Same excerpt only; no listening review or full-corpus/model ranking. SI-SDR is scale invariant; inspect ordinary SNR, gain, stereo and peaks too. Mixture-minus-vocals reconstruction does not establish separation quality."}
     for path in args.result:
         path = Path(path).resolve(strict=True)
-        if path.stat().st_size > 1024**2:
-            raise ValueError("worker result JSON exceeds 1 MiB")
-        result = json.loads(path.read_text())
-        if result["source_sha256"] != mixture_identity["sha256"]:
-            raise ValueError("worker input content differs from selected mixture: " + str(path))
+        result = read_export_report(path, mixture_identity["sha256"],
+                                    mismatch="worker input content differs from selected mixture: " + str(path))
         if (result["sample_rate"],result["frames"],result["channels"]) != (rate,len(mixture),2):
             raise ValueError("worker timeline differs from paired references: " + str(path))
         vocal_pcm = load_identified(result["outputs"]["vocals"])

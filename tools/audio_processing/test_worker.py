@@ -11,7 +11,7 @@ import tempfile
 from unittest.mock import patch
 import unittest
 from runtime.worker import VERSION, deny_network, resample_exact, validate_request
-from common import RUNTIME_FILES, WorkerError, canonical_digest, digest, validate_artifacts, validate_manifest
+from common import MAX_REPORT_BYTES, RUNTIME_FILES, WorkerError, canonical_digest, digest, validate_artifacts, validate_manifest
 from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -610,7 +610,7 @@ class ExplicitExportTests(unittest.TestCase):
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
             events = []
-            with patch("export.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
+            with patch("common.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaises(WorkerError) as error:
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
             self.assertEqual(error.exception.code, "report_capacity")
@@ -630,9 +630,9 @@ class ExplicitExportTests(unittest.TestCase):
                 outputs = {"speech":str(destination / "speech.wav")}
                 report = {"outputs":outputs, "note":"é", "export_request_sha256":canonical_digest(request)}
                 empty_size = len((json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8"))
-                report["note"] += "x" * (export.MAX_REPORT_BYTES-empty_size+extra)
+                report["note"] += "x" * (MAX_REPORT_BYTES-empty_size+extra)
                 expected = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8")
-                self.assertEqual(len(expected), export.MAX_REPORT_BYTES+extra)
+                self.assertEqual(len(expected), MAX_REPORT_BYTES+extra)
                 writers, report_files, events = [], [], []
                 open_soundfile, open_path = sf.SoundFile, Path.open
                 def soundfile(*args, **kwargs):

@@ -326,7 +326,8 @@ serves benchmark/corpus file jobs, not application execution. It requires
 absolute `input_path` and `output_dir`, IEEE float32 WAV/WAVEX/RF64 input and a new
 destination with an existing parent. It writes stem WAVs and `result.json` with
 an 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
-The actual UTF-8 report, including its final newline, is limited to 8 MiB.
+The exporter, offline benchmark, corpus evaluator and separation comparer enforce
+the same 8 MiB limit on `result.json`, including its final newline.
 Completion follows closed/checked audio and a successfully written report;
 failure removes the new export directory. Detailed hashes and timing/energy
 evidence are collected for this explicit export only.

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
+MAX_REPORT_BYTES = 8 * 1024**2
 
 class WorkerError(Exception):
     def __init__(self, code, message):
@@ -29,9 +30,28 @@ def absolute_path(value, field):
     require(isinstance(value, str) and Path(value).is_absolute(), "invalid_request", field + " must be an absolute local path")
     return Path(value).resolve()
 
+def _json_bytes(path):
+    with path.open("rb") as stream:
+        data = stream.read(1024**2 + 1)
+    require(len(data) <= 1024**2, "invalid_request", "JSON exceeds 1 MiB")
+    return data
+
 def read_json(path):
-    require(path.stat().st_size <= 1024 * 1024, "invalid_request", "JSON exceeds 1 MiB")
-    return json.loads(path.read_text())
+    return json.loads(_json_bytes(path).decode("utf-8"))
+
+def read_json_with_digest(path):
+    data = _json_bytes(path)
+    return json.loads(data.decode("utf-8")), hashlib.sha256(data).hexdigest()
+
+def read_export_report(path, source_sha256, *, mismatch):
+    with path.open("rb") as stream:
+        data = stream.read(MAX_REPORT_BYTES + 1)
+    if len(data) > MAX_REPORT_BYTES:
+        raise ValueError("worker result JSON exceeds 8 MiB")
+    report = json.loads(data.decode("utf-8"))
+    if not isinstance(report, dict) or report.get("source_sha256") != source_sha256:
+        raise ValueError(mismatch)
+    return report
 
 def validate_artifacts(path, operation):
     """Validate model construction inputs, never authorize inference."""
