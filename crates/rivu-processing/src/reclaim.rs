@@ -148,21 +148,21 @@ impl Reclaimer {
         release
     }
 
-    pub(super) fn spawn(
+    pub(super) fn spawn<T: Send + 'static>(
         &self,
         name: &str,
-        work: impl FnOnce(Result<()>) + Send + 'static,
-    ) -> Result<JoinHandle<()>> {
+        work: impl FnOnce(Result<()>) -> T + Send + 'static,
+    ) -> Result<JoinHandle<T>> {
         let (worker, release) = self.spawn_waiting(name, work)?;
         self.resume_after_release(release);
         Ok(worker)
     }
 
-    pub(super) fn spawn_waiting(
+    pub(super) fn spawn_waiting<T: Send + 'static>(
         &self,
         name: &str,
-        work: impl FnOnce(Result<()>) + Send + 'static,
-    ) -> Result<(JoinHandle<()>, Release)> {
+        work: impl FnOnce(Result<()>) -> T + Send + 'static,
+    ) -> Result<(JoinHandle<T>, Release)> {
         let (sender, receiver) = mpsc::channel::<std::result::Result<(), String>>();
         #[cfg(any(test, feature = "test-support"))]
         if self.fail_spawns {
@@ -173,7 +173,7 @@ impl Reclaimer {
                 .recv()
                 .context("Processing reclaimer stopped")
                 .and_then(|result| result.map_err(anyhow::Error::msg));
-            work(retired);
+            work(retired)
         })?;
         Ok((worker, sender))
     }

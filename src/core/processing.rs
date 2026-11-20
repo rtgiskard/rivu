@@ -602,11 +602,6 @@ impl Core {
         let active = self.processing.active_id();
         self.processing.shutdown();
         if let Some(id) = active {
-            self.processing.outcome(
-                id,
-                ProcessingPhase::Cancelled,
-                Some("Processing cancelled during shutdown".into()),
-            );
             self.retain_processing_terminal(id);
             self.task_completed(TaskTarget::Processing { id });
         }

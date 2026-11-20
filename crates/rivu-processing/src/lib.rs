@@ -240,8 +240,24 @@ struct ActiveTask {
     id: u64,
     stamp: SourceStamp,
     cancelled: Arc<Cancellation>,
-    worker: JoinHandle<()>,
+    worker: JoinHandle<Option<WorkerExit>>,
 }
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "move the existing worker status without boxing it"
+)]
+enum WorkerExit {
+    Undelivered(Event),
+    Interrupted(ProcessingTaskStatus),
+}
+
+fn deliver_finished(tx: &Sender<Event>, event: Event) -> Option<WorkerExit> {
+    tx.send_blocking(event)
+        .err()
+        .map(|error| WorkerExit::Undelivered(error.0))
+}
+
 struct RetainedAudition {
     id: u64,
     generation: u64,
@@ -907,7 +923,7 @@ impl Service {
             graph_actions_available: false,
             graph_outputs: Vec::new(),
             graph_exported_path: None,
-            graph_nodes: if let Some(order) = graph_order {
+            graph_nodes: if let Some(order) = graph_order.filter(|_| cached_output.is_none()) {
                 order
                     .into_iter()
                     .map(|node| GraphNodeStatus {
@@ -943,7 +959,16 @@ impl Service {
                     // This new thread executes only this task.
                     #[cfg(any(test, feature = "test-support"))]
                     PANIC_ON_NEURAL_PROGRESS.set(panic_on_neural_progress);
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut result = ProcessingResult {
+                        track,
+                        stamp,
+                        status: initial,
+                        outputs: AudioOutputs::default(),
+                        graph_outputs: BTreeMap::new(),
+                        pending_export: None,
+                        runner: None,
+                    };
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         retired?;
                         render::check_cancel(flag.flag())?;
                         if matches!(
@@ -963,30 +988,39 @@ impl Service {
                             );
                         }
                         render::check_cancel(flag.flag())?;
-                        let result = if let Some(cached_output) = cached_output {
+                        if let Some(cached_output) = cached_output {
                             render::run_cached_export(
-                                track,
-                                stamp,
-                                budget,
-                                initial,
+                                &mut result,
                                 cached_output,
                                 flag.flag(),
                                 &tx,
-                            )
+                            )?;
                         } else {
-                            render::run(track, stamp, config, budget, initial, &flag, &tx)
-                        }?;
+                            render::run(&mut result, config, budget, &flag, &tx)?;
+                        }
                         #[cfg(any(test, feature = "test-support"))]
                         if panic_after_processing {
                             panic!("injected native processing worker panic");
                         }
-                        Ok(result)
+                        Ok(())
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("Audio processing worker panicked")));
-                    let _ = tx.send_blocking(Event::Finished {
-                        id,
-                        result: result.map(Box::new),
-                    });
+                    match outcome {
+                        Ok(()) => deliver_finished(
+                            &tx,
+                            Event::Finished {
+                                id,
+                                result: Ok(Box::new(result)),
+                            },
+                        ),
+                        Err(error) => {
+                            let _ = tx.send_blocking(Event::Finished {
+                                id,
+                                result: Err(error),
+                            });
+                            Some(WorkerExit::Interrupted(result.status))
+                        }
+                    }
                 })?;
         if status.settings.graph_export_path.is_none() {
             self.release_unpinned_audio();
@@ -1015,18 +1049,43 @@ impl Service {
     }
     pub fn shutdown(&mut self) {
         let task = self.active.take();
+        let mut unfinished = task.as_ref().map(|task| task.id);
+        let reason = "Processing cancelled during shutdown";
         if let Some(task) = &task {
             task.cancelled.cancel();
         }
         // Closing admission wakes every reliable sender, including a worker
-        // blocked behind buffered progress. Joining establishes retirement;
-        // draining afterward drops unpublished outputs, not retained auditions.
+        // blocked behind buffered progress. Join for any terminal work the
+        // channel could not carry, then drain without publishing output.
         self.receiver.close();
-        if let Some(task) = task {
-            let _ = task.worker.join();
-        }
-        while let Ok(event) = self.receiver.try_recv() {
+        let mut undelivered = match task.and_then(|task| task.worker.join().ok().flatten()) {
+            Some(WorkerExit::Undelivered(event)) => Some(event),
+            Some(WorkerExit::Interrupted(mut status)) if unfinished == Some(status.id) => {
+                // The worker snapshot includes node updates that never reached Core.
+                if status.total.is_none()
+                    && let Some(previous) = self.status(status.id)
+                {
+                    status.completed = previous.completed;
+                    status.total = previous.total;
+                }
+                self.accept_status(status);
+                None
+            }
+            _ => None,
+        };
+        while let Some(event) = self.receiver.try_recv().ok().or_else(|| undelivered.take()) {
             match event {
+                Event::Finished {
+                    id,
+                    result: Ok(result),
+                } if unfinished == Some(id) => {
+                    self.reject_publication(
+                        result,
+                        ProcessingPhase::Cancelled,
+                        anyhow::anyhow!(reason),
+                    );
+                    unfinished = None;
+                }
                 Event::Finished {
                     result: Ok(result), ..
                 } => self.retire(result),
@@ -1035,6 +1094,9 @@ impl Service {
                 } => self.retire_pcm(pcm),
                 _ => {}
             }
+        }
+        if let Some(id) = unfinished {
+            self.outcome(id, ProcessingPhase::Cancelled, Some(reason.into()));
         }
         if let Some(mut reclaimer) = self.reclaimer.take() {
             reclaimer.shutdown();
@@ -1189,11 +1251,14 @@ impl Service {
                     },
                 ))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Stem mix worker panicked")));
-                let _ = tx.send_blocking(Event::MixFinished {
-                    id,
-                    generation,
-                    result: outcome,
-                });
+                deliver_finished(
+                    &tx,
+                    Event::MixFinished {
+                        id,
+                        generation,
+                        result: outcome,
+                    },
+                )
             })?;
         self.active = Some(ActiveTask {
             id,

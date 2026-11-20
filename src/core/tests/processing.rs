@@ -4675,6 +4675,39 @@ fn streamed_graph_exports_recheck_publication_and_reclaim_unpublished_files() {
 }
 
 #[test]
+fn shutdown_reports_completed_export_without_publishing_it() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let run = core
+        .processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    let export_dir = directory.path().join("exports");
+    std::fs::create_dir(&export_dir).unwrap();
+    let destination = export_dir.join("result.wav");
+    let id = core
+        .processing_graph_export(run, graph_port(2, 0), destination.clone())
+        .unwrap();
+    let event = completion(&mut core);
+    assert!(matches!(
+        &event,
+        rivu_processing::Event::Finished { result: Ok(_), .. }
+    ));
+    // Put back the terminal delivery without consuming it in Core's event loop.
+    core.processing.sender.try_send(event).ok().unwrap();
+    core.shutdown_processing();
+
+    let status = terminal_wait(&mut core, id);
+    assert_eq!(status.phase, ProcessingPhase::Cancelled);
+    assert_completed_graph_nodes(&status);
+    let error = status.error.as_deref().unwrap();
+    assert!(error.contains("Graph output #2:0 was not published"));
+    assert!(error.contains("shutdown"));
+    assert!(status.graph_exported_path.is_none());
+    assert_eq!(std::fs::read_dir(export_dir).unwrap().count(), 0);
+}
+
+#[test]
 fn cancelled_live_graph_retains_frozen_actions_for_export_and_reaudition() {
     let (directory, mut core) = fixture();
     let expected = source(directory.path());

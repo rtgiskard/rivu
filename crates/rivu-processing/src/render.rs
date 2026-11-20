@@ -61,14 +61,12 @@ impl<'a> ProgressReporter<'a> {
     }
 }
 pub(super) fn run_cached_export(
-    track: Track,
-    stamp: SourceStamp,
-    _budget: Arc<audio::PcmBudget>,
-    mut status: ProcessingTaskStatus,
+    result: &mut ProcessingResult,
     cached: CachedGraphOutput,
     cancel: &AtomicBool,
     tx: &Sender<Event>,
-) -> Result<ProcessingResult> {
+) -> Result<()> {
+    let status = &mut result.status;
     let pcm = cached.pcm;
     status.settings.graph_mode = Some(GraphExecutionMode::Offline);
     let _ = tx.send_blocking(Event::GraphPrepared {
@@ -93,36 +91,29 @@ pub(super) fn run_cached_export(
         },
     )?);
     ensure!(
-        SourceStamp::read(&track.path)? == stamp,
+        SourceStamp::read(&result.track.path)? == result.stamp,
         "Source changed while exporting; output discarded"
     );
     status.phase = ProcessingPhase::Complete;
-    status.graph_nodes.clear();
     status.sample_rate = Some(pcm.sample_rate());
     status.channels = Some(pcm.channels());
     status.frames = Some(pcm.frames());
     status.completed = pcm.frames();
     status.total = Some(pcm.frames());
-    Ok(ProcessingResult {
-        track,
-        stamp,
-        status,
-        outputs: AudioOutputs::default(),
-        graph_outputs: BTreeMap::new(),
-        pending_export,
-        runner: None,
-    })
+    result.pending_export = pending_export;
+    Ok(())
 }
 
 pub(super) fn run(
-    track: Track,
-    stamp: SourceStamp,
+    result: &mut ProcessingResult,
     config: Arc<Config>,
     budget: Arc<audio::PcmBudget>,
-    mut status: ProcessingTaskStatus,
     cancellation: &super::Cancellation,
     tx: &Sender<Event>,
-) -> Result<ProcessingResult> {
+) -> Result<()> {
+    let status = &mut result.status;
+    let track = &result.track;
+    let stamp = result.stamp;
     let cancel = cancellation.flag();
     let open_source = || -> Result<audio::SourceRenderer> {
         let renderer = audio::SourceRenderer::open(
@@ -150,10 +141,11 @@ pub(super) fn run(
     let mut runner = None;
     check_cancel(cancel)?;
     // Keep one immutable borrow and its full-graph validation for this worker run.
-    let frozen_graph = status.settings.graph.take();
-    let validated = frozen_graph
-        .as_ref()
-        .map(|graph| graph.validated())
+    let validated = status
+        .settings
+        .graph
+        .is_some()
+        .then(|| config.processing_graph.validated())
         .transpose()?;
     if let Some(mode) = status
         .settings
@@ -181,7 +173,7 @@ pub(super) fn run(
     }
     if let Some(mode) = status.settings.graph_mode {
         let boundary = status.settings.graph_boundary;
-        super::complete_prepared_nodes(&mut status, mode, boundary);
+        super::complete_prepared_nodes(status, mode, boundary);
         let _ = tx.send_blocking(Event::GraphPrepared {
             id: status.id,
             mode,
@@ -196,17 +188,8 @@ pub(super) fn run(
             "Source changed while preparing graph"
         );
         status.phase = ProcessingPhase::Complete;
-        drop(validated);
-        status.settings.graph = frozen_graph;
-        return Ok(ProcessingResult {
-            track,
-            stamp,
-            status,
-            outputs: AudioOutputs::default(),
-            graph_outputs: BTreeMap::new(),
-            pending_export: None,
-            runner,
-        });
+        result.runner = runner;
+        return Ok(());
     }
     let execution = if status.operation == ProcessingOperation::Graph {
         Some(graph::ExecutionGraph::new(
@@ -233,6 +216,8 @@ pub(super) fn run(
             &mut provenance,
             cancel,
         );
+        status.model_id.clone_from(&provenance.id);
+        status.model_sha256.clone_from(&provenance.sha256);
         // Decoding can fail before inference publishes a model outcome.
         let _ = tx.send_blocking(Event::Model {
             id: status.id,
@@ -248,7 +233,7 @@ pub(super) fn run(
     let models = if let Some(execution) = execution.as_ref().filter(|_| !native_graph) {
         graph::prepare_models(
             execution,
-            &mut status,
+            status,
             native.sample_rate,
             &native.layout,
             cancel,
@@ -266,7 +251,7 @@ pub(super) fn run(
             renderer,
             &open_source,
             Arc::clone(&budget),
-            &mut status,
+            status,
             cancel,
             &mut progress,
         )?;
@@ -281,7 +266,7 @@ pub(super) fn run(
             renderer,
             &open_source,
             Arc::clone(&budget),
-            &mut status,
+            status,
             cancel,
             &mut progress,
         )?;
@@ -300,7 +285,7 @@ pub(super) fn run(
                     .context("Missing admitted graph execution")?,
                 input,
                 Arc::clone(&budget),
-                &mut status,
+                status,
                 cancellation,
                 &mut progress,
                 models,
@@ -379,18 +364,11 @@ pub(super) fn run(
         });
     }
     check_cancel(cancel)?;
-    drop(execution);
-    drop(validated);
-    status.settings.graph = frozen_graph;
-    Ok(ProcessingResult {
-        track,
-        stamp,
-        status,
-        outputs,
-        graph_outputs,
-        pending_export,
-        runner,
-    })
+    result.outputs = outputs;
+    result.graph_outputs = graph_outputs;
+    result.pending_export = pending_export;
+    result.runner = runner;
+    Ok(())
 }
 
 pub(super) fn validate_output(

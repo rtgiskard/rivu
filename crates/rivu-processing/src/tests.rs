@@ -276,7 +276,8 @@ fn shutdown_releases_worker_with_a_full_progress_channel() {
 fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     let (_directory, mut service, track, config) = fixture();
     let buffered = completed(&mut service, &track, &config);
-    let blocked = completed(&mut service, &track, &config);
+    let blocked = completed_graph(&mut service, &track, graph_config(vec![])).unwrap();
+    let id = blocked.status.id;
     let retained_bytes = service.results()[0]
         .outputs
         .vocals
@@ -295,7 +296,7 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
         service
             .sender
             .try_send(Event::Progress {
-                id: 4,
+                id,
                 completed: 0,
                 total: None,
                 phase: ProcessingPhase::Processing,
@@ -310,17 +311,19 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     let (sent, delivery) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
-        let rejected = sender
-            .send_blocking(Event::Finished {
-                id: blocked.status.id,
+        let undelivered = deliver_finished(
+            &sender,
+            Event::Finished {
+                id,
                 result: Ok(Box::new(blocked)),
-            })
-            .is_err();
-        sent.send(rejected).unwrap();
+            },
+        );
+        sent.send(undelivered.is_some()).unwrap();
         released.recv().unwrap();
+        undelivered
     });
     service.active = Some(ActiveTask {
-        id: 4,
+        id,
         stamp,
         cancelled,
         worker,
@@ -329,17 +332,33 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     let shutdown = thread::spawn(move || {
         service.shutdown();
         assert!(service.sender.is_closed());
+        finished.send(()).unwrap();
         assert!(service.receiver.try_recv().is_err());
         assert_eq!(service.memory_bytes(), retained_bytes);
-        finished.send(()).unwrap();
+        let status = service.status(id).unwrap();
+        assert_eq!(status.phase, ProcessingPhase::Cancelled);
+        assert_eq!(status.frames, Some(PCM.len() as u64));
+        assert_eq!(
+            status.error.as_deref(),
+            Some("Graph output #2:0 was not published: Processing cancelled during shutdown")
+        );
+        assert_eq!(status.graph_nodes.len(), 2);
+        assert!(
+            status
+                .graph_nodes
+                .iter()
+                .all(|node| node.phase == ProcessingPhase::Complete)
+        );
+        assert!(status.graph_outputs.is_empty());
+        assert_eq!(service.results().len(), 1);
         service
     });
     let rejected = delivery.recv_timeout(Duration::from_secs(5)).unwrap();
     let waiting_for_retirement = completion.try_recv().is_err();
     let cancelled = observed.flag().load(Ordering::Acquire);
     release.send(()).unwrap();
-    let service = shutdown.join().unwrap();
     completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    let service = shutdown.join().unwrap();
     assert!(rejected, "shutdown accepted a new terminal delivery");
     assert!(cancelled);
     assert!(
@@ -348,6 +367,49 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     );
     assert_eq!(service.memory_bytes(), retained_bytes);
     assert!(service.active_id().is_none());
+}
+
+#[test]
+fn shutdown_keeps_prepared_hybrid_nodes_when_the_offline_prefix_is_cancelled() {
+    bounded(|| {
+        let (_directory, track, _) = source_fixture(1, 8_000, PCM);
+        let mut service = Service::new();
+        (service.sender, service.receiver) = async_channel::bounded(1);
+        let target = GraphPort { node: 2, port: 0 };
+        let boundary = GraphPort { node: 1, port: 0 };
+        let id = service
+            .start_graph(
+                track,
+                graph_config(vec![]),
+                GraphRequest {
+                    target,
+                    mode: GraphExecutionMode::Hybrid,
+                    export_path: None,
+                    source_run: None,
+                    cached_output: None,
+                    audio_export: None,
+                },
+            )
+            .unwrap();
+        // Observe preparation without applying it to the projection. The
+        // one-slot queue cannot accept both of the next two stage events.
+        assert!(matches!(
+            next_event(&mut service),
+            Event::GraphPrepared { boundary: Some(port), .. } if port == boundary
+        ));
+        service.shutdown();
+
+        let status = service.status(id).unwrap();
+        assert_eq!(status.phase, ProcessingPhase::Cancelled);
+        assert_eq!(status.settings.graph_mode, Some(GraphExecutionMode::Hybrid));
+        assert_eq!(status.settings.graph_boundary, Some(boundary));
+        assert!(status.graph_plan.is_some());
+        assert_eq!(status.graph_nodes[0].phase, ProcessingPhase::Cancelled);
+        assert_eq!(status.graph_nodes[1].phase, ProcessingPhase::Complete);
+        assert!(status.graph_outputs.is_empty());
+        assert!(service.results().is_empty());
+        assert_eq!(service.memory_bytes(), 0);
+    });
 }
 
 #[test]
@@ -1519,6 +1581,53 @@ fn unblock_reclamation(service: &mut Service, release: std::sync::mpsc::Sender<(
         assert!(matches!(next_event(service), Event::Progress { id: 0, .. }));
     }
     release.send(()).unwrap();
+}
+
+#[test]
+fn cached_export_cancelled_before_encoding_has_no_executed_nodes() {
+    bounded(|| {
+        let (directory, mut service, track, config) = fixture();
+        let result = &service.results[0];
+        let cached = CachedGraphOutput {
+            pcm: result.outputs.vocals.as_ref().unwrap().clone(),
+            stamp: result.stamp,
+        };
+        let destination = directory.path().join("cancelled.wav");
+        let target = GraphPort { node: 2, port: 0 };
+        let release = block_reclamation(&mut service);
+        let id = service
+            .start_graph(
+                track,
+                config,
+                GraphRequest {
+                    target,
+                    mode: GraphExecutionMode::Offline,
+                    export_path: Some(destination.clone()),
+                    source_run: Some(1),
+                    cached_output: Some(cached),
+                    audio_export: None,
+                },
+            )
+            .unwrap();
+        service.cancel(id).unwrap();
+        unblock_reclamation(&mut service, release);
+
+        let Event::Finished {
+            id: finished,
+            result: Err(error),
+        } = next_event(&mut service)
+        else {
+            panic!("expected cancellation before encoding");
+        };
+        assert_eq!(finished, id);
+        assert_eq!(service.finish_task(id), Some(true));
+        service.outcome(id, ProcessingPhase::Cancelled, Some(error.to_string()));
+        let status = service.status(id).unwrap();
+        assert_eq!(status.settings.graph_target, Some(target));
+        assert_eq!(status.graph_run_id, Some(1));
+        assert!(status.graph_nodes.is_empty());
+        assert!(!destination.exists());
+    });
 }
 
 #[test]
