@@ -762,26 +762,35 @@ impl Store {
                 unique.push(prefix.as_str());
             }
         }
-        let mut statement = self.conn.prepare_cached("WITH roots AS (SELECT key,value FROM json_each(?1)),
-         source_totals AS (
-             SELECT roots.key AS root_key,COUNT(*) AS track_total,MAX(tracks.file_size) AS source_size
-             FROM roots CROSS JOIN tracks INDEXED BY tracks_path
-             WHERE roots.value<>'' AND tracks.path>=roots.value
-               AND tracks.path<(rtrim(roots.value,'/')||'0')
-             GROUP BY roots.key,tracks.path
-             UNION ALL
-             SELECT roots.key,COUNT(*),MAX(tracks.file_size)
-             FROM roots CROSS JOIN tracks INDEXED BY tracks_path
-             WHERE roots.value='' GROUP BY roots.key,tracks.path
-         )
-         SELECT roots.key,COALESCE(SUM(track_total),0),COALESCE(SUM(source_size),0)
-         FROM roots LEFT JOIN source_totals ON source_totals.root_key=roots.key
-         GROUP BY roots.key ORDER BY roots.key")?;
-        let totals = statement
-            .query_map([serde_json::to_string(&unique)?], |row| {
-                Ok((row.get::<_, i64>(1)? as usize, row.get::<_, i64>(2)? as u64))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Keep grouping in path-index order instead of staging all (root, path) pairs.
+        let mut totals = Vec::with_capacity(unique.len());
+        for prefix in unique {
+            let (sql, args) = if prefix.is_empty() {
+                (
+                    "SELECT COALESCE(SUM(n),0),COALESCE(SUM(size),0) FROM (
+                        SELECT COUNT(*) AS n,MAX(file_size) AS size
+                        FROM tracks INDEXED BY tracks_path GROUP BY path
+                    )",
+                    &[][..],
+                )
+            } else {
+                (
+                    "SELECT COALESCE(SUM(n),0),COALESCE(SUM(size),0) FROM (
+                        SELECT COUNT(*) AS n,MAX(file_size) AS size
+                        FROM tracks INDEXED BY tracks_path
+                        WHERE path>=?1 AND path<(rtrim(?1,'/')||'0') GROUP BY path
+                    )",
+                    std::slice::from_ref(&prefix),
+                )
+            };
+            totals.push(
+                self.conn
+                    .prepare_cached(sql)?
+                    .query_row(rusqlite::params_from_iter(args), |row| {
+                        Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as u64))
+                    })?,
+            );
+        }
         Ok(roots
             .iter()
             .zip(prefixes.iter())
