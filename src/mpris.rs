@@ -89,7 +89,7 @@ impl MprisController {
                         handle.report_mpris_status("Desktop media controls disabled".to_owned());
                     }
                 }
-                let connection = {
+                let event = {
                     let registered = async {
                         match registration.as_mut() {
                             Some(pending) => pending.result().await,
@@ -97,14 +97,14 @@ impl MprisController {
                         }
                     }
                     .fuse();
-                    let disconnected = async {
-                        match service.as_ref() {
-                            Some(active) => active.connection.closed().await,
+                    let failed = async {
+                        match service.as_mut() {
+                            Some(active) => active.failure().await,
                             None => futures::future::pending().await,
                         }
                     }
                     .fuse();
-                    futures::pin_mut!(registered, disconnected);
+                    futures::pin_mut!(registered, failed);
                     futures::select_biased! {
                         _ = stopped => break,
                         changed = changes.recv().fuse() => {
@@ -113,23 +113,20 @@ impl MprisController {
                             }
                             continue;
                         }
-                        _ = disconnected => None,
-                        connection = registered => Some(connection),
+                        failure = failed => Err(failure),
+                        connection = registered => Ok(connection),
                     }
                 };
-                let Some(connection) = connection else {
-                    // Report loss before retirement waits for physical artwork
-                    // work. Retrying still requires an explicit enable transition.
-                    let state = handle.mpris_service_state();
-                    if state.enabled && !state.shutting_down {
-                        handle.report_mpris_status(
-                            "MPRIS unavailable: session bus disconnected".to_owned(),
-                        );
+                let connection = match event {
+                    Ok(connection) => connection,
+                    Err(failure) => {
+                        if let Some(active) = service.take() {
+                            active
+                                .retire_failed(&handle, failure, observed_intent)
+                                .await;
+                        }
+                        continue;
                     }
-                    if let Some(active) = service.take() {
-                        active.retire().await;
-                    }
-                    continue;
                 };
                 registration = None;
                 // Reconcile intent again: registration may finish with
@@ -245,11 +242,16 @@ async fn register(
         .context("Registering org.mpris.MediaPlayer2.rivu")
 }
 
+enum ServiceFailure {
+    Disconnected,
+    PublisherPanicked,
+}
+
 struct Mpris {
     connection: Connection,
     cancel: oneshot::Sender<()>,
     publisher: async_executor::Task<()>,
-    handle: CoreHandle,
+    panicked: futures::future::Fuse<oneshot::Receiver<()>>,
 }
 
 impl Mpris {
@@ -262,21 +264,40 @@ impl Mpris {
         workers: Arc<BlockingExecutor>,
     ) -> Self {
         let updates = handle.subscribe_revisions(RevisionInterest::Mpris);
+        // Subscribe before capturing the baseline so updates queued during
+        // initial publication are still compared against what was sent.
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
         let (cancel, mut cancelled) = oneshot::channel();
+        let (panic_notice, panicked) = oneshot::channel();
         let bus = connection.clone();
-        let publisher_handle = handle.clone();
         // Publish success before scheduling: an immediate bus-loss report must
         // never be overwritten by a publisher that has not started yet.
         handle.report_mpris_status("Connected to desktop media controls".to_owned());
         let publisher = executor.spawn(async move {
             let mut previous = initial;
             let mut previous_can_raise = initial_can_raise;
-            let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
-            let mut loaded_artwork = None;
             let mut artwork_load = None;
             let publication = AssertUnwindSafe(async {
+                let mut metadata = None;
+                let mut loaded_artwork = None;
+                if !publish_until_cancelled(
+                    &mut cancelled,
+                    &handle,
+                    publish_changes(
+                        &bus,
+                        None,
+                        &previous,
+                        &mut metadata,
+                        &artwork,
+                        previous_can_raise,
+                    ),
+                )
+                .await
+                    || previous.shutting_down
+                {
+                    return;
+                }
                 loop {
                     if artwork_load.is_none() {
                         artwork_load = load_artwork(
@@ -323,11 +344,10 @@ impl Mpris {
                                 &handle,
                                 publish_changes(
                                     &bus,
-                                    &previous,
+                                    Some((&previous, previous_can_raise)),
                                     &current,
                                     &mut metadata,
                                     &artwork,
-                                    previous_can_raise,
                                     current_can_raise,
                                 ),
                             )
@@ -364,22 +384,51 @@ impl Mpris {
             })
             .catch_unwind()
             .await;
-            // Cancellation stops publication, not the blocking closure. Retain
-            // its waiter through physical completion before service retirement
-            // or replacement, even if publication itself panicked.
-            if let Some(load) = artwork_load {
-                load.retire().await;
-            }
-            if let Err(panic) = publication {
-                std::panic::resume_unwind(panic);
-            }
+            finish_publication(publication, panic_notice, artwork_load).await;
         });
         Self {
             connection,
             cancel,
             publisher,
-            handle: publisher_handle,
+            panicked: panicked.fuse(),
         }
+    }
+
+    async fn failure(&mut self) -> ServiceFailure {
+        let publisher_panicked = async {
+            if (&mut self.panicked).await.is_err() {
+                // A normal publisher exit is not a panic (e.g. shutdown).
+                futures::future::pending::<()>().await;
+            }
+        }
+        .fuse();
+        futures::pin_mut!(publisher_panicked);
+        futures::select_biased! {
+            _ = publisher_panicked => ServiceFailure::PublisherPanicked,
+            _ = self.connection.closed().fuse() => ServiceFailure::Disconnected,
+        }
+    }
+
+    async fn retire_failed(
+        self,
+        handle: &CoreHandle,
+        failure: ServiceFailure,
+        observed_intent: Option<(bool, u64)>,
+    ) {
+        // Report before waiting for physical artwork retirement. The consumed
+        // enable intent is unchanged, so recovery requires an explicit toggle.
+        let state = handle.mpris_service_state();
+        if state.enabled
+            && !state.shutting_down
+            && observed_intent == Some((true, state.enable_generation))
+        {
+            let message = match failure {
+                ServiceFailure::Disconnected => "MPRIS unavailable: session bus disconnected",
+                ServiceFailure::PublisherPanicked => "publisher stopped: publisher task panicked",
+            };
+            handle.report_mpris_status(message.to_owned());
+        }
+        self.retire().await;
     }
 
     async fn retire(self) {
@@ -389,14 +438,24 @@ impl Mpris {
             .await
             .is_err()
         {
-            let state = self.handle.mpris_service_state();
-            if state.enabled && !state.shutting_down {
-                self.handle
-                    .report_mpris_status("publisher stopped: publisher task panicked".to_owned());
-            }
-            tracing::warn!("mpris_publisher_task_panicked");
+            tracing::warn!("mpris_publisher_cleanup_panicked");
         }
         retire_connection(self.connection).await;
+    }
+}
+
+async fn finish_publication(
+    publication: std::thread::Result<()>,
+    panic_notice: oneshot::Sender<()>,
+    artwork_load: Option<ArtworkLoad>,
+) {
+    if publication.is_err() {
+        tracing::warn!("mpris_publisher_task_panicked");
+        let _ = panic_notice.send(());
+    }
+    // Keep the waiter through physical completion even on panic or cancel.
+    if let Some(load) = artwork_load {
+        load.retire().await;
     }
 }
 
@@ -997,70 +1056,84 @@ async fn publish_artwork(
 
 async fn publish_changes(
     connection: &Connection,
-    previous: &MprisSnapshot,
+    previous: Option<(&MprisSnapshot, bool)>,
     current: &MprisSnapshot,
     metadata: &mut Option<TrackMetadata>,
     artwork: &ArtworkManager,
-    previous_can_raise: bool,
     current_can_raise: bool,
 ) -> zbus::Result<()> {
+    // No baseline means the first publication after registration. Emit all
+    // signal-driven properties, then use this same snapshot for later diffs.
+    let (previous, previous_can_raise) = previous.unzip();
     let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
-    if previous.playback.status != current.playback.status {
+    if previous.is_none_or(|before| before.playback.status != current.playback.status) {
         changed.insert(
             "PlaybackStatus",
             playback_status(current.playback.status).into(),
         );
     }
-    if previous.playback.repeat != current.playback.repeat {
+    if previous.is_none_or(|before| before.playback.repeat != current.playback.repeat) {
         changed.insert("LoopStatus", loop_status(current.playback.repeat).into());
     }
-    if previous.playback.shuffle != current.playback.shuffle {
+    if previous.is_none_or(|before| before.playback.shuffle != current.playback.shuffle) {
         changed.insert("Shuffle", current.playback.shuffle.into());
     }
-    if previous.playback.volume != current.playback.volume {
+    if previous.is_none_or(|before| before.playback.volume != current.playback.volume) {
         changed.insert("Volume", f64::from(current.playback.volume).into());
     }
-    if previous.playback.speed != current.playback.speed {
+    if previous.is_none_or(|before| before.playback.speed != current.playback.speed) {
         changed.insert("Rate", current.playback.speed.into());
     }
-    if refresh_metadata(previous, current, metadata, artwork) {
+    let metadata_changed = match previous {
+        Some(before) => refresh_metadata(before, current, metadata, artwork),
+        None => {
+            *metadata = TrackMetadata::from_snapshot(current, artwork);
+            true
+        }
+    };
+    if metadata_changed {
         changed.insert("Metadata", Variant::from(metadata_map(metadata.as_ref())));
     }
     // Queue navigation depends on ordering, selection and repeat/shuffle,
     // not the audio clock; do not walk the queue on each position update.
-    if previous.queue.current_id != current.queue.current_id
-        || previous.playback.status != current.playback.status
-        || previous.playback.shuffle != current.playback.shuffle
-        || previous.playback.repeat != current.playback.repeat
-        || previous.queue != current.queue
+    let queue_changed = previous.is_none_or(|before| {
+        before.queue.current_id != current.queue.current_id
+            || before.playback.status != current.playback.status
+            || before.queue != current.queue
+    });
+    if queue_changed
+        || previous.is_some_and(|before| {
+            before.playback.shuffle != current.playback.shuffle
+                || before.playback.repeat != current.playback.repeat
+        })
     {
         for (name, before, after) in [
-            ("CanGoNext", can_go_next(previous), can_go_next(current)),
+            ("CanGoNext", previous.map(can_go_next), can_go_next(current)),
             (
                 "CanGoPrevious",
-                can_go_previous(previous),
+                previous.map(can_go_previous),
                 can_go_previous(current),
             ),
         ] {
-            if before != after {
+            if before != Some(after) {
                 changed.insert(name, after.into());
             }
         }
     }
-    if previous.queue.current_id != current.queue.current_id
-        || previous.playback.status != current.playback.status
-        || previous.queue != current.queue
-    {
+    let pause = can_pause(current);
+    if previous.map(can_pause) != Some(pause) {
+        changed.insert("CanPause", pause.into());
+    }
+    if queue_changed {
         for (name, before, after) in [
             (
                 "CanPlay",
-                previous.queue.total != 0,
+                previous.map(|before| before.queue.total != 0),
                 current.queue.total != 0,
             ),
-            ("CanPause", can_pause(previous), can_pause(current)),
-            ("CanSeek", can_seek(previous), can_seek(current)),
+            ("CanSeek", previous.map(can_seek), can_seek(current)),
         ] {
-            if before != after {
+            if before != Some(after) {
                 changed.insert(name, after.into());
             }
         }
@@ -1076,7 +1149,7 @@ async fn publish_changes(
             )
             .await?;
     }
-    if previous_can_raise != current_can_raise {
+    if previous_can_raise != Some(current_can_raise) {
         let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
         changed.insert("CanRaise", current_can_raise.into());
         connection
@@ -1092,7 +1165,9 @@ async fn publish_changes(
     // Position itself never sends PropertiesChanged. Core explicitly marks
     // discontinuities, including seeks from non-D-Bus clients, so small seeks
     // are not lost to a clock-drift threshold and regular progress stays quiet.
-    if previous.playback.seek_revision != current.playback.seek_revision {
+    if previous
+        .is_some_and(|before| before.playback.seek_revision != current.playback.seek_revision)
+    {
         connection
             .emit_signal(
                 None::<&str>,
@@ -1717,29 +1792,65 @@ mod tests {
     }
 
     #[test]
-    fn publisher_panic_still_retires_connection_and_releases_bus_name() {
+    fn publisher_panic_reports_before_artwork_retires_and_releases_bus_name() {
         let bus = TestBus::start();
-        let (_directory, mut runtime) = runtime_fixture();
+        let (directory, mut runtime) = runtime_fixture();
         set_enabled(&runtime.handle, true);
-        let connection = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
+        let connection = bus.serve_root(AppHandle::new(&runtime, directory.path()));
         let retained = connection.clone();
         let (cancel, _cancelled) = oneshot::channel();
-        let publisher = runtime.test_executor().spawn(async {
-            panic!("publisher panic regression");
+        let (panic_notice, panicked) = oneshot::channel();
+        let (retiring, retirement_started) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let artwork_cancelled = Arc::new(AtomicBool::new(false));
+        let load = ArtworkLoad {
+            cancelled: Arc::clone(&artwork_cancelled),
+            completion: async move {
+                retiring.send(()).unwrap();
+                released.await.unwrap()
+            }
+            .boxed(),
+        };
+        let publisher = runtime.test_executor().spawn(async move {
+            let publication = async { panic!("publisher panic regression") };
+            let result = AssertUnwindSafe(publication).catch_unwind().await;
+            finish_publication(result, panic_notice, Some(load)).await;
         });
-        let service = Mpris {
+        let mut service = Mpris {
             connection,
             cancel,
             publisher,
-            handle: runtime.handle.clone(),
+            panicked: panicked.fuse(),
         };
-        async_io::block_on(service.retire());
+        let failure = async_io::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            service.failure(),
+        ))
+        .unwrap();
+        assert!(matches!(failure, ServiceFailure::PublisherPanicked));
+        // The worker can start retirement without an acknowledgement, but the
+        // controller must still report the panic before waiting for it to finish.
+        async_io::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            retirement_started,
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(artwork_cancelled.load(Ordering::Acquire));
+        let intent = Some((true, runtime.handle.mpris_service_state().enable_generation));
+        let mut retirement = Box::pin(service.retire_failed(&runtime.handle, failure, intent));
+        assert!(retirement.as_mut().now_or_never().is_none());
         wait_status(
             &runtime.handle,
             "publisher stopped: publisher task panicked",
         );
+        assert!(!retained.is_closed());
+        release
+            .send(Err(zbus::Error::Failure("test completion".into())))
+            .unwrap();
+        async_io::block_on(retirement);
         assert!(retained.is_closed());
-        let replacement = bus.serve_root(AppHandle::new(&runtime, _directory.path()));
+        let replacement = bus.serve_root(AppHandle::new(&runtime, directory.path()));
         async_io::block_on(replacement.close()).unwrap();
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
@@ -1812,6 +1923,16 @@ mod tests {
     #[test]
     fn reselected_artwork_reloads_after_eviction_with_clear_or_another_load_in_flight() {
         use futures::StreamExt;
+
+        async fn next_change(
+            signals: &mut (impl futures::Stream<Item = zbus::Message> + Unpin),
+        ) -> (String, Metadata, Vec<String>) {
+            let signal = rivu_protocol::transport::timeout(Duration::from_secs(5), signals.next())
+                .await
+                .expect("consumer receives property changes without polling")
+                .expect("properties signal stream");
+            signal.body().deserialize().unwrap()
+        }
 
         async fn next_property(
             signals: &mut (impl futures::Stream<Item = zbus::Message> + Unpin),
@@ -1893,6 +2014,7 @@ mod tests {
             .await
             .unwrap();
             let mut signals = proxy.receive_signal("PropertiesChanged").await.unwrap();
+            let can_raise = app.can_raise();
             let publisher = Mpris::start(
                 connection,
                 runtime.handle.clone(),
@@ -1900,6 +2022,36 @@ mod tests {
                 Arc::clone(&artwork),
                 runtime.test_executor(),
                 Arc::clone(runtime.test_workers()),
+            );
+            let (interface, mut changed, invalidated) = next_change(&mut signals).await;
+            assert_eq!(interface, PLAYER_INTERFACE);
+            assert!(invalidated.is_empty());
+            let mut properties: Vec<_> = changed.keys().map(String::as_str).collect();
+            properties.sort_unstable();
+            assert_eq!(
+                properties,
+                [
+                    "CanGoNext",
+                    "CanGoPrevious",
+                    "CanPause",
+                    "CanPlay",
+                    "CanSeek",
+                    "LoopStatus",
+                    "Metadata",
+                    "PlaybackStatus",
+                    "Rate",
+                    "Shuffle",
+                    "Volume",
+                ]
+            );
+            assert!(bool::try_from(changed.remove("CanPause").unwrap()).unwrap());
+            let (interface, mut changed, invalidated) = next_change(&mut signals).await;
+            assert_eq!(interface, "org.mpris.MediaPlayer2");
+            assert!(invalidated.is_empty());
+            assert_eq!(changed.len(), 1);
+            assert_eq!(
+                bool::try_from(changed.remove("CanRaise").unwrap()).unwrap(),
+                can_raise
             );
             let first = next_metadata(&mut signals).await;
             let original_uri = <&str>::try_from(&first["mpris:artUrl"]).unwrap().to_owned();
@@ -1911,6 +2063,22 @@ mod tests {
                     .uri()
             );
             assert_ne!(original_uri, artwork.export_default().unwrap().uri());
+
+            assert!(
+                runtime
+                    .handle
+                    .request_ack(Command::Volume { value: 0.5 })
+                    .await
+                    .is_success()
+            );
+            let (interface, mut changed, invalidated) = next_change(&mut signals).await;
+            assert_eq!(interface, PLAYER_INTERFACE);
+            assert!(invalidated.is_empty());
+            assert_eq!(changed.len(), 1);
+            assert_eq!(
+                f64::try_from(changed.remove("Volume").unwrap()).unwrap(),
+                0.5
+            );
 
             for (round, clear) in [false, true].into_iter().enumerate() {
                 let blocked = if clear {
