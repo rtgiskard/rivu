@@ -101,18 +101,32 @@ impl Store {
             .to_str()
             .context("Album directory is not UTF-8")?;
         let query = search_query(query);
-        let filter = format!("{} AND {}", album_filter(), search_filter!("tracks", "?3"));
-        let total =
+        let member_filter = || format!("{} AND {}", album_filter(), search_filter!("tracks", "?3"));
+        let mut filter = None;
+        let total = if let Some(query) = &query {
             self.cached_count(
                 super::CountDomain::AlbumTracks,
-                &[directory, &key.title, query.as_deref().unwrap_or("")],
+                &[directory, &key.title, query],
                 || {
+                    let filter = filter.get_or_insert_with(member_filter);
                     Ok(self.conn.prepare_cached(&format!(
-                    "SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"
-                ))?.query_row(params![directory, key.title, query],
-                |row| row.get::<_, i64>(0),)? as usize)
+                        "SELECT COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"
+                    ))?.query_row(params![directory, key.title, query], |row| row.get::<_, i64>(0))? as usize)
                 },
-            )?;
+            )?
+        } else {
+            self.conn.prepare_cached(
+                "SELECT COALESCE((SELECT track_count FROM albums WHERE directory=?1 AND title=?2),0)",
+            )?.query_row(params![directory, key.title], |row| row.get::<_, i64>(0))? as usize
+        };
+        let offset = i64::try_from(offset)?;
+        if limit == 0 {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
+        let filter = filter.unwrap_or_else(member_filter);
         let mut statement = self.conn.prepare_cached(&format!("SELECT {LIBRARY_ROW_COLUMNS} FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER} LIMIT ?4 OFFSET ?5"))?;
         let rows = statement
             .query_map(
@@ -121,7 +135,7 @@ impl Store {
                     key.title,
                     query,
                     limit.min(MAX_QUERY_ROWS) as i64,
-                    i64::try_from(offset)?
+                    offset
                 ],
                 library_row_from_row,
             )?

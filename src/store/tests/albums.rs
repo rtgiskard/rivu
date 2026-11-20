@@ -70,6 +70,11 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
             .len(),
         3
     );
+    for (query, total) in [(None, MAX_QUERY_ROWS + 3), (Some("Track 0"), 1)] {
+        let count = store.album_tracks_page(&large, query, 0, 0).unwrap();
+        assert_eq!(count.total, total);
+        assert!(count.rows.is_empty());
+    }
     store.queue_album(&compilation.key, false).unwrap();
     store.queue_album(&large, false).unwrap();
     assert_eq!(store.queue_state().unwrap().total, MAX_QUERY_ROWS + 6);
@@ -897,6 +902,9 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
     assert!(store.track(source_id).unwrap().unwrap().favorite);
     store.remove_tracks(&[source_id]).unwrap();
     assert!(snapshot(&store).is_empty());
+    let deleted = store.album_tracks_page(&albums[0].0, None, 0, 24).unwrap();
+    assert_eq!(deleted.total, 0);
+    assert!(deleted.rows.is_empty());
 }
 
 #[test]
