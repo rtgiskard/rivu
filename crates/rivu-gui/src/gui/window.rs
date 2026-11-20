@@ -1184,6 +1184,7 @@ impl WindowView {
         let source = self
             .state
             .current_track()
+            .filter(|_| self.state.playback.status != rivu_protocol::model::PlaybackStatus::Stopped)
             .map(|_| self.state.source_generation);
         let (display_generation, cancelled) = self
             .waveform
