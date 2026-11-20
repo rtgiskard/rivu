@@ -1552,14 +1552,21 @@ fn remove_track_references(
     macro_rules! queries {
         ($ids:literal) => {
             (
-                concat!("SELECT position FROM playlist_entries WHERE playlist_id=0 AND track_id IN (", $ids, ") ORDER BY position"),
-                concat!("SELECT playlist_id,position FROM playlist_entries WHERE playlist_id>0 AND track_id IN (", $ids, ") ORDER BY playlist_id,position"),
-                concat!("DELETE FROM playlist_entries WHERE track_id IN (", $ids, ")"),
+                concat!(
+                    "SELECT playlist_id,position FROM playlist_entries WHERE track_id IN (",
+                    $ids,
+                    ") AND playlist_id>=0 ORDER BY playlist_id,position"
+                ),
+                concat!(
+                    "DELETE FROM playlist_entries WHERE track_id IN (",
+                    $ids,
+                    ")"
+                ),
                 concat!("DELETE FROM tracks WHERE id IN (", $ids, ")"),
             )
         };
     }
-    let (queue_sql, playlists_sql, entries_sql, tracks_sql) = if encoded_ids.is_some() {
+    let (positions_sql, entries_sql, tracks_sql) = if encoded_ids.is_some() {
         queries!("SELECT value FROM json_each(?1)")
     } else {
         queries!("SELECT id FROM tracks WHERE missing=1")
@@ -1570,20 +1577,18 @@ fn remove_track_references(
     } else {
         &[]
     };
-    let queue_positions = tx
-        .prepare(queue_sql)?
-        .query_map(parameters, |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<i64>>>()?;
-    let playlist_positions = removed_playlist_positions(tx, playlists_sql, parameters)?;
+    let positions = removed_playlist_positions(tx, positions_sql, parameters)?;
     tx.execute(entries_sql, parameters)?;
     let removed = tx.execute(tracks_sql, parameters)?;
-    close_gaps(tx, &queue_positions, 0)?;
-    let mut playlists = Vec::with_capacity(playlist_positions.len());
-    for (playlist_id, positions) in playlist_positions {
+    let queue_changed = positions.first().is_some_and(|(id, _)| *id == 0);
+    let mut playlists = Vec::with_capacity(positions.len() - usize::from(queue_changed));
+    for (playlist_id, positions) in positions {
         close_gaps(tx, &positions, playlist_id)?;
-        playlists.push(playlist_id);
+        if playlist_id != 0 {
+            playlists.push(playlist_id);
+        }
     }
-    Ok((removed, playlists, !queue_positions.is_empty()))
+    Ok((removed, playlists, queue_changed))
 }
 
 fn removed_playlist_positions(
