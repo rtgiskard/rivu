@@ -285,6 +285,25 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn write_config(&mut self, config: &Arc<Config>) -> Result<bool> {
+        self.write_config_with(config, |path, baseline| {
+            config.save_with_baseline(path, baseline)
+        })
+    }
+
+    pub(in crate::core) fn write_validated_config(
+        &mut self,
+        config: &crate::config::ValidatedConfig,
+    ) -> Result<bool> {
+        self.write_config_with(config.config(), |path, baseline| {
+            crate::config::save_validated_config(config, path, baseline)
+        })
+    }
+
+    fn write_config_with(
+        &mut self,
+        config: &Arc<Config>,
+        save: impl FnOnce(&Path, Option<&Config>) -> Result<()>,
+    ) -> Result<bool> {
         if self
             .preferences
             .saved
@@ -293,12 +312,11 @@ impl Core {
         {
             return Ok(false);
         }
-        let result = config
-            .save_with_baseline(
-                &self.state.configuration.config_path,
-                self.preferences.saved.as_deref(),
-            )
-            .context("Saving configuration");
+        let result = save(
+            &self.state.configuration.config_path,
+            self.preferences.saved.as_deref(),
+        )
+        .context("Saving configuration");
         match &result {
             Ok(()) => {
                 self.preferences.saved = Some(Arc::clone(config));

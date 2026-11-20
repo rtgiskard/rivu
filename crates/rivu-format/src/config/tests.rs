@@ -669,10 +669,9 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
 fn graph_patch_saves_edits_without_runtime_revision() {
     let original = "# graph settings\n[playback]\nvolume_percent = 25\n";
     let baseline = from_toml(original).unwrap();
-    let mut config = baseline.clone();
-    config
-        .processing_graph
-        .edit(
+    let validated = baseline
+        .clone()
+        .with_processing_graph_edit(
             0,
             processing_graph::GraphEdit::Move {
                 id: 1,
@@ -680,7 +679,8 @@ fn graph_patch_saves_edits_without_runtime_revision() {
             },
         )
         .unwrap();
-    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    let saved = validated.update_toml(original, Some(&baseline)).unwrap();
+    let config = validated.config();
     let document: toml::Value = toml::from_str(&saved).unwrap();
     assert!(document["processing_graph"].get("revision").is_none());
     let loaded = from_toml(&saved).unwrap();
@@ -692,6 +692,27 @@ fn graph_patch_saves_edits_without_runtime_revision() {
     assert_eq!(config.processing_graph.revision, 1);
     assert!(saved.starts_with("# graph settings\n"));
     assert_eq!(loaded.volume, 0.25);
+}
+
+#[test]
+fn graph_patch_preserves_unedited_graph_values_from_disk() {
+    let original = "[processing_graph]\nnext_id = 99 # external edit\n";
+    let baseline = Config::default();
+    let candidate = baseline
+        .clone()
+        .with_processing_graph_edit(
+            0,
+            processing_graph::GraphEdit::Move {
+                id: 1,
+                position: [800.0, 500.0],
+            },
+        )
+        .unwrap();
+    let saved = candidate.update_toml(original, Some(&baseline)).unwrap();
+    assert!(saved.contains("next_id = 99 # external edit"));
+    let graph = from_toml(&saved).unwrap().processing_graph;
+    assert_eq!(graph.next_id, 99);
+    assert_eq!(graph.node(1).unwrap().position, [800.0, 500.0]);
 }
 
 #[test]
@@ -709,12 +730,64 @@ fn incremental_edits_validate_the_composed_document_not_only_the_requested_confi
     }
     baseline.processing_graph.next_id += 100;
     baseline.validate().unwrap();
-    let mut config = baseline.clone();
-    config.processing_graph.nodes[0].position = [800.0, 500.0];
-    config.validate().unwrap();
+    let validated = baseline
+        .clone()
+        .with_processing_graph_edit(
+            0,
+            processing_graph::GraphEdit::Move {
+                id: 101,
+                position: [800.0, 500.0],
+            },
+        )
+        .unwrap();
     // Only nodes changed relative to baseline; retaining original edges/next_id
     // alongside those nodes would produce an invalid graph despite valid config.
-    assert!(update_toml(&original, Some(&baseline), &config).is_err());
+    assert!(update_toml(&original, Some(&baseline), validated.config()).is_err());
+    assert!(validated.update_toml(&original, Some(&baseline)).is_err());
+}
+
+#[test]
+fn graph_update_validates_original_and_unchecked_candidate_before_patching() {
+    let mut invalid = Config::default();
+    // Isolate Output from Source, then give Output a self-loop.
+    invalid.processing_graph.edges[0].from.node = 2;
+    let err = update_toml("", Some(&invalid), &invalid).unwrap_err();
+    // No fields would be patched, so validating only the result would pass.
+    assert_eq!(err.to_string(), "Graph contains a cycle");
+
+    let original = "[processing_graph]\nnodes = []\n";
+    let err = update_toml(original, None, &invalid).unwrap_err();
+    assert_eq!(err.to_string(), "Graph requires 1..64 nodes");
+    let validated = Config::default().into_validated().unwrap();
+    let err = validated.update_toml(original, None).unwrap_err();
+    assert_eq!(err.to_string(), "Graph requires 1..64 nodes");
+}
+
+#[test]
+fn graph_candidate_admission_checks_revision_then_graph_then_settings() {
+    let mut config = Config::default();
+    config.ui_language.clear();
+    let edit = || processing_graph::GraphEdit::Move {
+        id: 2,
+        position: [f32::NAN, 0.0],
+    };
+    let error = config
+        .clone()
+        .with_processing_graph_edit(1, edit())
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "Graph changed; refresh before editing");
+    let error = config
+        .clone()
+        .with_processing_graph_edit(0, edit())
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "Graph positions must be finite");
+    let error = config
+        .with_processing_graph_edit(0, processing_graph::GraphEdit::Remove { id: 2 })
+        .err()
+        .unwrap();
+    assert!(error.to_string().starts_with("interface.language"));
 }
 
 #[test]

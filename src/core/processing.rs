@@ -106,9 +106,11 @@ impl Core {
         expected_revision: u64,
         edit: GraphEdit,
     ) -> Result<()> {
-        let mut config = self.preferences.checkpoint();
-        config.processing_graph.edit(expected_revision, edit)?;
-        self.commit_processing_config(config)
+        let config = self
+            .preferences
+            .checkpoint()
+            .with_processing_graph_edit(expected_revision, edit)?;
+        self.commit_validated_processing_config(config)
     }
 
     pub(in crate::core) fn processing_graph_run(
@@ -371,15 +373,21 @@ impl Core {
         Ok(())
     }
     fn commit_processing_config(&mut self, config: Config) -> Result<()> {
-        config.validate()?;
-        let equalizer_changed = !config.processing_bypassed
-            && config.equalizer != self.preferences.settings().equalizer;
+        self.commit_validated_processing_config(config.into_validated()?)
+    }
+
+    fn commit_validated_processing_config(
+        &mut self,
+        config: crate::config::ValidatedConfig,
+    ) -> Result<()> {
+        let candidate = config.config();
+        let equalizer_changed = !candidate.processing_bypassed
+            && candidate.equalizer != self.preferences.settings().equalizer;
         if equalizer_changed {
             self.engine.ensure_command_capacity(1)?;
         }
-        let config = Arc::new(config);
-        self.write_config(&config)?;
-        self.preferences.accept(config);
+        self.write_validated_config(&config)?;
+        self.preferences.accept(config.into_config());
         if equalizer_changed {
             self.engine
                 .send(AudioCommand::Equalizer(Arc::new(

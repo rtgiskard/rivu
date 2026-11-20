@@ -4,7 +4,7 @@ pub use rivu_format::config::*;
 
 mod persistence;
 pub use persistence::ConfigPersistence;
-pub(crate) use persistence::load_if_present;
+pub(crate) use persistence::{load_if_present, save_validated_config};
 
 #[cfg(test)]
 mod tests;

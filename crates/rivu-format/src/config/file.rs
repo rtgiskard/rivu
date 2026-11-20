@@ -1,11 +1,12 @@
 //! Strict grouped representation used only by config.toml persistence.
+use super::edit::Patch;
 use super::*;
 use toml_edit::TableLike;
 
 // Serialize only changed runtime fields, using the same key and serde rules as
 // full exports. Optional fields serialize to an absent entry when cleared.
 macro_rules! patch_field {
-    ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?) => {
+    ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty $(=> $mode:ident)?) => {{
         if $baseline.$field != $config.$field {
             #[derive(Serialize)]
             struct Field<'a> {
@@ -21,9 +22,11 @@ macro_rules! patch_field {
             } else {
                 before.get(stringify!($key))
             };
-            super::edit::patch($table, stringify!($key), before, after.remove(stringify!($key)))?;
+            super::edit::patch($table, stringify!($key), before, after.remove(stringify!($key)))?
+        } else {
+            Patch::Unchanged
         }
-    };
+    }};
     (@complete) => { false };
     (@complete complete) => { true };
 }
@@ -329,7 +332,7 @@ impl FileConfig {
         table: &mut dyn TableLike,
         baseline: &Config,
         config: &Config,
-    ) -> Result<()> {
+    ) -> Result<Patch> {
         Library::patch(table, "library", baseline, config)?;
         Playback::patch(table, "playback", baseline, config)?;
         Interface::patch(table, "interface", baseline, config)?;
@@ -338,9 +341,9 @@ impl FileConfig {
         patch_field!(table, baseline, config, equalizer => equalizer: EqualizerConfig);
         patch_field!(table, baseline, config, denoise => denoise: DenoiseConfig);
         patch_field!(table, baseline, config, neural => neural: NeuralConfig);
-        patch_field!(table, baseline, config, #[serde(serialize_with = "serialize_graph")] processing_graph => processing_graph: ProcessingGraph);
+        let graph = patch_field!(table, baseline, config, #[serde(serialize_with = "serialize_graph")] processing_graph => processing_graph: ProcessingGraph);
         patch_field!(table, baseline, config, equalizer_presets => equalizer_presets: Vec<EqualizerPreset>);
-        Ok(())
+        Ok(graph)
     }
 }
 

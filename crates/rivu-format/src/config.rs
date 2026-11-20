@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 mod edit;
@@ -698,6 +699,23 @@ impl Config {
         u64::from(self.gpu_material_budget_mib) * 1024 * 1024
     }
 
+    /// Validate a candidate before admitting a processing settings change.
+    pub fn into_validated(self) -> Result<ValidatedConfig> {
+        self.validate()?;
+        Ok(ValidatedConfig(Arc::new(self)))
+    }
+
+    /// Apply a revision-checked edit, validating its graph before the other settings.
+    pub fn with_processing_graph_edit(
+        mut self,
+        expected_revision: u64,
+        edit: processing_graph::GraphEdit,
+    ) -> Result<ValidatedConfig> {
+        self.processing_graph.edit(expected_revision, edit)?;
+        self.validate_settings()?;
+        Ok(ValidatedConfig(Arc::new(self)))
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.validate_settings()?;
         self.processing_graph.validate()
@@ -985,6 +1003,25 @@ impl Config {
     }
 }
 
+/// An immutable configuration candidate that has passed settings and graph validation.
+pub struct ValidatedConfig(Arc<Config>);
+
+impl ValidatedConfig {
+    pub fn config(&self) -> &Arc<Config> {
+        &self.0
+    }
+
+    pub fn into_config(self) -> Arc<Config> {
+        self.0
+    }
+
+    /// Patch TOML without revalidating this candidate. The original and the
+    /// composed output still get checked against the current file contract.
+    pub fn update_toml(&self, contents: &str, baseline: Option<&Config>) -> Result<String> {
+        update_toml_impl(contents, baseline, &self.0, true)
+    }
+}
+
 /// Current on-disk config schema; omitted versions use this contract directly.
 pub const CONFIG_SCHEMA_VERSION: u32 = 2;
 pub const MAX_QUERY_ROWS: usize = 256;
@@ -1122,6 +1159,14 @@ fn parse_config_document(contents: &str) -> Result<toml_edit::Document<&str>> {
 fn config_from_document<S: AsRef<str>>(
     document: impl Into<toml_edit::de::Deserializer<S>>,
 ) -> Result<Config> {
+    let config = decode_config_document(document)?;
+    config.processing_graph.validate()?;
+    Ok(config)
+}
+
+fn decode_config_document<S: AsRef<str>>(
+    document: impl Into<toml_edit::de::Deserializer<S>>,
+) -> Result<Config> {
     let file = file::FileConfig::deserialize(document.into())
         .context("cannot parse TOML configuration")?;
     let mut config = file.into_config();
@@ -1130,7 +1175,6 @@ fn config_from_document<S: AsRef<str>>(
         config.ui_font = DEFAULT_UI_FONT.to_owned();
     }
     config.library_roots = config.validate_settings()?;
-    config.processing_graph.validate()?;
     Ok(config)
 }
 
@@ -1154,19 +1198,33 @@ pub fn to_toml(config: &Config) -> Result<String> {
 /// otherwise the validated original supplies it. Empty input defaults that baseline.
 /// Existing input and the final output retain the shared size and validation rules.
 pub fn update_toml(contents: &str, baseline: Option<&Config>, config: &Config) -> Result<String> {
+    update_toml_impl(contents, baseline, config, false)
+}
+
+fn update_toml_impl(
+    contents: &str,
+    baseline: Option<&Config>,
+    config: &Config,
+    candidate_is_validated: bool,
+) -> Result<String> {
     let document = parse_config_document(contents)?;
     // toml_edit's deserializer consumes its tree. Clone once before into_mut
     // materializes decoration: raw input stays borrowed and comments stay spans.
     let original = config_from_document(document.clone())?;
     let baseline = baseline.unwrap_or(&original);
-    config.validate()?;
+    if !candidate_is_validated {
+        config.validate()?;
+    }
     let mut document = document.into_mut();
-    file::FileConfig::patch(document.as_table_mut(), baseline, config)
+    let graph_patch = file::FileConfig::patch(document.as_table_mut(), baseline, config)
         .context("cannot update configuration")?;
     let contents = document.to_string();
     check_config_size(contents.len() as u64)?;
     // Validate the composed fields by consuming the edited tree, not reparsing
     // its text (or cloning the now-owned decoration for another decoder).
-    config_from_document(document)?;
+    let merged = decode_config_document(document)?;
+    if matches!(graph_patch, edit::Patch::Merged) {
+        merged.processing_graph.validate()?;
+    }
     Ok(contents)
 }

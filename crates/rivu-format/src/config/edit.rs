@@ -14,19 +14,28 @@ pub(super) fn group<'a>(parent: &'a mut dyn TableLike, key: &str) -> Result<&'a 
         .with_context(|| format!("configuration group {key} is not a table"))
 }
 
+pub(super) enum Patch {
+    Unchanged,
+    Replaced,
+    Merged,
+}
+
 pub(super) fn patch(
     target: &mut dyn TableLike,
     key: &str,
     before: Option<&Item>,
     after: Option<Item>,
-) -> Result<()> {
+) -> Result<Patch> {
     let Some(mut after) = after else {
-        target.remove(key);
-        return Ok(());
+        return Ok(if target.remove(key).is_some() {
+            Patch::Replaced
+        } else {
+            Patch::Unchanged
+        });
     };
     if let Some(before) = before {
         if same_item(before, &after) {
-            return Ok(());
+            return Ok(Patch::Unchanged);
         }
         if let (Some(before), Some(_)) = (before.as_table_like(), after.as_table_like()) {
             let after = after.into_table().expect("serialized table");
@@ -39,7 +48,7 @@ pub(super) fn patch(
             for (key, value) in after {
                 patch(table, &key, before.get(&key), Some(value))?;
             }
-            return Ok(());
+            return Ok(Patch::Merged);
         }
     }
     if let Some(old) = target.get_mut(key) {
@@ -55,7 +64,7 @@ pub(super) fn patch(
     } else {
         target.insert(key, after);
     }
-    Ok(())
+    Ok(Patch::Replaced)
 }
 
 fn same_table(left: &dyn TableLike, right: &dyn TableLike) -> bool {

@@ -52,72 +52,89 @@ impl ConfigPersistence for Config {
     }
 
     fn save_with_baseline(&self, path: &Path, baseline: Option<&Self>) -> Result<()> {
-        let destination = configuration_destination(path)
-            .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
-        let path = destination.as_ref();
-        ensure!(
-            path.file_name().is_some(),
-            "configuration path must name a file: {}",
-            path.display()
-        );
-        let original = match rivu_format::config::read_toml(path) {
-            Ok(contents) => Some(contents),
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot read configuration {}", path.display()));
-            }
-        };
-        let contents = rivu_format::config::update_toml(
-            original.as_deref().unwrap_or_default(),
-            baseline.filter(|_| original.is_some()),
-            self,
-        )
-        .with_context(|| format!("cannot update configuration {}", path.display()))?;
-        if original.as_deref() == Some(contents.as_str()) {
-            return Ok(());
+        save_config_with(path, baseline, |contents, baseline| {
+            rivu_format::config::update_toml(contents, baseline, self)
+        })
+    }
+}
+
+pub(crate) fn save_validated_config(
+    config: &rivu_format::config::ValidatedConfig,
+    path: &Path,
+    baseline: Option<&Config>,
+) -> Result<()> {
+    save_config_with(path, baseline, |contents, baseline| {
+        config.update_toml(contents, baseline)
+    })
+}
+
+fn save_config_with(
+    path: &Path,
+    baseline: Option<&Config>,
+    update: impl FnOnce(&str, Option<&Config>) -> Result<String>,
+) -> Result<()> {
+    let destination = configuration_destination(path)
+        .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
+    let path = destination.as_ref();
+    ensure!(
+        path.file_name().is_some(),
+        "configuration path must name a file: {}",
+        path.display()
+    );
+    let original = match rivu_format::config::read_toml(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("cannot read configuration {}", path.display()));
         }
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut directories = fs::DirBuilder::new();
-        directories.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            directories.mode(0o700);
-        }
-        directories.create(parent).with_context(|| {
-            format!("cannot create configuration directory {}", parent.display())
-        })?;
-        // tempfile creates the file with owner-only permissions (0600 on Unix).
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".rivu-config-")
-            .suffix(".tmp")
-            .tempfile_in(parent)
-            .with_context(|| {
-                format!(
-                    "cannot create temporary configuration in {}",
-                    parent.display()
-                )
-            })?;
-        temporary.write_all(contents.as_bytes()).with_context(|| {
+    };
+    let contents = update(
+        original.as_deref().unwrap_or_default(),
+        baseline.filter(|_| original.is_some()),
+    )
+    .with_context(|| format!("cannot update configuration {}", path.display()))?;
+    if original.as_deref() == Some(contents.as_str()) {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut directories = fs::DirBuilder::new();
+    directories.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directories.mode(0o700);
+    }
+    directories
+        .create(parent)
+        .with_context(|| format!("cannot create configuration directory {}", parent.display()))?;
+    // tempfile creates the file with owner-only permissions (0600 on Unix).
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".rivu-config-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| {
             format!(
-                "cannot write temporary configuration for {}",
-                path.display()
+                "cannot create temporary configuration in {}",
+                parent.display()
             )
         })?;
-        // Discard PersistError's owned file here so cleanup is immediate, rather
-        // than deferred until the caller drops the returned error.
-        temporary
-            .persist(path)
-            .map_err(|error| error.error)
-            .with_context(|| {
-                format!("cannot atomically replace configuration {}", path.display())
-            })?;
-        Ok(())
-    }
+    temporary.write_all(contents.as_bytes()).with_context(|| {
+        format!(
+            "cannot write temporary configuration for {}",
+            path.display()
+        )
+    })?;
+    // Discard PersistError's owned file here so cleanup is immediate, rather
+    // than deferred until the caller drops the returned error.
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("cannot atomically replace configuration {}", path.display()))?;
+    Ok(())
 }
 
 /// Follow only the final path component's symbolic links, leaving intermediate
