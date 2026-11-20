@@ -468,8 +468,52 @@ impl Store {
         if positions.is_empty() {
             return Ok(false);
         }
-        // Keep the playing occurrence's identity, but move it to its track's first position.
-        tx.execute_batch("UPDATE playlist_entries SET position=(SELECT MIN(other.position) FROM playlist_entries other WHERE other.playlist_id=0 AND other.track_id=playlist_entries.track_id) WHERE playlist_id=0 AND id=(SELECT current_queue_entry_id FROM rivu_meta) AND position<>(SELECT MIN(other.position) FROM playlist_entries other WHERE other.playlist_id=0 AND other.track_id=playlist_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_queue_entry_id FROM rivu_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM playlist_entries WHERE playlist_id=0) DELETE FROM playlist_entries WHERE playlist_id=0 AND id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
+        let current: Option<(i64, i64, i64)> = tx
+            .query_row(
+                "SELECT id,track_id,position FROM playlist_entries
+                 WHERE playlist_id=0 AND id=(SELECT current_queue_entry_id FROM rivu_meta)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        // Delete the first occurrence instead if the playing occurrence is a duplicate.
+        // Compaction still uses the unmodified set of original duplicate slots.
+        let relocation = if let Some((id, track_id, position)) = current
+            && positions.binary_search(&position).is_ok()
+        {
+            let first: i64 = tx.query_row(
+                "SELECT MIN(position) FROM playlist_entries WHERE track_id=?1 AND playlist_id=0",
+                [track_id],
+                |row| row.get(0),
+            )?;
+            Some((id, position, first))
+        } else {
+            None
+        };
+        {
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM playlist_entries WHERE id IN (
+                    SELECT e.id FROM json_each(?1) AS p
+                    CROSS JOIN playlist_entries AS e INDEXED BY playlist_order
+                    WHERE e.playlist_id=0 AND e.position=CASE p.value WHEN ?2 THEN ?3 ELSE p.value END
+                )",
+            )?;
+            let mut encoded = Vec::new();
+            let original = relocation.map(|(_, position, _)| position);
+            let first = relocation.map(|(_, _, first)| first);
+            for batch in positions.chunks(CLEAR_BATCH_SIZE) {
+                encoded.clear();
+                serde_json::to_writer(&mut encoded, batch)?;
+                let encoded = std::str::from_utf8(&encoded)?;
+                delete.execute(params![encoded, original, first])?;
+            }
+        }
+        if let Some((id, _, first)) = relocation {
+            tx.execute(
+                "UPDATE playlist_entries SET position=?2 WHERE id=?1 AND playlist_id=0",
+                params![id, first],
+            )?;
+        }
         close_gaps(&tx, &positions, 0)?;
         tx.commit()?;
         Ok(true)
@@ -758,6 +802,34 @@ mod tests {
             .execute_batch("DROP TRIGGER reject_later_clear;")?;
         assert!(store.clear_queue()?);
         assert_eq!(store.queue_state()?.current_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn dedup_rolls_back_earlier_batches_when_replacing_the_first_occurrence_fails() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&vec![1; CLEAR_BATCH_SIZE + 2])?;
+        let ids = store.queue_ids()?;
+        let current = *ids.last().unwrap();
+        store.set_queue_current(Some(current))?;
+        let before = store.queue_state()?;
+        store.conn.execute_batch(&format!(
+            "CREATE TEMP TRIGGER reject_first_occurrence BEFORE DELETE ON playlist_entries
+             WHEN old.id={} BEGIN SELECT RAISE(ABORT,'injected dedup failure'); END;",
+            ids[0],
+        ))?;
+
+        assert!(store.deduplicate_queue().is_err());
+        assert_eq!(store.queue_ids()?, ids);
+        assert_eq!(store.queue_state()?, before);
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_first_occurrence")?;
+        assert!(store.deduplicate_queue()?);
+        assert_eq!(store.queue_ids()?, [current]);
+        assert_eq!(store.queue_state()?.current_id, Some(current));
+        assert_eq!(store.queue_state()?.current_position, Some(0));
         Ok(())
     }
 
