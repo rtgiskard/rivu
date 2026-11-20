@@ -102,7 +102,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
     let (relocation_tx, relocation_rx) = async_channel::bounded(1);
     let tasks = TaskRuntime::start().unwrap();
     let preferences =
-        crate::core::settings::Preferences::new(Arc::clone(&state.configuration.config), None);
+        crate::core::settings::Preferences::new(Arc::clone(&state.configuration.config), false);
     let mut core = Core {
         store,
         read_queries: None,

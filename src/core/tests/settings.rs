@@ -592,8 +592,7 @@ fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() 
         std::fs::write(&path, &original).unwrap();
         let mut config = Config::load(&path).unwrap();
         config.library_roots = vec![directory.path().to_path_buf()];
-        core.preferences =
-            crate::core::settings::Preferences::new(Arc::new(config.clone()), Some(config));
+        core.preferences = crate::core::settings::Preferences::new(Arc::new(config), true);
         core.preferences.project(&mut core.state);
 
         core.command(Command::Volume { value: 0.25 }).unwrap();

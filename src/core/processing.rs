@@ -78,8 +78,9 @@ impl Core {
                 self.transport.processing_resume_generation = Some(self.transport.generation);
             }
         } else {
+            let config = Arc::new(config);
             self.write_config(&config)?;
-            self.preferences.accept(Arc::new(config));
+            self.preferences.accept(config);
             if monitor_enabled {
                 self.engine
                     .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;
@@ -376,8 +377,9 @@ impl Core {
         if equalizer_changed {
             self.engine.ensure_command_capacity(1)?;
         }
+        let config = Arc::new(config);
         self.write_config(&config)?;
-        self.preferences.accept(Arc::new(config));
+        self.preferences.accept(config);
         if equalizer_changed {
             self.engine
                 .send(AudioCommand::Equalizer(Arc::new(
@@ -1027,6 +1029,7 @@ impl Core {
         // PCM is immutable; graph admission still validates the original source.
         let expected_identity = graph.as_ref().map(|_| admitted_source.identity());
         self.engine.ensure_command_capacity(2)?;
+        let config = config.map(Arc::new);
         let previous = config.as_ref().map(|_| self.preferences.checkpoint());
         if let Some(config) = config.as_ref() {
             self.write_config(config)?;
@@ -1035,7 +1038,7 @@ impl Core {
             Ok(replacement) => replacement,
             Err(error) => {
                 if let Some(previous) = previous {
-                    self.write_config(&previous)?;
+                    self.write_config(&Arc::new(previous))?;
                 }
                 return Err(error);
             }
@@ -1043,7 +1046,7 @@ impl Core {
         self.pending_processing_audition = None;
         if let Some(config) = config {
             let monitor_enabled = config.equalizer.enabled;
-            self.preferences.accept(Arc::new(config));
+            self.preferences.accept(config);
             if monitor_enabled {
                 self.engine
                     .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;

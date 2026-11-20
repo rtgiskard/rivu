@@ -18,20 +18,24 @@ pub trait ConfigPersistence: Sized {
     fn save_with_baseline(&self, path: &Path, baseline: Option<&Self>) -> Result<()>;
 }
 
+/// Only absence selects defaults; unreadable and invalid files remain errors.
+pub(crate) fn load_if_present(path: &Path) -> Result<Option<Config>> {
+    let contents = match rivu_format::config::read_toml(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("cannot read configuration {}", path.display()));
+        }
+    };
+    rivu_format::config::from_toml(&contents)
+        .map(Some)
+        .with_context(|| format!("invalid configuration {}", path.display()))
+}
+
 impl ConfigPersistence for Config {
-    /// Read settings without creating files or directories. Only a missing file
-    /// selects defaults; unreadable, malformed, and invalid files are errors.
     fn load(path: &Path) -> Result<Self> {
-        let contents = match rivu_format::config::read_toml(path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("cannot read configuration {}", path.display()));
-            }
-        };
-        rivu_format::config::from_toml(&contents)
-            .with_context(|| format!("invalid configuration {}", path.display()))
+        Ok(load_if_present(path)?.unwrap_or_default())
     }
 
     /// Validate, patch, and atomically replace the destination using a

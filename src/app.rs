@@ -196,16 +196,19 @@ impl App {
         let signals =
             Signals::new([Signal::Int, Signal::Term]).context("Registering shutdown signals")?;
         let config = CoreRuntime::load_startup_config(&config_path)?;
-        let artwork_limit_bytes = config.artwork_file_limit_mib as usize * 1024 * 1024;
+        let settings = &config.settings;
+        let artwork_limit_bytes = settings.artwork_file_limit_mib as usize * 1024 * 1024;
         #[cfg(feature = "gui")]
-        let tray_enabled = config.tray_enabled;
+        let tray_enabled = settings.tray_enabled;
         #[cfg(feature = "gui")]
-        let tray_i18n = Arc::new(rivu_presentation::i18n::Localizer::new(&config.ui_language));
+        let tray_i18n = Arc::new(rivu_presentation::i18n::Localizer::new(
+            &settings.ui_language,
+        ));
         let tasks = TaskRuntime::start()?;
         let i18n = rivu_presentation::i18n::Localizer::for_cli("auto");
         let session = rivu_utils::logging::Session::start(
             &data_dir,
-            &crate::config::logging_options(&config),
+            &crate::config::logging_options(settings),
         )?;
         let runtime = CoreRuntime::start_with_logging(
             &data_dir,

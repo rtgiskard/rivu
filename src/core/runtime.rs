@@ -177,6 +177,11 @@ impl Drop for CompletionGuard {
     }
 }
 
+pub(crate) struct StartupConfig {
+    pub(crate) settings: Config,
+    from_disk: bool,
+}
+
 pub struct CoreRuntime {
     pub handle: CoreHandle,
     pub(crate) control: CoreLifecycle,
@@ -205,11 +210,15 @@ impl CoreRuntime {
     }
 
     /// Load host configuration only when its path can be published over IPC.
-    pub(crate) fn load_startup_config(config_path: &Path) -> Result<Config> {
+    pub(crate) fn load_startup_config(config_path: &Path) -> Result<StartupConfig> {
         config_path
             .to_str()
             .context("Configuration path is not valid UTF-8; IPC requires UTF-8 paths")?;
-        Config::load(config_path)
+        let loaded = crate::config::load_if_present(config_path)?;
+        Ok(StartupConfig {
+            from_disk: loaded.is_some(),
+            settings: loaded.unwrap_or_default(),
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -233,7 +242,7 @@ impl CoreRuntime {
     pub(crate) fn start_with_logging(
         data_dir: &Path,
         config_path: &Path,
-        config: Config,
+        config: StartupConfig,
         logging: rivu_utils::logging::Control,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
@@ -252,29 +261,30 @@ impl CoreRuntime {
     fn start_inner(
         data_dir: &Path,
         config_path: &Path,
-        config: Config,
+        config: StartupConfig,
         logging: Option<rivu_utils::logging::Control>,
         executor: Arc<async_executor::Executor<'static>>,
         workers: Arc<BlockingExecutor>,
         initialize: fn(&mut Core),
     ) -> Result<Self> {
-        // An existing file establishes an effective, normalized baseline without
-        // rewriting user formatting or materializing omitted defaults at startup.
-        let saved_config = config_path.try_exists()?.then(|| config.clone());
+        let StartupConfig {
+            settings,
+            from_disk,
+        } = config;
         std::fs::create_dir_all(data_dir)?;
         tracing::info!(path = %config_path.display(), "configuration_loaded");
         // Keep the handle usable with a config-only snapshot. Core loads its
         // database projections independently of optional device enumeration,
         // which runs through the application's bounded blocking executor.
         let store = Store::open(&data_dir.join("library.db"))?;
-        store.set_track_cache_query_batch_size(config.query_batch_size);
+        store.set_track_cache_query_batch_size(settings.query_batch_size);
         tracing::debug!("store_ready");
-        let engine = AudioEngine::new(config.media_read_buffer_mib)?;
+        let engine = AudioEngine::new(settings.media_read_buffer_mib)?;
         tracing::info!("audio_engine_ready");
         let (sender, receiver) = async_channel::bounded(64);
         let (control, shutdown_receiver) = CoreLifecycle::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
-        let preferences = settings::Preferences::new(Arc::new(config), saved_config);
+        let preferences = settings::Preferences::new(Arc::new(settings), from_disk);
         let initial = {
             let mut state = CoreState::default();
             state.configuration.config_path = config_path.to_path_buf();
@@ -391,5 +401,35 @@ impl Drop for CoreRuntime {
             let _ = self.control.request_shutdown();
         }
         let _ = self.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_exit_does_not_recreate_config_removed_after_loading() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[playback]\nvolume_percent = 75\n")?;
+        let config = CoreRuntime::load_startup_config(&path)?;
+        std::fs::remove_file(&path)?;
+
+        let tasks = TaskRuntime::start()?;
+        let mut runtime = CoreRuntime::start_inner(
+            directory.path(),
+            &path,
+            config,
+            None,
+            Arc::clone(&tasks.handle),
+            Arc::clone(&tasks.workers),
+            Core::initialize_state,
+        )?;
+        assert_eq!(runtime.handle.config_snapshot().volume, 0.75);
+        runtime.control.request_shutdown()?;
+        runtime.join()?;
+        assert!(!path.exists());
+        Ok(())
     }
 }

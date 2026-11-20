@@ -14,12 +14,12 @@ pub(super) struct LiveControls {
 pub(super) struct Preferences {
     settings: Arc<Config>,
     live: LiveControls,
-    saved: Option<Config>,
+    saved: Option<Arc<Config>>,
     save_error: Option<String>,
 }
 
 impl Preferences {
-    pub(super) fn new(settings: Arc<Config>, saved: Option<Config>) -> Self {
+    pub(super) fn new(settings: Arc<Config>, from_disk: bool) -> Self {
         let live = LiveControls {
             volume: settings.volume,
             shuffle: settings.shuffle,
@@ -27,6 +27,7 @@ impl Preferences {
             output_device: settings.output_device.clone(),
             speed: 1.0,
         };
+        let saved = from_disk.then(|| Arc::clone(&settings));
         Self {
             settings,
             live,
@@ -72,6 +73,18 @@ impl Preferences {
         config
     }
 
+    fn checkpoint_snapshot(&self) -> Arc<Config> {
+        if self.settings.volume == self.live.volume
+            && self.settings.shuffle == self.live.shuffle
+            && self.settings.repeat == self.live.repeat
+            && self.settings.output_device == self.live.output_device
+        {
+            Arc::clone(&self.settings)
+        } else {
+            Arc::new(self.checkpoint())
+        }
+    }
+
     pub(super) fn accept(&mut self, settings: Arc<Config>) {
         self.live.volume = settings.volume;
         self.live.shuffle = settings.shuffle;
@@ -109,8 +122,9 @@ impl Core {
         if let ConfigMutation::Material(change) = change {
             let mut config = self.preferences.checkpoint();
             change.apply_to(&mut config.material);
+            let config = Arc::new(config);
             self.write_config(&config)?;
-            self.preferences.accept(Arc::new(config));
+            self.preferences.accept(config);
             return Ok(());
         }
         let mut config = self.preferences.checkpoint();
@@ -209,7 +223,7 @@ impl Core {
         };
         if let Some(logging) = self.logging.clone() {
             logging.reconfigure_with(&crate::config::logging_options(&config), || {
-                self.write_config(&config)
+                self.write_config(&config).map(|_| ())
             })?;
         } else {
             self.write_config(&config)?;
@@ -270,19 +284,24 @@ impl Core {
         self.output_settings_request = request;
         Ok(())
     }
-    pub(in crate::core) fn write_config(&mut self, config: &Config) -> Result<()> {
-        if self.preferences.saved.as_ref() == Some(config) {
-            return Ok(());
+    pub(in crate::core) fn write_config(&mut self, config: &Arc<Config>) -> Result<bool> {
+        if self
+            .preferences
+            .saved
+            .as_ref()
+            .is_some_and(|saved| Arc::ptr_eq(saved, config) || saved == config)
+        {
+            return Ok(false);
         }
         let result = config
             .save_with_baseline(
                 &self.state.configuration.config_path,
-                self.preferences.saved.as_ref(),
+                self.preferences.saved.as_deref(),
             )
             .context("Saving configuration");
         match &result {
             Ok(()) => {
-                self.preferences.saved = Some(config.clone());
+                self.preferences.saved = Some(Arc::clone(config));
                 if let Some(previous) = self.preferences.save_error.take()
                     && self.state.system.last_error.as_ref() == Some(&previous)
                 {
@@ -298,18 +317,15 @@ impl Core {
                 }
             }
         }
-        result
+        result.map(|()| true)
     }
 
     pub(in crate::core) fn flush_config(&mut self) -> Result<bool> {
-        // Compare the complete desired config, including quick controls, to the
-        // last successful save rather than only checking playback fields.
-        let config = self.preferences.checkpoint();
-        if self.preferences.saved.as_ref() == Some(&config) {
-            return Ok(false);
+        let config = self.preferences.checkpoint_snapshot();
+        let saved = self.write_config(&config)?;
+        if saved {
+            self.preferences.accept(config);
         }
-        self.write_config(&config)?;
-        self.preferences.accept(Arc::new(config));
-        Ok(true)
+        Ok(saved)
     }
 }
