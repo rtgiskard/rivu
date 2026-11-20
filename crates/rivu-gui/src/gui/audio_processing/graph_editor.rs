@@ -2655,6 +2655,28 @@ mod tests {
         });
         let handle = window.into();
         draw(cx, handle);
+        processing.update(cx, |this, cx| {
+            let baseline = Rc::clone(&this.state);
+            assert_eq!(this.results.graph_current, Some(true));
+
+            let mut state = (*baseline).clone();
+            let graph = &mut Arc::make_mut(&mut state.system.config).processing_graph;
+            graph.nodes[0].position[0] += 20.0;
+            this.reconcile(Rc::new(state.clone()), cx);
+            this.graph_task_summary(7, cx);
+            assert_eq!(this.results.graph_current, Some(true));
+
+            Arc::make_mut(&mut state.system.config)
+                .processing_graph
+                .edges
+                .clear();
+            this.reconcile(Rc::new(state), cx);
+            this.graph_task_summary(7, cx);
+            assert_eq!(this.results.graph_current, Some(false));
+
+            this.reconcile(baseline, cx);
+        });
+        draw(cx, handle);
         let position = gpui::VisualTestContext::from_window(handle, cx)
             .debug_bounds("graph-export-7-1-1-0")
             .unwrap()

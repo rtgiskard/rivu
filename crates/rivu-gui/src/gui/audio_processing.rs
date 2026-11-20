@@ -940,12 +940,13 @@ impl AudioProcessing {
                     .equalizer_presets
                     .iter()
                     .map(|preset| &preset.name));
+        let processing_changed = match (&self.state.system.processing, &state.system.processing) {
+            (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+            (None, None) => false,
+            _ => true,
+        };
         let changed = config_changed
-            || match (&self.state.system.processing, &state.system.processing) {
-                (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
-                (None, None) => false,
-                _ => true,
-            }
+            || processing_changed
             || self.state.system.processing_audition != state.system.processing_audition
             || self.state.system.processing_selection != state.system.processing_selection
             || self.state.playback.status != state.playback.status
@@ -956,6 +957,9 @@ impl AudioProcessing {
             != state.system.processing.as_ref().map(|task| task.id)
         {
             self.results.task_details = false;
+        }
+        if config_changed || processing_changed {
+            self.results.graph_current = None;
         }
         self.state = state;
         if config_changed

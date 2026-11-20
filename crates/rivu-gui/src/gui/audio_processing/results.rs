@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 pub(super) struct ResultsState {
     pub(super) details: bool,
     pub(super) task_details: bool,
+    pub(super) graph_current: Option<bool>,
 }
 
 pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus) -> Option<u64> {
@@ -419,6 +420,9 @@ impl AudioProcessing {
             task.source_path.display(),
         );
         if let Some(graph) = &task.settings.graph {
+            let graph_current = &mut self.results.graph_current;
+            let current = *graph_current
+                .get_or_insert_with(|| graph.audio_eq(&self.state.system.config.processing_graph));
             let mode = task
                 .settings
                 .graph_mode
@@ -433,13 +437,11 @@ impl AudioProcessing {
                 .unwrap_or_else(|| "—".into());
             details.push_str(&format!(
                 " · {mode} · {}",
-                self.tr(
-                    if graph.audio_eq(&self.state.system.config.processing_graph) {
-                        "processing-result-current"
-                    } else {
-                        "processing-result-edited"
-                    }
-                )
+                self.tr(if current {
+                    "processing-result-current"
+                } else {
+                    "processing-result-edited"
+                })
             ));
             if let Some(target) = task.settings.graph_target {
                 details.push_str(&format!(
