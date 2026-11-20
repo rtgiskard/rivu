@@ -83,22 +83,22 @@ impl Store {
         // Include the full ranking prefix, but nothing after the last requested
         // position. Fetch that bound by rowid rather than scanning playlist_order.
         let sql = if query.is_some() {
-            format!(
+            concat!(
                 "WITH matched AS (
                     SELECT e.id,e.track_id,e.position,row_number() OVER (ORDER BY e.position,e.id)-1 AS offset
                     FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id
                     WHERE e.playlist_id=?1 AND e.position <= (
                         SELECT MAX(target.position) FROM playlist_entries target NOT INDEXED
                         WHERE target.playlist_id=?1 AND target.id IN (SELECT value FROM json_each(?2))
-                    ) AND {}
-                 ) SELECT id,track_id,position,offset FROM matched
+                    ) AND ",
+                search_filter!("t", "?3"),
+                ") SELECT id,track_id,position,offset FROM matched
                  WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
-                search_filter!("t", "?3")
             )
         } else {
-            "SELECT id,track_id,position,position AS offset FROM playlist_entries NOT INDEXED WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id".into()
+            "SELECT id,track_id,position,position AS offset FROM playlist_entries NOT INDEXED WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id"
         };
-        let mut statement = self.conn.prepare_cached(&sql)?;
+        let mut statement = self.conn.prepare_cached(sql)?;
         Ok(statement
             .query_map(params![playlist_id, ids, query], |row| {
                 Ok(PlaylistEntryLocation {
@@ -116,12 +116,13 @@ impl Store {
     fn playlist_match_count(&self, playlist_id: i64, query: Option<&str>) -> Result<usize> {
         anyhow::ensure!(playlist_id > 0, "Playlist not found");
         let sql = if query.is_some() {
-            format!(
-                "SELECT (SELECT COUNT(*) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {}) FROM playlists WHERE id=?1",
-                search_filter!("t", "?2")
+            concat!(
+                "SELECT (SELECT COUNT(*) FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND ",
+                search_filter!("t", "?2"),
+                ") FROM playlists WHERE id=?1",
             )
         } else {
-            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1 AND ?2 IS NULL".into()
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1 AND ?2 IS NULL"
         };
         self.cached_count_for_id(
             super::CountDomain::PlaylistEntries,
@@ -130,7 +131,7 @@ impl Store {
             || {
                 Ok(self
                     .conn
-                    .prepare_cached(&sql)?
+                    .prepare_cached(sql)?
                     .query_row(params![playlist_id, query], |row| row.get::<_, i64>(0))
                     .optional()?
                     .context("Playlist not found")? as usize)

@@ -178,10 +178,9 @@ impl Store {
         limit: usize,
     ) -> Result<Page<QueueRow>> {
         let query = search_query(query);
-        let filter = search_filter!("t", "?1");
         let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
             if query.is_some() {
-                Ok(self.conn.prepare_cached(&format!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter}"))?.query_row([query.as_deref()], |row| integer(row, 0))?)
+                Ok(self.conn.prepare_cached(concat!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND ", search_filter!("t", "?1")))?.query_row([query.as_deref()], |row| integer(row, 0))?)
             } else {
                 Ok(self.conn.prepare_cached("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0")?.query_row([], |row| integer(row, 0))?)
             }
@@ -192,6 +191,7 @@ impl Store {
                 rows: Vec::new(),
             });
         }
+        let filter = search_filter!("t", "?1");
         let paging = if query.is_some() {
             "ORDER BY q.position,q.id LIMIT ?3 OFFSET ?2"
         } else {
