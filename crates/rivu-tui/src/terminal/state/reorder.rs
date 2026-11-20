@@ -38,6 +38,8 @@ enum Phase {
     Saving,
     SavingAfterChange,
     Saved,
+    CatalogUnknownBeforeChange,
+    Unknown,
     Changed,
 }
 
@@ -120,8 +122,10 @@ impl UiState {
 
     pub(super) fn sync_reorder(&mut self, next: &TuiSnapshot) {
         let Some(reorder) = &self.reorder else { return };
-        if matches!(reorder.phase, Phase::Changed | Phase::SavingAfterChange)
-            || reorder.target.revision(next) == Some(reorder.revision)
+        if matches!(
+            reorder.phase,
+            Phase::Changed | Phase::SavingAfterChange | Phase::Unknown
+        ) || reorder.target.revision(next) == Some(reorder.revision)
         {
             return;
         }
@@ -137,6 +141,7 @@ impl UiState {
         self.end_preview(reorder.target, Some(lookup));
         reorder.phase = match reorder.phase {
             Phase::Saving => Phase::SavingAfterChange,
+            Phase::CatalogUnknownBeforeChange => Phase::Unknown,
             Phase::Saved => {
                 self.mark_local_change();
                 return;
@@ -158,7 +163,7 @@ impl UiState {
         }
         match reorder.phase {
             Phase::Saving | Phase::SavingAfterChange | Phase::Saved => return KeyAction::Ignored,
-            Phase::Changed => {
+            Phase::Changed | Phase::CatalogUnknownBeforeChange | Phase::Unknown => {
                 if key.code == KeyCode::Esc {
                     self.reorder = None;
                     self.mark_local_change();
@@ -271,6 +276,27 @@ impl UiState {
         self.mark_local_change();
     }
 
+    pub(in crate::terminal) fn reorder_unknown(&mut self) {
+        let reorder = self.reorder.as_mut().expect("submitted reorder");
+        let target = reorder.target;
+        let preview_active = match reorder.phase {
+            Phase::Saving => true,
+            Phase::SavingAfterChange => false,
+            _ => unreachable!("completion belongs to the only submitted reorder"),
+        };
+        // Paging can drop the picked row before the watch arrives. Keep its
+        // ID in the reorder until the catalog can scan the new revision.
+        reorder.phase = if preview_active && matches!(target, Target::Playlist(_)) {
+            Phase::CatalogUnknownBeforeChange
+        } else {
+            Phase::Unknown
+        };
+        if preview_active {
+            self.end_preview(target, None);
+        }
+        self.mark_local_change();
+    }
+
     pub(in crate::terminal) fn complete_reorder(&mut self, result: Result<(), String>) {
         let reorder = self.reorder.as_mut().expect("submitted reorder");
         reorder.phase = match (&reorder.phase, result) {
@@ -303,6 +329,9 @@ impl UiState {
                 ("terminal-reorder-saving", None)
             }
             Phase::Changed => ("terminal-reorder-changed", None),
+            Phase::CatalogUnknownBeforeChange | Phase::Unknown => {
+                ("terminal-reorder-unknown", None)
+            }
         };
         Some((self.i18n.text(key), notice))
     }
@@ -312,8 +341,13 @@ impl UiState {
 mod tests {
     use super::{super::tests::queue_row, *};
     use crate::terminal::state::TuiState;
+    use crate::terminal::{state::tests::response, worker::QueryResult};
     use crossterm::event::KeyModifiers;
     use rivu_presentation::i18n::Localizer;
+    use rivu_protocol::{
+        model::{Page, PlaylistSummary},
+        response::ViewResponse,
+    };
     use std::sync::Arc;
 
     fn preview() -> TuiState {
@@ -427,18 +461,132 @@ mod tests {
     }
 
     #[test]
-    fn catalog_save_checks_destination_page_then_falls_back_by_id() {
-        use crate::terminal::{state::tests::response, worker::QueryResult};
-        use rivu_protocol::{
-            model::{Page, PlaylistSummary},
-            response::ViewResponse,
+    fn unknown_reorder_discards_preview_and_requires_dismissal() {
+        use crate::terminal::{
+            apply_command_completion,
+            worker::{CommandCompletion, CommandFeedback},
         };
+        use rivu_protocol::response::{Ack, AckStatus};
 
-        let summary = |id: i64| PlaylistSummary {
+        for ack_first in [true, false] {
+            for transport_error in [true, false] {
+                let mut tui = preview();
+                assert_save(&mut tui);
+                let mut next = tui.snapshot.clone();
+                next.queue.revision += 1;
+                if !ack_first {
+                    tui.apply_snapshot(next.clone());
+                }
+                let result = if transport_error {
+                    Err(anyhow::Error::new(rivu_client::CommandFailure {
+                        status: AckStatus::Unknown,
+                    })
+                    .into())
+                } else {
+                    Ok(Ack::new(AckStatus::Unknown, None, 0))
+                };
+                apply_command_completion(
+                    &mut tui.ui,
+                    CommandCompletion {
+                        feedback: CommandFeedback::Reorder,
+                        result,
+                    },
+                )
+                .unwrap();
+                assert!(tui.ui.queue.reorder_indices().is_none());
+                assert!(matches!(
+                    input(&mut tui, KeyCode::Enter),
+                    KeyAction::Ignored
+                ));
+                if ack_first {
+                    tui.apply_snapshot(next);
+                }
+                input(&mut tui, KeyCode::Down);
+                assert_eq!(
+                    tui.ui.reorder_footer().unwrap().0,
+                    tui.ui.i18n.text("terminal-reorder-unknown")
+                );
+                assert!(matches!(
+                    input(&mut tui, KeyCode::Enter),
+                    KeyAction::Ignored
+                ));
+                input(&mut tui, KeyCode::Esc);
+                assert!(tui.ui.reorder_footer().is_none());
+            }
+        }
+    }
+
+    fn summary(id: i64) -> PlaylistSummary {
+        PlaylistSummary {
             id,
             name: id.to_string(),
             entry_count: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_unknown_before_revision_restores_picked_id_after_page_reset() {
+        let mut snapshot = TuiSnapshot::default();
+        Arc::make_mut(&mut snapshot.configuration).query_batch_size = 4;
+        let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
+        let mut catalog = PagedList::default();
+        catalog.insert(0, 4, 4, (71..75).map(summary).collect());
+        tui.ui.view = View::Playlists(catalog);
+        input(&mut tui, KeyCode::Char('M'));
+        input(&mut tui, KeyCode::Down);
+        assert!(matches!(
+            input(&mut tui, KeyCode::Enter),
+            KeyAction::SaveOrder(Command::MovePlaylist {
+                playlist_id: 71,
+                ..
+            })
+        ));
+        tui.ui.reorder_submitted();
+        tui.ui.reorder_unknown();
+        assert!(matches!(
+            input(&mut tui, KeyCode::Enter),
+            KeyAction::Ignored
+        ));
+
+        let mut next = tui.snapshot.clone();
+        Arc::make_mut(&mut next.configuration).query_batch_size = 2;
+        tui.apply_snapshot(next.clone());
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next);
+        for (offset, ids) in [(0, [72, 73]), (2, [74, 71])] {
+            let request = tui.ui.query_request(&tui.snapshot).unwrap();
+            assert_eq!(request.demand.offset, offset);
+            assert!(tui.ui.apply_query(
+                &tui.snapshot,
+                &request,
+                Ok(QueryResult {
+                    view: ViewResponse::PlaylistSummaries(Page {
+                        total: 4,
+                        rows: ids.into_iter().map(summary).collect(),
+                    }),
+                    ..response(&request, 4)
+                })
+            ));
+            assert!(matches!(
+                input(&mut tui, KeyCode::Enter),
+                KeyAction::Ignored
+            ));
+        }
+        let View::Playlists(catalog) = &tui.ui.view else {
+            panic!("playlist catalog")
         };
+        assert_eq!(catalog.selected().unwrap().id, 71);
+        assert!(catalog.reorder_indices().is_none());
+        assert_eq!(
+            tui.ui.reorder_footer().unwrap().0,
+            tui.ui.i18n.text("terminal-reorder-unknown")
+        );
+        input(&mut tui, KeyCode::Esc);
+        assert!(tui.ui.reorder_footer().is_none());
+    }
+
+    #[test]
+    fn catalog_save_checks_destination_page_then_falls_back_by_id() {
         for ack_first in [true, false] {
             for first_page_hit in [true, false] {
                 let snapshot = TuiSnapshot::default();

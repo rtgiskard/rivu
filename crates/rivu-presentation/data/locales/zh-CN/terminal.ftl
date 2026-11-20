@@ -24,6 +24,7 @@ terminal-reorder = Enter 保存 · Esc 取消 · ↑↓/jk 调整
 terminal-reorder-failed = Enter 重试 · Esc 取消
 terminal-reorder-saving = 正在保存顺序…
 terminal-reorder-changed = Esc 关闭 · 列表已变化
+terminal-reorder-unknown = Esc 关闭 · 保存结果未确认，请检查列表
 terminal-reorder-filtered = 请清除搜索后再调整顺序
 terminal-reorder-loading = 正在等待列表加载
 terminal-connecting = 正在连接核心…

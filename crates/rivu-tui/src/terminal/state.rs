@@ -718,10 +718,10 @@ impl View {
                 Self::Queue | Self::Recent(_) => {}
             }
         }
-        if previous.system.library_roots != next.system.library_roots
+        if !previous.same_library_roots(next)
             && let Self::Tree(tree) = self
         {
-            tree.roots = LibraryTree::roots(&next.system.library_roots);
+            tree.roots = LibraryTree::roots(&next.configuration.library_roots);
             tree.other_present = None;
             if !tree.other_tracks && tree.directory.as_os_str().is_empty() {
                 tree.entries.clear();
@@ -1618,7 +1618,7 @@ impl UiState {
         if let View::LibraryResults(rows) = &self.view {
             // A global track result is not a root directory/OtherTracks row.
             // Returning to Tree therefore has no reachable matching identity.
-            let mut tree = LibraryTree::new(&state.system.library_roots);
+            let mut tree = LibraryTree::new(&state.configuration.library_roots);
             tree.entries.viewport_rows = rows.viewport_rows;
             self.view = View::Tree(tree);
         }
@@ -1705,10 +1705,9 @@ impl UiState {
                 .cached_playlists
                 .take()
                 .unwrap_or_else(|| View::Playlists(PagedList::default())),
-            TopTab::Library => self
-                .cached_library
-                .take()
-                .unwrap_or_else(|| View::Tree(LibraryTree::new(&state.system.library_roots))),
+            TopTab::Library => self.cached_library.take().unwrap_or_else(|| {
+                View::Tree(LibraryTree::new(&state.configuration.library_roots))
+            }),
             TopTab::Recent => self.cached_recent.take().unwrap_or_else(|| {
                 let mut recent = RecentTracks::default();
                 recent.sync(state, "");

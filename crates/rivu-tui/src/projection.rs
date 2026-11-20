@@ -19,11 +19,10 @@ pub struct TuiSystemSnapshot {
     pub scan_task_id: Option<u64>,
     pub scan_message: String,
     pub last_error: Option<String>,
-    pub library_roots: Arc<Vec<std::path::PathBuf>>,
 }
 
 impl TuiSnapshot {
-    pub(crate) fn from_client(state: ClientSnapshot, previous: Option<&Self>) -> Self {
+    pub(crate) fn from_client(state: ClientSnapshot) -> Self {
         Self {
             library: state.library,
             queue: state.queue,
@@ -35,17 +34,14 @@ impl TuiSnapshot {
                 scan_task_id: state.system.scan_task_id,
                 scan_message: state.system.scan_message,
                 last_error: state.system.last_error,
-                library_roots: previous
-                    .filter(|previous| {
-                        Arc::ptr_eq(&previous.configuration, &state.configuration.config)
-                            || previous.system.library_roots.as_ref()
-                                == &state.configuration.config.library_roots
-                    })
-                    .map(|previous| Arc::clone(&previous.system.library_roots))
-                    .unwrap_or_else(|| Arc::new(state.configuration.config.library_roots.clone())),
             },
             configuration: state.configuration.config,
         }
+    }
+
+    pub(crate) fn same_library_roots(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.configuration, &previous.configuration)
+            || self.configuration.library_roots == previous.configuration.library_roots
     }
 
     /// Publication sequencing and non-terminal configuration do not change the screen.
@@ -69,7 +65,7 @@ impl TuiSnapshot {
             && self.system.scan_task_id == previous.system.scan_task_id
             && self.system.scan_message == previous.system.scan_message
             && self.system.last_error == previous.system.last_error
-            && self.system.library_roots == previous.system.library_roots
+            && self.same_library_roots(previous)
             && self.configuration.query_batch_size == previous.configuration.query_batch_size
             && self.configuration.ui_theme == previous.configuration.ui_theme
             && self.configuration.confirm_queue_replace
@@ -100,56 +96,42 @@ mod tests {
     #[test]
     fn redraw_ignores_publication_sequence_and_unprojected_state() {
         let mut client = ClientSnapshot::default();
-        let initial = TuiSnapshot::from_client(client.clone(), None);
+        let initial = TuiSnapshot::from_client(client.clone());
         client.system.revision += 1;
         client.system.selected_device = Some("another device".into());
         Arc::make_mut(&mut client.configuration.config).volume = 0.25;
         client.library.duplicate_groups_revision += 1;
         client.library.duplicate_members_revision += 1;
-        let ignored = TuiSnapshot::from_client(client.clone(), Some(&initial));
+        let ignored = TuiSnapshot::from_client(client.clone());
         assert!(ignored.same_presentation(&initial));
 
         client.system.scan_message = "Scanning library".into();
-        let scan = TuiSnapshot::from_client(client.clone(), Some(&ignored));
+        let scan = TuiSnapshot::from_client(client.clone());
         assert!(!scan.same_presentation(&ignored));
         client.system.last_error = Some("Scan failed".into());
-        let error = TuiSnapshot::from_client(client.clone(), Some(&scan));
+        let error = TuiSnapshot::from_client(client.clone());
         assert!(!error.same_presentation(&scan));
         client.playback.position = 3.0;
-        let playback = TuiSnapshot::from_client(client.clone(), Some(&error));
+        let playback = TuiSnapshot::from_client(client.clone());
         assert!(!playback.same_presentation(&error));
         Arc::make_mut(&mut client.configuration.config).query_batch_size += 1;
-        let page_size = TuiSnapshot::from_client(client, Some(&playback));
+        let page_size = TuiSnapshot::from_client(client);
         assert!(!page_size.same_presentation(&playback));
     }
 
     #[test]
-    fn projection_reuses_library_roots_until_the_configuration_changes_them() {
+    fn redraw_tracks_root_changes_but_ignores_unrelated_config_changes() {
         let mut client = ClientSnapshot::default();
         Arc::make_mut(&mut client.configuration.config).library_roots = vec!["/music".into()];
-        let initial = TuiSnapshot::from_client(client.clone(), None);
-        let unchanged = TuiSnapshot::from_client(client.clone(), Some(&initial));
-        assert!(Arc::ptr_eq(
-            &initial.system.library_roots,
-            &unchanged.system.library_roots
-        ));
+        let initial = TuiSnapshot::from_client(client.clone());
 
-        Arc::make_mut(&mut client.configuration.config).query_batch_size = 17;
-        let other_setting = TuiSnapshot::from_client(client.clone(), Some(&unchanged));
-        assert!(Arc::ptr_eq(
-            &unchanged.system.library_roots,
-            &other_setting.system.library_roots
-        ));
+        Arc::make_mut(&mut client.configuration.config).volume = 0.25;
+        let other_setting = TuiSnapshot::from_client(client.clone());
+        assert!(other_setting.same_presentation(&initial));
 
         Arc::make_mut(&mut client.configuration.config)
             .library_roots
             .push("/other".into());
-        let changed_roots = TuiSnapshot::from_client(client, Some(&other_setting));
-        assert_eq!(changed_roots.system.library_roots.len(), 2);
-        assert!(!Arc::ptr_eq(
-            &other_setting.system.library_roots,
-            &changed_roots.system.library_roots
-        ));
-        assert_eq!(initial.system.library_roots.len(), 1);
+        assert!(!TuiSnapshot::from_client(client).same_presentation(&other_setting));
     }
 }

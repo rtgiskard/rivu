@@ -24,6 +24,7 @@ terminal-reorder = Enter Save · Esc Cancel · ↑↓/jk Move
 terminal-reorder-failed = Enter Retry · Esc Cancel
 terminal-reorder-saving = Saving order…
 terminal-reorder-changed = Esc Dismiss · List changed
+terminal-reorder-unknown = Esc Dismiss · Save result unknown; check the list
 terminal-reorder-filtered = Clear search before reordering
 terminal-reorder-loading = Waiting for rows to load
 terminal-connecting = Connecting to core…

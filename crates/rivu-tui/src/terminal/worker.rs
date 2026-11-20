@@ -1,10 +1,10 @@
 use crate::projection::TuiSnapshot;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
     AppCommand,
-    model::{ClientSnapshot, Command, LibrarySort, Query, QueryIdentity, QueryStamp},
+    model::{ClientSnapshot, LibrarySort, Query, QueryIdentity, QueryStamp},
     query_tracking::QuerySubmission,
     response::{Ack, ObservedState, QueryError, StateSections, StateWatch, ViewResponse},
 };
@@ -61,7 +61,7 @@ impl Drop for Watcher {
     }
 }
 
-pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
+pub(super) fn spawn_watcher(data_dir: &Path, instance_id: u32) -> Watcher {
     let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
@@ -70,15 +70,11 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
     let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
         let mut session = rivu_client::client_session_with_cancel(&data_dir, stop);
-        let initial = session.get_state(TERMINAL_SECTIONS).and_then(|response| {
-            let instance_id = session
-                .instance_id()
-                .context("Missing IPC Hello identity")?;
-            session.bind_instance(instance_id)?;
-            Ok((instance_id, response))
-        });
+        let initial = session
+            .bind_instance(instance_id)
+            .and_then(|()| session.get_state(TERMINAL_SECTIONS));
         let mut state = match initial {
-            Ok((instance_id, response)) => {
+            Ok(response) => {
                 let mut state = ObservedState::new(instance_id);
                 state.apply(instance_id, response);
                 state
@@ -199,14 +195,20 @@ impl WorkerFailure {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommandFeedback {
+    Notice,
+    Reorder,
+    PlaylistName,
+}
+
 pub(super) struct CommandCompletion {
-    pub(super) reorder: bool,
-    pub(super) playlist_name: bool,
+    pub(super) feedback: CommandFeedback,
     pub(super) result: Result<Ack, WorkerFailure>,
 }
 
 pub(super) struct CommandWorker {
-    sender: Option<Sender<AppCommand>>,
+    sender: Option<Sender<(AppCommand, CommandFeedback)>>,
     stopping: Option<Sender<()>>,
     shutdown: rivu_client::SessionCancellation,
     results: Receiver<CommandCompletion>,
@@ -224,11 +226,11 @@ impl CommandWorker {
         }
     }
 
-    pub(super) fn request(&self, command: AppCommand) -> Result<bool> {
+    pub(super) fn request(&self, command: AppCommand, feedback: CommandFeedback) -> Result<bool> {
         let Some(sender) = &self.sender else {
             anyhow::bail!("TUI command worker stopped unexpectedly");
         };
-        match sender.try_send(command) {
+        match sender.try_send((command, feedback)) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
@@ -261,7 +263,7 @@ impl Drop for CommandWorker {
 
 pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> CommandWorker {
     let data_dir = data_dir.to_owned();
-    let (sender, receiver) = bounded::<AppCommand>(8);
+    let (sender, receiver) = bounded::<(AppCommand, CommandFeedback)>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded(8);
     let shutdown = rivu_client::SessionCancellation::default();
@@ -272,31 +274,17 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
             .bind_instance(instance_id)
             .map(|()| session)
             .map_err(WorkerFailure::from);
-        while let Ok(command) = receiver.recv() {
+        while let Ok((command, feedback)) = receiver.recv() {
             if stop.is_cancelled() {
                 break;
             }
-            let reorder = matches!(
-                &command,
-                AppCommand::Core(
-                    Command::MoveQueue { .. }
-                        | Command::MovePlaylist { .. }
-                        | Command::MovePlaylistEntries { .. }
-                )
-            );
-            let playlist_name = matches!(
-                &command,
-                AppCommand::Core(
-                    Command::CreatePlaylistFromQueue { .. } | Command::RenamePlaylist { .. }
-                )
-            );
             let result = match &mut session {
                 Ok(session) => session.request_ack(command).map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
             crossbeam_channel::select! {
-                send(result_sender, CommandCompletion { reorder, playlist_name, result }) -> _ => {}
+                send(result_sender, CommandCompletion { feedback, result }) -> _ => {}
                 recv(stop_receiver) -> _ => break,
             }
             if instance_changed {

@@ -5,7 +5,7 @@ mod worker;
 
 use render::{draw, draw_loading};
 use state::{KeyAction, NoticeKind, TuiState, resolve_key};
-use worker::{spawn_command_worker, spawn_query_worker, spawn_watcher};
+use worker::{CommandFeedback, spawn_command_worker, spawn_query_worker, spawn_watcher};
 
 use crate::projection::TuiSnapshot;
 use anyhow::{Context, Result};
@@ -41,7 +41,7 @@ use std::{
 pub fn run(
     data_dir: &Path,
     language: &str,
-    startup: impl Future<Output = Result<()>>,
+    startup: impl Future<Output = Result<u32>>,
 ) -> Result<()> {
     let termination = TerminalTermination::new().context("register terminal shutdown signals")?;
     let i18n = Arc::new(Localizer::for_terminal(language));
@@ -156,7 +156,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     i18n: Arc<Localizer>,
     terminating: &AtomicBool,
-    startup: impl Future<Output = Result<()>>,
+    startup: impl Future<Output = Result<u32>>,
     next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
 ) -> Result<()>
 where
@@ -173,14 +173,14 @@ where
             if updates.is_none() {
                 // Sample completion once per existing input iteration (at most
                 // 50ms idle). I/O stays asynchronous without a waiter thread.
-                match startup
+                let instance_id = match startup
                     .as_mut()
                     .poll(&mut TaskContext::from_waker(Waker::noop()))
                 {
                     Poll::Pending => return Ok(None),
                     Poll::Ready(result) => result?,
-                }
-                updates = Some(spawn_watcher(data_dir));
+                };
+                updates = Some(spawn_watcher(data_dir, instance_id));
             }
             updates
                 .as_ref()
@@ -218,6 +218,43 @@ where
     )
 }
 
+fn apply_command_completion(
+    ui: &mut state::UiState,
+    completion: worker::CommandCompletion,
+) -> Result<()> {
+    let failure = match completion.result {
+        Ok(ack) if ack.is_success() => None,
+        Ok(ack) => Some((
+            ack.status == rivu_protocol::response::AckStatus::Unknown,
+            ack.error,
+        )),
+        Err(error) => Some((error.command_outcome_unknown(), Some(error.into_message()?))),
+    };
+    let result = match failure {
+        None => Ok(()),
+        Some((true, _)) if completion.feedback == CommandFeedback::Reorder => {
+            ui.reorder_unknown();
+            return Ok(());
+        }
+        Some((true, _)) if completion.feedback == CommandFeedback::PlaylistName => {
+            Err(ui.i18n.text("terminal-playlist-name-unknown").into())
+        }
+        Some((_, error)) => {
+            Err(error.unwrap_or_else(|| ui.i18n.text("terminal-command-rejected").into()))
+        }
+    };
+    match completion.feedback {
+        CommandFeedback::Reorder => ui.complete_reorder(result),
+        CommandFeedback::PlaylistName => ui.complete_playlist_name(result),
+        CommandFeedback::Notice => {
+            if let Err(error) = result {
+                ui.set_notice(error, NoticeKind::Error);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_loop_with_workers<B: ratatui::backend::Backend>(
     data_dir: &Path,
     terminal: &mut Terminal<B>,
@@ -249,7 +286,7 @@ where
             if workers.is_none() {
                 workers = Some(spawn_workers(data_dir, instance_id));
             }
-            let next = TuiSnapshot::from_client(state, tui.as_ref().map(|tui| &tui.snapshot));
+            let next = TuiSnapshot::from_client(state);
             match &mut tui {
                 Some(tui) => {
                     redraw |= !next.same_presentation(&tui.snapshot);
@@ -292,36 +329,7 @@ where
         };
         let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
         while let Some(completion) = commands.take_result()? {
-            let unknown = i18n.text("terminal-playlist-name-unknown");
-            let result = match completion.result {
-                Ok(ack)
-                    if completion.playlist_name
-                        && ack.status == rivu_protocol::response::AckStatus::Unknown =>
-                {
-                    Err(unknown.into())
-                }
-                Ok(ack) if !ack.is_success() => Err(ack
-                    .error
-                    .unwrap_or_else(|| i18n.text("terminal-command-rejected").into())),
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    let outcome_unknown =
-                        completion.playlist_name && error.command_outcome_unknown();
-                    let message = error.into_message()?;
-                    Err(if outcome_unknown {
-                        unknown.into()
-                    } else {
-                        message
-                    })
-                }
-            };
-            if completion.reorder {
-                tui.ui.complete_reorder(result);
-            } else if completion.playlist_name {
-                tui.ui.complete_playlist_name(result);
-            } else if let Err(error) = result {
-                tui.ui.set_notice(error, NoticeKind::Error);
-            }
+            apply_command_completion(&mut tui.ui, completion)?;
             redraw = true;
             immediate_redraw = true;
         }
@@ -403,26 +411,35 @@ where
                         | KeyAction::SaveOrder(_)
                         | KeyAction::WritePlaylistName(_)
                         | KeyAction::Shutdown) => {
-                            let is_reorder = matches!(action, KeyAction::SaveOrder(_));
-                            let writes_name = matches!(action, KeyAction::WritePlaylistName(_));
-                            let command = match action {
-                                KeyAction::Command(command)
-                                | KeyAction::SaveOrder(command)
-                                | KeyAction::WritePlaylistName(command) => command.into(),
-                                _ => rivu_protocol::AppCommand::Shutdown,
+                            let (command, feedback) = match action {
+                                KeyAction::Command(command) => {
+                                    (command.into(), CommandFeedback::Notice)
+                                }
+                                KeyAction::SaveOrder(command) => {
+                                    (command.into(), CommandFeedback::Reorder)
+                                }
+                                KeyAction::WritePlaylistName(command) => {
+                                    (command.into(), CommandFeedback::PlaylistName)
+                                }
+                                KeyAction::Shutdown => {
+                                    (rivu_protocol::AppCommand::Shutdown, CommandFeedback::Notice)
+                                }
+                                _ => unreachable!("command action"),
                             };
-                            if commands.request(command)? {
-                                if is_reorder {
+                            if commands.request(command, feedback)? {
+                                if feedback == CommandFeedback::Reorder {
                                     tui.ui.reorder_submitted();
                                 }
                             } else {
                                 let message = i18n.text("terminal-command-busy").into();
-                                if is_reorder {
-                                    tui.ui.reorder_busy(message);
-                                } else if writes_name {
-                                    tui.ui.complete_playlist_name(Err(message));
-                                } else {
-                                    tui.ui.set_notice(message, NoticeKind::Warning);
+                                match feedback {
+                                    CommandFeedback::Reorder => tui.ui.reorder_busy(message),
+                                    CommandFeedback::PlaylistName => {
+                                        tui.ui.complete_playlist_name(Err(message))
+                                    }
+                                    CommandFeedback::Notice => {
+                                        tui.ui.set_notice(message, NoticeKind::Warning)
+                                    }
                                 }
                                 redraw = true;
                                 immediate_redraw = true;
@@ -467,7 +484,7 @@ mod startup_tests {
     }
 
     impl Future for PendingStartup {
-        type Output = Result<()>;
+        type Output = Result<u32>;
 
         fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
             self.polled.store(true, Ordering::Relaxed);

@@ -1314,7 +1314,7 @@ pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> Que
 fn other_header_tracks_unfiltered_membership_and_rejects_stale_results() {
     for roots in [vec![], vec![PathBuf::from("/music")]] {
         let mut state = query_snapshot();
-        state.system.library_roots = Arc::new(roots.clone());
+        Arc::make_mut(&mut state.configuration).library_roots = roots.clone();
         let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.view = View::Tree(LibraryTree::new(&roots));
         render_view(&mut tui.ui);
@@ -1361,9 +1361,9 @@ fn other_header_tracks_unfiltered_membership_and_rejects_stale_results() {
 #[test]
 fn other_header_selection_survives_membership_refresh() {
     let mut state = query_snapshot();
-    state.system.library_roots = Arc::new(vec![PathBuf::from("/music")]);
+    Arc::make_mut(&mut state.configuration).library_roots = vec![PathBuf::from("/music")];
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-    tui.ui.view = View::Tree(LibraryTree::new(&state.system.library_roots));
+    tui.ui.view = View::Tree(LibraryTree::new(&state.configuration.library_roots));
     render_view(&mut tui.ui);
     load_visible(&mut tui.ui, &state);
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
@@ -1902,7 +1902,7 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
 #[test]
 fn hidden_pages_follow_page_size_and_library_root_changes() {
     let mut state = query_snapshot();
-    state.system.library_roots = Arc::new(vec!["/one".into()]);
+    Arc::make_mut(&mut state.configuration).library_roots = vec!["/one".into()];
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     load_visible(&mut tui.ui, &state);
@@ -1912,8 +1912,9 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
     tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
     let old = tui.ui.query_request(&state).unwrap();
     let mut next = state.clone();
-    Arc::make_mut(&mut next.configuration).query_batch_size = 5;
-    next.system.library_roots = Arc::new(vec!["/two".into()]);
+    let config = Arc::make_mut(&mut next.configuration);
+    config.query_batch_size = 5;
+    config.library_roots = vec!["/two".into()];
     tui.apply_snapshot(next.clone());
     let View::Playlists(playlists) = tui.ui.cached_playlists.as_ref().unwrap() else {
         unreachable!()

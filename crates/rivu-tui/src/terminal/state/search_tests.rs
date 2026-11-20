@@ -32,7 +32,7 @@ fn library_fixture() -> (UiState, TuiSnapshot) {
     let mut state = query_snapshot();
     Arc::make_mut(&mut state.configuration).query_batch_size = 2;
     let mut ui = UiState {
-        view: View::Tree(LibraryTree::new(&state.system.library_roots)),
+        view: View::Tree(LibraryTree::new(&state.configuration.library_roots)),
         ..UiState::default()
     };
     submit(&mut ui, &state, "active");
@@ -678,7 +678,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         Arc::make_mut(&mut state.configuration).query_batch_size = 2;
         let mut ui = UiState {
             view: match kind {
-                0 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                0 => View::Tree(LibraryTree::new(&state.configuration.library_roots)),
                 1 => View::Tree(LibraryTree {
                     directory: "/music".into(),
                     ..LibraryTree::default()
@@ -898,7 +898,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
             let ui = UiState {
                 view: match kind {
                     0 => View::Queue,
-                    1 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                    1 => View::Tree(LibraryTree::new(&state.configuration.library_roots)),
                     2 => View::Tree(LibraryTree {
                         directory: "/music".into(),
                         ..LibraryTree::default()
@@ -1370,8 +1370,8 @@ fn container_scan_clear_survives_tab_cache_and_navigation_rejects_late_pages() {
 #[test]
 fn root_global_search_and_clear_never_restore_an_unreachable_container() {
     let mut state = query_snapshot();
-    state.system.library_roots = Arc::new(vec!["/a".into(), "/b".into()]);
-    let mut tree = LibraryTree::new(&state.system.library_roots);
+    Arc::make_mut(&mut state.configuration).library_roots = vec!["/a".into(), "/b".into()];
+    let mut tree = LibraryTree::new(&state.configuration.library_roots);
     tree.other_present = Some(true);
     let mut ui = UiState {
         view: View::Tree(tree),
@@ -1411,7 +1411,7 @@ fn navigation_cancels_pending_track_and_occurrence_search_locates() {
         let mut ui = UiState {
             view: match kind {
                 0 => View::Queue,
-                1 => View::Tree(LibraryTree::new(&state.system.library_roots)),
+                1 => View::Tree(LibraryTree::new(&state.configuration.library_roots)),
                 2 => View::Tree(LibraryTree {
                     directory: "/music".into(),
                     ..LibraryTree::default()

@@ -185,10 +185,11 @@ impl App {
     pub fn open_tui(data_dir: PathBuf, config_path: PathBuf) -> Result<()> {
         let data_dir = frontend_host::absolute(data_dir)?;
         let config_path = frontend_host::absolute(config_path)?;
-        rivu_tui::run(&data_dir, "auto", async {
-            frontend_host::ensure_service(&data_dir, &config_path).await?;
-            Ok(())
-        })
+        rivu_tui::run(
+            &data_dir,
+            "auto",
+            frontend_host::ensure_service(&data_dir, &config_path),
+        )
     }
     pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {
         rivu_utils::logging::init(None, rivu_utils::logging::StderrFormat::Text)?;

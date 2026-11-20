@@ -232,7 +232,11 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
                     worker: Some(worker),
                 };
                 assert!(commands.take_result().is_err());
-                assert!(commands.request(AppCommand::Shutdown).is_err());
+                assert!(
+                    commands
+                        .request(AppCommand::Shutdown, CommandFeedback::Notice)
+                        .is_err()
+                );
                 commands
             } else {
                 spawn_command_worker(directory.path(), 1)
@@ -298,7 +302,11 @@ fn command_worker_empty_results_and_full_queue_remain_live() {
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let worker = spawn_command_worker(directory.path(), 1);
     assert!(worker.take_result().unwrap().is_none());
-    assert!(worker.request(AppCommand::Shutdown).unwrap());
+    assert!(
+        worker
+            .request(AppCommand::Shutdown, CommandFeedback::Notice)
+            .unwrap()
+    );
     let mut stream = listener.accept().unwrap().0;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -311,9 +319,17 @@ fn command_worker_empty_results_and_full_queue_remain_live() {
     // Hello is physically pending, so all eight queue slots can be filled
     // without racing command completion or mistaking the worker for dead.
     for _ in 0..8 {
-        assert!(worker.request(AppCommand::Shutdown).unwrap());
+        assert!(
+            worker
+                .request(AppCommand::Shutdown, CommandFeedback::Notice)
+                .unwrap()
+        );
     }
-    assert!(!worker.request(AppCommand::Shutdown).unwrap());
+    assert!(
+        !worker
+            .request(AppCommand::Shutdown, CommandFeedback::Notice)
+            .unwrap()
+    );
     assert!(worker.take_result().unwrap().is_none());
     drop(worker);
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
@@ -326,7 +342,7 @@ fn watcher_shutdown_closes_stalled_initial_handshake() {
     let directory = tempfile::tempdir().unwrap();
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let watcher = spawn_watcher(directory.path());
+    let watcher = spawn_watcher(directory.path(), 1);
     let mut stream = listener.accept().unwrap().0;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -351,12 +367,41 @@ fn watcher_shutdown_closes_stalled_initial_handshake() {
 #[test]
 fn watcher_reports_initial_connection_failure_to_loading_consumer() {
     let directory = tempfile::tempdir().unwrap();
-    let watcher = spawn_watcher(directory.path());
+    let watcher = spawn_watcher(directory.path(), 1);
     watcher
         .receiver
         .recv_timeout(Duration::from_secs(5))
         .unwrap();
     assert!(watcher.take_update().is_err());
+}
+
+#[test]
+fn watcher_rejects_replacement_at_initial_hello() {
+    use std::{io::Read, os::unix::net::UnixListener};
+
+    if rivu::test_support::run_in_subprocess(
+        "terminal::worker::tests::watcher_rejects_replacement_at_initial_hello",
+        Duration::from_secs(15),
+    ) {
+        return;
+    }
+    let directory = ipc::socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let watcher = spawn_watcher(directory.path(), 1);
+    let mut stream = listener.accept().unwrap().0;
+    ipc::complete_test_handshake_for_instance(&mut stream, 2);
+    watcher
+        .receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let error = watcher.take_update().expect_err("replacement rejected");
+    assert!(error.to_string().contains("instance changed"));
+    assert_eq!(
+        stream.read(&mut [0]).unwrap(),
+        0,
+        "replacement received a watch"
+    );
 }
 
 #[test]
@@ -473,7 +518,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             })),
         );
     });
-    let watcher = spawn_watcher(directory.path());
+    let watcher = spawn_watcher(directory.path(), 1);
     watcher
         .receiver
         .recv_timeout(Duration::from_secs(5))
@@ -712,17 +757,17 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         );
     });
     let worker = spawn_command_worker(directory.path(), 1);
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(
-            Command::CreatePlaylist {
-                name: "first".into(),
-            }
-            .into(),
-        )
-        .unwrap();
+    assert!(
+        worker
+            .request(
+                Command::CreatePlaylist {
+                    name: "first".into()
+                }
+                .into(),
+                CommandFeedback::Notice
+            )
+            .unwrap()
+    );
     let failure = worker
         .results
         .recv_timeout(Duration::from_secs(5))
@@ -730,17 +775,17 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .result
         .unwrap_err();
     failure.into_message().unwrap();
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(
-            Command::CreatePlaylist {
-                name: "second".into(),
-            }
-            .into(),
-        )
-        .unwrap();
+    assert!(
+        worker
+            .request(
+                Command::CreatePlaylist {
+                    name: "second".into()
+                }
+                .into(),
+                CommandFeedback::Notice
+            )
+            .unwrap()
+    );
     let ack = worker
         .results
         .recv_timeout(Duration::from_secs(5))
@@ -770,29 +815,29 @@ fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
         started.send(stream).unwrap();
     });
     let worker = spawn_command_worker(directory.path(), 1);
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(
-            Command::CreatePlaylist {
-                name: "first".into(),
-            }
-            .into(),
-        )
-        .unwrap();
+    assert!(
+        worker
+            .request(
+                Command::CreatePlaylist {
+                    name: "first".into()
+                }
+                .into(),
+                CommandFeedback::Notice
+            )
+            .unwrap()
+    );
     let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(
-            Command::CreatePlaylist {
-                name: "second".into(),
-            }
-            .into(),
-        )
-        .unwrap();
+    assert!(
+        worker
+            .request(
+                Command::CreatePlaylist {
+                    name: "second".into()
+                }
+                .into(),
+                CommandFeedback::Notice
+            )
+            .unwrap()
+    );
     drop(worker);
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     server.join().unwrap();
@@ -817,7 +862,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         }
     });
-    let watcher = spawn_watcher(directory.path());
+    let watcher = spawn_watcher(directory.path(), 1);
     watcher
         .receiver
         .recv_timeout(Duration::from_secs(5))
@@ -825,21 +870,23 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
     let (instance_id, _) = watcher.latest.lock().take().unwrap().unwrap();
     assert_eq!(instance_id, 1);
     let mut commands = spawn_command_worker(directory.path(), instance_id);
-    commands
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(
-            Command::CreatePlaylist {
-                name: "A-only".into(),
-            }
-            .into(),
-        )
-        .unwrap();
+    assert!(
+        commands
+            .request(
+                Command::CreatePlaylist {
+                    name: "A-only".into()
+                }
+                .into(),
+                CommandFeedback::Notice
+            )
+            .unwrap()
+    );
     commands.worker.take().unwrap().join().unwrap();
     // A disconnected submission must preserve the buffered identity failure,
     // rather than reporting either queue saturation or generic worker death.
-    let error = commands.request(AppCommand::Shutdown).unwrap_err();
+    let error = commands
+        .request(AppCommand::Shutdown, CommandFeedback::Notice)
+        .unwrap_err();
     assert!(error.is::<QueryError>());
     let mut queries = spawn_query_worker(directory.path(), instance_id);
     let mut tracker = QueryTracker::default();
@@ -876,12 +923,14 @@ fn command_worker_reconnection_rejects_replacement_instance() {
     });
     let worker = spawn_command_worker(directory.path(), 1);
     for name in ["ambiguous", "old-baseline"] {
-        worker
-            .sender
-            .as_ref()
-            .unwrap()
-            .send(Command::CreatePlaylist { name: name.into() }.into())
-            .unwrap();
+        assert!(
+            worker
+                .request(
+                    Command::CreatePlaylist { name: name.into() }.into(),
+                    CommandFeedback::Notice,
+                )
+                .unwrap()
+        );
         let failure = worker
             .results
             .recv_timeout(Duration::from_secs(5))
@@ -995,7 +1044,9 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
     let config = directory.path().join("config.toml");
     let _core =
         rivu::test_support::frontend::FrontendFixture::start(directory.path(), &config).unwrap();
-    let watcher = spawn_watcher(directory.path());
+    let mut bootstrap = rivu_client::client_session(directory.path());
+    bootstrap.get_state(Default::default()).unwrap();
+    let watcher = spawn_watcher(directory.path(), bootstrap.instance_id().unwrap());
     watcher
         .receiver
         .recv_timeout(Duration::from_secs(5))
@@ -1003,12 +1054,11 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
     let (instance, initial) = watcher.take_update().unwrap().unwrap();
     assert!(!initial.system.shutting_down);
     let worker = spawn_command_worker(directory.path(), instance);
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(AppCommand::Shutdown)
-        .unwrap();
+    assert!(
+        worker
+            .request(AppCommand::Shutdown, CommandFeedback::Notice)
+            .unwrap()
+    );
     assert!(
         worker
             .results
@@ -1083,12 +1133,11 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
         listener
     });
     let worker = spawn_command_worker(directory.path(), 1);
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(AppCommand::Shutdown)
-        .unwrap();
+    assert!(
+        worker
+            .request(AppCommand::Shutdown, CommandFeedback::Notice)
+            .unwrap()
+    );
     let ack = worker
         .results
         .recv_timeout(Duration::from_secs(5))
@@ -1096,12 +1145,11 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
         .result
         .unwrap();
     assert!(!ack.is_success());
-    worker
-        .sender
-        .as_ref()
-        .unwrap()
-        .send(AppCommand::Shutdown)
-        .unwrap();
+    assert!(
+        worker
+            .request(AppCommand::Shutdown, CommandFeedback::Notice)
+            .unwrap()
+    );
     let error = worker
         .results
         .recv_timeout(Duration::from_secs(5))

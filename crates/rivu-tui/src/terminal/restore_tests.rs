@@ -19,7 +19,7 @@ fn confirm_raw_mode_with_pty_parent() {
 struct PanicAfterLoadingScreen(bool);
 
 impl Future for PanicAfterLoadingScreen {
-    type Output = Result<()>;
+    type Output = Result<u32>;
 
     fn poll(mut self: std::pin::Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
         if self.0 {

@@ -33,8 +33,9 @@ more than once. Clear search before reordering.
 
 If the edited list changes before saving, the preview is discarded; press Esc
 to dismiss the notice and start again. Other lists and playback continue to
-refresh. A failed save with an unchanged list leaves the preview available for
-retry or cancellation. Exiting without confirming does not save the preview.
+refresh. A rejected save with an unchanged list leaves the preview available for
+retry or cancellation. If the save result is unknown, the preview is discarded;
+press Esc and check the list before starting another move.
 After saving a catalog move, the TUI checks the destination page first and
 restores selection by playlist ID, even if another edit changed its position.
 
@@ -159,5 +160,7 @@ waiting. `SIGINT` and `SIGTERM` also close only the client. These exits cancel
 frontend readiness waiting and restore terminal mode, screen, and cursor; the
 independent Core keeps its own lifetime and playback is not stopped.
 
-Core shutdown exits normally; a lost connection without shutdown state reports an error.
+The TUI attaches only to the Core instance confirmed at startup. A replacement
+instance or a lost connection without shutdown state reports an error; Core
+shutdown exits normally.
 
