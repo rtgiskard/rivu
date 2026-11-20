@@ -48,32 +48,39 @@ impl TuiState {
         self.ui.sync_reorder(&next);
         let page_size_changed =
             self.snapshot.configuration.query_batch_size != next.configuration.query_batch_size;
-        let queue_filter = if matches!(self.ui.view, View::Queue) {
+        let list_visible = !self.ui.details_active && !self.ui.show_help;
+        let queue_active = matches!(self.ui.view, View::Queue);
+        let queue_filter = if queue_active {
             self.ui.search.applied_query.as_str()
         } else {
             ""
         };
-        self.ui
-            .queue
-            .sync_snapshot(&self.snapshot, &next, queue_filter, page_size_changed);
+        self.ui.queue.sync_snapshot(
+            &self.snapshot,
+            &next,
+            queue_filter,
+            page_size_changed,
+            list_visible && queue_active,
+        );
         let was_playlist_detail = matches!(self.ui.view, View::PlaylistDetail { .. });
         self.ui.view.sync_snapshot(
             &self.snapshot,
             &next,
             page_size_changed,
             &self.ui.search.applied_query,
+            list_visible,
         );
         if was_playlist_detail && matches!(self.ui.view, View::Playlists(_)) {
             self.ui.clear_search(&next);
         }
         if let Some(tree) = &mut self.ui.cached_library {
-            tree.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
+            tree.sync_snapshot(&self.snapshot, &next, page_size_changed, "", false);
         }
         if let Some(playlists) = &mut self.ui.cached_playlists {
-            playlists.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
+            playlists.sync_snapshot(&self.snapshot, &next, page_size_changed, "", false);
         }
         if let Some(recent) = &mut self.ui.cached_recent {
-            recent.sync_snapshot(&self.snapshot, &next, page_size_changed, "");
+            recent.sync_snapshot(&self.snapshot, &next, page_size_changed, "", false);
         }
         self.ui.sync_details(&next);
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
@@ -370,6 +377,7 @@ impl QueuePage {
         next: &TuiSnapshot,
         filter: &str,
         page_size_changed: bool,
+        retain_display: bool,
     ) {
         if page_size_changed {
             self.rows.clear_pages();
@@ -380,13 +388,13 @@ impl QueuePage {
             return;
         }
         if !changes.coordinates_changed {
-            self.rows.invalidate_pages();
+            self.rows.invalidate_pages(retain_display);
             return;
         }
         self.preserve_selection();
         let selected = self.rows.selection.selected().unwrap_or(0);
         let filtered_total = self.rows.total;
-        self.rows.invalidate();
+        self.rows.invalidate(retain_display);
         if filter.is_empty() {
             self.rows.total = next.queue.total;
             self.rows.loaded = true;
@@ -506,16 +514,15 @@ impl LibraryPage {
         self.rows.selected().map(|row| row.id).or(self.selected_id)
     }
 
-    fn invalidate(&mut self, coordinates_changed: bool) {
+    fn invalidate(&mut self, coordinates_changed: bool, retain_display: bool) {
         if coordinates_changed {
             self.anchor = self.anchor.or_else(|| self.selected_identity());
         }
-        self.rows.invalidate();
+        self.rows.invalidate(retain_display);
     }
 
     fn refilter(&mut self) {
-        self.invalidate(true);
-        self.rows.discard_refresh();
+        self.invalidate(true, false);
         self.rows.selection.select(Some(0));
     }
 
@@ -618,6 +625,7 @@ impl View {
         next: &TuiSnapshot,
         page_size_changed: bool,
         query: &str,
+        retain_display: bool,
     ) -> bool {
         if let Self::Recent(recent) = self {
             recent.sync(next, query);
@@ -679,16 +687,16 @@ impl View {
             tree.other_present = None;
         }
         if rows_changed && !coordinates_changed && !page_size_changed {
-            self.invalidate_payload();
+            self.invalidate_payload(retain_display);
         } else if coordinates_changed && matches!(self, Self::Tree(_) | Self::Playlists(_)) {
-            self.retain_container_identity(!page_size_changed);
+            self.retain_container_identity(page_size_changed, retain_display);
         } else if rows_changed || page_size_changed {
             match self {
                 Self::LibraryResults(results) => {
                     if page_size_changed {
                         results.clear();
                     } else {
-                        results.invalidate(coordinates_changed);
+                        results.invalidate(coordinates_changed, retain_display);
                     }
                 }
                 Self::Tree(tree) => {
@@ -712,7 +720,7 @@ impl View {
                     if page_size_changed {
                         detail.entries.clear();
                     } else {
-                        detail.entries.invalidate();
+                        detail.entries.invalidate(retain_display);
                     }
                 }
                 Self::Queue | Self::Recent(_) => {}
@@ -731,11 +739,11 @@ impl View {
     }
 
     // Payload-only changes keep membership, counts and navigation coordinates.
-    fn invalidate_payload(&mut self) {
+    fn invalidate_payload(&mut self, retain_display: bool) {
         match self {
-            Self::LibraryResults(results) => results.invalidate_pages(),
-            Self::Tree(tree) => tree.entries.invalidate_pages(),
-            Self::PlaylistDetail { detail, .. } => detail.entries.invalidate_pages(),
+            Self::LibraryResults(results) => results.invalidate_pages(retain_display),
+            Self::Tree(tree) => tree.entries.invalidate_pages(retain_display),
+            Self::PlaylistDetail { detail, .. } => detail.entries.invalidate_pages(retain_display),
             Self::Queue | Self::Recent(_) => {}
             Self::Playlists(_) => {}
         }
@@ -1026,7 +1034,7 @@ impl View {
 }
 
 impl View {
-    fn retain_container_identity(&mut self, retain_display: bool) {
+    fn retain_container_identity(&mut self, reset_lookup: bool, retain_display: bool) {
         match self {
             View::Tree(tree) => {
                 let container = tree
@@ -1049,10 +1057,10 @@ impl View {
                         })
                         .or(tree.selected_track_id);
                 }
-                if retain_display {
-                    tree.entries.invalidate_identity(container);
-                } else {
+                if reset_lookup {
                     tree.entries.retain_identity(container);
+                } else {
+                    tree.entries.invalidate_identity(container, retain_display);
                 }
                 if tree.anchor.is_some() {
                     tree.entries.identity_lookup = None;
@@ -1068,10 +1076,10 @@ impl View {
                         rows.selected()
                             .map(|row| ContainerIdentity::Playlist(row.id))
                     });
-                if retain_display {
-                    rows.invalidate_identity(identity);
-                } else {
+                if reset_lookup {
                     rows.retain_identity(identity);
+                } else {
+                    rows.invalidate_identity(identity, retain_display);
                 }
             }
             _ => unreachable!("only container views retain container identities"),
@@ -1082,7 +1090,7 @@ impl View {
         match self {
             View::Queue => queue.refilter(state),
             View::LibraryResults(results) => results.refilter(),
-            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(false),
+            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(true, false),
             View::PlaylistDetail { detail, .. } => {
                 detail.entry_anchor = detail
                     .entry_anchor
@@ -1224,25 +1232,26 @@ impl UiState {
         let Some(other_present) = tree.other_present else {
             return false;
         };
-        let limit = state.configuration.query_batch_size as usize;
-        let mut changed = false;
+        let limit = (state.configuration.query_batch_size as usize).max(1);
+        let root_count = tree.roots.len();
+        let total = root_count + usize::from(other_present);
+        let mut changed = tree.entries.locate_identity(|identity| match identity {
+            ContainerIdentity::Directory(path) => tree.roots.binary_search(path).ok(),
+            ContainerIdentity::OtherTracks => other_present.then_some(root_count),
+            ContainerIdentity::Playlist(_) => None,
+        });
         while let Some(offset) = tree.entries.next_offset(limit) {
-            let rows: Vec<_> = tree
-                .roots
+            let end = offset.saturating_add(limit);
+            let rows = tree.roots[offset.min(root_count)..end.min(root_count)]
                 .iter()
                 .cloned()
                 .map(|path| DirectoryRow::Directory { path })
-                .chain(other_present.then_some(DirectoryRow::OtherTracks))
-                .skip(offset)
-                .take(limit)
+                .chain(
+                    (other_present && (offset..end).contains(&root_count))
+                        .then_some(DirectoryRow::OtherTracks),
+                )
                 .collect();
-            let total = tree.roots.len() + usize::from(other_present);
-            if tree
-                .entries
-                .resolve_identity(offset, total, &rows, matches_directory_identity)
-            {
-                tree.entries.insert(offset, limit, total, rows);
-            }
+            tree.entries.insert(offset, limit, total, rows);
             changed = true;
         }
         changed

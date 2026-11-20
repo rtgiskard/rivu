@@ -96,13 +96,7 @@ impl<T> PagedList<T> {
     }
 
     pub(super) fn clear(&mut self) {
-        self.clear_pages();
-        self.total = 0;
-        self.loaded = false;
-        self.fetch_size = 0;
-        if let Some((_, LookupStep::Scan(offset), _)) = &mut self.identity_lookup {
-            *offset = 0;
-        }
+        self.invalidate(false);
     }
 
     pub(super) fn clear_pages(&mut self) {
@@ -111,8 +105,8 @@ impl<T> PagedList<T> {
         self.columns = None;
     }
 
-    pub(super) fn invalidate(&mut self) {
-        self.invalidate_pages();
+    pub(super) fn invalidate(&mut self, retain_display: bool) {
+        self.invalidate_pages(retain_display);
         self.total = 0;
         self.loaded = false;
         self.fetch_size = 0;
@@ -121,7 +115,11 @@ impl<T> PagedList<T> {
         }
     }
 
-    pub(super) fn invalidate_pages(&mut self) {
+    pub(super) fn invalidate_pages(&mut self, retain_display: bool) {
+        if !retain_display {
+            self.clear_pages();
+            return;
+        }
         let now = Instant::now();
         self.expire_refresh(now);
         if self.retained.as_ref().is_some_and(|retained| {
@@ -447,12 +445,16 @@ impl<T> PagedList<T> {
         }
     }
 
-    pub(super) fn invalidate_identity(&mut self, identity: Option<ContainerIdentity>) {
+    pub(super) fn invalidate_identity(
+        &mut self,
+        identity: Option<ContainerIdentity>,
+        retain_display: bool,
+    ) {
         let scroll = self
             .identity_lookup
             .as_ref()
             .map_or(self.selection.offset(), |(_, _, scroll)| *scroll);
-        self.invalidate();
+        self.invalidate(retain_display);
         if let Some(retained) = &mut self.retained {
             retained.identity_scan = true;
         }
@@ -475,6 +477,24 @@ impl<T> PagedList<T> {
         self.clear();
         self.identity_lookup = identity.map(|identity| (identity, LookupStep::Scan(0), scroll));
         self.selection.select(Some(0));
+    }
+
+    pub(super) fn locate_identity(
+        &mut self,
+        locate: impl FnOnce(&ContainerIdentity) -> Option<usize>,
+    ) -> bool {
+        let Some((identity, _, scroll)) = self.identity_lookup.take() else {
+            return false;
+        };
+        if let Some(index) = locate(&identity) {
+            self.selection.select(Some(index));
+            *self.selection.offset_mut() = scroll;
+        } else {
+            self.selection.select(Some(0));
+            *self.selection.offset_mut() = 0;
+            self.discard_refresh();
+        }
+        true
     }
 
     // Catalogs and directory containers have no protocol locate endpoint. Keep

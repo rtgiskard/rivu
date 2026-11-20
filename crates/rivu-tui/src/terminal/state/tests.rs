@@ -1379,6 +1379,81 @@ fn other_header_selection_survives_membership_refresh() {
     assert_eq!(tree.entries.selected(), Some(&DirectoryRow::OtherTracks));
 }
 
+#[test]
+fn local_forest_restores_far_root_and_other_tracks_identities_after_refresh() {
+    let last_root = PathBuf::from("/root-31");
+    for (selected, removed, expected, index) in [
+        (
+            31,
+            false,
+            DirectoryRow::Directory {
+                path: last_root.clone(),
+            },
+            32,
+        ),
+        (
+            31,
+            true,
+            DirectoryRow::Directory {
+                path: "/first".into(),
+            },
+            0,
+        ),
+        (32, false, DirectoryRow::OtherTracks, 33),
+        (
+            32,
+            true,
+            DirectoryRow::Directory {
+                path: "/first".into(),
+            },
+            0,
+        ),
+    ] {
+        let mut state = query_snapshot();
+        let config = Arc::make_mut(&mut state.configuration);
+        config.query_batch_size = 2;
+        config.library_roots = (0..32)
+            .rev()
+            .map(|i| format!("/root-{i:02}").into())
+            .collect();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
+        tui.ui.view = View::Tree(LibraryTree::new(&state.configuration.library_roots));
+        load_visible(&mut tui.ui, &state);
+        let View::Tree(tree) = &mut tui.ui.view else {
+            unreachable!()
+        };
+        tree.entries.selection.select(Some(selected));
+        tree.entries.set_viewport(2);
+        tui.ui.prepare_local_view(&state);
+
+        let roots = &mut Arc::make_mut(&mut state.configuration).library_roots;
+        roots.push("/first".into());
+        if selected == 31 && removed {
+            roots.retain(|path| path != &last_root);
+        }
+        state.library.structure_revision += 1;
+        tui.apply_snapshot(state.clone());
+        assert!(!tui.ui.prepare_local_view(&state));
+        let request = tui.ui.query_request(&state).unwrap();
+        assert_eq!(request.demand.kind(), ReadKind::OtherTracksCount);
+        let other = usize::from(selected != 32 || !removed);
+        assert!(
+            tui.ui
+                .apply_query(&state, &request, Ok(response(&request, other)))
+        );
+        tui.ui.prepare_local_view(&state);
+
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert!(tree.entries.identity_lookup.is_none());
+        assert_eq!(tree.entries.selection.selected(), Some(index));
+        assert_eq!(tree.entries.selected(), Some(&expected));
+        assert!(tree.entries.pages.len() <= 4);
+        assert!(!tui.ui.prepare_local_view(&state));
+    }
+}
+
 pub(in crate::terminal) fn load_visible(ui: &mut UiState, state: &TuiSnapshot) {
     ui.prepare_local_view(state);
     for _ in 0..16 {
@@ -1871,11 +1946,13 @@ fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion(
         unreachable!()
     };
     assert!(tree.entries.pages.is_empty());
+    assert!(tree.entries.retained.is_none());
     assert_eq!(tree.directory, Path::new("/music"));
     let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap() else {
         unreachable!()
     };
     assert!(detail.entries.pages.is_empty());
+    assert!(detail.entries.retained.is_none());
     assert_eq!(detail.selected_entry_id, Some(0));
     Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 10);
     tui.apply_snapshot(next.clone());
@@ -4057,20 +4134,25 @@ fn deleted_background_playlist_cannot_retire_or_unpark_foreground_details() {
 }
 
 #[test]
-fn help_hides_page_demand_without_discarding_its_invalidated_rows() {
+fn help_hides_page_demand_and_skips_stale_rows_without_losing_queue_identity() {
     let state = query_snapshot();
     let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
     load_queue(&mut tui.ui, &state);
+    let selected_id = tui.ui.queue.selected().unwrap().id;
     tui.ui.show_help = true;
     let mut next = state.clone();
     next.queue.revision += 1;
     tui.apply_snapshot(next.clone());
     assert!(tui.ui.queue.pages.is_empty());
+    assert!(tui.ui.queue.retained.is_none());
     for _ in 0..8 {
         assert!(tui.ui.query_request(&next).is_none());
     }
     tui.ui.show_help = false;
-    assert!(tui.ui.query_request(&next).is_some());
+    assert_eq!(
+        tui.ui.query_request(&next).unwrap().demand.kind(),
+        ReadKind::QueueSelection(selected_id),
+    );
 }
 
 #[test]

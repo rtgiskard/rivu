@@ -62,7 +62,7 @@ fn invalidation_moves_non_clone_rows_into_display_without_authority() {
     list.insert(0, 2, 4, vec![Row(7), Row(8)]);
     list.insert(2, 2, 4, vec![Row(9), Row(10)]);
     let address = list.get(0).unwrap() as *const Row;
-    list.invalidate();
+    list.invalidate(true);
 
     assert!(list.pages.is_empty());
     assert_eq!(list.total, 0);
@@ -86,15 +86,15 @@ fn invalidation_moves_non_clone_rows_into_display_without_authority() {
 #[test]
 fn repeated_invalidation_never_extends_a_continuous_stale_interval() {
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     let deadline = list.refresh_deadline().unwrap();
     assert!(!list.expire_refresh(deadline - Duration::from_nanos(1)));
-    list.invalidate();
+    list.invalidate(true);
     assert_eq!(list.refresh_deadline(), Some(deadline));
     list.insert(0, 2, 10, vec![10, 11]);
     assert_eq!(list.display(0), Some(&10));
     assert_eq!(list.display(2), Some(&2));
-    list.invalidate();
+    list.invalidate(true);
     assert_eq!(list.refresh_deadline(), Some(deadline));
     assert_eq!(list.display(0), Some(&10));
     assert_eq!(list.display(2), Some(&2));
@@ -106,14 +106,14 @@ fn repeated_invalidation_never_extends_a_continuous_stale_interval() {
     assert_eq!(list.display_total(), 0);
     assert!(!list.display_loaded());
     list.insert(0, 2, 10, vec![10, 11]);
-    list.invalidate();
+    list.invalidate(true);
     assert_eq!(list.refresh_deadline(), None);
     assert_eq!(list.display(0), None);
 
     list.insert(0, 2, 10, vec![10, 11]);
     list.insert(2, 2, 10, vec![2, 3]);
     assert!(list.retained.is_none());
-    list.invalidate();
+    list.invalidate(true);
     assert!(list.refresh_deadline().is_some());
     assert_eq!(list.display(0), Some(&10));
 }
@@ -121,7 +121,7 @@ fn repeated_invalidation_never_extends_a_continuous_stale_interval() {
 #[test]
 fn fresh_pages_replace_only_their_stale_page_and_equal_replies_restore_after_expiry() {
     let mut list = loaded_list();
-    list.invalidate_pages();
+    list.invalidate_pages(true);
     assert!(list.loaded);
     assert_eq!(list.total, 10);
     assert_eq!(list.get(2), None);
@@ -160,7 +160,7 @@ fn retention_is_bounded_to_visible_pages_and_the_visible_slice() {
     list.insert(4, 2, 10, vec![4, 5]);
     list.insert(0, 2, 10, vec![0, 1]);
     list.insert(6, 2, 10, vec![6, 7]);
-    list.invalidate();
+    list.invalidate(true);
 
     assert_eq!(list.retained.as_ref().unwrap().pages.len(), 2);
     assert_eq!(list.display(2), None);
@@ -173,9 +173,28 @@ fn retention_is_bounded_to_visible_pages_and_the_visible_slice() {
 }
 
 #[test]
+fn hidden_payload_invalidation_drops_rows_and_keeps_coordinates() {
+    let mut list = loaded_list();
+    list.selection.select(Some(2));
+    list.invalidate_pages(true);
+    list.insert(0, 2, 10, vec![10, 11]);
+    assert!(list.retained.is_some());
+
+    let selection = list.selection;
+    list.invalidate_pages(false);
+    assert!(list.pages.is_empty());
+    assert!(list.retained.is_none());
+    assert!(list.loaded);
+    assert_eq!(list.total, 10);
+    assert_eq!(list.fetch_size, 2);
+    assert_eq!(list.selection, selection);
+    assert_eq!(list.next_offset(2), Some(2));
+}
+
+#[test]
 fn destructive_resets_and_explicit_discard_remove_retained_display() {
     let mut list = loaded_list();
-    list.invalidate_pages();
+    list.invalidate_pages(true);
     list.clear_pages();
     assert_eq!(list.display(0), None);
     assert_eq!(list.refresh_deadline(), None);
@@ -183,7 +202,7 @@ fn destructive_resets_and_explicit_discard_remove_retained_display() {
     assert!(list.loaded);
 
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     list.clear();
     assert_eq!(list.display_total(), 0);
     assert!(!list.display_loaded());
@@ -191,7 +210,7 @@ fn destructive_resets_and_explicit_discard_remove_retained_display() {
     assert_eq!(list.refresh_deadline(), None);
 
     let mut list = loaded_list();
-    list.invalidate_pages();
+    list.invalidate_pages(true);
     list.insert(0, 2, 10, vec![10, 11]);
     list.discard_refresh();
     assert_eq!(list.get(0), Some(&10));
@@ -203,33 +222,33 @@ fn destructive_resets_and_explicit_discard_remove_retained_display() {
 #[test]
 fn navigation_and_viewport_or_page_size_changes_discard_retention() {
     let mut list = loaded_list();
-    list.invalidate_pages();
+    list.invalidate_pages(true);
     assert!(list.navigate_action(Action::Down, 4));
     assert_eq!(list.display(0), None);
     assert_eq!(list.refresh_deadline(), None);
 
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     assert!(list.navigate_action(Action::Down, 4));
     assert_eq!(list.display(0), None);
     assert_eq!(list.refresh_deadline(), None);
 
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     list.set_viewport(4);
     assert!(list.refresh_deadline().is_some());
     list.set_viewport(3);
     assert_eq!(list.refresh_deadline(), None);
 
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     list.selection.select(Some(2));
     *list.selection.offset_mut() = 2;
     list.set_viewport(4);
     assert_eq!(list.refresh_deadline(), None);
 
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     list.insert(0, 3, 10, vec![10, 11, 12]);
     assert_eq!(list.refresh_deadline(), None);
     assert_eq!(list.display(2), Some(&12));
@@ -242,7 +261,7 @@ fn identity_refresh() -> PagedList<usize> {
     list.selection.select(Some(8));
     *list.selection.offset_mut() = 8;
     list.insert(8, 2, 12, vec![8, 9]);
-    list.invalidate_identity(Some(ContainerIdentity::OtherTracks));
+    list.invalidate_identity(Some(ContainerIdentity::OtherTracks), true);
     list
 }
 
@@ -263,7 +282,7 @@ fn identity_scan_keeps_display_coordinates_without_authorizing_the_scan_selectio
     assert_eq!(list.display_selected(), Some(8));
     assert_eq!(list.display_offset(), 8);
     assert_eq!(list.display(8), Some(&8));
-    list.invalidate_identity(Some(ContainerIdentity::OtherTracks));
+    list.invalidate_identity(Some(ContainerIdentity::OtherTracks), true);
     assert_eq!(list.refresh_deadline(), Some(deadline));
     assert_eq!(list.display_offset(), 8);
     assert_eq!(list.display(8), Some(&8));
@@ -297,7 +316,7 @@ fn resolved_identity_and_destructive_identity_changes_release_old_display() {
 #[test]
 fn a_fresh_empty_reply_immediately_replaces_retained_rows_and_total() {
     let mut list = loaded_list();
-    list.invalidate();
+    list.invalidate(true);
     list.insert(0, 2, 0, Vec::new());
     assert!(list.loaded);
     assert!(list.display_loaded());
