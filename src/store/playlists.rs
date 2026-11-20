@@ -80,15 +80,23 @@ impl Store {
         let query = search_query(query);
         let total = self.playlist_match_count(playlist_id, query.as_deref())?;
         let ids = serde_json::to_string(entry_ids)?;
-        // Rank only inside SQLite, before restricting the bounded identity set.
-        // The unfiltered path retains indexed occurrence lookup without ranking.
+        // Include the full ranking prefix, but nothing after the last requested
+        // position. Fetch that bound by rowid rather than scanning playlist_order.
         let sql = if query.is_some() {
             format!(
-                "WITH matched AS (SELECT e.id,e.track_id,e.position,row_number() OVER (ORDER BY e.position,e.id)-1 AS offset FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {}) SELECT id,track_id,position,offset FROM matched WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
+                "WITH matched AS (
+                    SELECT e.id,e.track_id,e.position,row_number() OVER (ORDER BY e.position,e.id)-1 AS offset
+                    FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id
+                    WHERE e.playlist_id=?1 AND e.position <= (
+                        SELECT MAX(target.position) FROM playlist_entries target NOT INDEXED
+                        WHERE target.playlist_id=?1 AND target.id IN (SELECT value FROM json_each(?2))
+                    ) AND {}
+                 ) SELECT id,track_id,position,offset FROM matched
+                 WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
                 search_filter!("t", "?3")
             )
         } else {
-            "SELECT id,track_id,position,position AS offset FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id".into()
+            "SELECT id,track_id,position,position AS offset FROM playlist_entries NOT INDEXED WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id".into()
         };
         let mut statement = self.conn.prepare_cached(&sql)?;
         Ok(statement

@@ -275,16 +275,25 @@ impl Store {
             return Ok(Vec::new());
         }
         let query = search_query(query);
-        // Apply identity restriction after ranking only when matches differ from
-        // queue positions. Unfiltered reconciliation remains an indexed lookup.
+        // A target's rank only depends on the prefix through its position.
+        // Read the bounded ID set by rowid, not by scanning playlist_order.
         let sql = if query.is_some() {
             format!(
-                "WITH matched AS (SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {}) SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset FROM matched q JOIN tracks t ON t.id=q.track_id WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
+                "WITH matched AS (
+                    SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset
+                    FROM playlist_entries q JOIN tracks t ON t.id=q.track_id
+                    WHERE q.playlist_id=0 AND q.position <= (
+                        SELECT MAX(target.position) FROM playlist_entries target NOT INDEXED
+                        WHERE target.playlist_id=0 AND target.id IN (SELECT value FROM json_each(?1))
+                    ) AND {}
+                 ) SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset
+                 FROM matched q JOIN tracks t ON t.id=q.track_id
+                 WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
                 search_filter!("t", "?2")
             )
         } else {
             format!(
-                "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
+                "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q NOT INDEXED JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
             )
         };
         let mut statement = self.conn.prepare_cached(&sql)?;

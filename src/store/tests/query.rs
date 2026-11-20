@@ -199,6 +199,47 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
 }
 
 #[test]
+fn unfiltered_occurrence_lookup_work_is_bounded_by_requested_ids() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'track');
+         INSERT INTO playlists(id,name,position) VALUES(1,'playlist',0);
+         WITH RECURSIVE positions(p) AS (VALUES(0) UNION ALL SELECT p+1 FROM positions WHERE p<999)
+         INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+         SELECT p+1,0,1,p FROM positions UNION ALL SELECT p+1001,1,1,p FROM positions;",
+        )
+        .unwrap();
+    let counter = SqlVmSteps::new(&store.conn);
+    let queue = store.queue_entries(None, &[1000, 1, 1001]).unwrap();
+    let queue_steps = counter.take();
+    let playlist = store
+        .playlist_entry_locations(1, None, &[2000, 1001, 1])
+        .unwrap();
+    let playlist_steps = counter.take();
+    assert_eq!(
+        queue.iter().map(|r| (r.id, r.offset)).collect::<Vec<_>>(),
+        [(1, 0), (1000, 999)]
+    );
+    assert_eq!(
+        playlist
+            .iter()
+            .map(|r| (r.id, r.offset, r.total))
+            .collect::<Vec<_>>(),
+        [(1001, 0, 1000), (2000, 999, 1000)]
+    );
+    assert!(
+        queue_steps < 1000,
+        "queue lookup took {queue_steps} VM steps"
+    );
+    assert!(
+        playlist_steps < 1000,
+        "playlist lookup took {playlist_steps} VM steps"
+    );
+}
+
+#[test]
 fn filtered_continuation_sql_vm_steps_scale_linearly() {
     let small = filtered_traversal_steps(4096);
     let large = filtered_traversal_steps(8192);
@@ -319,6 +360,25 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             (entry_matches[0].id, 1, 0, 6),
             (entry_matches[3].id, 5, 3, 6)
         ]
+    );
+    assert!(
+        store
+            .queue_entries(
+                Some("needle"),
+                &[u64::try_from(hidden_entry).unwrap(), hidden_queue],
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .playlist_entry_locations(
+                playlist,
+                Some("needle"),
+                &[i64::try_from(queue_matches[0].id).unwrap()],
+            )
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(store.queue_page(None, 0, 20).unwrap(), original);
     assert_eq!(
