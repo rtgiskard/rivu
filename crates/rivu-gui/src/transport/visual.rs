@@ -9,6 +9,7 @@ use futures::{
 use parking_lot::{Mutex, RwLock};
 use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand};
 use rivu_format::config::Config;
+use rivu_protocol::audio::PlaybackRange;
 use rivu_protocol::model::Track;
 use rivu_protocol::pcm::{
     ControlReader, ControlRequest, DEADLINE, PcmPosition, PcmState, STATUS_SIZE, WELCOME_SIZE,
@@ -240,17 +241,13 @@ impl VisualClient {
             return;
         }
         let source_generation = track.map(|_| generation);
-        let range = track.and_then(|track| track.cue.as_ref()).map(|cue| {
-            rivu_protocol::audio::PlaybackRange {
-                start_seconds: cue.start_seconds(),
-                end_seconds: cue.end_seconds(),
-            }
-        });
+        let source = waveform_source(track);
+        let range = source.and_then(|(_, range)| range);
         let mut summary = self.state.summary.lock();
         // Restored selection and first playback can share generation zero.
         // Metadata edits and saved decoder hints do not replace an open source.
         let unchanged = desired.source_generation == source_generation
-            && summary.frame.path.as_deref() == track.map(|track| track.path.as_path())
+            && summary.frame.path.as_deref() == source.map(|(path, _)| path)
             && summary.frame.range == range;
         if unchanged {
             return;
@@ -703,6 +700,18 @@ async fn run_client(
             state.wake();
         }
     }
+}
+
+/// Restored selection can share a generation with first playback; only path
+/// and playback range identify the source within that generation.
+pub(crate) fn waveform_source(track: Option<&Track>) -> Option<(&Path, Option<PlaybackRange>)> {
+    track.map(|track| {
+        let range = track.cue.as_ref().map(|cue| PlaybackRange {
+            start_seconds: cue.start_seconds(),
+            end_seconds: cue.end_seconds(),
+        });
+        (track.path.as_path(), range)
+    })
 }
 
 #[cfg(test)]

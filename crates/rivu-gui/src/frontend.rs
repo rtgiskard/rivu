@@ -1,7 +1,7 @@
 //! Remote desktop state and bounded, instance-bound IPC workers.
 //! Logical query deadlines notify the view without releasing its physical wait.
 use crate::projection::GuiSnapshot;
-use crate::transport::visual::VisualClient;
+use crate::transport::visual::{VisualClient, waveform_source};
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
 use futures::channel::oneshot;
@@ -155,34 +155,45 @@ impl Shared {
             if self.stop.is_cancelled() {
                 return false;
             }
-            let device_changed = response.system.as_ref().is_some_and(|next| {
-                next.selected_device != published.observed.snapshot().system.selected_device
-            });
-            let invalidate_analysis = response.playback.as_ref().is_some_and(|next| {
-                next.source_generation != published.observed.snapshot().source_generation
-                    || next.playback.seek_revision
-                        != published.observed.snapshot().playback.seek_revision
-                    || next.playback.status != published.observed.snapshot().playback.status
-            }) || response.configuration.as_ref().is_some_and(|next| {
-                analysis_invalidated_by_config(
-                    &published.observed.snapshot().configuration.config,
-                    &next.config,
-                )
-            }) || device_changed;
+            let previous = published.observed.snapshot();
+            let configure_visual = response.configuration.is_some();
+            let (source_changed, playback_invalidated) =
+                response.playback.as_ref().map_or((false, false), |next| {
+                    let generation_changed = next.source_generation != previous.source_generation;
+                    let source_changed = generation_changed
+                        || waveform_source(next.current_track.as_deref())
+                            != waveform_source(previous.current_track.as_deref());
+                    let analysis_invalidated = generation_changed
+                        || next.playback.seek_revision != previous.playback.seek_revision
+                        || next.playback.status != previous.playback.status;
+                    (source_changed, analysis_invalidated)
+                });
+            let invalidate_analysis = playback_invalidated
+                || response
+                    .system
+                    .as_ref()
+                    .is_some_and(|next| next.selected_device != previous.system.selected_device)
+                || response.configuration.as_ref().is_some_and(|next| {
+                    analysis_invalidated_by_config(&previous.configuration.config, &next.config)
+                });
             if invalidate_analysis {
                 self.visual.invalidate();
             }
             published.observed.apply(self.instance_id, response);
-            self.visual
-                .configure(&published.observed.snapshot().configuration.config);
             let state = published.observed.snapshot();
-            self.visual.configure_source(
-                state.current_track.as_deref(),
-                state.source_generation,
-                state.playback.duration,
-            );
+            if configure_visual {
+                self.visual.configure(&state.configuration.config);
+            }
+            if source_changed {
+                self.visual.configure_source(
+                    state.current_track.as_deref(),
+                    state.source_generation,
+                    state.playback.duration,
+                );
+            }
+            let shutdown = state.system.shutting_down;
             published.publication = published.publication.wrapping_add(1);
-            published.observed.snapshot().system.shutting_down
+            shutdown
         };
         if shutdown {
             self.disconnected();
@@ -891,6 +902,50 @@ mod tests {
         let runtime =
             crate::test_support::CoreRuntime::start(directory.path(), &config_path).unwrap();
         (directory, runtime)
+    }
+
+    #[test]
+    fn playback_merge_preserves_waveform_until_cue_range_changes() {
+        let (_directory, runtime) = fixture();
+        let handle = &runtime.handle;
+        let mut track = crate::test_support::artwork_track("album.wav".into());
+        track.cue = Some(rivu_protocol::model::CueSegment {
+            sheet: "album.cue".into(),
+            number: 1,
+            start_frame: 0,
+            end_frame: Some(75),
+        });
+        let merge = |track, position| {
+            assert!(handle.shared.merge(StateResponse {
+                playback: Some(rivu_protocol::response::PlaybackSnapshot {
+                    playback: rivu_protocol::model::PlaybackState {
+                        position,
+                        ..Default::default()
+                    },
+                    current_track: Some(Arc::new(track)),
+                    source_generation: 0,
+                    processing_audition: None,
+                    processing_selection: None,
+                }),
+                ..Default::default()
+            }));
+        };
+        merge(track.clone(), 0.0);
+        let initial_epoch = handle.waveform.read().request_epoch;
+        assert_eq!(handle.waveform.read().range.unwrap().start_seconds, 0.0);
+
+        merge(track.clone(), 0.5);
+        assert_eq!(handle.gui_snapshot().playback.position, 0.5);
+        assert_eq!(handle.waveform.read().request_epoch, initial_epoch);
+
+        let cue = track.cue.as_mut().unwrap();
+        cue.number = 2;
+        cue.start_frame = 75;
+        cue.end_frame = Some(150);
+        merge(track, 0.0);
+        let frame = handle.waveform.read();
+        assert_ne!(frame.request_epoch, initial_epoch);
+        assert_eq!(frame.range.unwrap().start_seconds, 1.0);
     }
 
     #[test]
