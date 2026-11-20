@@ -416,7 +416,7 @@ fn desktop_subscription_reconciliation_keeps_setup_changes_without_a_later_wakeu
         assert_eq!(tray_updates.try_recv(), Ok(()));
         assert_eq!(tray_updates.try_recv(), Err(mpsc::TryRecvError::Empty));
         let reconciled = handle.tray_snapshot();
-        assert!(reconciled.changed_from(&tray_baseline));
+        assert_eq!(tray_baseline.status, PlaybackStatus::Stopped);
         assert_eq!(reconciled.status, PlaybackStatus::Paused);
     }
 }

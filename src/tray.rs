@@ -36,27 +36,42 @@ fn sni_status() -> &'static str {
     "Active"
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrayMenuState {
+    playing: bool,
+    shuffle: bool,
+    repeat: RepeatMode,
+}
+
+impl From<&TraySnapshot> for TrayMenuState {
+    fn from(snapshot: &TraySnapshot) -> Self {
+        Self {
+            playing: snapshot.status == PlaybackStatus::Playing,
+            shuffle: snapshot.shuffle,
+            repeat: snapshot.repeat,
+        }
+    }
+}
+
 struct TrayData {
-    i18n: Arc<Localizer>,
     snapshot: TraySnapshot,
     menu_revision: u32,
 }
 
 impl TrayData {
-    fn publish(&mut self, current: &TraySnapshot) -> Option<(TraySnapshot, u32, bool)> {
-        if !current.changed_from(&self.snapshot) {
-            return None;
-        }
-        let menu_changed = current.menu_changed_from(&self.snapshot);
-        if menu_changed {
+    fn publish(&mut self, current: TraySnapshot) -> ((bool, Option<u32>), TraySnapshot) {
+        let tooltip = tooltip_changed(&self.snapshot, &current);
+        let menu_changed = TrayMenuState::from(&current) != TrayMenuState::from(&self.snapshot);
+        let menu = menu_changed.then(|| {
             self.menu_revision = self.menu_revision.wrapping_add(1);
-        }
-        let previous = std::mem::replace(&mut self.snapshot, current.clone());
-        Some((previous, self.menu_revision, menu_changed))
+            self.menu_revision
+        });
+        let previous = std::mem::replace(&mut self.snapshot, current);
+        ((tooltip, menu), previous)
     }
 
-    fn layout_snapshot(&self) -> (TraySnapshot, u32) {
-        (self.snapshot.clone(), self.menu_revision)
+    fn menu_snapshot(&self) -> (TrayMenuState, u32) {
+        (TrayMenuState::from(&self.snapshot), self.menu_revision)
     }
 }
 
@@ -104,7 +119,6 @@ async fn run_bus(
     let cancelled = cancelled.shared();
     let updates = handle.subscribe_revisions(RevisionInterest::Tray);
     let data = Arc::new(RwLock::new(TrayData {
-        i18n,
         snapshot: handle.tray_snapshot(),
         menu_revision: 1,
     }));
@@ -117,11 +131,13 @@ async fn run_bus(
     let item = StatusNotifierItem {
         app: app.clone(),
         data: Arc::clone(&data),
+        i18n: Arc::clone(&i18n),
     };
     let menu = DbusMenu {
         handle: handle.clone(),
         app,
         data: Arc::clone(&data),
+        i18n,
     };
     // default-rt's shared native helper drives bus I/O independently of this
     // application's async-io executor, including registration and shutdown.
@@ -270,39 +286,36 @@ async fn apply_update(
     current: TraySnapshot,
     cancelled: Cancellation,
 ) -> bool {
-    let update = data.write().publish(&current);
-    if let Some((previous, revision, menu_changed)) = update {
+    let shutting_down = current.shutting_down;
+    let ((tooltip, menu), previous) = data.write().publish(current);
+    drop(previous);
+    if tooltip || menu.is_some() {
         futures::select_biased! {
             _ = cancelled.fuse() => return true,
-            _ = emit_update(connection, &previous, &current, revision, menu_changed).fuse() => {},
+            _ = emit_update(connection, tooltip, menu).fuse() => {},
         }
     }
-    current.shutting_down
+    shutting_down
 }
 
 fn tooltip_changed(previous: &TraySnapshot, current: &TraySnapshot) -> bool {
     match (previous.current_track(), current.current_track()) {
         (Some(previous), Some(current)) => {
-            previous.title != current.title || previous.artist != current.artist
+            !std::ptr::eq(previous, current)
+                && (previous.title != current.title || previous.artist != current.artist)
         }
         (None, None) => previous.status != current.status,
         _ => true,
     }
 }
 
-async fn emit_update(
-    connection: &Connection,
-    previous: &TraySnapshot,
-    current: &TraySnapshot,
-    menu_revision: u32,
-    menu_changed: bool,
-) {
-    if tooltip_changed(previous, current) {
+async fn emit_update(connection: &Connection, tooltip: bool, menu: Option<u32>) {
+    if tooltip {
         let _ = connection
             .emit_signal(None::<&str>, SNI_PATH, SNI_INTERFACE, "NewToolTip", &())
             .await;
     }
-    if menu_changed {
+    if let Some(menu_revision) = menu {
         let _ = connection
             .emit_signal(
                 None::<&str>,
@@ -318,6 +331,7 @@ async fn emit_update(
 struct StatusNotifierItem {
     app: AppHandle,
     data: Arc<RwLock<TrayData>>,
+    i18n: Arc<Localizer>,
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -406,9 +420,9 @@ impl StatusNotifierItem {
             Some(track) if track.artist.is_empty() => track.title.clone(),
             Some(track) => format!("{} — {}", track.title, track.artist),
             None => match snapshot.status {
-                PlaybackStatus::Playing => data.i18n.text("core-playing").to_owned(),
-                PlaybackStatus::Paused => data.i18n.text("core-paused").to_owned(),
-                PlaybackStatus::Stopped => data.i18n.text("core-stopped").to_owned(),
+                PlaybackStatus::Playing => self.i18n.text("core-playing").to_owned(),
+                PlaybackStatus::Paused => self.i18n.text("core-paused").to_owned(),
+                PlaybackStatus::Stopped => self.i18n.text("core-stopped").to_owned(),
             },
         };
         (
@@ -447,11 +461,11 @@ struct MenuLayout {
 }
 
 impl MenuLayout {
-    fn root(snapshot: &TraySnapshot, recursion_depth: i32, i18n: &Localizer) -> Self {
+    fn root(menu: TrayMenuState, recursion_depth: i32, i18n: &Localizer) -> Self {
         let children = if recursion_depth == 0 {
             Vec::new()
         } else {
-            menu_items(snapshot, i18n)
+            menu_items(menu, i18n)
                 .into_iter()
                 .map(Variant::from)
                 .collect()
@@ -486,6 +500,7 @@ struct DbusMenu {
     handle: CoreHandle,
     app: AppHandle,
     data: Arc<RwLock<TrayData>>,
+    i18n: Arc<Localizer>,
 }
 
 #[zbus::interface(name = "com.canonical.dbusmenu")]
@@ -499,11 +514,10 @@ impl DbusMenu {
         if parent_id != 0 {
             return Err(fdo::Error::InvalidArgs("Unknown menu parent".into()));
         }
-        let data = self.data.read();
-        let (snapshot, revision) = data.layout_snapshot();
+        let (menu, revision) = self.data.read().menu_snapshot();
         Ok((
             revision,
-            MenuLayout::root(&snapshot, recursion_depth, &data.i18n),
+            MenuLayout::root(menu, recursion_depth, &self.i18n),
         ))
     }
 
@@ -512,7 +526,7 @@ impl DbusMenu {
         ids: Vec<i32>,
         property_names: Vec<String>,
     ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedVariant>)>> {
-        let snapshot = self.data.read().snapshot.clone();
+        let (menu, _) = self.data.read().menu_snapshot();
         let ids = if ids.is_empty() {
             (2..=9).collect()
         } else {
@@ -521,15 +535,14 @@ impl DbusMenu {
         Ok(ids
             .into_iter()
             .filter_map(|id| {
-                menu_properties(&snapshot, id, &property_names, &self.data.read().i18n)
-                    .map(|props| (id, props))
+                menu_properties(menu, id, &property_names, &self.i18n).map(|props| (id, props))
             })
             .collect())
     }
 
     fn get_property(&self, id: i32, name: String) -> fdo::Result<OwnedVariant> {
-        let snapshot = self.data.read().snapshot.clone();
-        menu_properties(&snapshot, id, &[name], &self.data.read().i18n)
+        let (menu, _) = self.data.read().menu_snapshot();
+        menu_properties(menu, id, &[name], &self.i18n)
             .and_then(|mut properties| properties.drain().next().map(|(_, value)| value))
             .ok_or_else(|| fdo::Error::InvalidArgs("Unknown menu property".into()))
     }
@@ -628,19 +641,19 @@ impl DbusMenu {
     }
 }
 
-fn menu_items(snapshot: &TraySnapshot, i18n: &Localizer) -> Vec<MenuLayout> {
+fn menu_items(menu: TrayMenuState, i18n: &Localizer) -> Vec<MenuLayout> {
     (2..=9)
         .map(|id| MenuLayout {
             id,
-            properties: menu_properties(snapshot, id, &[], i18n).expect("known menu item"),
+            properties: menu_properties(menu, id, &[], i18n).expect("known menu item"),
             children: Vec::new(),
         })
         .collect()
 }
 
-fn menu_entry<'a>(snapshot: &TraySnapshot, id: i32, i18n: &'a Localizer) -> Option<&'a str> {
+fn menu_entry(menu: TrayMenuState, id: i32, i18n: &Localizer) -> Option<&str> {
     let label = match id {
-        2 => i18n.text(if snapshot.status == PlaybackStatus::Playing {
+        2 => i18n.text(if menu.playing {
             "core-pause"
         } else {
             "playback-play"
@@ -649,7 +662,7 @@ fn menu_entry<'a>(snapshot: &TraySnapshot, id: i32, i18n: &'a Localizer) -> Opti
         4 => i18n.text("core-next"),
         5 | 8 => "",
         6 => i18n.text("core-shuffle"),
-        7 => i18n.text(match snapshot.repeat {
+        7 => i18n.text(match menu.repeat {
             RepeatMode::Off => "core-repeat-off",
             RepeatMode::All => "core-repeat-all",
             RepeatMode::One => "core-repeat-one",
@@ -661,7 +674,7 @@ fn menu_entry<'a>(snapshot: &TraySnapshot, id: i32, i18n: &'a Localizer) -> Opti
 }
 
 fn menu_properties(
-    snapshot: &TraySnapshot,
+    menu: TrayMenuState,
     id: i32,
     requested: &[String],
     i18n: &Localizer,
@@ -674,7 +687,7 @@ fn menu_properties(
     let all = requested.is_empty();
     let mut properties = HashMap::new();
     if all || requested.iter().any(|name| name == "label") {
-        let label = menu_entry(snapshot, id, i18n)?;
+        let label = menu_entry(menu, id, i18n)?;
         properties.insert("label".to_owned(), owned_variant(label.to_owned()));
     }
     if all || requested.iter().any(|name| name == "type") {
@@ -693,7 +706,7 @@ fn menu_properties(
         if all || requested.iter().any(|name| name == "toggle-state") {
             properties.insert(
                 "toggle-state".to_owned(),
-                OwnedVariant::from(i32::from(snapshot.shuffle)),
+                OwnedVariant::from(i32::from(menu.shuffle)),
             );
         }
     }
@@ -726,10 +739,10 @@ mod tests {
         assert!(app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
-                i18n: Arc::new(Localizer::new(&handle.config_snapshot().ui_language)),
                 snapshot: handle.tray_snapshot(),
                 menu_revision: 1,
             })),
+            i18n: Arc::new(Localizer::new(&handle.config_snapshot().ui_language)),
             handle: handle.clone(),
             app,
         };
@@ -752,12 +765,16 @@ mod tests {
     #[test]
     fn shuffle_menu_item_uses_native_checkmark_without_changing_label() {
         let i18n = Localizer::new("en-US");
-        let mut snapshot = TraySnapshot::from_core(&crate::core::CoreState::default());
+        let mut menu = TrayMenuState {
+            playing: false,
+            shuffle: false,
+            repeat: RepeatMode::Off,
+        };
         let label = owned_variant(i18n.text("core-shuffle").to_owned());
         let checkmark = owned_variant("checkmark".to_owned());
         for (shuffle, state) in [(false, 0_i32), (true, 1_i32)] {
-            snapshot.shuffle = shuffle;
-            let items = menu_items(&snapshot, &i18n);
+            menu.shuffle = shuffle;
+            let items = menu_items(menu, &i18n);
             let properties = &items.iter().find(|item| item.id == 6).unwrap().properties;
             assert_eq!(properties.get("label"), Some(&label));
             assert_eq!(properties.get("toggle-type"), Some(&checkmark));
@@ -776,34 +793,63 @@ mod tests {
             ))),
             ..Default::default()
         };
-        let baseline = TraySnapshot::from_core(&state);
+        let mut data = TrayData {
+            snapshot: TraySnapshot::from_core(&state),
+            menu_revision: 1,
+        };
+        state.playback.position = 12.0;
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (false, None)
+        );
         let track = Arc::make_mut(state.current_track.as_mut().unwrap());
         track.play_count += 1;
         track.last_played = Some(42);
-        assert!(!tooltip_changed(
-            &baseline,
-            &TraySnapshot::from_core(&state)
-        ));
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (false, None)
+        );
         state.playback.status = PlaybackStatus::Playing;
-        assert!(!tooltip_changed(
-            &baseline,
-            &TraySnapshot::from_core(&state)
-        ));
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (false, Some(2))
+        );
         Arc::make_mut(state.current_track.as_mut().unwrap())
             .title
             .push_str(" renamed");
-        assert!(tooltip_changed(&baseline, &TraySnapshot::from_core(&state)));
-        let renamed = TraySnapshot::from_core(&state);
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, None)
+        );
         Arc::make_mut(state.current_track.as_mut().unwrap())
             .artist
             .push_str(" artist");
-        assert!(tooltip_changed(&renamed, &TraySnapshot::from_core(&state)));
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, None)
+        );
+        let track = state.current_track.take();
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, None)
+        );
+        state.current_track = track;
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, None)
+        );
         state.current_track = None;
-        let empty = TraySnapshot::from_core(&state);
-        assert!(tooltip_changed(&baseline, &empty));
-        assert!(tooltip_changed(&empty, &baseline));
+        data.publish(TraySnapshot::from_core(&state));
         state.playback.status = PlaybackStatus::Paused;
-        assert!(tooltip_changed(&empty, &TraySnapshot::from_core(&state)));
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, Some(3))
+        );
+        state.playback.status = PlaybackStatus::Stopped;
+        assert_eq!(
+            data.publish(TraySnapshot::from_core(&state)).0,
+            (true, None)
+        );
     }
 
     #[test]
@@ -815,34 +861,40 @@ mod tests {
             repeat: RepeatMode::Off,
             shutting_down: false,
         };
+        let i18n = Localizer::new("en-US");
         let mut data = TrayData {
-            i18n: Arc::new(Localizer::new("en-US")),
             snapshot: baseline.clone(),
             menu_revision: 1,
         };
         // Playback may change during bus setup, before another wakeup arrives.
         let mut latest = baseline;
         latest.status = PlaybackStatus::Playing;
-        let (previous, revision, menu_changed) = data.publish(&latest).unwrap();
-        assert_eq!(previous.status, PlaybackStatus::Stopped);
-        assert!(menu_changed);
-        assert_eq!(revision, 2);
-        let (layout_snapshot, layout_revision) = data.layout_snapshot();
-        assert_eq!(layout_revision, revision);
+        assert_eq!(data.publish(latest.clone()).0, (true, Some(2)));
+        let (layout_menu, layout_revision) = data.menu_snapshot();
+        assert_eq!(layout_revision, 2);
         // A newer publication cannot alter the already captured layout/revision.
         latest.status = PlaybackStatus::Paused;
-        assert_eq!(data.publish(&latest).unwrap().1, 3);
-        assert_eq!(layout_snapshot.status, PlaybackStatus::Playing);
-        assert!(data.publish(&latest).is_none());
+        assert_eq!(data.publish(latest.clone()).0, (true, Some(3)));
+        assert_eq!(
+            menu_entry(layout_menu, 2, &i18n),
+            Some(i18n.text("core-pause"))
+        );
+        let (paused_menu, paused_revision) = data.menu_snapshot();
+        assert_eq!(paused_revision, 3);
+        assert_eq!(
+            menu_entry(paused_menu, 2, &i18n),
+            Some(i18n.text("playback-play"))
+        );
+        assert_eq!(data.publish(latest.clone()).0, (false, None));
         latest.shutting_down = true;
-        let (_, revision, menu_changed) = data.publish(&latest).unwrap();
-        assert!(!menu_changed);
-        assert_eq!(revision, 3);
+        assert_eq!(data.publish(latest.clone()).0, (false, None));
+        assert!(data.snapshot.shutting_down);
+        assert_eq!(data.menu_revision, 3);
         data.menu_revision = u32::MAX;
         latest.shuffle = true;
-        assert_eq!(data.publish(&latest).unwrap().1, 0);
-        let (snapshot, revision) = data.layout_snapshot();
-        let root_only = MenuLayout::root(&snapshot, 0, &data.i18n);
+        assert_eq!(data.publish(latest).0, (false, Some(0)));
+        let (menu, revision) = data.menu_snapshot();
+        let root_only = MenuLayout::root(menu, 0, &i18n);
         assert_eq!(revision, 0);
         assert!(root_only.children.is_empty());
     }
