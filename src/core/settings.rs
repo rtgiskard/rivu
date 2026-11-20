@@ -190,15 +190,26 @@ impl Core {
         Arc::make_mut(&mut config).library_roots = roots;
         let roots_changed = config.library_roots != self.preferences.settings().library_roots;
         let previous = self.preferences.settings();
-        let changed = [
-            config.visualization_enabled != previous.visualization_enabled,
-            config.media_read_buffer_mib != previous.media_read_buffer_mib,
-            config.volume != self.preferences.live().volume,
-            config.visualization_signal != previous.visualization_signal,
-            !config.processing_bypassed && config.equalizer != previous.equalizer,
-            config.ffmpeg_enabled != previous.ffmpeg_enabled,
-            config.replaygain_enabled != previous.replaygain_enabled
-                || config.replaygain_peak_policy != previous.replaygain_peak_policy,
+        type DeferredCommand = fn(&Config) -> AudioCommand;
+        let commands: [Option<DeferredCommand>; _] = [
+            (config.visualization_enabled != previous.visualization_enabled)
+                .then_some(|c| AudioCommand::VisualizationEnabled(c.visualization_enabled)),
+            (config.media_read_buffer_mib != previous.media_read_buffer_mib)
+                .then_some(|c| AudioCommand::MediaReadBuffer(c.media_read_buffer_mib)),
+            (config.volume != self.preferences.live().volume)
+                .then_some(|c| AudioCommand::Volume(c.volume)),
+            (config.visualization_signal != previous.visualization_signal)
+                .then_some(|c| AudioCommand::VisualizationSignal(c.visualization_signal)),
+            (!config.processing_bypassed && config.equalizer != previous.equalizer)
+                .then_some(|c| AudioCommand::Equalizer(Arc::new(c.equalizer.clone()))),
+            (config.ffmpeg_enabled != previous.ffmpeg_enabled)
+                .then_some(|c| AudioCommand::FfmpegEnabled(c.ffmpeg_enabled)),
+            (config.replaygain_enabled != previous.replaygain_enabled
+                || config.replaygain_peak_policy != previous.replaygain_peak_policy)
+                .then_some(|c| AudioCommand::ReplayGain {
+                    enabled: c.replaygain_enabled,
+                    peak_policy: c.replaygain_peak_policy,
+                }),
         ];
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
@@ -206,16 +217,7 @@ impl Core {
         // The engine compares admitted output targets, so validation alone does
         // not revoke the PCM identity or discard a client's partial FFT window.
         self.engine
-            .ensure_command_capacity(1 + changed.iter().filter(|&&changed| changed).count())?;
-        let [
-            visualization_changed,
-            buffer_changed,
-            volume_changed,
-            signal_changed,
-            equalizer_changed,
-            ffmpeg_changed,
-            replaygain_changed,
-        ] = changed;
+            .ensure_command_capacity(1 + commands.iter().flatten().count())?;
         let ffmpeg_status = if !config.ffmpeg_enabled {
             "disabled".to_owned()
         } else {
@@ -243,36 +245,8 @@ impl Core {
         let request = self.output_settings_request.wrapping_add(1);
         let config = self.preferences.settings();
         (|| -> Result<()> {
-            if visualization_changed {
-                self.engine.send(AudioCommand::VisualizationEnabled(
-                    config.visualization_enabled,
-                ))?;
-            }
-            if buffer_changed {
-                self.engine
-                    .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mib))?;
-            }
-            if volume_changed {
-                self.engine.send(AudioCommand::Volume(config.volume))?;
-            }
-            if signal_changed {
-                self.engine.send(AudioCommand::VisualizationSignal(
-                    config.visualization_signal,
-                ))?;
-            }
-            if equalizer_changed {
-                self.engine
-                    .send(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
-            }
-            if ffmpeg_changed {
-                self.engine
-                    .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-            }
-            if replaygain_changed {
-                self.engine.send(AudioCommand::ReplayGain {
-                    enabled: config.replaygain_enabled,
-                    peak_policy: config.replaygain_peak_policy,
-                })?;
+            for command in commands.into_iter().flatten() {
+                self.engine.send(command(config))?;
             }
             self.engine.send(AudioCommand::OutputSettings {
                 request,
