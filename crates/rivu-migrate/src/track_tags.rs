@@ -44,5 +44,5 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
         "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
         [6],
     )?;
-    super::target_schema::validate_replaygain_source(conn)
+    Ok(())
 }

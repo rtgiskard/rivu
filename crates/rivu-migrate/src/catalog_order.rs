@@ -14,14 +14,10 @@ pub(super) fn apply(conn: &Connection) -> Result<()> {
          ) UPDATE playlists SET position=ranked.position FROM ranked WHERE playlists.id=ranked.id;",
     )
     .context("Persisting playlist catalog order")?;
-    tracing::info!(
-        schema_version = 4,
-        "Advancing format marker and validating target structure"
-    );
+    tracing::info!(schema_version = 4, "Advancing format marker");
     conn.execute(
         "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
         [4],
     )?;
-    tracing::info!("Verifying catalog-order migration source for tag cutover");
-    super::target_schema::validate_tag_source(conn).map(|_| ())
+    Ok(())
 }
