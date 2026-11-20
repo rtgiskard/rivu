@@ -66,18 +66,17 @@ impl<T> PagedRows<T> {
         self.pages.get(&offset)?.get(index - offset)
     }
     pub(super) fn display(&self, index: usize) -> Option<&T> {
+        self.display_with_clock(index, Instant::now)
+    }
+    fn display_with_clock(&self, index: usize, now: impl FnOnce() -> Instant) -> Option<&T> {
         if index >= self.len() {
             return None;
         }
-        self.get(index)
-            .or_else(|| self.retained_at(index, Instant::now()))
+        self.get(index).or_else(|| self.retained_at(index, now()))
     }
     #[cfg(test)]
     fn display_at(&self, index: usize, now: Instant) -> Option<&T> {
-        if index >= self.len() {
-            return None;
-        }
-        self.get(index).or_else(|| self.retained_at(index, now))
+        self.display_with_clock(index, || now)
     }
     fn retained_at(&self, index: usize, now: Instant) -> Option<&T> {
         if !self.retention.visible(now) {

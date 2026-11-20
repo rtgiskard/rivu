@@ -70,7 +70,6 @@ pub(super) fn list_library(
     missing: Option<bool>,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
-    let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,
         &mut session,
@@ -179,7 +178,6 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
 
 pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
-    let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,
         &mut session,
@@ -222,7 +220,6 @@ pub(super) fn show_playlist(
     json: bool,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
-    let _ = session.get_state(StateSections::default())?;
     write_listing(
         i18n,
         &mut session,
@@ -591,9 +588,9 @@ pub(super) fn show_state(
         && let Some(state) = playback.playback.audio_output.as_deref()
     {
         writeln!(output, "{}:", i18n.text("audio-output"))?;
-        for (label, value) in rivu_presentation::audio_output::output_rows(state, i18n) {
-            writeln!(output, "  {label}: {}", TerminalEscaped(&value))?;
-        }
+        rivu_presentation::audio_output::try_visit_output_fields(state, i18n, |key, value| {
+            writeln!(output, "  {}: {}", i18n.text(key), TerminalEscaped(&value))
+        })?;
         writeln!(output, "  {}", i18n.text("audio-output-note"))?;
     }
     if let Some(progress) = &system.scan_progress {

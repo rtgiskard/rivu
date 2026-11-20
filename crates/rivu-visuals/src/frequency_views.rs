@@ -439,7 +439,9 @@ impl FrequencyViews {
             data.spectrum.top_db = 0.0;
             data.spectrum.last_update = None;
             data.refresh_db_labels();
-            data.refresh_frequency_labels();
+            if frame.spectrum_db.is_empty() {
+                data.refresh_frequency_labels();
+            }
         }
         if frame.spectrum_db.is_empty() {
             return;
