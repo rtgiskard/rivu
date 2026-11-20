@@ -194,7 +194,7 @@ impl Core {
             decoder_hint,
             release_date.as_deref(),
         )?;
-        self.finish_track_edit(track_id, impact)
+        self.finish_track_edit(track_id, impact, false)
     }
 
     pub(in crate::core) fn set_replaygain(
@@ -218,13 +218,14 @@ impl Core {
             }
         }
         let impact = self.store.set_replaygain(track_id, value)?;
-        self.finish_track_edit(track_id, impact)
+        self.finish_track_edit(track_id, impact, false)
     }
 
-    fn finish_track_edit(
+    pub(in crate::core) fn finish_track_edit(
         &mut self,
         track_id: i64,
         impact: crate::store::TrackEditImpact,
+        refresh_pending_current_track: bool,
     ) -> Result<()> {
         let impacts = crate::store::CatalogChanges {
             changed: impact.changed,
@@ -237,7 +238,7 @@ impl Core {
             ..Default::default()
         };
         self.accept_catalog_facts(impacts, Some(&[track_id]), impact.playlists.as_deref());
-        if impact.library {
+        if impact.library || refresh_pending_current_track {
             self.transport.history_pending |= impacts.history;
             let current = self.refresh_affected_queue_tracks(&[track_id]);
             let catalog = self.refresh_catalog_projections();

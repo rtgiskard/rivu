@@ -80,6 +80,54 @@ fn bulk_sync_rejects_nonfinite_replaygain_without_changing_any_field() {
 }
 
 #[test]
+fn bulk_sync_preflights_live_replaygain_before_committing() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let before = core.track(1).unwrap();
+    let expected = source_tags::track_tags(&before);
+    let revisions = core.state.query_revisions();
+    let generation = core.transport.generation;
+    let mut tags = expected.clone();
+    tags.replaygain_track_gain = Some(-6.0);
+    let sync = || Command::SyncTrackTags {
+        track_id: 1,
+        tags: tags.clone(),
+        expected: Box::new(expected.clone()),
+    };
+    let (commands, audio) = async_channel::bounded(1);
+    commands
+        .try_send(audio::QueuedAudioCommand::test_unfenced(
+            AudioCommand::Volume(0.5),
+        ))
+        .unwrap();
+    let _idle_commands = core.engine.replace_commands(commands);
+
+    assert!(core.command(sync()).is_err());
+    assert_eq!(core.track(1).unwrap(), before);
+    assert_eq!(core.state.query_revisions(), revisions);
+    assert_eq!(
+        core.state.current_track().unwrap().replaygain_track_gain,
+        before.replaygain_track_gain
+    );
+    assert!(matches!(
+        audio.try_recv().unwrap().command,
+        AudioCommand::Volume(_)
+    ));
+
+    core.command(sync()).unwrap();
+    assert_eq!(core.track(1).unwrap().replaygain_track_gain, Some(-6.0));
+    assert_eq!(
+        core.state.current_track().unwrap().replaygain_track_gain,
+        Some(-6.0)
+    );
+    assert!(matches!(
+        audio.try_recv().unwrap().command,
+        AudioCommand::Metadata { generation: actual, metadata }
+            if actual == generation && metadata.replaygain_track_gain == Some(-6.0)
+    ));
+}
+
+#[test]
 fn stale_bulk_database_baseline_does_not_overwrite_a_concurrent_field_edit() {
     let (_directory, mut core) = fixture();
     let before = source_tags::track_tags(&core.track(1).unwrap());

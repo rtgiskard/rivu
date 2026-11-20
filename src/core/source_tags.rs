@@ -170,16 +170,32 @@ impl Core {
             tags.replaygain_track_gain.is_none_or(f64::is_finite),
             "ReplayGain must be finite"
         );
+        let stored = self.track(track_id)?;
         ensure!(
-            track_tags(&self.track(track_id)?) == *expected,
+            track_tags(&stored) == *expected,
             "Database tags changed; reload the details before synchronizing"
         );
+        // Reject a busy live metadata update before persisting tags or saved source facts.
+        if self
+            .transport
+            .session
+            .as_ref()
+            .is_some_and(|playback| playback.loaded_track.id == track_id)
+            && self.state.current_track.as_ref().is_some_and(|track| {
+                track.id == track_id
+                    && (track.title != tags.title
+                        || track.artist != tags.artist
+                        || track.album != tags.album
+                        || track.replaygain_track_gain != tags.replaygain_track_gain)
+            })
+        {
+            self.engine.ensure_command_capacity(1)?;
+        }
         if let Some(pending) = &self.pending_written_source
             && pending.track_id == track_id
         {
-            let track = self.track(track_id)?;
             ensure!(
-                track.path == pending.path && track.cue.is_none(),
+                stored.path == pending.path && stored.cue.is_none(),
                 "Saved source identity changed; inspect the file before synchronizing"
             );
             let changes = self
@@ -194,40 +210,9 @@ impl Core {
                     .as_ref()
                     .is_some_and(|track| track.id == track_id);
         }
-        // Only title/artist/album can require an audio-worker metadata command.
-        if self.state.current_track.as_ref().is_some_and(|track| {
-            track.id == track_id
-                && (track.title != tags.title
-                    || track.artist != tags.artist
-                    || track.album != tags.album)
-        }) {
-            self.engine.ensure_command_capacity(1)?;
-        }
         let impact = self.store.sync_track_tags(track_id, tags)?;
-        let changes = crate::store::CatalogChanges {
-            changed: impact.changed,
-            library: impact.library,
-            counts: impact.counts,
-            queue: impact.queue,
-            albums: impact.albums,
-            duplicate_members: impact.member_facts,
-            history: impact.history,
-            ..Default::default()
-        };
-        self.accept_catalog_facts(changes, Some(&[track_id]), impact.playlists.as_deref());
-        if impact.library || self.projections.current_track {
-            self.transport.history_pending |= changes.history;
-            let current = self.refresh_affected_queue_tracks(&[track_id]);
-            let catalog = self.refresh_catalog_projections();
-            let errors: Vec<_> = [current, catalog]
-                .into_iter()
-                .filter_map(Result::err)
-                .collect();
-            if !errors.is_empty() {
-                return Err(projections::ProjectionSyncError(errors).into());
-            }
-        }
-        Ok(())
+        // A source-fact write can invalidate the current track even when the tags are unchanged.
+        self.finish_track_edit(track_id, impact, self.projections.current_track)
     }
 
     pub(in crate::core) fn finish_source_tags(&mut self, mut result: SourceTagFinished) {
