@@ -57,7 +57,12 @@ fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<boo
         matched == ids.len(),
         "Queue entry not found in target range"
     );
-    let changed = tx.execute("UPDATE playlist_entries SET position=(SELECT position FROM queue_order_update WHERE queue_order_update.id=playlist_entries.id) WHERE playlist_id=0 AND id IN (SELECT id FROM queue_order_update) AND position<>(SELECT position FROM queue_order_update WHERE queue_order_update.id=playlist_entries.id)", [])?;
+    let changed = tx.execute(
+        "UPDATE playlist_entries AS e SET position=s.position
+         FROM queue_order_update AS s
+         WHERE e.id=s.id AND e.playlist_id=0 AND e.position<>s.position",
+        [],
+    )?;
     tx.execute_batch("DROP TABLE queue_order_update;")?;
     Ok(changed != 0)
 }
