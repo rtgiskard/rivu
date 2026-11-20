@@ -1029,6 +1029,10 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         height: 1.min(outer[3].height),
         ..outer[3]
     };
+    if let Some((prompt, notice)) = ui.reorder_footer() {
+        draw_reorder_footer(frame, messages, prompt, notice, colors);
+        return;
+    }
     if let Some(input) = &ui.command_input {
         let input_width = messages.width;
         let (tail, cursor) = query_tail(input, input_width.saturating_sub(2) as usize);
@@ -1156,6 +1160,36 @@ fn draw_status(
             columns[1],
         );
     }
+}
+
+fn draw_reorder_footer(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    prompt: &str,
+    notice: Option<(&str, NoticeKind)>,
+    colors: TerminalColors,
+) {
+    let width = area.width as usize;
+    let prompt_width = Span::raw(prompt).width().min(width);
+    let mut spans = vec![Span::styled(
+        cell_text(prompt, prompt_width, false),
+        Style::default().fg(colors.accent),
+    )];
+    if let Some((message, kind)) = notice
+        && width > prompt_width + 3
+    {
+        let color = match kind {
+            NoticeKind::Success => colors.positive,
+            NoticeKind::Warning => colors.warning,
+            NoticeKind::Error => colors.error,
+        };
+        spans.push(Span::styled(" · ", Style::default().fg(color)));
+        spans.push(Span::styled(
+            cell_text(message, width - prompt_width - 3, false),
+            Style::default().fg(color),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_messages(
@@ -1753,8 +1787,12 @@ fn draw_paged_list<T>(
         page.display_selected()
             .map(|index| index - page.display_offset()),
     );
+    let mut highlight = list_selection_style(colors);
+    if page.reorder_indices().is_some() {
+        highlight = highlight.add_modifier(Modifier::BOLD);
+    }
     frame.render_stateful_widget(
-        List::new(items).highlight_style(list_selection_style(colors)),
+        List::new(items).highlight_style(highlight),
         items_area,
         &mut selection,
     );

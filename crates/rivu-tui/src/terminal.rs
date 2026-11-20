@@ -291,17 +291,18 @@ where
             continue;
         };
         let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
-        while let Some(result) = commands.take_result()? {
-            match result {
-                Ok(ack) if !ack.is_success() => {
-                    tui.ui.set_notice(
-                        ack.error
-                            .unwrap_or_else(|| i18n.text("terminal-command-rejected").into()),
-                        NoticeKind::Error,
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => tui.ui.set_notice(error.into_message()?, NoticeKind::Error),
+        while let Some(completion) = commands.take_result()? {
+            let result = match completion.result {
+                Ok(ack) if !ack.is_success() => Err(ack
+                    .error
+                    .unwrap_or_else(|| i18n.text("terminal-command-rejected").into())),
+                Ok(_) => Ok(()),
+                Err(error) => Err(error.into_message()?),
+            };
+            if completion.reorder {
+                tui.ui.complete_reorder(result);
+            } else if let Err(error) = result {
+                tui.ui.set_notice(error, NoticeKind::Error);
             }
             redraw = true;
             immediate_redraw = true;
@@ -363,6 +364,9 @@ where
                     .min(Duration::from_millis(50))
             });
         if let Some(event) = next_event(wait)? {
+            if terminating.load(Ordering::Relaxed) {
+                break;
+            }
             match event {
                 Event::Resize(width, height) => {
                     size.width = width;
@@ -377,17 +381,27 @@ where
                         KeyAction::Search => {
                             tui.ui.open_search();
                         }
-                        action @ (KeyAction::Command(_) | KeyAction::Shutdown) => {
-                            let command = if let KeyAction::Command(command) = action {
-                                command.into()
-                            } else {
-                                rivu_protocol::AppCommand::Shutdown
+                        action @ (KeyAction::Command(_)
+                        | KeyAction::SaveOrder(_)
+                        | KeyAction::Shutdown) => {
+                            let is_reorder = matches!(action, KeyAction::SaveOrder(_));
+                            let command = match action {
+                                KeyAction::Command(command) | KeyAction::SaveOrder(command) => {
+                                    command.into()
+                                }
+                                _ => rivu_protocol::AppCommand::Shutdown,
                             };
-                            if !commands.request(command)? {
-                                tui.ui.set_notice(
-                                    i18n.text("terminal-command-busy").into(),
-                                    NoticeKind::Warning,
-                                );
+                            if commands.request(command)? {
+                                if is_reorder {
+                                    tui.ui.reorder_submitted();
+                                }
+                            } else {
+                                let message = i18n.text("terminal-command-busy").into();
+                                if is_reorder {
+                                    tui.ui.reorder_busy(message);
+                                } else {
+                                    tui.ui.set_notice(message, NoticeKind::Warning);
+                                }
                                 redraw = true;
                                 immediate_redraw = true;
                             }

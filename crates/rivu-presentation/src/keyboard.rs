@@ -60,6 +60,7 @@ pub enum Action {
     PageDown,
     Activate,
     Remove,
+    Reorder,
     Parent,
     Expand,
     Enqueue,
@@ -107,6 +108,9 @@ const PLAYBACK: u32 = GUI | (TUI & !QUERY);
 const QUEUE: u32 = (1 << Context::GuiQueue as u16) | (1 << Context::TuiQueue as u16);
 const TRACKS: u32 =
     (1 << Context::GuiPlaylistTracks as u16) | (1 << Context::TuiPlaylistTracks as u16);
+const TUI_REORDER_LISTS: u32 = (1 << Context::TuiQueue as u16)
+    | (1 << Context::TuiPlaylists as u16)
+    | (1 << Context::TuiPlaylistTracks as u16);
 const TREE: u32 = (1 << Context::GuiLibrary as u16) | TUI_TREE;
 const TABS: u32 = TUI & !HELP;
 const MULTI: u32 = (1 << Context::GuiQueue as u16)
@@ -335,6 +339,14 @@ static BINDINGS: &[Binding] = &[
         TUI & !(QUERY | (1 << Context::TuiPlaylists as u16)),
         Favorite,
         "keyboard-favorite"
+    ),
+    binding!(
+        "m",
+        "Shift+M",
+        SHIFT,
+        TUI_REORDER_LISTS,
+        Reorder,
+        "keyboard-reorder"
     ),
     binding!("tab", "Tab", 0, GUI, Traverse, "keyboard-traverse"),
     binding!(

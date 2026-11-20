@@ -4,7 +4,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use parking_lot::Mutex;
 use rivu_protocol::{
     AppCommand,
-    model::{ClientSnapshot, LibrarySort, Query, QueryIdentity, QueryStamp},
+    model::{ClientSnapshot, Command, LibrarySort, Query, QueryIdentity, QueryStamp},
     query_tracking::QuerySubmission,
     response::{Ack, ObservedState, QueryError, StateSections, StateWatch, ViewResponse},
 };
@@ -188,16 +188,21 @@ impl WorkerFailure {
     }
 }
 
+pub(super) struct CommandCompletion {
+    pub(super) reorder: bool,
+    pub(super) result: Result<Ack, WorkerFailure>,
+}
+
 pub(super) struct CommandWorker {
     sender: Option<Sender<AppCommand>>,
     stopping: Option<Sender<()>>,
     shutdown: rivu_client::SessionCancellation,
-    results: Receiver<Result<Ack, WorkerFailure>>,
+    results: Receiver<CommandCompletion>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl CommandWorker {
-    pub(super) fn take_result(&self) -> Result<Option<Result<Ack, WorkerFailure>>> {
+    pub(super) fn take_result(&self) -> Result<Option<CommandCompletion>> {
         match self.results.try_recv() {
             Ok(result) => Ok(Some(result)),
             Err(TryRecvError::Empty) => Ok(None),
@@ -219,7 +224,7 @@ impl CommandWorker {
                 // the owner's result drain and command dispatch. Preserve that
                 // fatal cause rather than replacing it with queue busy/death.
                 for result in self.results.try_iter() {
-                    if let Err(error) = result {
+                    if let Err(error) = result.result {
                         error.into_query_error()?;
                     }
                 }
@@ -246,7 +251,7 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     let data_dir = data_dir.to_owned();
     let (sender, receiver) = bounded::<AppCommand>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
-    let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
+    let (result_sender, results) = bounded(8);
     let shutdown = rivu_client::SessionCancellation::default();
     let stop = shutdown.clone();
     let worker = std::thread::spawn(move || {
@@ -259,13 +264,21 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
             if stop.is_cancelled() {
                 break;
             }
+            let reorder = matches!(
+                &command,
+                AppCommand::Core(
+                    Command::MoveQueue { .. }
+                        | Command::MovePlaylist { .. }
+                        | Command::MovePlaylistEntries { .. }
+                )
+            );
             let result = match &mut session {
                 Ok(session) => session.request_ack(command).map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
             crossbeam_channel::select! {
-                send(result_sender, result) -> _ => {}
+                send(result_sender, CommandCompletion { reorder, result }) -> _ => {}
                 recv(stop_receiver) -> _ => break,
             }
             if instance_changed {

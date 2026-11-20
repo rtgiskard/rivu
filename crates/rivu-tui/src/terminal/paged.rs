@@ -23,6 +23,11 @@ pub(super) enum ContainerIdentity {
     Playlist(i64),
 }
 
+pub(super) enum LookupStep {
+    Hint(usize),
+    Scan(usize),
+}
+
 pub(super) struct PagedList<T> {
     pub(super) pages: HashMap<usize, Vec<T>>,
     pub(super) total: usize,
@@ -30,11 +35,12 @@ pub(super) struct PagedList<T> {
     pub(super) fetch_size: usize,
     pub(super) selection: ListState,
     pub(super) viewport_rows: usize,
-    // Target identity, next scan offset, and the viewport to restore on success.
-    pub(super) identity_lookup: Option<(ContainerIdentity, usize, usize)>,
+    // Target identity, search step, and the viewport to restore on success.
+    pub(super) identity_lookup: Option<(ContainerIdentity, LookupStep, usize)>,
     pub(super) columns: Option<super::render::IntrinsicColumns>,
     pub(super) failed_request: Option<std::sync::Arc<super::worker::ReadSpec>>,
     pub(super) retained: Option<RetainedPages<T>>,
+    pub(super) reorder_origin: Option<ListState>,
 }
 
 impl<T> Default for PagedList<T> {
@@ -50,17 +56,51 @@ impl<T> Default for PagedList<T> {
             columns: None,
             failed_request: None,
             retained: None,
+            reorder_origin: None,
         }
     }
 }
 
 impl<T> PagedList<T> {
+    pub(super) fn begin_reorder(&mut self) {
+        self.reorder_origin = Some(self.selection);
+    }
+
+    pub(super) fn end_reorder(&mut self) {
+        if let Some(origin) = self.reorder_origin.take() {
+            self.selection = origin;
+            self.set_viewport(self.viewport_rows);
+        }
+    }
+
+    pub(super) fn reorder_indices(&self) -> Option<(usize, usize)> {
+        Some((
+            self.reorder_origin.as_ref()?.selected()?,
+            self.selection.selected()?,
+        ))
+    }
+
+    fn source_index(&self, index: usize) -> usize {
+        let Some((from, to)) = self.reorder_indices() else {
+            return index;
+        };
+        if index == to {
+            from
+        } else if (from..to).contains(&index) {
+            index + 1
+        } else if (to < index) && (index <= from) {
+            index - 1
+        } else {
+            index
+        }
+    }
+
     pub(super) fn clear(&mut self) {
         self.clear_pages();
         self.total = 0;
         self.loaded = false;
         self.fetch_size = 0;
-        if let Some((_, offset, _)) = &mut self.identity_lookup {
+        if let Some((_, LookupStep::Scan(offset), _)) = &mut self.identity_lookup {
             *offset = 0;
         }
     }
@@ -76,7 +116,7 @@ impl<T> PagedList<T> {
         self.total = 0;
         self.loaded = false;
         self.fetch_size = 0;
-        if let Some((_, offset, _)) = &mut self.identity_lookup {
+        if let Some((_, LookupStep::Scan(offset), _)) = &mut self.identity_lookup {
             *offset = 0;
         }
     }
@@ -117,10 +157,18 @@ impl<T> PagedList<T> {
             retained.pages.extend(self.pages.drain());
         }
         self.pages.clear();
+        let origin = self.reorder_indices().map(|(from, _)| from);
         if let Some(retained) = &mut self.retained {
             let end = start.saturating_add(retained.rows).min(retained.total);
+            let (start, end) = if origin.is_some() {
+                (start.saturating_sub(1), end.saturating_add(1))
+            } else {
+                (start, end)
+            };
             retained.pages.retain(|&offset, items| {
-                offset < end && offset.saturating_add(items.len()) > start
+                let page_end = offset.saturating_add(items.len());
+                (offset < end && page_end > start)
+                    || origin.is_some_and(|from| (offset..page_end).contains(&from))
             });
         }
         self.columns = None;
@@ -192,15 +240,16 @@ impl<T> PagedList<T> {
         if index >= self.display_total() {
             return None;
         }
-        if let Some(item) = self.get(index) {
+        let source = self.source_index(index);
+        if let Some(item) = self.get(source) {
             return Some(item);
         }
         let retained = self.retained_display()?;
         if index < retained.start || index >= retained.start.saturating_add(retained.rows) {
             return None;
         }
-        let offset = index / retained.fetch_size * retained.fetch_size;
-        retained.pages.get(&offset)?.get(index - offset)
+        let offset = source / retained.fetch_size * retained.fetch_size;
+        retained.pages.get(&offset)?.get(source - offset)
     }
 
     pub(super) fn display_iter(&self) -> impl Iterator<Item = &T> {
@@ -213,8 +262,12 @@ impl<T> PagedList<T> {
                 .filter(move |&(offset, _)| !self.pages.contains_key(offset))
                 .flat_map(move |(&offset, items)| {
                     items.iter().enumerate().filter_map(move |(index, item)| {
-                        let index = offset.saturating_add(index);
-                        (index >= start && index < end).then_some(item)
+                        let source = offset.saturating_add(index);
+                        let visible = (start..end).contains(&source);
+                        let shifted = self.reorder_indices().is_some_and(|(from, _)| {
+                            source == from || (start.saturating_sub(1)..=end).contains(&source)
+                        });
+                        (visible || shifted).then_some(item)
                     })
                 }),
         )
@@ -230,8 +283,11 @@ impl<T> PagedList<T> {
 
     pub(super) fn next_offset(&self, fetch_size: usize) -> Option<usize> {
         let fetch_size = fetch_size.max(1);
-        if let Some((_, offset, _)) = &self.identity_lookup {
-            return Some(*offset);
+        if let Some((_, step, _)) = &self.identity_lookup {
+            return Some(match *step {
+                LookupStep::Hint(row) => row / fetch_size * fetch_size,
+                LookupStep::Scan(offset) => offset,
+            });
         }
         let selected = self.selection.selected().unwrap_or(0) / fetch_size * fetch_size;
         if !self.loaded || self.fetch_size != fetch_size {
@@ -249,6 +305,13 @@ impl<T> PagedList<T> {
         for offset in (first..=last).step_by(fetch_size) {
             if missing(offset) {
                 return Some(offset);
+            }
+        }
+        // The held row can be outside the viewport. Keep only its batch.
+        if let Some((from, _)) = self.reorder_indices() {
+            let origin = from / fetch_size * fetch_size;
+            if missing(origin) {
+                return Some(origin);
             }
         }
         // One neighboring batch on either side hides boundaries during ordinary scrolling.
@@ -295,8 +358,11 @@ impl<T> PagedList<T> {
         let first = (self.selection.offset() / fetch_size * fetch_size).saturating_sub(fetch_size);
         let last = self.visible_end().saturating_sub(1) / fetch_size * fetch_size;
         let last = last.saturating_add(fetch_size);
-        // At most ceil(viewport_rows / fetch_size) + 3 batches, independent of list length.
-        self.retain_pages(|offset, _| (first..=last).contains(&offset));
+        let origin = self
+            .reorder_indices()
+            .map(|(from, _)| from / fetch_size * fetch_size);
+        // Keep the viewport, its neighbors, and at most one held-row batch.
+        self.retain_pages(|offset, _| (first..=last).contains(&offset) || Some(offset) == origin);
     }
 
     pub(super) fn navigate_action(&mut self, action: Action, page_size: usize) -> bool {
@@ -374,7 +440,8 @@ impl<T> PagedList<T> {
             .retained
             .as_ref()
             .is_some_and(|retained| !retained.identity_scan)
-            && (self.selection.offset()..self.visible_end()).all(|index| self.get(index).is_some())
+            && (self.selection.offset()..self.visible_end())
+                .all(|index| self.get(self.source_index(index)).is_some())
         {
             self.discard_refresh();
         }
@@ -389,7 +456,13 @@ impl<T> PagedList<T> {
         if let Some(retained) = &mut self.retained {
             retained.identity_scan = true;
         }
-        self.identity_lookup = identity.map(|identity| (identity, 0, scroll));
+        self.identity_lookup = identity.map(|identity| {
+            let step = match self.identity_lookup.take() {
+                Some((target, step @ LookupStep::Hint(_), _)) if target == identity => step,
+                _ => LookupStep::Scan(0),
+            };
+            (identity, step, scroll)
+        });
         self.selection.select(Some(0));
         *self.selection.offset_mut() = 0;
     }
@@ -400,7 +473,7 @@ impl<T> PagedList<T> {
             .as_ref()
             .map_or(self.selection.offset(), |(_, _, scroll)| *scroll);
         self.clear();
-        self.identity_lookup = identity.map(|identity| (identity, 0, scroll));
+        self.identity_lookup = identity.map(|identity| (identity, LookupStep::Scan(0), scroll));
         self.selection.select(Some(0));
     }
 
@@ -413,7 +486,7 @@ impl<T> PagedList<T> {
         items: &[T],
         matches: impl Fn(&T, &ContainerIdentity) -> bool,
     ) -> bool {
-        let Some((identity, next, scroll)) = &mut self.identity_lookup else {
+        let Some((identity, step, scroll)) = &mut self.identity_lookup else {
             return true;
         };
         if let Some(index) = items.iter().position(|item| matches(item, identity)) {
@@ -422,8 +495,14 @@ impl<T> PagedList<T> {
             self.identity_lookup = None;
             return true;
         }
+        // A hint may land beyond the end or skip earlier pages. On a miss,
+        // scan from the beginning, without requesting page zero twice.
+        if matches!(step, LookupStep::Hint(_)) && offset != 0 {
+            *step = LookupStep::Scan(0);
+            return false;
+        }
         if !items.is_empty() && offset + items.len() < total {
-            *next = offset + items.len();
+            *step = LookupStep::Scan(offset + items.len());
             return offset == 0;
         }
         self.identity_lookup = None;
@@ -444,7 +523,7 @@ impl<T> PagedList<T> {
         {
             return None;
         }
-        self.get(self.selection.selected()?)
+        self.get(self.source_index(self.selection.selected()?))
     }
 }
 fn move_selection(selection: &mut ListState, len: usize, down: bool) -> bool {

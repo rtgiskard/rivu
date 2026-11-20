@@ -727,6 +727,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .results
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
+        .result
         .unwrap_err();
     failure.into_message().unwrap();
     worker
@@ -744,6 +745,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .results
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
+        .result
         .unwrap();
     assert!(ack.is_success());
     drop(worker);
@@ -884,6 +886,7 @@ fn command_worker_reconnection_rejects_replacement_instance() {
             .results
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
+            .result
             .unwrap_err();
         assert_eq!(failure.instance_changed, name == "old-baseline");
     }
@@ -1011,6 +1014,7 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
             .results
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
+            .result
             .unwrap()
             .is_success()
     );
@@ -1089,6 +1093,7 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
         .results
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
+        .result
         .unwrap();
     assert!(!ack.is_success());
     worker
@@ -1101,6 +1106,7 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
         .results
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
+        .result
         .unwrap_err();
     error.into_message().unwrap();
     let listener = server.join().unwrap();

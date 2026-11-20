@@ -25,7 +25,20 @@ collection, regardless of filters. Selecting a row alone does not change playbac
 Whole-playlist playback asks on the status line before replacing a nonempty queue:
 `y` or Enter confirms; `n` or Esc cancels.
 
-Outside search editing, help, and details, press `:` to open the command line on
+Press `Shift+M` to pick up a row in Queue, the playlist catalog, or a playlist's
+tracks. Up/Down or `k`/`j` moves it one row at a time in the preview; Enter saves
+the new order and Esc cancels. The selection follows the picked row. Each queue
+or playlist occurrence moves independently, even when the same track appears
+more than once. Clear search before reordering.
+
+If the edited list changes before saving, the preview is discarded; press Esc
+to dismiss the notice and start again. Other lists and playback continue to
+refresh. A failed save with an unchanged list leaves the preview available for
+retry or cancellation. Exiting without confirming does not save the preview.
+After saving a catalog move, the TUI checks the destination page first and
+restores selection by playlist ID, even if another edit changed its position.
+
+Outside search editing, reorder mode, help, and details, press `:` to open the command line on
 the bottom row. Enter executes; Escape cancels. Submitted search results remain
 browsable with command mode, without clearing the search. Commands are bounded
 to 256 UTF-8 bytes and support Backspace.
@@ -109,7 +122,8 @@ state.
 The status row shows volume, shuffle, repeat, speed when not 1×, and current-track codec, sample rate,
 bit depth, and available bitrate in `kbps` where space permits, without distinguishing
 estimated and confirmed bitrates. A separate bottom row holds notices, then scan
-status, core errors, or the startup help hint, in that priority order. Notices and
+status, core errors, or the startup help hint, in that priority order. Reorder mode
+keeps its controls at the start of that row. Notices and
 startup help expire automatically. Playback transitions update the fixed playback
 display rather than replacing messages.
 

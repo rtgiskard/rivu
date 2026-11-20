@@ -1,3 +1,5 @@
+mod reorder;
+
 use super::{
     paged::{ContainerIdentity, PagedList},
     worker::{QueryRequest, QueryResult, ReadDemand, ReadKind, ReadSpec},
@@ -5,6 +7,7 @@ use super::{
 use crate::projection::TuiSnapshot;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
+use reorder::Reorder;
 use rivu_presentation::{
     history::{activity_key, compare_recent, playback_activity, reorder_changed_rows},
     i18n::Localizer,
@@ -42,6 +45,7 @@ impl TuiState {
     }
 
     pub(super) fn apply_snapshot(&mut self, next: TuiSnapshot) {
+        self.ui.sync_reorder(&next);
         let page_size_changed =
             self.snapshot.configuration.query_batch_size != next.configuration.query_batch_size;
         let queue_filter = if matches!(self.ui.view, View::Queue) {
@@ -1132,6 +1136,7 @@ pub(super) struct UiState {
     pub(super) help_layout: Option<super::render::HelpLayout>,
     pub(super) message: Option<Notice>,
     pub(super) queue_replace: Option<QueueReplaceConfirmation>,
+    reorder: Option<Reorder>,
     // Started only after the initial IPC snapshot; None is permanently dismissed.
     pub(super) startup_hint_deadline: Option<Instant>,
     pub(super) details: Details,
@@ -1158,6 +1163,7 @@ impl UiState {
             help_layout: None,
             message: None,
             queue_replace: None,
+            reorder: None,
             startup_hint_deadline: Some(Instant::now() + Duration::from_secs(4)),
             details: Details::default(),
             details_active: false,
@@ -1726,6 +1732,9 @@ impl UiState {
             self.queue_replace = None;
             return KeyAction::Quit;
         }
+        if self.reorder.is_some() {
+            return self.reorder_key(key);
+        }
         if let Some(pending) = self.queue_replace.take() {
             self.mark_local_change();
             if !pending.valid(self, state) {
@@ -1900,6 +1909,10 @@ impl UiState {
             }
             Action::Details => {
                 self.open_details();
+                return KeyAction::Ignored;
+            }
+            Action::Reorder => {
+                self.begin_reorder(state);
                 return KeyAction::Ignored;
             }
             Action::Enqueue => {
@@ -2465,6 +2478,7 @@ pub(super) enum KeyAction {
     Shutdown,
     Search,
     Command(Command),
+    SaveOrder(Command),
     Ignored,
 }
 
