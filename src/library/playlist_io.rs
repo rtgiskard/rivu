@@ -263,23 +263,52 @@ async fn prepare_import(
     };
     // Deduplicate on the blocking worker without copying occurrence-sized path
     // payloads. The scoped index workspace is bounded by MAX_IMPORT_ENTRIES.
-    let (paths, sources, first_sources, _source_order_charge) = workers
+    let (mut paths, sources, mut ordinary_sources, source_order_charge) = workers
         .execute({
             let budget = budget.clone();
             let cancellation = cancellation.clone();
             move || -> Result<_> {
-                let (sources, first_sources, charge) =
+                let (sources, mut first_sources, charge) =
                     unique_import_sources(&paths, &budget, &cancellation)?;
+                first_sources.retain(|&index| !is_cue_path(&paths[index]));
                 Ok((paths, sources, first_sources, charge))
             }
         })
         .await
         .context("Playlist import source ordering worker panicked")??;
     builder.result.paths = sources;
-    let mut first_sources = first_sources.into_iter().peekable();
+    let mut non_regular_source = None;
+    for start in (0..ordinary_sources.len()).step_by(super::source::SOURCE_BATCH_SIZE) {
+        cancellation.check()?;
+        let end = (start + super::source::SOURCE_BATCH_SIZE).min(ordinary_sources.len());
+        let cancellation = cancellation.clone();
+        (paths, ordinary_sources, non_regular_source) = workers
+            .execute(move || -> Result<_> {
+                let mut non_regular = None;
+                for &index in &ordinary_sources[start..end] {
+                    cancellation.check()?;
+                    if std::fs::metadata(&paths[index]).is_ok_and(|metadata| !metadata.is_file()) {
+                        non_regular = Some(index);
+                        break;
+                    }
+                }
+                Ok((paths, ordinary_sources, non_regular))
+            })
+            .await
+            .context("Import source inspection worker panicked")??;
+        if non_regular_source.is_some() {
+            break;
+        }
+    }
+    drop((ordinary_sources, source_order_charge));
     for (index, path) in paths.into_iter().enumerate() {
         cancellation.check()?;
-        let first_source = first_sources.next_if_eq(&index).is_some();
+        // Report prechecked errors in playlist order, including CUE failures.
+        ensure!(
+            non_regular_source != Some(index),
+            "Import source is not a regular file: {}",
+            path.display()
+        );
         let path_bytes = path.as_os_str().len();
         if is_cue_path(&path) {
             if let Some(roots) = roots {
@@ -323,25 +352,6 @@ async fn prepare_import(
                 .context("Playlist import CUE parser panicked")??;
             path_charge.release(path_bytes);
         } else {
-            let path = if first_source {
-                let (path, inspected) = workers
-                    .execute(move || {
-                        let inspected = std::fs::metadata(&path);
-                        (path, inspected)
-                    })
-                    .await
-                    .context("Import source inspection worker panicked")?;
-                if let Ok(metadata) = inspected {
-                    ensure!(
-                        metadata.is_file(),
-                        "Import source is not a regular file: {}",
-                        path.display()
-                    );
-                }
-                path
-            } else {
-                path
-            };
             ensure!(
                 builder.result.items.len() < MAX_IMPORT_ENTRIES,
                 "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
@@ -643,6 +653,35 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_reports_earlier_cue_failure_before_a_later_non_regular_source() -> Result<()> {
+        use std::fmt::Write as _;
+
+        let directory = tempfile::tempdir()?;
+        let playlist = directory.path().join("list.m3u8");
+        std::fs::create_dir(directory.path().join("directory.wav"))?;
+        let mut entries = String::new();
+        for index in 0..super::super::source::SOURCE_BATCH_SIZE {
+            writeln!(entries, "missing-{index}.wav")?;
+        }
+        std::fs::write(&playlist, format!("missing.cue\n{entries}directory.wav\n"))?;
+        let error = import_m3u(&playlist).unwrap_err();
+        assert!(
+            error.to_string().contains("Reading import CUE"),
+            "{error:#}"
+        );
+
+        std::fs::write(&playlist, format!("{entries}directory.wav\n"))?;
+        let error = import_m3u(&playlist).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Import source is not a regular file"),
+            "{error:#}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn unique_sources_keep_first_occurrences_and_account_index_workspace() -> Result<()> {
