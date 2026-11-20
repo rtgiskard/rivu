@@ -465,10 +465,7 @@ impl MenuLayout {
         let children = if recursion_depth == 0 {
             Vec::new()
         } else {
-            menu_items(menu, i18n)
-                .into_iter()
-                .map(Variant::from)
-                .collect()
+            menu_items(menu, i18n).map(Variant::from).collect()
         };
         Self {
             id: 0,
@@ -527,23 +524,22 @@ impl DbusMenu {
         property_names: Vec<String>,
     ) -> fdo::Result<Vec<(i32, HashMap<String, OwnedVariant>)>> {
         let (menu, _) = self.data.read().menu_snapshot();
-        let ids = if ids.is_empty() {
-            (2..=9).collect()
-        } else {
-            ids
-        };
-        Ok(ids
-            .into_iter()
-            .filter_map(|id| {
-                menu_properties(menu, id, &property_names, &self.i18n).map(|props| (id, props))
+        let defaults = MenuItem::ALL.into_iter().filter(|_| ids.is_empty());
+        Ok(defaults
+            .chain(ids.iter().copied().filter_map(MenuItem::from_id))
+            .map(|item| {
+                (
+                    item as i32,
+                    item.properties(menu, &property_names, &self.i18n),
+                )
             })
             .collect())
     }
 
     fn get_property(&self, id: i32, name: String) -> fdo::Result<OwnedVariant> {
         let (menu, _) = self.data.read().menu_snapshot();
-        menu_properties(menu, id, &[name], &self.i18n)
-            .and_then(|mut properties| properties.drain().next().map(|(_, value)| value))
+        MenuItem::from_id(id)
+            .and_then(|item| item.property(menu, &name, &self.i18n))
             .ok_or_else(|| fdo::Error::InvalidArgs("Unknown menu property".into()))
     }
 
@@ -554,8 +550,10 @@ impl DbusMenu {
         _data: OwnedVariant,
         _timestamp: u32,
     ) -> fdo::Result<()> {
-        if event_id == "clicked" {
-            self.activate(id);
+        if event_id == "clicked"
+            && let Some(item) = MenuItem::from_id(id)
+        {
+            self.activate(item);
         }
         Ok(())
     }
@@ -563,10 +561,10 @@ impl DbusMenu {
     fn event_group(&self, events: Vec<(i32, String, OwnedVariant, u32)>) -> Vec<i32> {
         let mut invalid = Vec::new();
         for (id, event, _, _) in events {
-            if !(2..=9).contains(&id) && id != 0 {
-                invalid.push(id);
-            } else if event == "clicked" {
-                self.activate(id);
+            match MenuItem::from_id(id) {
+                Some(item) if event == "clicked" => self.activate(item),
+                None if id != 0 => invalid.push(id),
+                _ => {}
             }
         }
         invalid
@@ -591,7 +589,7 @@ impl DbusMenu {
             // Force the static root layout to be loaded instead of leaving an
             // empty host-side cache.
             Ok(true)
-        } else if (2..=9).contains(&id) {
+        } else if MenuItem::from_id(id).is_some() {
             Ok(false)
         } else {
             Err(fdo::Error::InvalidArgs("Unknown menu item".into()))
@@ -620,20 +618,20 @@ impl DbusMenu {
 }
 
 impl DbusMenu {
-    fn activate(&self, id: i32) {
-        if id == 9 {
-            if let Err(error) = self.app.request_shutdown() {
-                tracing::warn!(error = %error, "tray_quit_failed");
+    fn activate(&self, item: MenuItem) {
+        let command = match item {
+            MenuItem::PlayPause => Command::Toggle,
+            MenuItem::Previous => Command::Previous,
+            MenuItem::Next => Command::Next,
+            MenuItem::Shuffle => Command::ToggleShuffle,
+            MenuItem::Repeat => Command::CycleRepeat,
+            MenuItem::PlaybackSeparator | MenuItem::QuitSeparator => return,
+            MenuItem::Quit => {
+                if let Err(error) = self.app.request_shutdown() {
+                    tracing::warn!(error = %error, "tray_quit_failed");
+                }
+                return;
             }
-            return;
-        }
-        let command = match id {
-            2 => Command::Toggle,
-            3 => Command::Previous,
-            4 => Command::Next,
-            6 => Command::ToggleShuffle,
-            7 => Command::CycleRepeat,
-            _ => return,
         };
         if let Err(error) = self.handle.send(command) {
             tracing::warn!(error = %error, "tray_command_failed");
@@ -641,79 +639,103 @@ impl DbusMenu {
     }
 }
 
-fn menu_items(menu: TrayMenuState, i18n: &Localizer) -> Vec<MenuLayout> {
-    (2..=9)
-        .map(|id| MenuLayout {
-            id,
-            properties: menu_properties(menu, id, &[], i18n).expect("known menu item"),
-            children: Vec::new(),
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+enum MenuItem {
+    PlayPause = 2,
+    Previous = 3,
+    Next = 4,
+    PlaybackSeparator = 5,
+    Shuffle = 6,
+    Repeat = 7,
+    QuitSeparator = 8,
+    Quit = 9,
+}
+
+impl MenuItem {
+    const ALL: [Self; 8] = [
+        Self::PlayPause,
+        Self::Previous,
+        Self::Next,
+        Self::PlaybackSeparator,
+        Self::Shuffle,
+        Self::Repeat,
+        Self::QuitSeparator,
+        Self::Quit,
+    ];
+
+    fn from_id(id: i32) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| *item as i32 == id)
+    }
+
+    fn label(self, menu: TrayMenuState, i18n: &Localizer) -> &str {
+        i18n.text(match self {
+            Self::PlayPause if menu.playing => "core-pause",
+            Self::PlayPause => "playback-play",
+            Self::Previous => "core-previous",
+            Self::Next => "core-next",
+            Self::Shuffle => "core-shuffle",
+            Self::Repeat => match menu.repeat {
+                RepeatMode::Off => "core-repeat-off",
+                RepeatMode::All => "core-repeat-all",
+                RepeatMode::One => "core-repeat-one",
+            },
+            Self::Quit => "app-quit",
+            Self::PlaybackSeparator | Self::QuitSeparator => return "",
         })
-        .collect()
+    }
+
+    fn property(self, menu: TrayMenuState, name: &str, i18n: &Localizer) -> Option<OwnedVariant> {
+        Some(match name {
+            "label" => owned_variant(self.label(menu, i18n).to_owned()),
+            "type" => owned_variant(
+                if matches!(self, Self::PlaybackSeparator | Self::QuitSeparator) {
+                    "separator"
+                } else {
+                    "standard"
+                }
+                .to_owned(),
+            ),
+            "enabled" | "visible" => OwnedVariant::from(true),
+            "toggle-type" if self == Self::Shuffle => owned_variant("checkmark".to_owned()),
+            "toggle-state" if self == Self::Shuffle => OwnedVariant::from(i32::from(menu.shuffle)),
+            _ => return None,
+        })
+    }
+
+    fn properties(
+        self,
+        menu: TrayMenuState,
+        requested: &[String],
+        i18n: &Localizer,
+    ) -> HashMap<String, OwnedVariant> {
+        const PROPERTIES: [&str; 6] = [
+            "label",
+            "type",
+            "enabled",
+            "visible",
+            "toggle-type",
+            "toggle-state",
+        ];
+        PROPERTIES
+            .into_iter()
+            .filter(|name| {
+                requested.is_empty() || requested.iter().any(|requested| requested == name)
+            })
+            .filter_map(|name| {
+                self.property(menu, name, i18n)
+                    .map(|value| (name.to_owned(), value))
+            })
+            .collect()
+    }
 }
 
-fn menu_entry(menu: TrayMenuState, id: i32, i18n: &Localizer) -> Option<&str> {
-    let label = match id {
-        2 => i18n.text(if menu.playing {
-            "core-pause"
-        } else {
-            "playback-play"
-        }),
-        3 => i18n.text("core-previous"),
-        4 => i18n.text("core-next"),
-        5 | 8 => "",
-        6 => i18n.text("core-shuffle"),
-        7 => i18n.text(match menu.repeat {
-            RepeatMode::Off => "core-repeat-off",
-            RepeatMode::All => "core-repeat-all",
-            RepeatMode::One => "core-repeat-one",
-        }),
-        9 => i18n.text("app-quit"),
-        _ => return None,
-    };
-    Some(label)
-}
-
-fn menu_properties(
-    menu: TrayMenuState,
-    id: i32,
-    requested: &[String],
-    i18n: &Localizer,
-) -> Option<HashMap<String, OwnedVariant>> {
-    let item_type = match id {
-        5 | 8 => "separator",
-        2..=9 => "standard",
-        _ => return None,
-    };
-    let all = requested.is_empty();
-    let mut properties = HashMap::new();
-    if all || requested.iter().any(|name| name == "label") {
-        let label = menu_entry(menu, id, i18n)?;
-        properties.insert("label".to_owned(), owned_variant(label.to_owned()));
-    }
-    if all || requested.iter().any(|name| name == "type") {
-        properties.insert("type".to_owned(), owned_variant(item_type.to_owned()));
-    }
-    if all || requested.iter().any(|name| name == "enabled") {
-        properties.insert("enabled".to_owned(), OwnedVariant::from(true));
-    }
-    if id == 6 {
-        if all || requested.iter().any(|name| name == "toggle-type") {
-            properties.insert(
-                "toggle-type".to_owned(),
-                owned_variant("checkmark".to_owned()),
-            );
-        }
-        if all || requested.iter().any(|name| name == "toggle-state") {
-            properties.insert(
-                "toggle-state".to_owned(),
-                OwnedVariant::from(i32::from(menu.shuffle)),
-            );
-        }
-    }
-    if all || requested.iter().any(|name| name == "visible") {
-        properties.insert("visible".to_owned(), OwnedVariant::from(true));
-    }
-    Some(properties)
+fn menu_items(menu: TrayMenuState, i18n: &Localizer) -> impl Iterator<Item = MenuLayout> + '_ {
+    MenuItem::ALL.into_iter().map(move |item| MenuLayout {
+        id: item as i32,
+        properties: item.properties(menu, &[], i18n),
+        children: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -774,8 +796,8 @@ mod tests {
         let checkmark = owned_variant("checkmark".to_owned());
         for (shuffle, state) in [(false, 0_i32), (true, 1_i32)] {
             menu.shuffle = shuffle;
-            let items = menu_items(menu, &i18n);
-            let properties = &items.iter().find(|item| item.id == 6).unwrap().properties;
+            let item = menu_items(menu, &i18n).find(|item| item.id == 6).unwrap();
+            let properties = &item.properties;
             assert_eq!(properties.get("label"), Some(&label));
             assert_eq!(properties.get("toggle-type"), Some(&checkmark));
             assert_eq!(
@@ -876,14 +898,14 @@ mod tests {
         latest.status = PlaybackStatus::Paused;
         assert_eq!(data.publish(latest.clone()).0, (true, Some(3)));
         assert_eq!(
-            menu_entry(layout_menu, 2, &i18n),
-            Some(i18n.text("core-pause"))
+            MenuItem::PlayPause.label(layout_menu, &i18n),
+            i18n.text("core-pause")
         );
         let (paused_menu, paused_revision) = data.menu_snapshot();
         assert_eq!(paused_revision, 3);
         assert_eq!(
-            menu_entry(paused_menu, 2, &i18n),
-            Some(i18n.text("playback-play"))
+            MenuItem::PlayPause.label(paused_menu, &i18n),
+            i18n.text("playback-play")
         );
         assert_eq!(data.publish(latest.clone()).0, (false, None));
         latest.shutting_down = true;
