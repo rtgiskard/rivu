@@ -131,6 +131,7 @@ struct Node {
     processor: Option<audio::NativeProcessor>,
     output: Vec<f32>,
     output_node: usize,
+    needs_sum: bool,
     latency: u64,
     frames: u64,
     input_frames: u64,
@@ -303,6 +304,7 @@ impl Engine {
                 Vec::new()
             },
             output_node,
+            needs_sum,
             latency,
             frames,
             input_frames,
@@ -356,10 +358,7 @@ impl Engine {
                     }
                 }
                 (None, Some(processor)) => {
-                    if node.inputs.len() == 1
-                        && node.inputs[0].gain == 1.0
-                        && node.inputs[0].delay.is_empty()
-                    {
+                    if !node.needs_sum {
                         let input = &previous[previous[node.inputs[0].node].output_node].output;
                         output.copy_from_slice(&input[..output.len()]);
                     } else {
@@ -368,16 +367,23 @@ impl Engine {
                         for edge in &mut node.inputs {
                             let input =
                                 &previous[previous[edge.node].output_node].output[..output.len()];
-                            for (sum, &sample) in sum.iter_mut().zip(input) {
-                                let sample = if edge.delay.is_empty() {
-                                    sample
-                                } else {
-                                    let delayed = edge.delay[edge.position];
-                                    edge.delay[edge.position] = sample;
-                                    edge.position = (edge.position + 1) % edge.delay.len();
-                                    delayed
-                                };
-                                *sum += f64::from(sample) * edge.gain;
+                            let gain = edge.gain;
+                            if edge.delay.is_empty() {
+                                for (sum, &sample) in sum.iter_mut().zip(input) {
+                                    *sum += f64::from(sample) * gain;
+                                }
+                            } else {
+                                let mut position = edge.position;
+                                for (sum, &sample) in sum.iter_mut().zip(input) {
+                                    let delayed =
+                                        std::mem::replace(&mut edge.delay[position], sample);
+                                    *sum += f64::from(delayed) * gain;
+                                    position += 1;
+                                    if position == edge.delay.len() {
+                                        position = 0;
+                                    }
+                                }
+                                edge.position = position;
                             }
                         }
                         for (sample, sum) in output.iter_mut().zip(sum) {
