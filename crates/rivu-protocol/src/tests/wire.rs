@@ -1096,40 +1096,57 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
 }
 
 #[test]
-fn configuration_wire_adapter_preserves_optional_fields_and_library_columns() {
-    for (output_device, library_columns) in [
-        (
-            None,
-            rivu_format::config::LibraryColumns {
-                duration: false,
-                ..Default::default()
+fn configuration_wire_round_trip_preserves_optional_devices_columns_and_appearance() {
+    use rivu_format::config::{
+        ArtworkDirection, ArtworkMode, ArtworkStyle, Config, LibraryColumns, Theme,
+        VisualizationPalette,
+    };
+
+    let mut encoded = Vec::new();
+    for has_device in [false, true] {
+        let base = Config {
+            output_device: has_device.then(|| "USB audio output".to_owned()),
+            library_columns: if has_device {
+                LibraryColumns {
+                    artist: true,
+                    album: true,
+                    duration: false,
+                    codec: true,
+                    bitrate: true,
+                }
+            } else {
+                LibraryColumns {
+                    duration: false,
+                    ..Default::default()
+                }
             },
-        ),
-        (
-            Some("USB audio output".to_owned()),
-            rivu_format::config::LibraryColumns {
-                artist: true,
-                album: true,
-                duration: false,
-                codec: true,
-                bitrate: true,
-            },
-        ),
-    ] {
-        let config = Arc::new(rivu_format::config::Config {
-            scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
-            visualization_palette: rivu_format::config::VisualizationPalette::Viridis,
-            output_device,
-            library_columns,
-            ui_theme: rivu_format::config::Theme::TokyoNight,
-            artwork_style: rivu_format::config::ArtworkStyle::Metal,
-            artwork_mode: rivu_format::config::ArtworkMode::Rotating,
+            scan_min_duration_seconds: if has_device { u32::MAX } else { 0 },
+            artwork_mode: ArtworkMode::Rotating,
             artwork_period_seconds: 12.5,
-            artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
-            animation_fps: 240,
+            artwork_direction: ArtworkDirection::Counterclockwise,
             ..Default::default()
-        });
-        assert_configuration_round_trip(config, &mut Vec::new());
+        };
+        for config in [
+            Config {
+                visualization_palette: VisualizationPalette::Viridis,
+                ui_theme: Theme::TokyoNight,
+                artwork_style: ArtworkStyle::Metal,
+                animation_fps: 240,
+                ..base.clone()
+            },
+            Config {
+                default_visualizer_reference_lines: has_device,
+                default_visualizer_labels: !has_device,
+                oscilloscope_overlay_channels: has_device,
+                visualization_palette: VisualizationPalette::Magma,
+                ui_theme: Theme::TokyoNightDay,
+                artwork_style: ArtworkStyle::Duotone,
+                animation_fps: 30,
+                ..base
+            },
+        ] {
+            assert_configuration_round_trip(Arc::new(config), &mut encoded);
+        }
     }
 }
 
@@ -1255,47 +1272,6 @@ fn request_round_trip_uses_explicit_message_types() {
             }
             _ => panic!("unexpected request variant"),
         }
-    }
-}
-
-#[test]
-fn state_round_trip_preserves_optional_config_field_and_library_columns() {
-    for (output_device, library_columns) in [
-        (
-            None,
-            rivu_format::config::LibraryColumns {
-                duration: false,
-                ..Default::default()
-            },
-        ),
-        (
-            Some("USB audio output".to_owned()),
-            rivu_format::config::LibraryColumns {
-                artist: true,
-                album: true,
-                duration: false,
-                codec: true,
-                bitrate: true,
-            },
-        ),
-    ] {
-        let config = rivu_format::config::Config {
-            default_visualizer_reference_lines: output_device.is_some(),
-            default_visualizer_labels: output_device.is_none(),
-            oscilloscope_overlay_channels: output_device.is_some(),
-            scan_min_duration_seconds: if output_device.is_some() { u32::MAX } else { 0 },
-            visualization_palette: rivu_format::config::VisualizationPalette::Magma,
-            output_device,
-            library_columns,
-            ui_theme: rivu_format::config::Theme::TokyoNightDay,
-            artwork_style: rivu_format::config::ArtworkStyle::Duotone,
-            artwork_mode: rivu_format::config::ArtworkMode::Rotating,
-            artwork_period_seconds: 12.5,
-            artwork_direction: rivu_format::config::ArtworkDirection::Counterclockwise,
-            animation_fps: 30,
-            ..Default::default()
-        };
-        assert_configuration_round_trip(Arc::new(config), &mut Vec::new());
     }
 }
 

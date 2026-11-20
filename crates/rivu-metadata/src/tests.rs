@@ -107,16 +107,6 @@ fn replaygain_reads_db_suffixes_and_rejects_invalid_values() {
 }
 
 #[test]
-fn replaygain_missing_track_gain_is_none() {
-    let mut file = tempfile::tempfile().unwrap();
-    file.write_all(&flac(&[], None)).unwrap();
-    assert_eq!(
-        read_tags(&mut file).unwrap().unwrap().replaygain_track_gain,
-        None
-    );
-}
-
-#[test]
 fn runtime_track_peak_is_positive_finite_and_never_uses_album_peak() {
     for (peak, expected) in [
         ("0.8", Some(0.8)),

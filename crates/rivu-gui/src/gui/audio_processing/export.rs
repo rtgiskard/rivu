@@ -886,6 +886,7 @@ impl AudioProcessing {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{click, draw};
     use super::*;
     use core::prelude::v1::test;
 
@@ -1013,42 +1014,6 @@ mod tests {
             self.0
                 .update(cx, |this, cx| this.render_panel(7, window, cx))
         }
-    }
-
-    fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
-        cx.run_until_parked();
-        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-    }
-
-    fn click(cx: &mut TestAppContext, handle: AnyWindowHandle, selector: &'static str) {
-        use gpui::InputEvent as _;
-        let position = VisualTestContext::from_window(handle, cx)
-            .debug_bounds(selector)
-            .unwrap()
-            .center();
-        cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseDownEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.dispatch_event(
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-        })
-        .unwrap();
-        draw(cx, handle);
     }
 
     #[gpui::test]

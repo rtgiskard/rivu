@@ -1419,6 +1419,7 @@ impl AudioProcessing {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::draw;
     use super::*;
     use crate::test_support::CoreRuntime;
     use core::prelude::v1::test;
@@ -1480,12 +1481,6 @@ mod tests {
         })
         .unwrap();
         (directory, runtime, processing, handle)
-    }
-
-    fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
-        cx.run_until_parked();
-        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
     }
 
     async fn wait_for_commands(
