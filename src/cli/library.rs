@@ -24,6 +24,79 @@ fn probe_format_component(i18n: &Localizer, value: u32, unit: &str) -> String {
     }
 }
 
+fn format_probe(
+    i18n: &Localizer,
+    path: &Path,
+    result: &audio::ProbeResult,
+    decoder_status: &str,
+) -> String {
+    let info = &result.info;
+    i18n.format(
+        "core-probe",
+        &[
+            ("path", TerminalEscaped(path.display()).to_string().into()),
+            ("title", terminal_text(&info.title).into()),
+            ("artist", terminal_text(&info.artist).into()),
+            ("album", terminal_text(&info.album).into()),
+            ("codec", terminal_text(&info.codec).into()),
+            (
+                "channels",
+                probe_format_component(i18n, u32::from(info.channels), "").into(),
+            ),
+            (
+                "sample-rate",
+                probe_format_component(i18n, info.sample_rate, " Hz").into(),
+            ),
+            (
+                "duration",
+                info.duration
+                    .map_or_else(
+                        || i18n.text("core-unknown").to_owned(),
+                        |value| format!("{value:.3} s"),
+                    )
+                    .into(),
+            ),
+            (
+                "bitrate",
+                info.bitrate_bps
+                    .map_or("—".into(), |value| {
+                        format!(
+                            "{}{:.1} kbps",
+                            if info.bitrate_exact { "" } else { "≈" },
+                            value as f64 / 1000.0
+                        )
+                    })
+                    .into(),
+            ),
+            (
+                "bits",
+                info.bits_per_sample
+                    .map_or("—".into(), |v| v.to_string())
+                    .into(),
+            ),
+            (
+                "track",
+                info.track_number
+                    .map_or("—".into(), |v| v.to_string())
+                    .into(),
+            ),
+            (
+                "disc",
+                info.disc_number
+                    .map_or("—".into(), |v| v.to_string())
+                    .into(),
+            ),
+            (
+                "date",
+                terminal_text(info.release_date.as_deref().unwrap_or("—")).into(),
+            ),
+            ("probe", result.probe_backend.to_string().into()),
+            ("decoder", result.decoder_backend.to_string().into()),
+            ("ffmpeg", terminal_text(decoder_status).into()),
+        ],
+    )
+}
+
 pub(super) fn run(
     i18n: &Localizer,
     data_dir: &Path,
@@ -150,13 +223,13 @@ pub(super) fn run(
             let probe_config = config::Config::load(config_path)?;
             let ffmpeg_enabled = probe_config.ffmpeg_enabled || enhanced;
             let result = audio::probe_details(&path, ffmpeg_enabled, enhanced)?;
-            let info = result.info;
             let decoder_status = if ffmpeg_enabled {
                 audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
             } else {
                 "disabled".to_owned()
             };
             if json {
+                let info = &result.info;
                 writeln!(
                     output,
                     "{}",
@@ -179,68 +252,7 @@ pub(super) fn run(
             writeln!(
                 output,
                 "{}",
-                i18n.format(
-                    "core-probe",
-                    &[
-                        ("path", TerminalEscaped(path.display()).to_string().into()),
-                        ("title", terminal_text(&info.title).into()),
-                        ("artist", terminal_text(&info.artist).into()),
-                        ("album", terminal_text(&info.album).into()),
-                        ("codec", terminal_text(&info.codec).into()),
-                        (
-                            "channels",
-                            probe_format_component(i18n, u32::from(info.channels), "").into()
-                        ),
-                        (
-                            "sample-rate",
-                            probe_format_component(i18n, info.sample_rate, " Hz").into()
-                        ),
-                        (
-                            "duration",
-                            info.duration
-                                .map_or_else(
-                                    || i18n.text("core-unknown").to_owned(),
-                                    |value| format!("{value:.3} s")
-                                )
-                                .into()
-                        ),
-                        (
-                            "bitrate",
-                            info.bitrate_bps
-                                .map_or("—".into(), |value| format!(
-                                    "{}{:.1} kbps",
-                                    if info.bitrate_exact { "" } else { "≈" },
-                                    value as f64 / 1000.0
-                                ))
-                                .into()
-                        ),
-                        (
-                            "bits",
-                            info.bits_per_sample
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "track",
-                            info.track_number
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "disc",
-                            info.disc_number
-                                .map_or("—".into(), |v| v.to_string())
-                                .into()
-                        ),
-                        (
-                            "date",
-                            terminal_text(info.release_date.as_deref().unwrap_or("—")).into()
-                        ),
-                        ("probe", result.probe_backend.to_string().into()),
-                        ("decoder", result.decoder_backend.to_string().into()),
-                        ("ffmpeg", terminal_text(&decoder_status).into()),
-                    ]
-                )
+                format_probe(i18n, &path, &result, &decoder_status)
             )?;
             Ok(())
         }
@@ -580,23 +592,33 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn human_probe_omits_units_for_unknown_pcm_components() {
+    fn human_probe_omits_units_for_unknown_pcm_components() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("source.wav");
+        fs::write(&path, wav())?;
+        let mut result = audio::probe_details(&path, false, false)?;
         for locale in ["en-US", "zh-CN"] {
             let i18n = Localizer::for_cli(locale);
             let unknown = i18n.text("core-unknown");
-            for (rate, expected) in [(0, unknown.to_owned()), (48_000, "48000 Hz".into())] {
-                let text = i18n.format(
-                    "core-probe",
-                    &[(
-                        "sample-rate",
-                        probe_format_component(&i18n, rate, " Hz").into(),
-                    )],
-                );
-                let line = text.lines().nth(6).unwrap();
-                assert!(line.ends_with(&expected), "{line}");
-                assert!(rate != 0 || !line.contains("Hz"), "{line}");
+            for (channels, rate, expected_channels, expected_rate) in
+                [(0, 0, unknown, unknown), (2, 48_000, "2", "48000 Hz")]
+            {
+                result.info.channels = channels;
+                result.info.sample_rate = rate;
+                let text = format_probe(&i18n, &path, &result, "disabled");
+                let mut lines = text.lines().skip(5);
+                for expected in [expected_channels, expected_rate] {
+                    let line = lines.next().unwrap();
+                    let (_, value) = line.split_once([':', '：']).unwrap();
+                    // Fluent isolates interpolated text for bidirectional display.
+                    assert_eq!(
+                        value.trim().trim_matches(['\u{2068}', '\u{2069}']),
+                        expected
+                    );
+                }
             }
         }
+        Ok(())
     }
 
     fn wav() -> Vec<u8> {
