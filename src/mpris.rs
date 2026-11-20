@@ -759,7 +759,7 @@ impl Player {
 
     #[zbus(property)]
     fn can_play(&self) -> bool {
-        self.handle.mpris_snapshot().queue.total != 0
+        can_play(&self.handle.mpris_snapshot())
     }
 
     #[zbus(property)]
@@ -808,6 +808,10 @@ fn loop_status(mode: RepeatMode) -> &'static str {
         RepeatMode::All => "Playlist",
         RepeatMode::One => "Track",
     }
+}
+
+fn can_play(state: &MprisSnapshot) -> bool {
+    state.queue.total != 0
 }
 
 fn can_pause(state: &MprisSnapshot) -> bool {
@@ -1094,48 +1098,16 @@ async fn publish_changes(
     if metadata_changed {
         changed.insert("Metadata", Variant::from(metadata_map(metadata.as_ref())));
     }
-    // Queue navigation depends on ordering, selection and repeat/shuffle,
-    // not the audio clock; do not walk the queue on each position update.
-    let queue_changed = previous.is_none_or(|before| {
-        before.queue.current_id != current.queue.current_id
-            || before.playback.status != current.playback.status
-            || before.queue != current.queue
-    });
-    if queue_changed
-        || previous.is_some_and(|before| {
-            before.playback.shuffle != current.playback.shuffle
-                || before.playback.repeat != current.playback.repeat
-        })
-    {
-        for (name, before, after) in [
-            ("CanGoNext", previous.map(can_go_next), can_go_next(current)),
-            (
-                "CanGoPrevious",
-                previous.map(can_go_previous),
-                can_go_previous(current),
-            ),
-        ] {
-            if before != Some(after) {
-                changed.insert(name, after.into());
-            }
-        }
-    }
-    let pause = can_pause(current);
-    if previous.map(can_pause) != Some(pause) {
-        changed.insert("CanPause", pause.into());
-    }
-    if queue_changed {
-        for (name, before, after) in [
-            (
-                "CanPlay",
-                previous.map(|before| before.queue.total != 0),
-                current.queue.total != 0,
-            ),
-            ("CanSeek", previous.map(can_seek), can_seek(current)),
-        ] {
-            if before != Some(after) {
-                changed.insert(name, after.into());
-            }
+    for (name, capability) in [
+        ("CanGoNext", can_go_next as fn(&MprisSnapshot) -> bool),
+        ("CanGoPrevious", can_go_previous),
+        ("CanPause", can_pause),
+        ("CanPlay", can_play),
+        ("CanSeek", can_seek),
+    ] {
+        let current = capability(current);
+        if previous.map(capability) != Some(current) {
+            changed.insert(name, current.into());
         }
     }
     if !changed.is_empty() {
@@ -2005,6 +1977,18 @@ mod tests {
         let connection = bus.serve_root(app.clone());
         let client = bus.connect();
         async_io::block_on(async {
+            connection
+                .object_server()
+                .at(
+                    OBJECT_PATH,
+                    Player {
+                        handle: runtime.handle.clone(),
+                        artwork: Arc::clone(&artwork),
+                        artwork_result: parking_lot::Mutex::new(None),
+                    },
+                )
+                .await
+                .unwrap();
             let proxy = zbus::Proxy::new(
                 &client,
                 BUS_NAME,
@@ -2045,6 +2029,12 @@ mod tests {
                 ]
             );
             assert!(bool::try_from(changed.remove("CanPause").unwrap()).unwrap());
+            let can_play: OwnedVariant = proxy
+                .call("Get", &(PLAYER_INTERFACE, "CanPlay"))
+                .await
+                .unwrap();
+            assert!(bool::try_from(can_play).unwrap());
+            assert!(bool::try_from(changed.remove("CanPlay").unwrap()).unwrap());
             let (interface, mut changed, invalidated) = next_change(&mut signals).await;
             assert_eq!(interface, "org.mpris.MediaPlayer2");
             assert!(invalidated.is_empty());
