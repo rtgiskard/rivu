@@ -402,64 +402,51 @@ where
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let local_revision = tui.ui.local_revision;
-                    match tui.ui.key_action(key, &tui.snapshot) {
+                    let command = match tui.ui.key_action(key, &tui.snapshot) {
                         KeyAction::Quit => break,
                         KeyAction::Search => {
                             tui.ui.open_search();
+                            immediate_redraw = true;
+                            None
                         }
-                        action @ (KeyAction::Command(_)
-                        | KeyAction::SaveOrder(_)
-                        | KeyAction::WritePlaylistName(_)
-                        | KeyAction::Shutdown) => {
-                            let (command, feedback) = match action {
-                                KeyAction::Command(command) => {
-                                    (command.into(), CommandFeedback::Notice)
-                                }
-                                KeyAction::SaveOrder(command) => {
-                                    (command.into(), CommandFeedback::Reorder)
-                                }
-                                KeyAction::WritePlaylistName(command) => {
-                                    (command.into(), CommandFeedback::PlaylistName)
-                                }
-                                KeyAction::Shutdown => {
-                                    (rivu_protocol::AppCommand::Shutdown, CommandFeedback::Notice)
-                                }
-                                _ => unreachable!("command action"),
-                            };
-                            if commands.request(command, feedback)? {
-                                if feedback == CommandFeedback::Reorder {
-                                    tui.ui.reorder_submitted();
-                                }
-                            } else {
-                                let message = i18n.text("terminal-command-busy").into();
-                                match feedback {
-                                    CommandFeedback::Reorder => tui.ui.reorder_busy(message),
-                                    CommandFeedback::PlaylistName => {
-                                        tui.ui.complete_playlist_name(Err(message))
-                                    }
-                                    CommandFeedback::Notice => {
-                                        tui.ui.set_notice(message, NoticeKind::Warning)
-                                    }
-                                }
-                                redraw = true;
-                                immediate_redraw = true;
-                            }
-                            if tui.ui.local_revision != local_revision {
-                                redraw = true;
-                                immediate_redraw = true;
-                            }
-                            continue;
+                        KeyAction::Ignored => None,
+                        KeyAction::Command(command) => {
+                            Some((command.into(), CommandFeedback::Notice))
                         }
-                        KeyAction::Ignored => {
-                            if tui.ui.local_revision != local_revision {
-                                redraw = true;
-                                immediate_redraw = true;
+                        KeyAction::SaveOrder(command) => {
+                            Some((command.into(), CommandFeedback::Reorder))
+                        }
+                        KeyAction::WritePlaylistName(command) => {
+                            Some((command.into(), CommandFeedback::PlaylistName))
+                        }
+                        KeyAction::Shutdown => {
+                            Some((rivu_protocol::AppCommand::Shutdown, CommandFeedback::Notice))
+                        }
+                    };
+                    if let Some((command, feedback)) = command {
+                        if commands.request(command, feedback)? {
+                            if feedback == CommandFeedback::Reorder {
+                                tui.ui.reorder_submitted();
                             }
-                            continue;
+                        } else {
+                            let message = i18n.text("terminal-command-busy").into();
+                            match feedback {
+                                CommandFeedback::Reorder => tui.ui.reorder_busy(message),
+                                CommandFeedback::PlaylistName => {
+                                    tui.ui.complete_playlist_name(Err(message))
+                                }
+                                CommandFeedback::Notice => {
+                                    tui.ui.set_notice(message, NoticeKind::Warning)
+                                }
+                            }
+                            redraw = true;
+                            immediate_redraw = true;
                         }
                     }
-                    redraw |= tui.ui.local_revision != local_revision;
-                    immediate_redraw = true;
+                    if tui.ui.local_revision != local_revision {
+                        redraw = true;
+                        immediate_redraw = true;
+                    }
                 }
                 _ => {}
             }
