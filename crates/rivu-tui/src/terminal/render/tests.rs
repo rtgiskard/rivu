@@ -12,6 +12,26 @@ use rivu_protocol::{
 use std::sync::Arc;
 
 #[test]
+fn progress_changes_at_seconds_or_visible_cell_boundaries() {
+    let mut state = TuiSnapshot::default();
+    state.playback.duration = Some(180.0);
+    let progress = |width, position| {
+        let mut state = state.clone();
+        state.playback.position = position;
+        PlaybackProgress::new(width, &state)
+    };
+    assert!(progress(40, 2.0) == progress(40, 2.3));
+    assert!(progress(40, 2.3) != progress(40, 3.0));
+    assert!(progress(180, 2.0) != progress(180, 2.3));
+    for width in [1, 2, 3, 12, 15, 16, 40, 180] {
+        let area = Rect::new(0, 0, width, 1);
+        let gauge =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(13)]).areas::<2>(area)[0];
+        assert_eq!(progress(width + 2, 2.0).gauge_width, gauge.width);
+    }
+}
+
+#[test]
 fn queue_replacement_confirmation_uses_status_row_without_hiding_notices() {
     let mut tui = queue_replace_tui();
     tui.ui
@@ -140,7 +160,7 @@ fn command_prompt_keeps_unicode_cursor_in_bounds() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &TuiSnapshot::default(), &mut ui)
+                draw(frame, &TuiSnapshot::default(), &mut ui);
             })
             .unwrap();
         assert_eq!(
@@ -260,7 +280,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         let ready_text = terminal_text(&terminal);
@@ -272,7 +292,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         assert!(ui.details.error_max_scroll > ui.page_size);
@@ -288,7 +308,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
             terminal
                 .draw(|frame| {
                     commit_layout(frame.area(), &mut ui);
-                    draw(frame, &state, &mut ui)
+                    draw(frame, &state, &mut ui);
                 })
                 .unwrap();
             assert_eq!(ui.details.error_scroll, expected);
@@ -302,7 +322,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         for key in [
@@ -320,7 +340,7 @@ fn long_detail_errors_scroll_independently_and_loading_preserves_ready_position(
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         assert_eq!((ui.details.scroll, ui.details.max_scroll), position);
@@ -365,7 +385,7 @@ fn iteration_details_refresh_replaced_error_and_container_text() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &TuiSnapshot::default(), &mut ui)
+                draw(frame, &TuiSnapshot::default(), &mut ui);
             })
             .unwrap();
         assert!(terminal_text(&terminal).contains("Original message"));
@@ -377,7 +397,7 @@ fn iteration_details_refresh_replaced_error_and_container_text() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &TuiSnapshot::default(), &mut ui)
+                draw(frame, &TuiSnapshot::default(), &mut ui);
             })
             .unwrap();
         let text = terminal_text(&terminal);
@@ -416,7 +436,7 @@ fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         assert!(ui.help_max_scroll > 0);
@@ -424,7 +444,7 @@ fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         assert!(ui.help_scroll > 0);
@@ -481,7 +501,7 @@ fn details_refresh_after_metadata_changes_without_reopening() {
     terminal
         .draw(|frame| {
             commit_layout(frame.area(), &mut ui);
-            draw(frame, &state, &mut ui)
+            draw(frame, &state, &mut ui);
         })
         .unwrap();
     assert!(terminal_text(&terminal).contains("Original title"));
@@ -492,7 +512,7 @@ fn details_refresh_after_metadata_changes_without_reopening() {
     terminal
         .draw(|frame| {
             commit_layout(frame.area(), &mut ui);
-            draw(frame, &state, &mut ui)
+            draw(frame, &state, &mut ui);
         })
         .unwrap();
     let text = terminal_text(&terminal);
@@ -524,7 +544,9 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .draw(|frame| {
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })
             .unwrap();
         let ready_text = terminal_text(&terminal);
         let position = (tui.ui.details.scroll, tui.ui.details.max_scroll);
@@ -535,7 +557,9 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
         let deadline = tui.ui.details.refresh_deadline().unwrap();
         let request = tui.ui.query_request(&tui.snapshot).unwrap();
         terminal
-            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .draw(|frame| {
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })
             .unwrap();
         assert_eq!(terminal_text(&terminal), ready_text);
         assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), position);
@@ -547,7 +571,9 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             .key_action(KeyEvent::from(KeyCode::Home), &tui.snapshot);
         assert_eq!(tui.ui.details.scroll, 0);
         terminal
-            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .draw(|frame| {
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })
             .unwrap();
         assert!(terminal_text(&terminal).contains("Original title"));
         if expire {
@@ -565,7 +591,9 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             ));
         }
         terminal
-            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .draw(|frame| {
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })
             .unwrap();
         assert!(!terminal_text(&terminal).contains("Original title"));
         assert_ne!(
@@ -643,7 +671,7 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
         terminal
             .draw(|frame| {
                 commit_layout(frame.area(), &mut ui);
-                draw(frame, &state, &mut ui)
+                draw(frame, &state, &mut ui);
             })
             .unwrap();
         let page_size = ui.page_size;
@@ -654,7 +682,7 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
             terminal
                 .draw(|frame| {
                     commit_layout(frame.area(), &mut ui);
-                    draw(frame, &state, &mut ui)
+                    draw(frame, &state, &mut ui);
                 })
                 .unwrap();
             assert_eq!(ui.page_size, page_size);
@@ -1044,7 +1072,9 @@ fn drawing_without_a_layout_commit_cannot_change_retention_or_navigation() {
     for height in [3, 24, 5] {
         let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &TuiSnapshot::default(), &mut ui))
+            .draw(|frame| {
+                draw(frame, &TuiSnapshot::default(), &mut ui);
+            })
             .unwrap();
         let mut after = ui.queue.pages.keys().copied().collect::<Vec<_>>();
         after.sort_unstable();

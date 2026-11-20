@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use rivu_presentation::{
     i18n::Localizer,
@@ -779,6 +779,70 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     draw_cached_lines(frame, inner, lines, ui.help_scroll);
 }
 
+/// Cell-level playback presentation, shared by invalidation and drawing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlaybackProgress {
+    seconds: u64,
+    duration: Option<u64>,
+    gauge_width: u16,
+    filled: u16,
+}
+
+impl PlaybackProgress {
+    pub(super) fn new(width: u16, state: &TuiSnapshot) -> Self {
+        let position = state.playback.position.max(0.0);
+        let duration = state
+            .playback
+            .duration
+            .filter(|d| d.is_finite() && *d > 0.0);
+        let seconds = if position.is_finite() {
+            position as u64
+        } else {
+            0
+        };
+        let duration_seconds = duration.map(|d| d as u64);
+        let time_width = |s: u64| (s / 60).checked_ilog10().unwrap_or(0) as u16 + 4;
+        // Outer margins, plus the leading space, separator and trailing space.
+        let width = width.saturating_sub(2);
+        let label = 5 + time_width(seconds) + duration_seconds.map_or(4, time_width);
+        let gauge_width = width.saturating_sub(label).max(width.min(1));
+        let ratio = duration.map_or(0.0, |d| (position / d).clamp(0.0, 1.0));
+        let filled = (f64::from(gauge_width.saturating_sub(1)) * ratio).floor() as u16;
+        Self {
+            seconds,
+            duration: duration_seconds,
+            gauge_width,
+            filled,
+        }
+    }
+
+    fn draw(self, frame: &mut ratatui::Frame<'_>, area: Rect, colors: TerminalColors) {
+        if area.is_empty() {
+            return;
+        }
+        let start = area.left().saturating_add(1);
+        let end = area.left() + self.gauge_width;
+        for x in start..end {
+            frame.buffer_mut()[(x, area.y)]
+                .set_symbol("─")
+                .set_fg(if x - start < self.filled {
+                    colors.accent
+                } else {
+                    colors.border
+                });
+        }
+        let s = self.seconds;
+        let time = match self.duration {
+            Some(d) => format!(" {}:{:02} / {}:{:02} ", s / 60, s % 60, d / 60, d % 60),
+            None => format!(" {}:{:02} / –:–– ", s / 60, s % 60),
+        };
+        frame.render_widget(
+            Paragraph::new(time).style(Style::default().fg(colors.secondary)),
+            Rect::new(end, area.y, area.width - self.gauge_width, 1),
+        );
+    }
+}
+
 fn page_layout(area: Rect) -> [Rect; 4] {
     let area = area.inner(ratatui::layout::Margin::new(1, 0));
     let spacing = u16::from(area.height >= 16);
@@ -841,7 +905,11 @@ fn commit_page_viewport(ui: &mut UiState, rows: usize) {
     }
 }
 
-pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
+pub(super) fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    state: &TuiSnapshot,
+    ui: &mut UiState,
+) -> Option<PlaybackProgress> {
     let colors = TerminalColors::new(state.configuration.ui_theme);
     let area = frame.area();
     frame.render_widget(
@@ -850,11 +918,11 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     );
     if ui.details_active {
         draw_details(frame, area, &mut ui.details, &ui.i18n, colors);
-        return;
+        return None;
     }
     if ui.show_help {
         draw_help(frame, area, ui, colors);
-        return;
+        return None;
     }
     let area = area.inner(ratatui::layout::Margin::new(1, 0));
     let spacing = u16::from(area.height >= 16);
@@ -956,34 +1024,8 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(now)), rows[0]);
-    let position = state.playback.position.max(0.0);
-    let duration = state
-        .playback
-        .duration
-        .filter(|duration| duration.is_finite() && *duration > 0.0);
-    let ratio = duration.map_or(0.0, |duration| (position / duration).clamp(0.0, 1.0));
-    let time = format!(
-        " {} / {} ",
-        format_time(position),
-        duration.map_or_else(|| "–:––".into(), format_time)
-    );
-    let progress = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(Line::from(time.as_str()).width() as u16),
-    ])
-    .split(rows[1]);
-    frame.render_widget(
-        LineGauge::default()
-            .label("")
-            .filled_style(Style::default().fg(colors.accent))
-            .unfilled_style(Style::default().fg(colors.border))
-            .ratio(ratio),
-        progress[0],
-    );
-    frame.render_widget(
-        Paragraph::new(time).style(Style::default().fg(colors.secondary)),
-        progress[1],
-    );
+    let progress = PlaybackProgress::new(frame.area().width, state);
+    progress.draw(frame, rows[1], colors);
     let name_feedback = ui.playlist_name.as_ref().and_then(|draft| {
         if draft.pending {
             Some((i18n.text("terminal-playlist-name-saving"), colors.command))
@@ -1006,7 +1048,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     };
     if let Some((prompt, notice)) = ui.reorder_footer() {
         draw_reorder_footer(frame, messages, prompt, notice, colors);
-        return;
+        return Some(progress);
     }
     if let Some(draft) = &ui.playlist_name {
         let label = draft.label();
@@ -1020,7 +1062,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         if !draft.pending && messages.height > 0 && label.len() + cursor < width {
             frame.set_cursor_position((messages.x + (label.len() + cursor) as u16, messages.y));
         }
-        return;
+        return Some(progress);
     }
     if let Some(input) = &ui.command_input {
         let input_width = messages.width;
@@ -1061,6 +1103,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
     } else {
         draw_messages(frame, messages, ui, state, colors);
     }
+    Some(progress)
 }
 
 fn draw_status(

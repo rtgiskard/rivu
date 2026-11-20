@@ -745,9 +745,17 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
         })
     ));
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
-    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, &state, &mut ui);
+        })
+        .unwrap();
     ui.key_action(KeyEvent::from(KeyCode::End), &state);
-    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, &state, &mut ui);
+        })
+        .unwrap();
     assert!(matches!(&ui.details.state, DetailState::Ready(track) if track.id == 2));
     assert_eq!(ui.details.scroll, ui.details.max_scroll);
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
@@ -2864,7 +2872,11 @@ fn help_owns_navigation_without_touching_the_underlying_queue() {
         ui.queue.selection.select(Some(7));
         ui.key_action(KeyEvent::from(KeyCode::F(1)), &state);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &state, &mut ui);
+            })
+            .unwrap();
         for key in [
             KeyCode::Home,
             KeyCode::End,

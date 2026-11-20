@@ -273,6 +273,7 @@ where
     let mut immediate_redraw = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
     let mut size = terminal.size()?;
+    let mut shown_progress = None;
     // Reuse the input loop's existing bounded wait; signals need no extra worker
     // or periodic wakeup and are observed even before the IPC handshake finishes.
     while !terminating.load(Ordering::Relaxed) {
@@ -290,6 +291,10 @@ where
             match &mut tui {
                 Some(tui) => {
                     redraw |= !next.same_presentation(&tui.snapshot);
+                    if !redraw && !tui.ui.details_active && !tui.ui.show_help {
+                        redraw = shown_progress
+                            != Some(render::PlaybackProgress::new(size.width, &next));
+                    }
                     tui.apply_snapshot(next);
                 }
                 None => {
@@ -375,7 +380,7 @@ where
                 size.width = area.width;
                 size.height = area.height;
                 render::commit_layout(area, &mut tui.ui);
-                draw(frame, &tui.snapshot, &mut tui.ui);
+                shown_progress = draw(frame, &tui.snapshot, &mut tui.ui);
             })?;
             last_draw = Instant::now();
             redraw = false;

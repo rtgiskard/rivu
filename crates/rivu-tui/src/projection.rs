@@ -44,9 +44,19 @@ impl TuiSnapshot {
             || self.configuration.library_roots == previous.configuration.library_roots
     }
 
-    /// Publication sequencing and non-terminal configuration do not change the screen.
+    /// Position is compared against the last rendered progress, not the last snapshot.
     pub(crate) fn same_presentation(&self, previous: &Self) -> bool {
-        self.playback == previous.playback
+        let (a, b) = (&self.playback, &previous.playback);
+        a.status == b.status
+            && a.duration == b.duration
+            && a.last_heard_at == b.last_heard_at
+            && a.volume == b.volume
+            && a.shuffle == b.shuffle
+            && a.repeat == b.repeat
+            && a.seek_revision == b.seek_revision
+            && a.stopped_source_generation == b.stopped_source_generation
+            && a.audio_output == b.audio_output
+            && a.speed == b.speed
             && self.queue == previous.queue
             && self.current_track == previous.current_track
             && self.library.revision == previous.library.revision
@@ -113,7 +123,7 @@ mod tests {
         assert!(!error.same_presentation(&scan));
         client.playback.position = 3.0;
         let playback = TuiSnapshot::from_client(client.clone());
-        assert!(!playback.same_presentation(&error));
+        assert!(playback.same_presentation(&error));
         Arc::make_mut(&mut client.configuration.config).query_batch_size += 1;
         let page_size = TuiSnapshot::from_client(client);
         assert!(!page_size.same_presentation(&playback));
