@@ -261,8 +261,7 @@ async fn prepare_import(
                 builder.result.items.len() < MAX_IMPORT_ENTRIES,
                 "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
             );
-            path_charge.release(path_bytes);
-            builder.budget.reserve(path_bytes)?;
+            path_charge.retain(path_bytes);
             builder.budget.reserve_vec(&mut builder.result.items, 1)?;
             builder.result.items.push(M3uItem {
                 path,

@@ -82,6 +82,15 @@ impl ImportBudgetScope {
         self.budget.release(bytes);
         self.bytes -= bytes;
     }
+
+    /// Keep the charge in the shared budget when the payload leaves this scope.
+    pub(super) fn retain(&mut self, bytes: usize) {
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .expect("scoped reservation ownership");
+    }
+
     pub(crate) fn reserve_vec<T>(&mut self, values: &mut Vec<T>, additional: usize) -> Result<()> {
         self.bytes += self.budget.reserve_vec(values, additional)?;
         Ok(())
@@ -115,5 +124,17 @@ mod tests {
             assert_eq!(budget.remaining(), remaining - values.capacity() * 8 - 200);
         }
         assert_eq!(budget.remaining(), remaining);
+    }
+
+    #[test]
+    fn retained_payload_stays_charged_after_workspace_drops() {
+        let budget = ImportBudget::default();
+        let remaining = budget.remaining();
+        {
+            let mut workspace = budget.scoped();
+            workspace.reserve(300).unwrap();
+            workspace.retain(100);
+        }
+        assert_eq!(budget.remaining(), remaining - 100);
     }
 }
