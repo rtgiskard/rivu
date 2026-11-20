@@ -203,7 +203,7 @@ impl Queue {
     pub(in crate::gui) fn render_panel(
         &mut self,
         panel_id: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
@@ -365,8 +365,9 @@ impl Queue {
                 |panel| {
                     panel.child(crate::gui::components::media_task::media_task_status(
                         &self.state.system,
-                        &self.context.i18n,
+                        &self.context,
                         panel_id,
+                        window,
                         cx,
                         Self::send,
                     ))

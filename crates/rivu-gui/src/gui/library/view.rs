@@ -858,8 +858,9 @@ impl Library {
         {
             panel = panel.child(crate::gui::components::media_task::media_task_status(
                 &self.state.system,
-                &self.i18n,
+                &self.context,
                 panel_id,
+                window,
                 cx,
                 Self::send,
             ));

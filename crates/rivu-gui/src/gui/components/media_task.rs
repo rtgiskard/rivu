@@ -1,21 +1,128 @@
 //! Accepted media-task progress shared by its owning Library, Queue or Playlists surface.
+use crate::gui::feature::FeatureContext;
 use crate::projection::GuiSystemSnapshot;
-use gpui::{ClipboardItem, Context, Div, SharedString, div, prelude::*, px, relative, rgb};
+use gpui::{ClipboardItem, Context, Div, SharedString, Window, div, prelude::*, px, relative, rgb};
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::model::MediaTaskOwner;
-use rivu_protocol::model::{Command, ScanPhase};
+use rivu_protocol::model::{Command, MediaTaskOwner, Query, ScanPhase};
+use rivu_protocol::response::ViewResponse;
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column,
     panel_header_actions, panel_heading_row, status_message,
 };
 
+#[derive(Default)]
+struct TaskDetails {
+    outcome: Option<SharedString>,
+    error: Option<SharedString>,
+}
+
+impl TaskDetails {
+    fn from_reply(
+        id: u64,
+        phase: ScanPhase,
+        importing: bool,
+        reply: Option<ViewResponse>,
+        i18n: &Localizer,
+    ) -> Self {
+        let status = match reply {
+            Some(ViewResponse::ScanTask(status))
+                if status.id == id && status.progress.phase == phase =>
+            {
+                status
+            }
+            _ => {
+                return Self {
+                    outcome: Some(i18n.text("gl-task-details-unavailable").into()),
+                    error: None,
+                };
+            }
+        };
+        let outcome = importing.then(|| {
+            let library = i18n.text(if status.library_committed {
+                "gl-task-library-saved"
+            } else {
+                "gl-task-library-unconfirmed"
+            });
+            let playlist = status.playlist_id.map_or_else(
+                || i18n.text("gl-task-playlist-unconfirmed").to_owned(),
+                |id| {
+                    i18n.format(
+                        "core-scan-playlist-created",
+                        &[("id", id.to_string().into())],
+                    )
+                },
+            );
+            SharedString::from(format!("{library} · {playlist}"))
+        });
+        Self {
+            outcome,
+            error: if phase == ScanPhase::Failed {
+                status.error.map(Into::into)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+struct TaskDetailsSlot {
+    details: Option<TaskDetails>,
+}
+
+impl TaskDetailsSlot {
+    fn load(
+        context: &FeatureContext,
+        id: u64,
+        phase: ScanPhase,
+        importing: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let handle = context.handle().clone();
+        let i18n = context.i18n.clone();
+        // Drain the read even after unmount. The weak handle can only update
+        // the keyed slot that requested it, never its replacement.
+        cx.spawn(async move |slot, cx| {
+            let publish = |reply: rivu_protocol::response::QueryResponse,
+                           cx: &mut gpui::AsyncApp| {
+                let _ = slot.update(cx, |slot, cx| {
+                    if slot.publish(|| {
+                        TaskDetails::from_reply(id, phase, importing, reply.result.ok(), &i18n)
+                    }) {
+                        cx.notify();
+                    }
+                });
+            };
+            let reply = crate::gui::query::run(
+                handle,
+                cx,
+                |handle| async move { handle.query_for_gui(Query::ScanTask { id }).await },
+                &publish,
+            )
+            .await;
+            publish(reply, cx);
+        })
+        .detach();
+        Self { details: None }
+    }
+
+    fn publish(&mut self, details: impl FnOnce() -> TaskDetails) -> bool {
+        if self.details.is_some() {
+            return false;
+        }
+        self.details = Some(details());
+        true
+    }
+}
+
 pub(in crate::gui) fn media_task_status<T: 'static>(
     system: &GuiSystemSnapshot,
-    i18n: &Localizer,
+    context: &FeatureContext,
     panel_id: u64,
+    window: &mut Window,
     cx: &mut Context<T>,
     send: fn(&mut T, Command, &mut Context<T>),
 ) -> Div {
+    let i18n = &context.i18n;
     let theme = rivu_ui::theme::palette(cx);
     let progress = system.scan_progress.as_ref();
     let importing = system.scan_owner == Some(MediaTaskOwner::Playlist);
@@ -74,19 +181,36 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
     let cancellable = system.scanning
         && task_id.is_some()
         && progress.is_none_or(|progress| progress.phase != ScanPhase::Saving);
-    let dismissible = !system.scanning
-        && progress.is_some_and(|progress| {
-            matches!(
-                progress.phase,
+    let terminal = progress.map(|p| p.phase).filter(|phase| {
+        !system.scanning
+            && matches!(
+                phase,
                 ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
             )
+    });
+    // The window and its query handle are bound to one Core instance. The
+    // keyed slot belongs only to this panel and task, not to the next result.
+    let details = task_id
+        .zip(terminal)
+        .filter(|_| importing || failed)
+        .map(|(id, phase)| {
+            window.with_element_namespace(("media-task-result", panel_id), |window| {
+                window.use_keyed_state(("task", id), cx, |_, cx| {
+                    TaskDetailsSlot::load(context, id, phase, importing, cx)
+                })
+            })
         });
-    let message: SharedString = system.scan_message.clone().into();
+    let details = details
+        .as_ref()
+        .and_then(|slot| slot.read(cx).details.as_ref());
+    let outcome = details.and_then(|details| details.outcome.clone());
+    let error = details.and_then(|details| details.error.clone());
+    let message = SharedString::from(system.scan_message.as_str());
     let actions = panel_header_actions()
         .min_w_8()
         .min_h_8()
-        .when(failed, |slot| {
-            let message = message.clone();
+        .when_some(error, |slot, error| {
+            let snapshots = context.snapshots.clone();
             slot.child(
                 IconButton::new(
                     ("media-task-copy-error", panel_id),
@@ -99,7 +223,13 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                     IconButtonDensity::Regular,
                     cx,
                     move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(message.to_string()));
+                        let current = snapshots.read();
+                        if snapshots.handle().is_connected()
+                            && !current.system.scanning
+                            && current.system.scan_task_id == task_id
+                        {
+                            cx.write_to_clipboard(ClipboardItem::new_string(error.to_string()));
+                        }
                     },
                 ),
             )
@@ -125,7 +255,7 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                 ),
             )
         })
-        .when(dismissible, |slot| {
+        .when(terminal.is_some(), |slot| {
             slot.child(
                 IconButton::new(
                     ("media-task-dismiss", panel_id),
@@ -163,11 +293,13 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
             theme.accent
         })));
     }
-    let path: SharedString = progress
-        .and_then(|progress| progress.path.as_ref())
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default()
-        .into();
+    let path = outcome.unwrap_or_else(|| {
+        progress
+            .and_then(|progress| progress.path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into()
+    });
     // Keep phases in fixed cells; only dismissal removes the accepted-task surface.
     column()
         .gap_1()
@@ -202,4 +334,138 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
             .min_w_0()
             .truncate(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskDetails;
+    use rivu_presentation::i18n::Localizer;
+    use rivu_protocol::{
+        model::{ScanPhase, ScanProgress, ScanTaskStatus},
+        response::ViewResponse,
+    };
+
+    fn failed_import() -> ScanTaskStatus {
+        ScanTaskStatus {
+            id: 8,
+            progress: ScanProgress {
+                phase: ScanPhase::Failed,
+                processed: 2,
+                total: Some(2),
+                errors: 1,
+                path: None,
+            },
+            message: "Processed two files".into(),
+            library_committed: true,
+            playlist_id: None,
+            error: Some("Unreadable entry\n/path/to/file".into()),
+        }
+    }
+
+    #[test]
+    fn failed_import_keeps_each_commit_and_the_complete_task_error() {
+        let i18n = Localizer::new("en-US");
+        for (library_committed, playlist_id) in [(false, None), (true, None), (true, Some(42))] {
+            let status = ScanTaskStatus {
+                library_committed,
+                playlist_id,
+                ..failed_import()
+            };
+            let details = TaskDetails::from_reply(
+                status.id,
+                status.progress.phase,
+                true,
+                Some(ViewResponse::ScanTask(status)),
+                &i18n,
+            );
+            assert_eq!(
+                details.error.as_deref(),
+                Some("Unreadable entry\n/path/to/file")
+            );
+            let outcome = details.outcome.unwrap();
+            assert!(outcome.contains(i18n.text(if library_committed {
+                "gl-task-library-saved"
+            } else {
+                "gl-task-library-unconfirmed"
+            })));
+            if playlist_id.is_some() {
+                assert!(outcome.contains("42"));
+            } else {
+                assert!(outcome.contains(i18n.text("gl-task-playlist-unconfirmed")));
+            }
+        }
+    }
+
+    #[test]
+    fn non_failed_import_retains_outcome_but_not_error() {
+        let i18n = Localizer::new("en-US");
+        for phase in [ScanPhase::Completed, ScanPhase::Cancelled] {
+            let mut status = failed_import();
+            status.progress.phase = phase;
+            let details = TaskDetails::from_reply(
+                status.id,
+                phase,
+                true,
+                Some(ViewResponse::ScanTask(status)),
+                &i18n,
+            );
+            assert!(details.error.is_none());
+            let outcome = details.outcome.unwrap();
+            assert!(outcome.contains(i18n.text("gl-task-library-saved")));
+            assert!(outcome.contains(i18n.text("gl-task-playlist-unconfirmed")));
+        }
+    }
+
+    #[test]
+    fn timeout_feedback_is_not_replaced_when_worker_finishes() {
+        let i18n = Localizer::new("en-US");
+        let mut slot = super::TaskDetailsSlot { details: None };
+        assert!(slot.publish(|| TaskDetails::from_reply(8, ScanPhase::Failed, true, None, &i18n)));
+        assert!(!slot.publish(|| panic!("late worker result published")));
+        assert_eq!(
+            slot.details.unwrap().outcome.as_deref(),
+            Some(i18n.text("gl-task-details-unavailable"))
+        );
+    }
+
+    #[test]
+    fn stale_or_unavailable_result_never_supplies_copy_or_commit_evidence() {
+        let i18n = Localizer::new("en-US");
+        let status = failed_import();
+        for (id, phase, reply) in [
+            (
+                9,
+                ScanPhase::Failed,
+                Some(ViewResponse::ScanTask(status.clone())),
+            ),
+            (
+                8,
+                ScanPhase::Completed,
+                Some(ViewResponse::ScanTask(status.clone())),
+            ),
+            (8, ScanPhase::Failed, None),
+        ] {
+            let details = TaskDetails::from_reply(id, phase, true, reply, &i18n);
+            assert!(details.error.is_none());
+            assert_eq!(
+                details.outcome.as_deref(),
+                Some(i18n.text("gl-task-details-unavailable"))
+            );
+        }
+        let details = TaskDetails::from_reply(
+            status.id,
+            status.progress.phase,
+            false,
+            Some(ViewResponse::ScanTask(ScanTaskStatus {
+                error: None,
+                ..status
+            })),
+            &i18n,
+        );
+        assert!(details.error.is_none(), "summary is not a copyable error");
+        assert!(
+            details.outcome.is_none(),
+            "non-import has no playlist outcome"
+        );
+    }
 }

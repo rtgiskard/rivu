@@ -81,6 +81,10 @@ gl-import-completed = 导入完成
 gl-import-failed = 导入失败
 gl-import-cancelled = 导入已取消
 gl-dismiss-import = 关闭导入结果
+gl-task-library-saved = 音乐库修改已保存
+gl-task-library-unconfirmed = 音乐库提交未经确认
+gl-task-playlist-unconfirmed = 播放列表创建未经确认
+gl-task-details-unavailable = 无法获取任务详情
 
 gl-unfavorite = 取消收藏
 

@@ -81,6 +81,10 @@ gl-import-completed = Import completed
 gl-import-failed = Import failed
 gl-import-cancelled = Import cancelled
 gl-dismiss-import = Dismiss import result
+gl-task-library-saved = Library changes saved
+gl-task-library-unconfirmed = Library commit unconfirmed
+gl-task-playlist-unconfirmed = Playlist creation unconfirmed
+gl-task-details-unavailable = Task details unavailable
 
 gl-unfavorite = Remove from favorites
 
