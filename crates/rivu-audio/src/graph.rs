@@ -166,16 +166,11 @@ impl GraphPlan<'_> {
                 } else {
                     nodes.len()
                 };
-            let owns_output = output_node == nodes.len();
             nodes.push(Node {
                 id: planned.port.node,
                 inputs: planned.inputs,
                 processor,
-                output: if owns_output {
-                    vec![0.0; GRAPH_BLOCK_FRAMES * self.channels]
-                } else {
-                    Vec::new()
-                },
+                output: Vec::new(),
                 output_node,
                 needs_sum: planned.needs_sum,
                 latency: planned.latency,
@@ -185,9 +180,24 @@ impl GraphPlan<'_> {
             });
         }
         let output = nodes.last().context("empty realtime graph")?;
+        // Aliases are created only for a prepared Pass with a single,
+        // undelayed unity input. If every output aliases the source (or cached
+        // boundary), no node in the selected closure needs a PCM block.
+        let is_identity = nodes[0].processor.is_none()
+            && output.tail == 0
+            && nodes.iter().all(|node| node.output_node == 0);
+        let (latency, tail) = (output.latency, output.tail);
+        if !is_identity {
+            for (index, node) in nodes.iter_mut().enumerate() {
+                if node.output_node == index {
+                    node.output = vec![0.0; GRAPH_BLOCK_FRAMES * self.channels];
+                }
+            }
+        }
         Ok(GraphRunner {
-            latency: output.latency,
-            tail: output.tail,
+            latency,
+            tail,
+            is_identity,
             nodes,
             sum: if needs_sum {
                 vec![0.0; GRAPH_BLOCK_FRAMES * self.channels]
@@ -217,6 +227,7 @@ pub struct GraphRunner {
     nodes: Vec<Node>,
     // Nodes execute serially, so all weighted/delayed inputs share one scratch block.
     sum: Vec<f64>,
+    is_identity: bool,
     channels: usize,
     sample_rate: u32,
     latency: usize,
@@ -529,15 +540,27 @@ impl GraphRunner {
             samples.len().is_multiple_of(self.channels),
             "incomplete graph input frame"
         );
+        let frames = samples.len() / self.channels;
         ensure!(
-            samples.len() / self.channels <= MAX_CALL_FRAMES,
+            frames <= MAX_CALL_FRAMES,
             "graph call exceeds 65,536 frames"
         );
         ensure!(
             samples.iter().all(|value| value.is_finite()),
             "graph input is not finite"
         );
-        for chunk in samples.chunks_mut(GRAPH_BLOCK_FRAMES * self.channels) {
+        let chunks = samples.chunks_mut(GRAPH_BLOCK_FRAMES * self.channels);
+        if self.is_identity {
+            let blocks = chunks.len() as u64;
+            if blocks != 0 {
+                for node in &mut self.nodes {
+                    node.blocks = node.blocks.saturating_add(blocks);
+                }
+                self.processed_frames += frames as u64;
+            }
+            return Ok(());
+        }
+        for chunk in chunks {
             self.process_chunk(chunk)?;
         }
         Ok(())
@@ -926,6 +949,53 @@ mod tests {
             assert_eq!(runner.finish_interleaved(&mut [0.0; 2]).unwrap(), 0);
             runner.reset();
         }
+    }
+
+    #[test]
+    fn identity_suffix_preserves_validation_counts_and_eof() {
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig::default(),
+                profile: None,
+            },
+            2,
+        );
+        let mut runner =
+            GraphRunner::compile_from_boundary(&graph, port(4, 0), port(2, 0), 48_000, 2).unwrap();
+        let mut samples = vec![-0.0; (MAX_CALL_FRAMES + 1) * 2];
+        assert!(runner.process_interleaved(&mut samples[..1]).is_err());
+        assert!(runner.process_interleaved(&mut samples).is_err());
+        assert!(runner.finish_interleaved(&mut samples[..1]).is_err());
+        assert!(runner.finish_interleaved(&mut samples).is_err());
+
+        let samples = &mut samples[..(GRAPH_BLOCK_FRAMES + 1) * 2];
+        let last = samples.len() - 1;
+        samples[last] = f32::NAN;
+        assert!(runner.process_interleaved(samples).is_err());
+        assert!(runner.node_process_counts().eq([(2, 0), (3, 0), (4, 0)]));
+
+        samples[last] = f32::MAX;
+        runner.process_interleaved(samples).unwrap();
+        assert!(
+            samples[..last]
+                .iter()
+                .all(|s| s.to_bits() == (-0.0_f32).to_bits())
+        );
+        assert_eq!(samples[last], f32::MAX);
+        assert!(runner.node_process_counts().eq([(2, 2), (3, 2), (4, 2)]));
+
+        assert_eq!(runner.finish_interleaved(&mut []).unwrap(), 0);
+        assert!(runner.process_interleaved(&mut []).is_err());
+        let mut drain = [0.75, -0.0];
+        assert_eq!(runner.finish_interleaved(&mut drain).unwrap(), 0);
+        assert_eq!(drain.map(f32::to_bits), [0.75_f32, -0.0].map(f32::to_bits));
+        assert!(runner.node_process_counts().eq([(2, 2), (3, 2), (4, 2)]));
+
+        runner.reset();
+        runner.process_interleaved(&mut []).unwrap();
+        assert!(runner.node_process_counts().eq([(2, 0), (3, 0), (4, 0)]));
+        runner.process_interleaved(&mut drain).unwrap();
+        assert!(runner.node_process_counts().eq([(2, 1), (3, 1), (4, 1)]));
     }
 
     #[test]
