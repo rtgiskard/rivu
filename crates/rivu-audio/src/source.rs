@@ -296,7 +296,7 @@ fn probe_open_file(
         PROBE_BUFFER_LEN,
         DecoderHint::Auto,
         ffmpeg_enabled,
-        true,
+        SourceMetadata::Descriptive,
         cancelled,
     )?
     .prime(SourceSelection::default(), cancelled)?;
@@ -498,6 +498,13 @@ struct NativePcm {
 pub(super) struct SourceSelection {
     pub(super) range: Option<super::PlaybackRange>,
     pub(super) start: f64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SourceMetadata {
+    PcmOnly,
+    PlaybackPeak,
+    Descriptive,
 }
 
 /// Intake does not initialize any decoder (including the shared MIDI bank).
@@ -705,7 +712,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
-            true,
+            SourceMetadata::Descriptive,
             SourceSelection::default(),
             None,
         )
@@ -745,7 +752,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
-            false,
+            SourceMetadata::PlaybackPeak,
             None,
         )?;
         source.select(selection, None)?;
@@ -758,7 +765,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
-        descriptive: bool,
+        metadata: SourceMetadata,
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
@@ -769,7 +776,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
-            descriptive,
+            metadata,
             selection,
             cancelled,
         )
@@ -782,7 +789,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
-        descriptive: bool,
+        metadata: SourceMetadata,
         selection: SourceSelection,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
@@ -793,7 +800,7 @@ impl Source {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
-            descriptive,
+            metadata,
             cancelled,
         )?;
         source.prime(selection, cancelled)
@@ -821,7 +828,7 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
-        descriptive: bool,
+        metadata: SourceMetadata,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
@@ -832,7 +839,7 @@ impl Source {
                 buffer_len,
                 decoder_hint,
                 ffmpeg_enabled,
-                descriptive,
+                metadata,
                 cancelled,
             ),
             #[cfg(feature = "midi")]
@@ -853,25 +860,32 @@ impl Source {
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
-        descriptive: bool,
+        metadata: SourceMetadata,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
         crate::source_identity(&file)?;
-        // Runtime peak belongs to this admitted file, never library/CUE metadata.
-        // Read both in one pass; playback discards descriptive values in favor of
-        // the authoritative metadata supplied by Core.
-        let (tags, peak) = match read_playback_tags(&mut file) {
-            Ok(tags) => tags.unwrap_or_default(),
-            Err(error) => {
-                tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
-                (Tags::default(), None)
-            }
+        let (tags, peak) = if matches!(metadata, SourceMetadata::PcmOnly) {
+            (Tags::default(), None)
+        } else {
+            // The runtime peak belongs to the admitted file. Core owns
+            // descriptive metadata during playback.
+            let (tags, peak) = match read_playback_tags(&mut file) {
+                Ok(tags) => tags.unwrap_or_default(),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
+                    (Tags::default(), None)
+                }
+            };
+            file.rewind()
+                .map_err(source_io_error)
+                .context("Rewinding audio source after metadata")?;
+            let tags = match (metadata, tags) {
+                (SourceMetadata::Descriptive, tags) => tags,
+                _ => Tags::default(),
+            };
+            (tags, peak)
         };
-        let tags = if descriptive { tags } else { Tags::default() };
-        file.rewind()
-            .map_err(source_io_error)
-            .context("Rewinding audio source after metadata")?;
         check_cancelled(cancelled)?;
         match decoder_hint {
             DecoderHint::Auto => (),
@@ -2645,7 +2659,7 @@ pub(super) mod tests {
             PROBE_BUFFER_LEN,
             hint,
             ffmpeg_enabled,
-            false,
+            SourceMetadata::PlaybackPeak,
             SourceSelection { range, start: 0.0 },
             None,
         )
@@ -3592,7 +3606,7 @@ pub(super) mod tests {
                     PROBE_BUFFER_LEN,
                     hint,
                     cfg!(feature = "ffmpeg"),
-                    false,
+                    SourceMetadata::PlaybackPeak,
                     SourceSelection::default(),
                     None,
                 )
@@ -3603,18 +3617,19 @@ pub(super) mod tests {
                     PROBE_BUFFER_LEN,
                     hint,
                     cfg!(feature = "ffmpeg"),
-                    false,
+                    SourceMetadata::PcmOnly,
                     SourceSelection::default(),
                     None,
                 )
                 .unwrap(),
             ];
-            for mut source in sources {
+            for (mut source, expected_peak) in sources.into_iter().zip([Some(0.8), Some(0.8), None])
+            {
                 while !source.poll_open().unwrap() {}
                 assert_eq!(source.info().title, expected_title);
                 assert!(source.info().artist.is_empty());
                 assert!(source.info().album.is_empty());
-                assert_eq!(source.replaygain_track_peak(), Some(0.8));
+                assert_eq!(source.replaygain_track_peak(), expected_peak);
                 assert_eq!(decode_remaining(&mut source), vec![-5000.0 / 32768.0; 8000]);
             }
         }
@@ -4074,7 +4089,7 @@ pub(super) mod tests {
                 PROBE_BUFFER_LEN,
                 hint,
                 true,
-                true,
+                SourceMetadata::Descriptive,
                 None,
             )
             .unwrap();
@@ -4240,7 +4255,7 @@ pub(super) mod tests {
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
-            true,
+            SourceMetadata::Descriptive,
             None,
         )
         .unwrap();
@@ -4353,7 +4368,7 @@ pub(super) mod tests {
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
-            true,
+            SourceMetadata::Descriptive,
             None,
         )
         .unwrap();

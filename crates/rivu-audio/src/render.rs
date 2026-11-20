@@ -2,7 +2,9 @@
 
 use super::{
     Channel, PlaybackRange, SourceIdentity,
-    source::{DECODE_WORK_BUDGET, DecodeStep, Source, SourceSelection, check_cancelled},
+    source::{
+        DECODE_WORK_BUDGET, DecodeStep, Source, SourceMetadata, SourceSelection, check_cancelled,
+    },
 };
 use anyhow::{Context, Result, bail};
 use rivu_format::decoder_hint::DecoderHint;
@@ -176,7 +178,7 @@ impl SourceRenderer {
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
-            false,
+            SourceMetadata::PcmOnly,
             SourceSelection { range, start: 0.0 },
             Some(cancelled),
         )?;
