@@ -600,8 +600,7 @@ impl Store {
                  (SELECT id FROM tracks INDEXED BY tracks_path
                   WHERE path=r.path AND CASE WHEN cue_sheet IS NULL THEN 0 ELSE NULL END IS NULL
                   ORDER BY id LIMIT 1)
-             )
-             ORDER BY r.ordinal",
+             )",
         )?;
         let mut result = (0..paths.len()).map(|_| None).collect::<Vec<_>>();
         let mut rows = query.query([encoded])?;
