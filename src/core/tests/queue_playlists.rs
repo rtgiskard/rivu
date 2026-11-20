@@ -546,12 +546,16 @@ fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
     // Fixture a committed producer result before exercising Core's completion.
     let playlist_id = core.store.create_playlist("Committed playlist").unwrap();
+    core.projections.playlist_total = true;
     let before = core.state.query_revisions();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE playlists;")
         .unwrap();
-    assert!(core.playlist_created(playlist_id, false).is_err());
+    let error = core.playlist_created(playlist_id, false).unwrap_err();
+    assert!(error.to_string().contains("Playlist creation committed"));
+    assert!(format!("{error:#}").contains("Refreshing playlist count failed"));
+    assert!(core.projections.playlist_total);
     assert_ne!(core.state.library.playlist_revision, before.playlist);
     assert!(
         core.state
@@ -2192,6 +2196,31 @@ fn committed_playlist_creation_registers_tokens_and_refreshes_count() {
             core.store.playlist_track_ids(1, 20).unwrap(),
             if has_members { vec![2, 3] } else { vec![] }
         );
+    }
+}
+
+#[test]
+fn regular_playlist_lifecycle_recounts_after_unrefreshed_catalog_creation() {
+    for delete in [false, true] {
+        let (_directory, mut core) = fixture();
+        core.create_playlist("Existing".into()).unwrap();
+        // Model a confirmed import whose prepared count was never accepted.
+        let imported = core
+            .store
+            .create_playlist_with_tracks("Imported", &[1])
+            .unwrap();
+        core.advance_playlist_entry_revision(imported);
+        core.invalidate_playlist_creation(true);
+        assert_eq!(core.state.library.playlist_total, 1);
+
+        if delete {
+            core.delete_playlist(imported).unwrap();
+        } else {
+            core.create_playlist("New".into()).unwrap();
+        }
+        let expected = if delete { 1 } else { 3 };
+        assert_eq!(core.state.library.playlist_total, expected);
+        assert!(!core.projections.playlist_total);
     }
 }
 

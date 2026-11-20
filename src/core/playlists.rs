@@ -127,15 +127,20 @@ impl Core {
         playlist_id: i64,
         has_members: bool,
     ) -> Result<()> {
-        self.invalidate_playlist_creation(has_members);
+        self.advance_playlist_lifecycle_revisions(has_members);
         self.advance_playlist_entry_revision(playlist_id);
-        self.refresh_playlist_count().context(
-            "Playlist creation committed, but refreshing views failed; some projections may be stale",
-        )
+        self.update_playlist_count(self.state.library.playlist_total.checked_add(1))
+            .context(
+                "Playlist creation committed, but refreshing views failed; some projections may be stale",
+            )
     }
 
     pub(in crate::core) fn invalidate_playlist_creation(&mut self, has_members: bool) {
         self.projections.playlist_total = true;
+        self.advance_playlist_lifecycle_revisions(has_members);
+    }
+
+    fn advance_playlist_lifecycle_revisions(&mut self, has_members: bool) {
         if has_members {
             self.state.library.duplicate_members_revision = self
                 .state
@@ -152,16 +157,8 @@ impl Core {
         had_members: bool,
     ) -> Result<()> {
         self.set_playlist_entry_revision(playlist_id, None);
-        if had_members {
-            self.state.library.duplicate_members_revision = self
-                .state
-                .library
-                .duplicate_members_revision
-                .wrapping_add(1);
-        }
-        self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
-        self.projections.playlist_total = true;
-        self.refresh_playlist_count()
+        self.advance_playlist_lifecycle_revisions(had_members);
+        self.update_playlist_count(self.state.library.playlist_total.checked_sub(1))
     }
 
     pub(in crate::core) fn invalidate_playlist_members(&mut self, ids: &[i64]) -> Result<()> {
@@ -180,7 +177,15 @@ impl Core {
         Ok(())
     }
 
-    fn refresh_playlist_count(&mut self) -> Result<()> {
+    fn update_playlist_count(&mut self, adjusted_total: Option<usize>) -> Result<()> {
+        // A dirty count may predate another committed playlist change.
+        if !self.projections.playlist_total
+            && let Some(total) = adjusted_total
+        {
+            self.state.library.playlist_total = total;
+            return Ok(());
+        }
+
         self.projections.playlist_total = true;
         let prepared = projections::PreparedProjections {
             playlist_total: Some(
@@ -190,8 +195,7 @@ impl Core {
             ),
             ..Default::default()
         };
-        self.accept_prepared_projections(prepared)?;
-        Ok(())
+        self.accept_prepared_projections(prepared)
     }
 
     pub(in crate::core) fn check_playlist_entry_revision(
