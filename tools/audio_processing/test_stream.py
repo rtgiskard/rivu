@@ -209,10 +209,12 @@ class StreamEntrypointTests(unittest.TestCase):
             ({"channels":3}, "input_channels"),
             ({"frames":0}, "input_duration"),
             ({"parameters":{"wet_mix":2}}, "invalid_request"),
+            ({"parameters":{"wet_mix":10**400}}, "invalid_request"),
             ({"unexpected":True}, "invalid_request"),
+            ({"😀" * 7500:True}, "invalid_request"),
         ):
             with self.subTest(fields=fields):
-                wire = encode(worker.JSON_FRAME, json.dumps({**request, **fields}).encode())
+                wire = encode(worker.JSON_FRAME, json.dumps({**request, **fields}, ensure_ascii=False).encode())
                 completed = subprocess.run([sys.executable, "-B", worker.__file__, "--stream"],
                                            input=wire, capture_output=True, timeout=30)
                 self.assertNotEqual(completed.returncode, 0)

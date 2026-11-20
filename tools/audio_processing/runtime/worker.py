@@ -62,7 +62,7 @@ def validate_request(request):
     for name, (low, high) in bounds.items():
         if name in parameters:
             value = parameters[name]
-            common.require(type(value) in (int, float) and math.isfinite(value) and low <= value <= high,
+            common.require(type(value) in (int, float) and low <= value <= high,
                     "invalid_request", name + " outside supported finite range")
     common.require("post_filter" not in parameters or type(parameters["post_filter"]) is bool,
             "invalid_request", "post_filter must be boolean")
@@ -393,7 +393,8 @@ def main():
             _process_validated(request, source, write_pcm, emit, collect_report=False)
         return 0
     except Exception as exc:
-        emit("error", code=exc.code if isinstance(exc, common.WorkerError) else "worker_failure", message=str(exc)[:8192])
+        # ASCII JSON can expand one character to 12 bytes. Keep the whole error frame bounded.
+        emit("error", code=exc.code if isinstance(exc, common.WorkerError) else "worker_failure", message=str(exc)[:4096])
         return 1
 
 
