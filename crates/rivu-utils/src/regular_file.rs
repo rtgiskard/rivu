@@ -20,17 +20,23 @@ pub fn modified_unix_ns(modified: std::time::SystemTime) -> Option<i64> {
 /// Follow ordinary symlinks, but reject non-regular opened objects. Nonblocking
 /// open ensures a FIFO substituted at the path cannot wait for a writer.
 pub fn open_regular_file(path: &Path) -> io::Result<File> {
+    open_regular_file_with_metadata(path).map(|(file, _)| file)
+}
+
+/// Return the descriptor and the metadata used to admit it.
+pub fn open_regular_file_with_metadata(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "input is not an ordinary file",
         ));
     }
-    Ok(file)
+    Ok((file, metadata))
 }
 
 #[cfg(test)]

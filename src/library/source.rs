@@ -3,7 +3,7 @@ use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{MediaInfo, probe_file, source_identity_from_metadata};
 use rivu_protocol::{audio::SourceIdentity, model::CueSegment};
-use rivu_utils::regular_file::open_regular_file;
+use rivu_utils::regular_file::open_regular_file_with_metadata;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek};
@@ -449,9 +449,7 @@ where
                 token.check()?;
                 let opened = (|| {
                     path.to_str().context("Audio source path is not UTF-8")?;
-                    let file = open_regular_file(&path)?;
-                    let metadata = file.metadata()?;
-                    Ok::<_, anyhow::Error>((file, metadata))
+                    open_regular_file_with_metadata(&path).map_err(anyhow::Error::from)
                 })();
                 admitted.push((path, opened));
             }
