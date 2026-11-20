@@ -15,7 +15,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, channel::oneshot};
 use rivu_protocol::AppCommand;
-use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
+use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode, Track};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -350,7 +350,6 @@ impl Mpris {
                                     &handle,
                                     result?,
                                     &mut metadata,
-                                    &artwork,
                                     &mut loaded_artwork,
                                 )
                                 .await
@@ -809,6 +808,17 @@ struct TrackMetadata {
 
 impl TrackMetadata {
     fn from_snapshot(state: &MprisSnapshot, artwork: &ArtworkManager) -> Option<Self> {
+        Self::with_artwork(state, |track| {
+            artwork
+                .cached(crate::artwork_source(track))
+                .or_else(|| artwork.cached_default())
+        })
+    }
+
+    fn with_artwork(
+        state: &MprisSnapshot,
+        art: impl FnOnce(&Track) -> Option<Artwork>,
+    ) -> Option<Self> {
         let queue_id = state.queue.current_id?;
         let track = state.current_track()?;
         Some(Self {
@@ -817,9 +827,7 @@ impl TrackMetadata {
             artist: track.artist.clone(),
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
-            art_url: artwork
-                .cached(crate::artwork_source(track))
-                .or_else(|| artwork.cached_default()),
+            art_url: art(track),
             length: state
                 .playback
                 .duration
@@ -958,7 +966,6 @@ async fn publish_artwork(
     handle: &CoreHandle,
     (identity, result): (ArtworkIdentity, Option<Artwork>),
     metadata: &mut Option<TrackMetadata>,
-    artwork: &ArtworkManager,
     loaded: &mut Option<ArtworkIdentity>,
 ) -> zbus::Result<()> {
     let current = handle.mpris_snapshot();
@@ -970,10 +977,7 @@ async fn publish_artwork(
         return Ok(());
     }
     *loaded = Some(identity);
-    let mut next = TrackMetadata::from_snapshot(&current, artwork);
-    if let Some(next) = &mut next {
-        next.art_url = result;
-    }
+    let next = TrackMetadata::with_artwork(&current, |_| result);
     if *metadata != next {
         let mut changed: HashMap<&str, Variant<'_>> = HashMap::new();
         changed.insert("Metadata", Variant::from(metadata_map(next.as_ref())));
@@ -2047,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn late_artwork_completion_cannot_replace_the_selected_occurrence_metadata() {
+    fn artwork_completion_checks_current_identity_and_preserves_a_completed_miss() {
         let bus = TestBus::start();
         let (directory, mut runtime) = runtime_fixture();
         let paths: Vec<_> = (1..=2)
@@ -2087,14 +2091,30 @@ mod tests {
             &runtime.handle,
             (identity, image),
             &mut metadata,
-            &artwork,
             &mut loaded,
         ))
         .unwrap();
         assert!(loaded.is_none());
-        let metadata = metadata.unwrap();
-        assert_eq!(metadata.queue_id, current.queue.current_id.unwrap());
-        assert!(metadata.art_url.is_none());
+        assert_eq!(
+            metadata.as_ref().unwrap().queue_id,
+            current.queue.current_id.unwrap()
+        );
+        assert!(metadata.as_ref().unwrap().art_url.is_none());
+
+        metadata = TrackMetadata::from_snapshot(&current, &artwork);
+        assert!(metadata.as_ref().unwrap().art_url.is_some());
+        let identity =
+            ArtworkIdentity::new(crate::artwork_source(current.current_track().unwrap()));
+        async_io::block_on(publish_artwork(
+            &connection,
+            &runtime.handle,
+            (identity, None),
+            &mut metadata,
+            &mut loaded,
+        ))
+        .unwrap();
+        assert!(loaded.is_some());
+        assert!(metadata.unwrap().art_url.is_none());
         async_io::block_on(connection.close()).unwrap();
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
