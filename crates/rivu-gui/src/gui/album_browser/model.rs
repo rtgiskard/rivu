@@ -415,7 +415,7 @@ impl AlbumModel {
                     .albums_total
                     .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
-                completion.changed = self.albums.accept(page);
+                completion.changed = self.albums.accept_changed(page);
                 completion.published = Published::Albums;
             }
             Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
@@ -427,7 +427,7 @@ impl AlbumModel {
                     .tracks_total
                     .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
-                completion.changed = self.tracks.accept(page);
+                self.tracks.accept(page);
                 completion.published = Published::Tracks;
             }
             Err(error) => {
@@ -789,7 +789,9 @@ mod tests {
                         model.revisions,
                         "wrong response",
                     );
-                    assert!(completion.changed);
+                    if !tracks {
+                        assert!(completion.changed);
+                    }
                     model.retire_worker();
                     let start = Instant::now() + std::time::Duration::from_secs(10);
                     if tracks {
@@ -826,7 +828,9 @@ mod tests {
                         revisions,
                         "wrong response",
                     );
-                    assert_eq!(completion.changed, changed);
+                    if !tracks {
+                        assert_eq!(completion.changed, changed);
+                    }
                     assert_eq!(
                         completion.published,
                         if tracks {
@@ -837,7 +841,7 @@ mod tests {
                     );
                     assert_eq!(completion.counts, Some((1, 1)));
                     if tracks {
-                        assert!(model.tracks.get(0).is_some());
+                        assert_eq!(model.tracks.get(0).unwrap().id, if changed { 2 } else { 1 });
                         assert_eq!(model.tracks.refresh_deadline(), None);
                     } else {
                         assert!(model.albums.get(0).is_some());

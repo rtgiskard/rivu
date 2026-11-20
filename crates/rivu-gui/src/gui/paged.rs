@@ -176,7 +176,13 @@ impl<T> PagedRows<T> {
         self.retired = true;
         self.retained.clear();
     }
-    pub(super) fn accept(&mut self, page: Page<T>) -> bool
+    pub(super) fn accept(&mut self, page: Page<T>) {
+        if let Some(offset) = self.pending.take() {
+            self.replace_page(offset, page);
+        }
+    }
+
+    pub(super) fn accept_changed(&mut self, page: Page<T>) -> bool
     where
         T: PartialEq,
     {
@@ -186,7 +192,7 @@ impl<T> PagedRows<T> {
     where
         T: PartialEq,
     {
-        let Some(offset) = self.pending.take() else {
+        let Some(offset) = self.pending else {
             return false;
         };
         let previous = self.pages.get(&offset).or_else(|| {
@@ -196,6 +202,11 @@ impl<T> PagedRows<T> {
                 .flatten()
         });
         let changed = self.layout_len != page.total || previous != Some(&page.rows);
+        self.accept(page);
+        changed
+    }
+
+    fn replace_page(&mut self, offset: usize, page: Page<T>) {
         self.set_total(page.total);
         self.failures.remove(&offset);
         self.pages.retain(|start, _| *start < page.total);
@@ -214,7 +225,6 @@ impl<T> PagedRows<T> {
         {
             self.retention.clear();
         }
-        changed
     }
     pub(super) fn fail(&mut self, error: String) {
         if let Some(offset) = self.pending.take() {

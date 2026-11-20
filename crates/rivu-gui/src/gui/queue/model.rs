@@ -475,11 +475,11 @@ impl QueueBrowser {
         generation: u64,
         response: rivu_protocol::response::QueryResponse,
         unexpected: impl FnOnce() -> String,
-    ) -> bool {
+    ) {
         if self.page_projection.generation() != generation
             || !self.page_projection.matches_identity(query)
         {
-            return false;
+            return;
         }
         if matches!(
             &response.result,
@@ -491,21 +491,12 @@ impl QueueBrowser {
         {
             self.page_projection.cancel();
             self.rows.retire_pending();
-            return true;
+            return;
         }
         match response.result {
-            Ok(ViewResponse::QueuePage(page)) => {
-                self.rows.accept(page);
-                true
-            }
-            Err(error) => {
-                self.rows.fail(error.to_string());
-                true
-            }
-            _ => {
-                self.rows.fail(unexpected());
-                true
-            }
+            Ok(ViewResponse::QueuePage(page)) => self.rows.accept(page),
+            Err(error) => self.rows.fail(error.to_string()),
+            _ => self.rows.fail(unexpected()),
         }
     }
     fn reconcile_query(&self) -> Query {
@@ -917,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_queue_refresh_reports_restored_action_authority() {
+    fn equal_queue_refresh_restores_action_authority() {
         let mut queue = queue(7);
         queue.rows.begin(0, 20);
         queue.rows.accept(Page {
@@ -926,7 +917,7 @@ mod tests {
         });
         assert!(queue.sync(revisions(8), 1));
         let (query, generation) = queue.demand_page(0..1, 20).unwrap();
-        let changed = queue.accept_page(
+        queue.accept_page(
             &query,
             generation,
             rivu_protocol::response::QueryResponse {
@@ -937,10 +928,6 @@ mod tests {
                 })),
             },
             || "unexpected".into(),
-        );
-        assert!(
-            changed,
-            "fresh authority must rebuild inert retained controls"
         );
         assert_eq!(
             queue.operation_rows(identity(10, 0), generation),

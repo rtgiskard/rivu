@@ -67,12 +67,9 @@ pub(in crate::gui) struct PlaylistBrowser {
 }
 
 impl PlaylistBrowser {
-    pub(super) fn accept_selected_summary(&mut self, summary: PlaylistSummary) -> bool {
-        let changed =
-            self.selected_name != summary.name || self.selected_total != Some(summary.entry_count);
+    pub(super) fn accept_selected_summary(&mut self, summary: PlaylistSummary) {
         self.selected_name = summary.name;
         self.selected_total = Some(summary.entry_count);
-        changed
     }
     pub(in crate::gui) fn selected_total(&self) -> Option<usize> {
         self.selected_total
@@ -345,17 +342,14 @@ impl PlaylistBrowser {
         }
     }
 
-    pub(super) fn accept_summaries(&mut self, page: Page<PlaylistSummary>) -> (bool, bool) {
+    pub(super) fn accept_summaries(&mut self, page: Page<PlaylistSummary>) -> bool {
         let selected = page.rows.iter().find(|row| Some(row.id) == self.selected);
         let contains_selected = selected.is_some();
-        let mut changed = false;
         if let Some(summary) = selected {
-            changed = self.selected_name != summary.name
-                || self.selected_total != Some(summary.entry_count);
             self.selected_name.clone_from(&summary.name);
             self.selected_total = Some(summary.entry_count);
         }
-        changed |= self.summaries.rows.accept(page);
+        self.summaries.rows.accept(page);
         if let Some(index) = self
             .summaries
             .rows
@@ -363,11 +357,11 @@ impl PlaylistBrowser {
         {
             self.summaries.rows.pin(Some(index));
         }
-        (contains_selected, changed)
+        contains_selected
     }
 
-    pub(super) fn accept_entries(&mut self, page: Page<PlaylistEntryRow>) -> bool {
-        let changed = self.entries.rows.accept(page);
+    pub(super) fn accept_entries(&mut self, page: Page<PlaylistEntryRow>) {
+        self.entries.rows.accept(page);
         if let Some(index) = self
             .entries
             .rows
@@ -375,7 +369,6 @@ impl PlaylistBrowser {
         {
             self.entries.rows.pin(Some(index));
         }
-        changed
     }
 
     pub(super) fn accept_entry_locations(&mut self, mut rows: Vec<PlaylistEntryLocation>) {

@@ -120,7 +120,7 @@ impl Playlists {
                         let revisions = this
                             .state
                             .query_revisions(this.browser.playlists().entries().playlist_id);
-                        let (_, error) = this
+                        let error = this
                             .browser
                             .timeout_playlist_read(&read, revisions, response);
                         this.finish_loading_text(&kind, generation, cx);
@@ -139,7 +139,7 @@ impl Playlists {
                 let revisions = this
                     .state
                     .query_revisions(this.browser.playlists().entries().playlist_id);
-                let (_, error) = this
+                let error = this
                     .browser
                     .complete_playlist_read(&read, revisions, response);
                 if let Some(error) = error {
