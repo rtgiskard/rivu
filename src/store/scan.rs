@@ -184,6 +184,58 @@ pub(super) fn staged_projection_columns(cue: bool) -> String {
     )
 }
 
+/// Compare final staged values against the old catalog, before either producer updates it.
+pub(super) fn staged_catalog_changes(
+    conn: &rusqlite::Connection,
+    table: &str,
+    cue: bool,
+) -> rusqlite::Result<CatalogChanges> {
+    let (structure, duplicate_candidate, identity_changed) = if cue {
+        (
+            "t.id IS NULL OR t.path IS NOT s.path
+                OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number",
+            "(t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
+                OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL)",
+            "OR (t.cue_sheet IS NULL)<>(s.cue_sheet IS NULL)",
+        )
+    } else {
+        // Admission resolves an exact ordinary path; only insertion changes identity.
+        (
+            "t.id IS NULL",
+            "t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL",
+            "",
+        )
+    };
+    conn.query_row(
+        &format!(
+            "SELECT {},
+                COALESCE(MAX({structure}),0),
+                COALESCE(MAX(({duplicate_candidate}) AND
+                    (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
+                        {identity_changed} OR t.missing IS NOT 0)),0),
+                COALESCE(MAX(({duplicate_candidate}) AND
+                    (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
+                {}, {}
+             FROM {table} AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
+            staged_library_column(cue), staged_projection_columns(cue), staged_count_column(),
+        ),
+        [],
+        |row| {
+            Ok(CatalogChanges {
+                library: row.get(0)?,
+                structure: row.get(1)?,
+                duplicate_groups: row.get(2)?,
+                duplicate_members: row.get(3)?,
+                queue: row.get(4)?,
+                albums: row.get(5)?,
+                history: row.get(6)?,
+                counts: row.get(7)?,
+                ..CatalogChanges::default()
+            })
+        },
+    )
+}
+
 // Keep equality and descendant branches separate so both path indexes can seek.
 // A slash-terminated prefix has the exclusive BINARY upper bound ending in '0'.
 const SCAN_SCOPE_IDS: &str = "
@@ -1075,49 +1127,8 @@ impl Store {
             &staged_bitrate_update_sql("temp.scan_stage", true),
             [i64::MIN],
         )?;
-        // Compare against the final staged values, including playback enrichment,
-        // while the old rows are still available. These flags
-        // describe changed dependencies, not hashes of materialized query results.
-        let mut impacts = tx.query_row(
-            &format!(
-                "SELECT
-                {},
-                COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
-                    OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number),0),
-                COALESCE(MAX(
-                    ((t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
-                        OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
-                    AND (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
-                        OR (t.cue_sheet IS NULL)<>(s.cue_sheet IS NULL)
-                        OR t.missing IS NOT 0)),0),
-                COALESCE(MAX(
-                    ((t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
-                        OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
-                    AND (t.id IS NULL OR t.file_size IS NOT s.file_size
-                        OR t.modified_ns IS NOT s.modified_ns)),0),
-                {},
-                {}
-             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
-                staged_library_column(true),
-                staged_projection_columns(true),
-                staged_count_column()
-            ),
-            [],
-            |row| {
-                Ok(CatalogChanges {
-                    library: row.get(0)?,
-                    structure: row.get(1)?,
-                    duplicate_groups: row.get(2)?,
-                    duplicate_members: row.get(3)?,
-                    queue: row.get(4)?,
-                    albums: row.get(5)?,
-                    history: row.get(6)?,
-                    counts: row.get(7)?,
-                    skipped_short_tracks,
-                    ..CatalogChanges::default()
-                })
-            },
-        )?;
+        let mut impacts = staged_catalog_changes(&tx, "temp.scan_stage", true)?;
+        impacts.skipped_short_tracks = skipped_short_tracks;
         let mut changed_tracks = tx.execute(&staged_update_sql("temp.scan_stage", true), [])?;
         changed_tracks += tx.execute(&staged_insert_sql("temp.scan_stage", true, ""), [])?;
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
