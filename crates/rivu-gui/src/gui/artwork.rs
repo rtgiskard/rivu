@@ -436,22 +436,51 @@ pub(super) struct ArtworkImageSizing {
 }
 
 impl ArtworkImageSizing {
-    pub(super) fn request(&self, side: Pixels, window: &mut Window, cx: &mut App) {
-        let view = window.current_view();
-        self.image.update(cx, |image, cx| {
-            if image.artwork.is_none() {
-                return;
-            }
-            image.views.insert(self.token, (view, image.generation));
-            image.flush_replaced();
-            image.request(self.token, side, self.max_side, window, cx);
-        });
+    fn register_demand(
+        &self,
+        image: &mut ArtworkImage,
+        side: Pixels,
+        window: &mut Window,
+        cx: &mut Context<ArtworkImage>,
+    ) {
+        if image.artwork.is_none() {
+            return;
+        }
+        image
+            .views
+            .insert(self.token, (window.current_view(), image.generation));
+        image.flush_replaced();
+        image.request(self.token, side, self.max_side, window, cx);
+    }
+
+    /// Register measured demand before subscribing to decode completion.
+    pub(super) fn request_image(
+        &self,
+        side: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Img> {
+        let decoded = self
+            .image
+            .update(cx, |image, cx| {
+                self.register_demand(image, side, window, cx);
+                let path = image.artwork.as_ref()?.path();
+                image.load(&Resource::from(path), window, cx)
+            })?
+            .ok()?;
+        if decoded.frame_count() == 0 {
+            return None;
+        }
+        let mut element = img(decoded);
+        element.interactivity().element_id = Some(("artwork-cover", self.image.entity_id()).into());
+        Some(element)
     }
 
     fn request_cover(&self, window: &mut Window, cx: &mut App) {
-        let viewport = window.viewport_size();
-        let side = self.image.read(cx).cover_side(viewport);
-        self.request(side, window, cx);
+        self.image.update(cx, |image, cx| {
+            let side = image.cover_side(window.viewport_size());
+            self.register_demand(image, side, window, cx);
+        });
     }
 }
 
@@ -534,9 +563,23 @@ impl ArtworkView {
 
     pub(super) fn replace(&self, next: Option<LoadedArtwork>, cx: &mut App) -> bool {
         let mut state = self.state.borrow_mut();
-        if state.current.as_ref().map(|image| &image.artwork) == next.as_ref() {
-            return false;
-        }
+        let next = match (state.current.as_mut(), next) {
+            (None, None) => return false,
+            (Some(current), Some(artwork)) => {
+                let same_handle = current.artwork == artwork;
+                if same_handle
+                    || (current.owner.key.1 == artwork.max_image_bytes()
+                        && current.owner.key.0 == artwork.path())
+                {
+                    // Artwork equality only compares the file handle. Always
+                    // adopt the incoming lookup lease, even when it compares equal.
+                    current.artwork = artwork;
+                    return !same_handle;
+                }
+                Some(artwork)
+            }
+            (_, next) => next,
+        };
         let next = next.map(|artwork| ArtworkViewImage {
             owner: self.images.acquire(artwork.clone(), cx),
             artwork,
@@ -548,6 +591,7 @@ impl ArtworkView {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn image(&self, cx: &App) -> Option<Img> {
         let state = self.state.borrow();
         let image = state.current.as_ref()?;
@@ -584,55 +628,6 @@ impl ArtworkView {
             token,
             max_side: None,
         })
-    }
-
-    /// Measure the actual laid-out image surface, not an estimated panel width.
-    pub(super) fn measured_image(&self, consumer: u64, cx: &App) -> Option<gpui::AnyElement> {
-        self.measured_image_with_limit(consumer, None, gpui::px(0.), cx)
-    }
-
-    pub(super) fn measured_thumbnail(
-        &self,
-        consumer: u64,
-        corner_radius: Pixels,
-        cx: &App,
-    ) -> Option<gpui::AnyElement> {
-        self.measured_image_with_limit(consumer, Some(560), corner_radius, cx)
-    }
-
-    fn measured_image_with_limit(
-        &self,
-        consumer: u64,
-        max_side: Option<u32>,
-        corner_radius: Pixels,
-        cx: &App,
-    ) -> Option<gpui::AnyElement> {
-        let image = self.image(cx)?;
-        let mut sizing = self.sizing(consumer)?;
-        sizing.max_side = max_side;
-        Some(
-            canvas(
-                move |bounds, window, cx| {
-                    let side = bounds.size.width.max(bounds.size.height);
-                    sizing.request(side, window, cx);
-                    let mut image = image
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Contain)
-                        .rounded(corner_radius)
-                        .into_any_element();
-                    let _ = image.prepaint_as_root(
-                        bounds.origin,
-                        bounds.size.map(Into::into),
-                        window,
-                        cx,
-                    );
-                    image
-                },
-                |_, mut image, window, cx| image.paint(window, cx),
-            )
-            .size_full()
-            .into_any_element(),
-        )
     }
 
     pub(super) fn retain_consumers(&self, visible: &[u64]) {
@@ -766,6 +761,34 @@ impl ArtworkView {
             image.release(window, cx);
         }
     }
+}
+
+/// Measure the laid-out surface, and keep its placeholder until a frame is ready.
+pub(super) fn measured_cover(
+    sizing: Option<ArtworkImageSizing>,
+    max_side: Option<u32>,
+    corner_radius: Pixels,
+    fallback: impl FnOnce(Pixels, &Window, &App) -> Img + 'static,
+) -> gpui::AnyElement {
+    canvas(
+        move |bounds, window, cx| {
+            let mut image = sizing
+                .and_then(|mut sizing| {
+                    sizing.max_side = max_side;
+                    sizing.request_image(bounds.size.width.max(bounds.size.height), window, cx)
+                })
+                .unwrap_or_else(|| fallback(bounds.size.width.min(bounds.size.height), window, cx))
+                .size_full()
+                .object_fit(gpui::ObjectFit::Contain)
+                .rounded(corner_radius)
+                .into_any_element();
+            let _ = image.prepaint_as_root(bounds.origin, bounds.size.map(Into::into), window, cx);
+            image
+        },
+        |_, mut image, window, cx| image.paint(window, cx),
+    )
+    .size_full()
+    .into_any_element()
 }
 
 struct ArtworkSourceInfo {
@@ -1564,6 +1587,107 @@ mod tests {
             .clone()
     }
 
+    #[gpui::test]
+    fn same_image_swap_keeps_decode_and_measured_consumer(cx: &mut gpui::TestAppContext) {
+        struct CoverScene(ArtworkImageSizing, bool);
+
+        impl Render for CoverScene {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let sizing = self.0.clone();
+                let expected_ready = self.1;
+                canvas(
+                    move |bounds, window, cx| {
+                        assert_eq!(
+                            sizing
+                                .request_image(bounds.size.width, window, cx)
+                                .is_some(),
+                            expected_ready
+                        );
+                    },
+                    |_, (), _, _| {},
+                )
+                .size_full()
+            }
+        }
+
+        fn draw(window: &mut gpui::VisualTestContext, sizing: ArtworkImageSizing, ready: bool) {
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(128.), gpui::px(128.)),
+                |_, cx| cx.new(|_| CoverScene(sizing, ready)).into_any_element(),
+            );
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cover.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
+        let mut track = crate::test_support::artwork_track(path);
+        track.id = 1;
+        let first = manager.load(crate::artwork_source(&track)).unwrap();
+        let mut alias = track.clone();
+        alias.id = 2;
+        let latest = manager.load(crate::artwork_source(&alias)).unwrap();
+        assert_eq!(first, latest, "aliases share pixels but not lookup leases");
+
+        let images = ArtworkImageRegistry::new(2);
+        let view = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let (cache, sizing) = window.update(|_, cx| {
+            let cache = install_cover(&view, first, cx);
+            (cache, view.sizing(1).unwrap())
+        });
+        draw(window, sizing.clone(), false);
+        window.run_until_parked();
+        draw(window, sizing.clone(), true);
+        let (next, decoded) = window.update(|_, cx| {
+            let decoded = cache
+                .read(cx)
+                .item
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .unwrap();
+            assert!(decoded.frame_count() > 1);
+
+            view.replace(Some(latest), cx);
+            let next = view.sizing(1).unwrap();
+            assert_eq!(next.token, sizing.token);
+            assert_eq!(next.image.entity_id(), cache.entity_id());
+            (next, decoded)
+        });
+        // Only the view now holds the selected alias. Churn idle logical entries
+        // that share the file to distinguish its lease from the old track's.
+        for id in 3..=130 {
+            track.id = id;
+            drop(manager.load(crate::artwork_source(&track)).unwrap());
+        }
+        track.id = 3;
+        assert!(
+            manager
+                .cached_result(crate::artwork_source(&track))
+                .is_none()
+        );
+        assert!(manager.cached(crate::artwork_source(&alias)).is_some());
+
+        draw(window, next, true);
+        window.update(|window, cx| {
+            let retained = cache
+                .read(cx)
+                .item
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&decoded, &retained));
+
+            view.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
+    }
+
     // Each test selects distinct pixels so global same-source decode sharing
     // cannot make another concurrently running test own its release probe.
     fn static_cover(side: u32, red: u8) -> Vec<u8> {
@@ -2296,11 +2420,18 @@ mod tests {
             cover: ArtworkView,
             consumer: u64,
             renders: Rc<std::cell::Cell<usize>>,
+            fallback: Arc<RenderImage>,
         }
         impl Render for Panel {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 self.renders.set(self.renders.get() + 1);
-                self.cover.measured_image(self.consumer, cx).unwrap()
+                let fallback = Arc::clone(&self.fallback);
+                measured_cover(
+                    self.cover.sizing(self.consumer),
+                    None,
+                    gpui::px(0.),
+                    move |_, _, _| img(fallback),
+                )
             }
         }
         struct Root {
@@ -2356,6 +2487,9 @@ mod tests {
         });
         let first_renders = Rc::new(std::cell::Cell::new(0));
         let second_renders = Rc::new(std::cell::Cell::new(0));
+        let fallback = Arc::new(RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
         let window = cx.open_window(gpui::size(gpui::px(640.), gpui::px(480.)), {
             let view = view.clone();
             let images = images.clone();
@@ -2366,11 +2500,13 @@ mod tests {
                     cover: view.clone(),
                     consumer: 1,
                     renders: first_renders,
+                    fallback: Arc::clone(&fallback),
                 }),
                 second: cx.new(|_| Panel {
                     cover: view,
                     consumer: 2,
                     renders: second_renders,
+                    fallback,
                 }),
                 side: gpui::px(64.),
                 images,

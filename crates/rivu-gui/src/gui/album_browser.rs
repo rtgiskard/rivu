@@ -19,7 +19,8 @@ use rivu_protocol::{
 
 use super::{
     artwork::{
-        ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork, owned_artwork_source,
+        ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork, measured_cover,
+        owned_artwork_source,
     },
     components::{
         search::{SearchScope, new_search, set_search_counts},
@@ -850,19 +851,29 @@ impl AlbumBrowser {
         let drag_snapshots = self.snapshots.clone();
         let hover_key = key.clone();
         let corner_radius = self.grid_layout.artwork_size * 0.04;
-        let image = self
+        let default_artwork = self.default_artwork.clone();
+        let artwork_size = self.grid_layout.artwork_size;
+        let fallback = move |window: &Window, cx: &App| {
+            default_artwork.read(cx).image(theme, artwork_size, window)
+        };
+        let image = if let Some(sizing) = self
             .covers
             .views
             .get(&index)
-            .and_then(|cover| cover.view.measured_thumbnail(0, corner_radius, cx))
-            .unwrap_or_else(|| {
-                self.default_artwork
-                    .read(cx)
-                    .image(theme, self.grid_layout.artwork_size, window)
-                    .size_full()
-                    .rounded(corner_radius)
-                    .into_any_element()
-            });
+            .and_then(|cover| cover.view.sizing(0))
+        {
+            measured_cover(
+                Some(sizing),
+                Some(560),
+                corner_radius,
+                move |_, window, cx| fallback(window, cx),
+            )
+        } else {
+            fallback(window, cx)
+                .size_full()
+                .rounded(corner_radius)
+                .into_any_element()
+        };
         let directory = key.directory.to_string_lossy().into_owned();
         let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();

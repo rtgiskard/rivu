@@ -532,12 +532,6 @@ impl ArtworkRuntime {
     ) -> impl IntoElement {
         let theme = rivu_ui::theme::palette(cx);
         self.request_frame(window, cx);
-        let image = self.view.image(cx).map(|mut image| {
-            // Multiple panels share a decode, not their playback cursor.
-            image.interactivity().element_id = Some(("artwork-cover", id).into());
-            image = image.with_automatic_animation_frames(false);
-            image
-        });
         let sizing = self.view.sizing(id);
         let image_aspect = self.view.aspect_ratio(cx);
         let default_artwork = self.default_artwork.clone();
@@ -559,13 +553,14 @@ impl ArtworkRuntime {
                 // Even device-pixel diameters keep all concentric layers on the
                 // same center after pixel snapping, including fractional scale.
                 let image_side = px((f32::from(side) * scale * ratio / 2.0).floor() * 2.0 / scale);
-                if let Some(sizing) = sizing {
-                    sizing.request(
-                        artwork_decode_side(image_side, style, image_aspect),
-                        window,
-                        cx,
-                    );
-                }
+                let image = sizing.and_then(|sizing| {
+                    let side = artwork_decode_side(image_side, style, image_aspect);
+                    sizing.request_image(side, window, cx).map(|mut image| {
+                        // Panels share a decode, not their playback cursor.
+                        image.interactivity().element_id = Some(("artwork-cover", id).into());
+                        image.with_automatic_animation_frames(false)
+                    })
+                });
                 let inset = (side - image_side) / 2.0;
                 let image = image
                     .unwrap_or_else(|| default_artwork.read(cx).image(theme, image_side, window));

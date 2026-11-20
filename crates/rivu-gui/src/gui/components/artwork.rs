@@ -5,7 +5,7 @@ pub(crate) fn artwork_preview(
     theme: &'static rivu_format::palette::Palette,
     label: impl Into<SharedString>,
     image: impl IntoElement,
-    aspect_ratio: Option<f32>,
+    aspect_ratio: f32,
 ) -> Div {
     column()
         .w_full()
@@ -17,7 +17,7 @@ pub(crate) fn artwork_preview(
                     .relative()
                     .w(gpui::relative(0.7))
                     .flex_shrink_0()
-                    .when_some(aspect_ratio, |view, ratio| view.aspect_ratio(ratio))
+                    .aspect_ratio(aspect_ratio)
                     .child(div().absolute().size_full().child(image)),
             ),
         )

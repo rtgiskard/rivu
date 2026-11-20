@@ -11,7 +11,7 @@ mod source;
 mod tests;
 
 use super::{
-    artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork},
+    artwork::{ArtworkImageRegistry, ArtworkLoader, ArtworkView, DefaultArtwork, measured_cover},
     components::{artwork::artwork_preview, track::favorite_button},
     feature::FeatureContext,
 };
@@ -1610,22 +1610,20 @@ impl Metadata {
                                 ),
                             ))
                             .when(id.is_some(), |tags| {
-                                tags.child(match self.artwork_view.measured_image(panel_id, cx) {
-                                    Some(image) => artwork_preview(
-                                        theme,
-                                        self.tr("shell-panel-artwork"),
-                                        image,
-                                        self.artwork_view.aspect_ratio(cx),
+                                let default_artwork = self.default_artwork.clone();
+                                tags.child(artwork_preview(
+                                    theme,
+                                    self.tr("shell-panel-artwork"),
+                                    measured_cover(
+                                        self.artwork_view.sizing(panel_id),
+                                        None,
+                                        px(0.),
+                                        move |side, window, cx| {
+                                            default_artwork.read(cx).image(theme, side, window)
+                                        },
                                     ),
-                                    None => artwork_preview(
-                                        theme,
-                                        self.tr("shell-panel-artwork"),
-                                        self.default_artwork
-                                            .clone()
-                                            .cached(gpui::StyleRefinement::default().size_full()),
-                                        Some(1.0),
-                                    ),
-                                })
+                                    self.artwork_view.aspect_ratio(cx).unwrap_or(1.),
+                                ))
                             }),
                     )),
             );
