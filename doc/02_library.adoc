@@ -59,6 +59,9 @@ Saved roots appear immediately in the desktop Library, even when empty or not
 yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action
 or choose `Scan paths` in Library.
 
+See link:04_playback.adoc#audio-formats[Audio format support] for supported
+inputs and decoder requirements.
+
 Configured roots must not overlap after logical path normalization: duplicate
 and parent/child paths are rejected. Symlink targets are not resolved, so logical
 aliases remain distinct. Correct existing overlaps before starting the host or

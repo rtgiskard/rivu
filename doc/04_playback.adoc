@@ -6,6 +6,123 @@ Playback follows queue occurrences, with shared controls in the GUI, TUI, CLI
 and optional MPRIS service. Output uses native PipeWire; decoder selection and
 processing are independent of the output device.
 
+[[audio-formats]]
+== Audio format support
+
+Common input formats and what you need to play them:
+
+[cols="1,2",options="header"]
+|===
+|Input |Playback requirements
+
+|FLAC, MP3, WAV/AIFF (PCM), Ogg (Vorbis/Opus), M4A (AAC/ALAC)
+|Native decoding. Native Opus supports mono and stereo with mapping family 0;
+native AAC supports AAC-LC up to stereo. Other AAC profiles and multichannel
+AAC need FFmpeg.
+
+|Additional codecs, such as DTS
+|Enable the <<optional-ffmpeg-decoder,FFmpeg extension>>.
+
+|DSD (`.dsf`, `.dff`)
+|Requires FFmpeg. <<dsd-playback,Plays as PCM>>; no native DSD output or DoP.
+
+|Tracker (`.mod`, `.xm`, `.it`, `.s3m`)
+|Requires FFmpeg with the <<_tracker_modules_and_dsd_files,`libopenmpt` demuxer>>.
+
+|Standard MIDI (`.mid`, `.midi`), formats 0 and 1
+|Uses Rivu's MIDI synthesizer with a <<midi-playback,General MIDI SoundFont>>.
+|===
+
+During directory scans, the filename extension identifies candidates, not
+playability. A container such as MP4 or MKV can hold different audio codecs, and
+the codec determines whether it can play natively or needs FFmpeg. To check a
+specific file without adding it to the library, use `rivu library probe PATH`.
+Add `--enhanced` to load FFmpeg for that command only; it does not enable FFmpeg
+in a running instance.
+
+See link:02_library.adoc#roots-and-scanning[Library scanning] for importing
+files and link:07_audio_processing.adoc#encoded-export[Encoded export] for
+writable output formats.
+
+[[optional-ffmpeg-decoder]]
+=== Optional FFmpeg decoder
+
+To use the extension, build with the `ffmpeg` feature and set
+`playback.ffmpeg_enabled = true` (off by default). The installed FFmpeg must
+provide the demuxer and audio decoder for the file.
+
+For tracks other than MIDI, use *Decoder hint* in Track details to choose the
+playback backend. The choice saves immediately, independently of tag edits:
+
+* *Auto* preserves automatic native-first selection and FFmpeg fallback.
+* *Native* uses only the native decoder, without FFmpeg recognition or fallback.
+* *FFmpeg* uses the extension directly, with no fallback to the native decoder
+  if the extension is disabled or unavailable.
+
+The saved hint survives rescans and restart, is independent for each CUE subtrack,
+and applies to the next source open or explicit full-waveform request. It does
+not reopen current playback. Changing it cancels an in-flight full-waveform
+request and discards its completed preview; request a fresh preview explicitly.
+
+In Auto mode, FFmpeg loads when native support is missing, including during
+initial decoding. Corrupt input and cancellation do not trigger fallback.
+An explicit FFmpeg hint also loads it on open. Startup and status queries do
+not load it; decoder status shows `not loaded` until the first attempt, whose
+result is retained until restart.
+
+In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
+recognition; ordinary PCM still uses the native decoder. Recognition is not proof
+that a file has been fully validated. In Native mode, or Auto mode with FFmpeg
+disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
+including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
+and enable the extension; no prior load is required.
+
+Library rows are not automatically reprobed after FFmpeg loads; use a forced
+rescan to refresh stored metadata. Probe commands and recognition provenance:
+link:02_library.adoc#metadata-and-favorites[Library].
+
+Build prerequisites and ABI compatibility:
+link:00_getting_started.adoc#ffmpeg-and-native-only-builds[FFmpeg and native-only builds].
+Enablement, disabling an active decoder, and build-feature restrictions:
+link:01_config.adoc[Configuration].
+
+[[_tracker_modules_and_dsd_files]]
+=== Tracker modules
+
+Modules use their own instruments and samples. Rivu exposes one track per
+file, using FFmpeg's default subsong selection. Tags come from Lofty, which
+does not read module titles. The reported sample rate and channel count
+describe the rendered PCM, not an encoded PCM stream in the file.
+
+[[dsd-playback]]
+=== DSD files
+
+FFmpeg decodes DSD to PCM for Rivu's normal processing and output path. The
+reported sample rate is the decoded PCM rate, not the DSD bit clock.
+
+[[midi-playback]]
+=== MIDI file playback
+
+The default build includes the `midi` feature. Scanning and probing read the
+sequence without loading a SoundFont. If setting a *Decoder hint* for a MIDI
+track, use *Auto* or *Native*: forcing *FFmpeg* fails. Playback, full waveforms
+and exports use the same SoundFont.
+Files that use more than one MIDI port are rejected. System-exclusive messages
+and MIDI hardware input/output are not supported.
+
+Playback requires a General MIDI SoundFont (`.sf2`). On Arch Linux, install
+`soundfont-fluid` for `/usr/share/soundfonts/FluidR3_GM.sf2`. On other distributions,
+Rivu also checks `/usr/share/sounds/sf2/FluidR3_GM.sf2` and
+`/usr/share/sounds/sf2/default-GM.sf2`. To use a different bank, set
+`RIVU_MIDI_SOUNDFONT` to its absolute path in the environment that starts Core.
+Restart Core to change banks or retry a failed load. Rivu does not ship a bank
+or download one automatically.
+
+The playback duration includes one second for note release and effects after
+the last track ends. Seeking ahead of the current synthesis cursor renders and
+discards the intervening audio; seeking behind it rebuilds synth state from the
+beginning. Long seeks can therefore take more work than in a WAV file.
+
 [[transport-and-timing]]
 == Transport and timing
 
@@ -464,75 +581,6 @@ MP4 edit lists with several media edits or a non-unit rate are not applied.
 After a seek, native AAC and MP3 output is not guaranteed to be bit-exact with
 continuous decoding. For timing ownership and decoder seek recovery, see
 link:91_design_decisions.adoc#DEC-027[encoder-delay ownership].
-
-[[optional-ffmpeg-decoder]]
-== Optional FFmpeg decoder
-
-Native decoding is the default. Enable `playback.ffmpeg_enabled` for sources the
-native decoder does not support. Container extensions such as MKV or MP4 alone
-do not determine whether FFmpeg is needed; the contained codec also matters.
-In Auto mode, FFmpeg loads when a native decoder cannot support a source,
-not during startup or status queries. Opening a track whose
-decoder hint is FFmpeg also loads the extension directly. Decoder status shows
-`not loaded` until a load is attempted; missing or incompatible libraries are
-reported when needed, and the load result is retained until restart.
-Auto fallback covers unsupported native formats detected during opening,
-including initial decoding. Corrupt input and cancellation do not trigger fallback.
-
-Track details provides a *Decoder hint* selection. Choosing an option saves it
-immediately, independently of tag edits:
-
-* *Auto* preserves automatic native-first selection and FFmpeg fallback.
-* *Native* uses only the native decoder, without FFmpeg recognition or fallback.
-* *FFmpeg* loads and uses FFmpeg directly. The global setting must be enabled;
-  disabling it, missing libraries, or a native-only build reports an error rather
-  than falling back to native decoding.
-
-The saved hint survives rescans and restart, is independent for each CUE subtrack,
-and applies to the next source open or explicit full-waveform request. It does
-not reopen current playback. Changing it cancels an in-flight full-waveform
-request and discards its completed preview; request a fresh preview explicitly.
-
-In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
-recognition; ordinary PCM still uses the native decoder. Recognition is not proof
-that a file has been fully validated. In Native mode, or Auto mode with FFmpeg
-disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
-including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
-and enable the extension; no prior load is required. An explicit enhanced probe
-runs in a separate process and does not load FFmpeg in a running playback instance.
-
-Library rows are not automatically reprobed after FFmpeg loads; use a forced
-rescan to refresh stored metadata. Probe commands and recognition provenance:
-link:02_library.adoc#metadata-and-favorites[Library].
-
-Build prerequisites and ABI compatibility:
-link:00_getting_started.adoc#ffmpeg-and-native-only-builds[FFmpeg and native-only builds].
-Enablement, disabling an active decoder, and build-feature restrictions:
-link:01_config.adoc[Configuration].
-
-[[midi-playback]]
-== MIDI file playback
-
-The default build scans and plays Standard MIDI files (`.mid`, `.midi`, formats
-0 and 1). In custom builds, this requires the `midi` feature. Scanning and
-probing read the sequence without loading an instrument bank. Playback
-synthesizes stereo audio in Rivu, without FFmpeg or a separate audio output.
-Full waveforms and exports use the same bank.
-Files that use more than one MIDI port are rejected. System-exclusive messages
-and MIDI hardware input/output are not supported.
-
-Playback requires a General MIDI SoundFont (`.sf2`). On Arch Linux, install
-`soundfont-fluid` for `/usr/share/soundfonts/FluidR3_GM.sf2`. On other distributions,
-Rivu also checks `/usr/share/sounds/sf2/FluidR3_GM.sf2` and
-`/usr/share/sounds/sf2/default-GM.sf2`. To use a different bank, set
-`RIVU_MIDI_SOUNDFONT` to its absolute path in the environment that starts Core.
-Restart Core to change banks or retry a failed load. Rivu does not ship a bank
-or download one automatically.
-
-The playback duration includes one second for note release and effects after
-the last track ends. Seeking ahead of the current synthesis cursor renders and
-discards the intervening audio; seeking behind it rebuilds synth state from the
-beginning. Long seeks can therefore take more work than in a WAV file.
 
 [[playback-metadata-updates]]
 == Playback metadata updates

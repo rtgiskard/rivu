@@ -8,7 +8,7 @@ application unless explicitly marked as proposed or historical.
 
 * link:00_getting_started.adoc[Install and get started] — runtime requirements,
   packages, source builds and interface selection
-* link:10_upgrading.adoc[Upgrading and compatibility] — supported formats,
+* link:10_upgrading.adoc[Upgrading and compatibility] — database formats,
   automatic migration and manual configuration changes
 * link:02_library.adoc#sqlite-maintenance[Database maintenance]
 
@@ -19,6 +19,8 @@ application unless explicitly marked as proposed or historical.
 * link:03_playlist.adoc[Playlists] — management, transfers and import/export
 * link:04_playback.adoc[Playback] — transport, queue, ReplayGain, audio output,
   diagnostics and desktop integration
+* link:04_playback.adoc#audio-formats[Audio format support] — native decoding,
+  FFmpeg, Tracker, DSD and MIDI requirements
 * link:05_layout.adoc[Desktop layout and panels] — named layouts, docking,
   panel choices and Artwork
 * link:06_visualizations.adoc[Visualizations] — display controls, signal choices
