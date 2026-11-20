@@ -52,6 +52,7 @@ error. Messages still share the bottom row rather than adding extra rows.
 |Command |Effect
 |`:q`, `:quit` |Close this TUI only; Core and playback continue
 |`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
+|`:now` |Jump to the playing or paused occurrence in Queue without changing playback. If a Queue search hides it, clear the search and retry.
 |`:help` |Open the scrollable help page, including command descriptions
 |===
 

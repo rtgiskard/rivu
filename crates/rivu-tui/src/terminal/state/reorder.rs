@@ -1,6 +1,6 @@
 use super::{
-    Command, ContainerIdentity, KeyAction, KeyCode, KeyEvent, NoticeKind, PagedList, TuiSnapshot,
-    UiState, View,
+    Command, ContainerIdentity, KeyAction, KeyCode, KeyEvent, NoticeKind, PagedList, QueueLocator,
+    TuiSnapshot, UiState, View,
 };
 use crate::terminal::paged::LookupStep;
 use rivu_presentation::keyboard::Action;
@@ -57,7 +57,7 @@ impl UiState {
             return;
         }
         let target = match &mut self.view {
-            View::Queue if self.queue.anchor.is_none() => {
+            View::Queue if self.queue.locator.is_none() => {
                 begin(&mut self.queue, |row| row.id).map(Target::Queue)
             }
             View::Playlists(rows) if rows.identity_lookup.is_none() => {
@@ -94,7 +94,7 @@ impl UiState {
                 self.queue.end_reorder();
                 self.queue.selected_id = Some(id);
                 if lookup.is_some() {
-                    self.queue.anchor = Some(id);
+                    self.queue.locator = Some(QueueLocator::RestoreSelection(id));
                 }
             }
             (View::Playlists(rows), Target::Playlist(id)) => {
@@ -390,7 +390,10 @@ mod tests {
                 KeyAction::Ignored
             ));
             assert!(tui.ui.queue.reorder_indices().is_none());
-            assert_eq!(tui.ui.queue.anchor, Some(100));
+            assert_eq!(
+                tui.ui.queue.locator,
+                Some(QueueLocator::RestoreSelection(100))
+            );
             input(&mut tui, KeyCode::Esc);
             assert!(tui.ui.reorder_footer().is_none());
         }
@@ -416,7 +419,10 @@ mod tests {
                 tui.ui.complete_reorder(Ok(()));
             }
             assert!(tui.ui.reorder_footer().is_none());
-            assert_eq!(tui.ui.queue.anchor, Some(100));
+            assert_eq!(
+                tui.ui.queue.locator,
+                Some(QueueLocator::RestoreSelection(100))
+            );
         }
     }
 

@@ -3096,7 +3096,7 @@ fn bitrate_changes_reload_retained_payloads_without_losing_coordinates_or_identi
     assert!(tui.ui.reads.requested.is_none());
     assert_eq!(page_coordinates(&tui.ui.queue), queue_coordinates);
     assert!(tui.ui.queue.pages.is_empty());
-    assert!(tui.ui.queue.anchor.is_none());
+    assert!(tui.ui.queue.locator.is_none());
     let View::LibraryResults(results) = &tui.ui.view else {
         unreachable!()
     };
@@ -3891,7 +3891,10 @@ fn iteration_details_accept_original_completion_across_source_and_page_size_chan
                 View::Queue => {
                     assert!(tui.ui.queue.pages.is_empty());
                     if !page_size {
-                        assert_eq!(tui.ui.queue.anchor, Some(1000));
+                        assert_eq!(
+                            tui.ui.queue.locator,
+                            Some(QueueLocator::RestoreSelection(1000))
+                        );
                     }
                 }
                 View::PlaylistDetail { detail, .. } => {

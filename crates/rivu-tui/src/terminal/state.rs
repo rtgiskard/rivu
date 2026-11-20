@@ -337,10 +337,16 @@ impl RecentTracks {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueLocator {
+    RestoreSelection(u64),
+    LocateNow(u64),
+}
+
 #[derive(Default)]
 pub(super) struct QueuePage {
     rows: PagedList<QueueRow>,
-    pub(super) anchor: Option<u64>,
+    locator: Option<QueueLocator>,
     selected_id: Option<u64>,
 }
 
@@ -377,10 +383,7 @@ impl QueuePage {
             self.rows.invalidate_pages();
             return;
         }
-        self.anchor = self
-            .anchor
-            .or_else(|| self.rows.selected().map(|row| row.id))
-            .or(self.selected_id);
+        self.preserve_selection();
         let selected = self.rows.selection.selected().unwrap_or(0);
         let filtered_total = self.rows.total;
         self.rows.invalidate();
@@ -400,7 +403,7 @@ impl QueuePage {
             self.rows.total = 0;
             self.rows.loaded = true;
             self.rows.selection.select(None);
-            self.anchor = None;
+            self.locator = None;
             self.selected_id = None;
         }
         self.rows.set_viewport(self.rows.viewport_rows);
@@ -410,24 +413,41 @@ impl QueuePage {
         if state.queue.total == 0 {
             return None;
         }
-        Some(match self.anchor {
-            Some(id) => (ReadKind::QueueSelection(id), 0),
+        Some(match self.locator {
+            Some(QueueLocator::RestoreSelection(id) | QueueLocator::LocateNow(id)) => {
+                (ReadKind::QueueSelection(id), 0)
+            }
             None => (ReadKind::Queue, self.rows.next_offset(limit)?),
         })
     }
 
     fn refilter(&mut self, state: &TuiSnapshot) {
-        self.anchor = self
-            .anchor
-            .or_else(|| self.rows.selected().map(|row| row.id))
-            .or(self.selected_id);
+        self.cancel_locate_now();
+        self.preserve_selection();
         self.rows.clear();
         self.rows.selection.select(Some(0));
         if state.queue.total == 0 {
             self.rows.loaded = true;
             self.rows.selection.select(None);
-            self.anchor = None;
+            self.locator = None;
             self.selected_id = None;
+        }
+    }
+
+    fn cancel_locate_now(&mut self) {
+        if matches!(self.locator, Some(QueueLocator::LocateNow(_))) {
+            self.locator = None;
+        }
+    }
+
+    fn preserve_selection(&mut self) {
+        if self.locator.is_none() {
+            self.locator = self
+                .rows
+                .selected()
+                .map(|row| row.id)
+                .or(self.selected_id)
+                .map(QueueLocator::RestoreSelection);
         }
     }
 
@@ -441,14 +461,15 @@ impl QueuePage {
         }
     }
 
-    fn locate(&mut self, queue_id: u64, rows: &[QueueRow]) {
+    // Report a miss only for an explicit :now command, not selection recovery.
+    fn locate(&mut self, queue_id: u64, rows: &[QueueRow]) -> bool {
         let row = rows.iter().find(|row| row.id == queue_id);
         if let Some(row) = row {
             self.rows.selection.select(Some(row.offset));
             self.rows.set_viewport(self.rows.viewport_rows);
         }
         self.selected_id = row.map(|row| row.id);
-        self.anchor = None;
+        matches!(self.locator.take(), Some(QueueLocator::LocateNow(_))) && row.is_none()
     }
 }
 #[derive(Default)]
@@ -889,14 +910,14 @@ impl View {
         queue: &mut QueuePage,
         request: &QueryRequest,
         view: ViewResponse,
-    ) -> Result<(), ()> {
+    ) -> Result<bool, ()> {
         match (self, view) {
             (View::Queue, ViewResponse::QueuePage(page)) if request.demand.kind() == ReadKind::Queue => {
                 queue.accept_page(&request.demand, page);
             }
             (View::Queue, ViewResponse::QueueEntries(rows)) => {
                 if let ReadKind::QueueSelection(queue_id) = request.demand.kind() {
-                    queue.locate(queue_id, &rows);
+                    return Ok(queue.locate(queue_id, &rows));
                 } else {
                     return Err(());
                 }
@@ -1000,7 +1021,7 @@ impl View {
                 return Err(());
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1365,12 +1386,17 @@ impl UiState {
             self.mark_local_change();
             return true;
         }
-        if self
-            .view
-            .accept(&mut self.queue, request, result.view)
-            .is_err()
-        {
-            return self.unexpected_query(request);
+        let now_missed = match self.view.accept(&mut self.queue, request, result.view) {
+            Ok(now_missed) => now_missed,
+            Err(()) => return self.unexpected_query(request),
+        };
+        if now_missed {
+            let message = if self.search.applied_query.is_empty() {
+                "terminal-now-unavailable"
+            } else {
+                "terminal-now-filtered"
+            };
+            self.set_notice(self.i18n.text(message).into(), NoticeKind::Warning);
         }
         self.prepare_local_view(state);
         self.mark_local_change();
@@ -1624,6 +1650,27 @@ impl UiState {
         }
     }
 
+    fn locate_now(&mut self, state: &TuiSnapshot) {
+        let Some(id) = state
+            .queue
+            .current_id
+            .filter(|_| state.playback.status != rivu_protocol::model::PlaybackStatus::Stopped)
+        else {
+            self.set_notice(
+                self.i18n.text("terminal-now-unavailable").into(),
+                NoticeKind::Warning,
+            );
+            return;
+        };
+        if !matches!(self.view, View::Queue) {
+            self.clear_search(state);
+            self.store_page();
+        }
+        self.reopen_view_queries();
+        self.startup_hint_deadline = None;
+        self.queue.locator = Some(QueueLocator::LocateNow(id));
+    }
+
     fn switch_tab(&mut self, backward: bool, state: &TuiSnapshot) {
         self.clear_search(state);
         let target = match (self.view.tab(), backward) {
@@ -1674,7 +1721,7 @@ impl UiState {
         }
     }
 
-    fn command_key(&mut self, key: KeyEvent) -> KeyAction {
+    fn command_key(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         const MAX_COMMAND_BYTES: usize = 256;
         if key.modifiers.intersects(
             KeyModifiers::CONTROL
@@ -1694,6 +1741,10 @@ impl UiState {
                     "" => KeyAction::Ignored,
                     "q" | "quit" => KeyAction::Quit,
                     "qa" | "qall" => KeyAction::Shutdown,
+                    "now" => {
+                        self.locate_now(state);
+                        KeyAction::Ignored
+                    }
                     "help" => {
                         self.show_help = true;
                         self.help_scroll = 0;
@@ -1765,7 +1816,7 @@ impl UiState {
             }
         }
         if self.command_input.is_some() {
-            return self.command_key(key);
+            return self.command_key(key, state);
         }
         if self.details_active {
             let action = resolve_key(key, KeyboardContext::TuiHelp);
@@ -1981,8 +2032,8 @@ impl UiState {
             // Navigation owns the current selection even while a locator is
             // pending. Cancel that intent, then apply the actual action below.
             cancelled_lookup = match &mut self.view {
-                View::Queue if self.queue.anchor.is_some() => {
-                    self.queue.anchor = None;
+                View::Queue if self.queue.locator.is_some() => {
+                    self.queue.locator = None;
                     self.queue.selected_id = None;
                     if !self.queue.loaded {
                         self.queue.selection.select(Some(0));
@@ -2242,7 +2293,7 @@ impl UiState {
                 _ => {
                     changed = self.queue.navigate_action(action, page_size);
                     if changed {
-                        self.queue.anchor = None;
+                        self.queue.locator = None;
                         self.queue.selected_id = self.queue.selected().map(|row| row.id);
                     }
                 }

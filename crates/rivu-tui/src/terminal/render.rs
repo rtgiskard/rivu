@@ -718,6 +718,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
         let commands = [
             (":q / :quit", "terminal-command-close"),
             (":qa / :qall", "terminal-command-shutdown"),
+            (":now", "terminal-command-now"),
             (":help", "terminal-command-help"),
         ];
         let key_width = bindings
