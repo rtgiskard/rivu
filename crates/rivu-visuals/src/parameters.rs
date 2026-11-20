@@ -45,7 +45,6 @@ pub struct VisualParameters {
     pub waveform_peak_gain: f32,
     pub waveform_peak_gamma: f32,
     pub waveform_rms_gain: f32,
-    pub waveform_seek_enabled: bool,
     pub gpu_material_budget_bytes: u64,
 }
 
@@ -90,7 +89,6 @@ impl From<&Config> for VisualParameters {
             waveform_peak_gain: config.waveform_peak_gain,
             waveform_peak_gamma: config.waveform_peak_gamma,
             waveform_rms_gain: config.waveform_rms_gain,
-            waveform_seek_enabled: config.waveform_seek_enabled,
             gpu_material_budget_bytes: config.gpu_material_budget_bytes(),
         }
     }

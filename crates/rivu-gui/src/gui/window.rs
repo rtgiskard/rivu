@@ -565,11 +565,6 @@ impl WindowView {
                     if !waveform.read(cx).accepts_seek_event(*generation) {
                         return;
                     }
-                    if !this.state.system.config.visualization_enabled
-                        || !this.state.system.config.waveform_seek_enabled
-                    {
-                        return;
-                    }
                     if this.workspace.interaction.waveform_preview(
                         *seconds,
                         this.state.queue.current_id,
@@ -590,8 +585,6 @@ impl WindowView {
                         .workspace
                         .interaction
                         .finish_waveform(*seconds, *generation)
-                        && this.state.system.config.visualization_enabled
-                        && this.state.system.config.waveform_seek_enabled
                     {
                         this.send(
                             Command::SeekQueue {
@@ -825,12 +818,20 @@ impl WindowView {
         cancellation: Cancellation,
         cx: &mut Context<Self>,
     ) {
-        self.workspace.restore_interaction(&cancellation);
-        self.audio_processing
-            .update(cx, |owner, cx| owner.invalidate_geometry(cx));
+        self.restore_cancelled_interaction(&cancellation, cx);
         self.waveform
             .update(cx, |waveform, _| waveform.cancel_seek());
         self.sync_waveform(cx);
+    }
+
+    fn restore_cancelled_interaction(
+        &mut self,
+        cancellation: &Cancellation,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace.restore_interaction(cancellation);
+        self.audio_processing
+            .update(cx, |owner, cx| owner.invalidate_geometry(cx));
     }
 
     pub(super) fn cancel_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -988,11 +989,7 @@ impl WindowView {
         }
         if visualization_enabled_changed || waveform_seek_disabled {
             let cancellation = self.workspace.interaction.cancel();
-            self.apply_interaction_cancellation(cancellation, cx);
-        }
-        if waveform_seek_disabled {
-            self.waveform
-                .update(cx, |waveform, _| waveform.set_seek_enabled(false));
+            self.restore_cancelled_interaction(&cancellation, cx);
         }
         self.sync_analysis(cx);
         if error_changed || (!transport_only && !changed.is_empty()) {

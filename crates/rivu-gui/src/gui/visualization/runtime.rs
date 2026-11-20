@@ -118,6 +118,7 @@ pub(in crate::gui) struct VisualizerRuntime {
     style_coordinator: visualization::StyleCoordinator,
     waveform: Entity<visualization::Waveform>,
     panels: HashMap<u64, PanelKind>,
+    has_waveform_panel: bool,
     layout_panels: HashMap<u64, PanelKind>,
     views: HashMap<u64, Entity<VisualizerPanel>>,
     panel_revision: u64,
@@ -166,6 +167,7 @@ impl VisualizerRuntime {
             style_coordinator: visualization::StyleCoordinator::new(),
             waveform,
             panels: HashMap::new(),
+            has_waveform_panel: false,
             layout_panels: HashMap::new(),
             views: HashMap::new(),
             panel_revision: 0,
@@ -265,6 +267,11 @@ impl VisualizerRuntime {
                 .collect::<HashMap<_, _>>();
             panels_changed = self.panels != active;
             layout_panels_changed = self.layout_panels != all;
+            if panels_changed {
+                self.has_waveform_panel = active
+                    .values()
+                    .any(|kind| matches!(kind, PanelKind::Waveform(_)));
+            }
             self.panels = active;
             self.layout_panels = all;
             self.panel_revision = panels.revision;
@@ -402,13 +409,8 @@ impl VisualizerRuntime {
                         .values()
                         .any(|kind| matches!(kind, PanelKind::Waveform(_))),
             );
-            self.handle.set_waveform_presentation_visible(
-                enabled
-                    && self
-                        .panels
-                        .values()
-                        .any(|kind| matches!(kind, PanelKind::Waveform(_))),
-            );
+            self.handle
+                .set_waveform_presentation_visible(enabled && self.has_waveform_panel);
             if self.demand.enabled != demand.enabled {
                 self.cancel_clock(cx);
             }
@@ -445,6 +447,11 @@ impl VisualizerRuntime {
         let waveform_enabled = self.config.visualization_enabled && !self.shutting_down;
         let waveform_visible = self.active();
         self.waveform.update(cx, |waveform, cx| {
+            let seek_enabled =
+                waveform_visible && self.config.waveform_seek_enabled && self.has_waveform_panel;
+            if let Some(generation) = waveform.set_seek_enabled(seek_enabled) {
+                cx.emit(visualization::WaveformEvent::Cancelled { generation });
+            }
             waveform.retain_panels(
                 |id| {
                     waveform_visible && matches!(self.panels.get(&id), Some(PanelKind::Waveform(_)))
@@ -453,7 +460,6 @@ impl VisualizerRuntime {
             );
             // Visibility retires rendering resources, not explicit scan results.
             waveform.set_enabled(waveform_enabled);
-            waveform.set_seek_enabled(waveform_visible && self.config.waveform_seek_enabled);
             if waveform_enabled {
                 waveform.sync(waveform_track, cx);
             }

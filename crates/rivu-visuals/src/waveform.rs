@@ -887,7 +887,7 @@ impl Waveform {
         plot.columns = HashMap::new();
         drop(plot);
         *self.interaction.borrow_mut() = WaveformInteraction::default();
-        self.cancel_seek();
+        let _ = self.set_seek_enabled(false);
     }
 
     fn release_seek_capture(&mut self) {
@@ -903,7 +903,7 @@ impl Waveform {
     }
 
     pub fn accepts_seek_event(&self, generation: u64) -> bool {
-        self.seek_generation == generation
+        self.seek_enabled && self.seek_generation == generation
     }
 
     /// Called after the window's release dispatch. A normally released capture
@@ -940,11 +940,18 @@ impl Waveform {
         self.cancel_unavailable_capture()
     }
 
-    pub fn set_seek_enabled(&mut self, enabled: bool) {
-        self.seek_enabled = enabled;
-        if !enabled {
-            self.cancel_seek();
+    /// Returns the generation whose preview or queued seek was invalidated.
+    pub fn set_seek_enabled(&mut self, enabled: bool) -> Option<u64> {
+        if self.seek_enabled == enabled {
+            return None;
         }
+        self.seek_enabled = enabled;
+        if enabled {
+            return None;
+        }
+        let generation = self.seek_generation;
+        self.cancel_seek();
+        Some(generation)
     }
 
     pub fn retain_panels(&mut self, keep: impl Fn(u64) -> bool, cx: &mut Context<Self>) {
@@ -1389,7 +1396,6 @@ impl Waveform {
             duration,
             options,
         } = state;
-        self.set_seek_enabled(config.waveform_seek_enabled);
         let panel = div()
             .id(("waveform", panel_id))
             .relative()
@@ -2362,6 +2368,19 @@ mod tests {
                 .seek_seconds(gpui::point(px(60.0), px(5.0)), None),
             None
         );
+    }
+
+    #[test]
+    fn disabling_seek_invalidates_a_released_event_once() {
+        let mut waveform = preview(WaveformFrame::default());
+        let generation = waveform.seek_generation;
+        waveform.release_seek_capture();
+        assert_eq!(waveform.set_seek_enabled(true), None);
+        assert!(waveform.accepts_seek_event(generation));
+        assert_eq!(waveform.set_seek_enabled(false), Some(generation));
+        assert_eq!(waveform.set_seek_enabled(false), None);
+        assert_eq!(waveform.set_seek_enabled(true), None);
+        assert!(!waveform.accepts_seek_event(generation));
     }
 
     #[test]
