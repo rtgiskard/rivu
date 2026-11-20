@@ -423,6 +423,8 @@ impl Core {
                 completed_duration,
                 bitrate_bps,
             } if generation == self.transport.generation => {
+                // The worker claims EOF against seek admission before closing.
+                // A current-generation Ended is therefore authoritative for navigation.
                 self.playback_ended(completed_duration, bitrate_bps);
                 let status = self.state.playback.status;
                 self.transport.autoplay = None;
@@ -1291,6 +1293,8 @@ impl Core {
             .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
         let seconds = end.map_or(seconds, |end| seconds.min(end));
         let revision = self.state.playback.seek_revision.wrapping_add(1);
+        // This can reject a physically ended traversal even while its Ended
+        // event is still queued here. Publish intent only after admission.
         self.engine.send(AudioCommand::Seek { seconds, revision })?;
         // A decoder failure caused by this admitted manual seek belongs to
         // this occurrence, not to the earlier natural navigation search.

@@ -430,6 +430,8 @@ pub enum AudioEvent {
         position_seconds: f64,
         listened_seconds: f64,
     },
+    /// The drained traversal claimed EOF before closing. A later seek cannot
+    /// be admitted for this source while this event awaits Core navigation.
     Ended {
         generation: u64,
         /// Decoded duration after a complete, seek-free origin-to-EOF traversal drains.
@@ -487,6 +489,9 @@ struct AudioAdmission {
     signal: VisualizationSignal,
     device: Option<String>,
     auto_mix: bool,
+    generation: u64,
+    // Latest admitted seek in the FIFO source. None once its EOF is claimed.
+    seek_revision: Option<u64>,
 }
 
 impl Default for AudioAdmission {
@@ -496,11 +501,23 @@ impl Default for AudioAdmission {
             signal: VisualizationSignal::After,
             device: None,
             auto_mix: true,
+            generation: 0,
+            seek_revision: Some(0),
         }
     }
 }
 
 impl AudioAdmission {
+    fn claim_eof(&mut self, generation: u64, seek_revision: u64) -> bool {
+        // A queued replacement can be preceded by a seek on this source.
+        // Let the worker apply that FIFO prefix instead of closing underneath it.
+        if self.generation != generation || self.seek_revision != Some(seek_revision) {
+            return false;
+        }
+        self.seek_revision = None;
+        true
+    }
+
     fn changes_pcm(&self, command: &AudioCommand) -> bool {
         match command {
             AudioCommand::VisualizationEnabled(enabled) => self.visualization_enabled != *enabled,
@@ -515,7 +532,7 @@ impl AudioAdmission {
 
 pub struct AudioEngine {
     commands: async_channel::Sender<QueuedAudioCommand>,
-    admission: Mutex<AudioAdmission>,
+    admission: Arc<Mutex<AudioAdmission>>,
     command_wake: Sender<()>,
     pub events: Option<async_channel::Receiver<AudioEvent>>,
     pub pcm: Arc<PcmControl>,
@@ -530,6 +547,8 @@ impl AudioEngine {
         let (shutdown, cancelled) = shutdown_channel();
         let pcm = Arc::new(PcmControl::new()?);
         let analyzer = Arc::clone(&pcm);
+        let admission = Arc::new(Mutex::new(AudioAdmission::default()));
+        let worker_admission = Arc::clone(&admission);
         let media_read_buffer_len = usize::try_from(media_read_buffer_mib)
             .expect("media read buffer size does not fit usize")
             .saturating_mul(BYTES_PER_MEBIBYTE);
@@ -538,6 +557,7 @@ impl AudioEngine {
             .spawn(move || {
                 Worker::new(
                     receive,
+                    worker_admission,
                     commands_ready,
                     send_events,
                     cancelled,
@@ -548,7 +568,7 @@ impl AudioEngine {
             })?;
         Ok(Self {
             commands,
-            admission: Mutex::new(AudioAdmission::default()),
+            admission,
             command_wake,
             events: Some(events),
             pcm,
@@ -564,6 +584,19 @@ impl AudioEngine {
             return Ok(());
         }
         let mut admission = self.admission.lock();
+        let traversal = match &command {
+            AudioCommand::Load { generation, .. }
+            | AudioCommand::Audition { generation, .. }
+            | AudioCommand::GraphAudition { generation, .. } => Some((*generation, 0)),
+            AudioCommand::Seek { revision, .. } => {
+                anyhow::ensure!(
+                    admission.seek_revision.is_some(),
+                    "Cannot seek: playback has ended"
+                );
+                Some((admission.generation, *revision))
+            }
+            _ => None,
+        };
         let changes_pcm = admission.changes_pcm(&command);
         self.ensure_command_capacity(1)?;
         let enabled = match &command {
@@ -589,6 +622,10 @@ impl AudioEngine {
             pcm_intent: changes_pcm,
         }) {
             Ok(()) => {
+                if let Some((generation, revision)) = traversal {
+                    admission.generation = generation;
+                    admission.seek_revision = Some(revision);
+                }
                 admission.visualization_enabled = enabled;
                 admission.signal = signal;
                 if let Some((device, auto_mix)) = output {

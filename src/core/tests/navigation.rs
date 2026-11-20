@@ -313,6 +313,52 @@ fn rejected_seek_progress_uses_settled_intent_not_published_clock_revision() {
 }
 
 #[test]
+fn drained_eof_after_seek_rejection_advances_once_or_stops_at_queue_end() {
+    for last in [false, true] {
+        let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
+        edit_preferences(&mut core, |config| {
+            config.repeat = RepeatMode::Off;
+            config.shuffle = false;
+        });
+        let index = if last { core.state.queue.total - 1 } else { 1 };
+        let current = core.store.queue_id_at(index).unwrap().unwrap();
+        pending(&mut core, current);
+        let _commands = recording_audio(&mut core);
+        started(&mut core, Some(10.0)).unwrap();
+        let generation = core.transport.generation;
+        core.seek(1e16).unwrap();
+        core.audio_event(AudioEvent::SeekRejected {
+            revision: core.state.playback.seek_revision,
+            snapshot: audio::AudioSnapshot {
+                generation,
+                position_seconds: 10.0,
+                listened_seconds: 10.0,
+            },
+            message: "Target exceeds the opened backend timebase".into(),
+        })
+        .unwrap();
+        let ended = AudioEvent::Ended {
+            generation,
+            completed_duration: None,
+            bitrate_bps: None,
+        };
+        core.audio_event(ended.clone()).unwrap();
+        core.audio_event(ended).unwrap();
+        if last {
+            assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+            assert_eq!(core.state.queue.current_id, Some(current));
+            assert!(core.transport.session.is_none());
+        } else {
+            assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+            assert_eq!(
+                core.state.queue.current_id,
+                core.store.queue_id_at(index + 1).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let commands = recording_audio(&mut core);

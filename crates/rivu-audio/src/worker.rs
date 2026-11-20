@@ -1,8 +1,8 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent, AudioFailureKind, AudioShutdownReceiver, AudioSnapshot,
-    PlaybackMetadata, QueuedAudioCommand,
+    AudioAdmission, AudioCommand, AudioEvent, AudioFailureKind, AudioShutdownReceiver,
+    AudioSnapshot, PlaybackMetadata, QueuedAudioCommand,
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
@@ -13,6 +13,7 @@ use anyhow::anyhow;
 use async_channel::TryRecvError;
 use crossbeam_channel::{Receiver, select};
 use futures::FutureExt;
+use parking_lot::Mutex;
 use rivu_dsp::equalizer::config::EqualizerConfig;
 use rivu_format::decoder_hint::DecoderHint;
 use std::{
@@ -185,6 +186,7 @@ impl Opening {
 
 pub(super) struct Worker {
     commands: CommandInbox,
+    admission: Arc<Mutex<AudioAdmission>>,
     commands_ready: Receiver<()>,
     events: async_channel::Sender<AudioEvent>,
     shutdown: AudioShutdownReceiver,
@@ -212,6 +214,7 @@ pub(super) struct Worker {
 impl Worker {
     pub(super) fn new(
         commands: async_channel::Receiver<QueuedAudioCommand>,
+        admission: Arc<Mutex<AudioAdmission>>,
         commands_ready: Receiver<()>,
         events: async_channel::Sender<AudioEvent>,
         shutdown: AudioShutdownReceiver,
@@ -224,6 +227,7 @@ impl Worker {
                 pending: None,
                 admitted_intents: 0,
             },
+            admission,
             commands_ready,
             events,
             shutdown,
@@ -602,6 +606,8 @@ impl Worker {
                 &self.analyzer,
             )?;
             self.refresh_pcm();
+        } else if target.is_some() {
+            anyhow::bail!("Cannot seek: no active playback");
         }
         Ok(())
     }
@@ -725,6 +731,37 @@ impl Worker {
             }
             Err(error) => self.fail(error),
         }
+    }
+
+    fn finish_traversal(&mut self) {
+        let playback = self.playback.as_ref().expect("finished playback");
+        // Return to the next control round if a seek beat this traversal's
+        // EOF. Never hold admission across device close or event delivery.
+        if !self
+            .admission
+            .lock()
+            .claim_eof(playback.generation(), self.seek_revision)
+        {
+            return;
+        }
+        let bitrate_bps = playback.completed_bitrate();
+        let completed_duration = playback.completed_duration();
+        let AudioSnapshot {
+            generation,
+            position_seconds,
+            listened_seconds,
+        } = self.stop();
+        self.event(AudioEvent::Progress {
+            generation,
+            seek_revision: self.seek_revision,
+            position_seconds,
+            listened_seconds,
+        });
+        self.event(AudioEvent::Ended {
+            generation,
+            completed_duration,
+            bitrate_bps,
+        });
     }
 
     fn control_round(&mut self) -> bool {
@@ -864,25 +901,7 @@ impl Worker {
                 self.diagnostics_at = Instant::now();
             }
             if self.playback.as_ref().unwrap().finished() {
-                let playback = self.playback.as_ref().unwrap();
-                let bitrate_bps = playback.completed_bitrate();
-                let completed_duration = playback.completed_duration();
-                let AudioSnapshot {
-                    generation,
-                    position_seconds,
-                    listened_seconds,
-                } = self.stop();
-                self.event(AudioEvent::Progress {
-                    generation,
-                    seek_revision: self.seek_revision,
-                    position_seconds,
-                    listened_seconds,
-                });
-                self.event(AudioEvent::Ended {
-                    generation,
-                    completed_duration,
-                    bitrate_bps,
-                });
+                self.finish_traversal();
                 continue;
             }
             // Neither a command-budget yield nor a partial refill needs a timer.
@@ -1260,7 +1279,7 @@ mod tests {
         let (worker, commands, events, shutdown) = opening_worker();
         let engine = crate::AudioEngine {
             commands,
-            admission: parking_lot::Mutex::new(crate::AudioAdmission::default()),
+            admission: Arc::clone(&worker.admission),
             command_wake: bounded(1).0,
             events: Some(events),
             pcm: Arc::clone(&worker.analyzer),
@@ -1978,7 +1997,15 @@ mod tests {
         let (events, receive) = async_channel::bounded(16);
         let (stop, shutdown) = shutdown_channel();
         let analyzer = Arc::new(PcmControl::new().unwrap());
-        let worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 65536);
+        let worker = Worker::new(
+            commands,
+            Arc::default(),
+            commands_ready,
+            events,
+            shutdown,
+            analyzer,
+            65536,
+        );
         (worker, send, receive, stop)
     }
 
@@ -2296,6 +2323,145 @@ mod tests {
                 assert!(events.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn seek_without_playback_reports_terminal_failure_from_last_source() {
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let file = crate::playback::tests::pcm();
+        load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
+        worker.command(AudioCommand::Stop);
+        worker.command(AudioCommand::Seek {
+            seconds: 0.5,
+            revision: 1,
+        });
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed { generation: 41, message, .. })
+                if message.contains("no active playback")
+        ));
+    }
+
+    fn file_load(path: &std::path::Path, generation: u64) -> AudioCommand {
+        AudioCommand::Load {
+            path: path.to_owned(),
+            range: None,
+            decoder_hint: DecoderHint::Native,
+            metadata: Arc::default(),
+            generation,
+            start_seconds: 0.0,
+            paused: false,
+        }
+    }
+
+    fn drained_worker(path: &std::path::Path) -> (Worker, crate::AudioEngine) {
+        let (mut worker, engine) = admitted_worker();
+        engine.send(file_load(path, 1)).unwrap();
+        assert!(worker.control_round());
+        // Use the deterministic device clock rather than a physical output.
+        let (mut playback, mut render) = crate::playback::tests::test_playback_selected(path, None);
+        for block in 0..102 {
+            playback.fill().unwrap();
+            render(&mut [0.0; 160], block * 20);
+        }
+        assert!(playback.finished());
+        worker.opening = None;
+        worker.playback = Some(playback);
+        (worker, engine)
+    }
+
+    #[test]
+    fn queued_replacement_preserves_preceding_seek_on_drained_source() {
+        let file = crate::playback::tests::pcm();
+        let (mut worker, engine) = drained_worker(file.path());
+        engine
+            .send(AudioCommand::Seek {
+                seconds: 1e16,
+                revision: 7,
+            })
+            .unwrap();
+        engine.send(file_load(file.path(), 2)).unwrap();
+        worker.finish_traversal();
+        assert!(worker.control_round());
+
+        let events = engine.events.as_ref().unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::SeekRejected { revision: 7, snapshot, .. }) if snapshot.generation == 1
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::OutputDiagnostics(_))
+        ));
+        assert!(events.is_empty());
+        assert_eq!(worker.opening.as_ref().unwrap().generation, 2);
+    }
+
+    #[test]
+    fn seek_and_drained_eof_share_admission_before_terminal_delivery() {
+        let file = crate::playback::tests::pcm();
+        let (mut worker, engine) = drained_worker(file.path());
+        let events = engine.events.as_ref().unwrap();
+
+        // Seek enters the FIFO after drain detection but before close. Only
+        // the still-live decoder can reject this backend-specific timebase.
+        engine
+            .send(AudioCommand::Seek {
+                seconds: 1e16,
+                revision: 7,
+            })
+            .unwrap();
+        worker.finish_traversal();
+        assert!(events.is_empty());
+        assert!(worker.control_round());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::SeekRejected { revision: 7, .. })
+        ));
+        worker.finish_traversal();
+
+        // EOF has now won, but Core hasn't read the event. A request must
+        // fail at admission without reserving a PCM fence or changing position.
+        let seek = || AudioCommand::Seek {
+            seconds: 0.5,
+            revision: 8,
+        };
+        let intent = engine.pcm.state().intent;
+        assert!(
+            engine
+                .send(seek())
+                .unwrap_err()
+                .to_string()
+                .contains("ended")
+        );
+        assert_eq!(engine.pcm.state().intent, intent);
+        assert!(worker.playback.is_none());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::OutputDiagnostics(_))
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Progress {
+                generation: 1,
+                seek_revision: 7,
+                position_seconds: 2.0,
+                listened_seconds: 2.0,
+            })
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Ended { generation: 1, .. })
+        ));
+        assert!(events.is_empty());
+
+        // The next selected occurrence can be sought even while opening.
+        engine.send(file_load(file.path(), 2)).unwrap();
+        engine.send(seek()).unwrap();
+        assert!(worker.control_round());
+        let opening = worker.opening.as_ref().unwrap();
+        assert_eq!(opening.generation, 2);
+        assert_eq!(opening.pending_seek, Some((0.5, 8)));
     }
 
     #[test]
@@ -2777,7 +2943,15 @@ mod tests {
         let (events, receive) = async_channel::bounded(2);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = Arc::new(PcmControl::new().unwrap());
-        let mut worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 1024);
+        let mut worker = Worker::new(
+            commands,
+            Arc::default(),
+            commands_ready,
+            events,
+            shutdown,
+            analyzer,
+            1024,
+        );
         for (index, target) in [
             "invalid-first-target",
             "invalid-first-target",
@@ -2822,6 +2996,7 @@ mod tests {
             let analyzer = Arc::new(PcmControl::new().unwrap());
             let worker = Worker::new(
                 receive,
+                Arc::default(),
                 commands_ready,
                 events,
                 cancelled,
@@ -3003,7 +3178,15 @@ mod tests {
         let (events, _receive) = async_channel::bounded(1);
         let (_stop, shutdown) = shutdown_channel();
         let analyzer = Arc::new(PcmControl::new().unwrap());
-        let mut worker = Worker::new(commands, commands_ready, events, shutdown, analyzer, 65536);
+        let mut worker = Worker::new(
+            commands,
+            Arc::default(),
+            commands_ready,
+            events,
+            shutdown,
+            analyzer,
+            65536,
+        );
         worker.command(AudioCommand::Volume(0.3));
         worker.analyzer.set_enabled(true);
         worker.command(AudioCommand::VisualizationEnabled(false));
@@ -3280,8 +3463,16 @@ mod tests {
                 let (shutdown, cancelled) = shutdown_channel();
                 let pcm = Arc::new(PcmControl::new().unwrap());
                 let analyzer = Arc::clone(&pcm);
-                let worker =
-                    Worker::new(receive, commands_ready, events, cancelled, analyzer, 1024);
+                let admission = Arc::default();
+                let worker = Worker::new(
+                    receive,
+                    Arc::clone(&admission),
+                    commands_ready,
+                    events,
+                    cancelled,
+                    analyzer,
+                    1024,
+                );
                 let worker = std::thread::spawn(move || {
                     worker.event(AudioEvent::Ended {
                         generation: 2,
@@ -3292,7 +3483,7 @@ mod tests {
                 });
                 let mut engine = AudioEngine {
                     commands,
-                    admission: Mutex::new(crate::AudioAdmission::default()),
+                    admission,
                     command_wake,
                     events: Some(event_receive),
                     pcm,
