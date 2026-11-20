@@ -620,12 +620,14 @@ impl Playback {
         let sample_rate = self.source.info().sample_rate;
         let media = self.audible_media();
         // Concurrent callback consumption belongs to the next refill, not this
-        // prefix. Both submitted frames and decoded packets bound this round.
-        let mut remaining_frames = self.output.vacant_frames().min(MAX_REFILL_FRAMES);
+        // prefix. Bound source work separately: stretching may consume frames
+        // without submitting any, or submit staged frames without consuming any.
+        let mut output_left = self.output.vacant_frames().min(MAX_REFILL_FRAMES);
+        let mut input_left = output_left;
         let mut remaining_packets = DECODE_WORK_BUDGET;
-        while remaining_frames > 0 {
+        while output_left > 0 && input_left > 0 {
             if self.offset_frames < self.pending.len() / channels {
-                remaining_frames -= self.submit_pending(remaining_frames, channels);
+                input_left -= self.submit_pending(input_left, &mut output_left, channels);
                 if self.offset_frames < self.pending.len() / channels {
                     break;
                 }
@@ -633,7 +635,7 @@ impl Playback {
             if !self.eof && self.graph_output_remaining == Some(0) {
                 self.eof = true;
             }
-            if self.eof || remaining_frames == 0 || remaining_packets == 0 {
+            if self.eof || input_left == 0 || output_left == 0 || remaining_packets == 0 {
                 break;
             }
             self.pending.clear();
@@ -731,11 +733,12 @@ impl Playback {
                     }
                     if borrowed {
                         // Settled disabled EQ keeps the original borrowed fast path.
-                        let prefix = frames.len().min(remaining_frames * channels);
+                        let prefix = frames.len().min(input_left * channels);
                         let output_frame = self.output.submitted();
                         let count = self.speed.push(
                             &mut self.output,
                             &frames[..prefix],
+                            &mut output_left,
                             &mut self.visualization.audible_tap(media),
                         );
                         self.pending_tap = PendingTap::Direct(self.visualization.signal);
@@ -760,7 +763,7 @@ impl Playback {
                         }
                         self.pending_start = start_seconds + count as f64 / sample_rate as f64;
                         self.pending_position = position + count as u64;
-                        remaining_frames -= count;
+                        input_left -= count;
                         self.pending.extend_from_slice(&frames[count * channels..]);
                     } else {
                         // Process each packet once. Pending output is already
@@ -777,7 +780,7 @@ impl Playback {
                         self.pending_position = position;
                         self.pending_discontinuity = self.graph.is_none() && discontinuity;
                         self.process_graph_pending(channels)?;
-                        remaining_frames -= self.submit_pending(remaining_frames, channels);
+                        input_left -= self.submit_pending(input_left, &mut output_left, channels);
                     }
                     after_packet();
                 }
@@ -800,9 +803,11 @@ impl Playback {
         }
         if self.eof
             && self.offset_frames == self.pending.len() / channels
-            && self
-                .speed
-                .finish(&mut self.output, &mut self.visualization.audible_tap(media))
+            && self.speed.finish(
+                &mut self.output,
+                &mut output_left,
+                &mut self.visualization.audible_tap(media),
+            )
         {
             self.output.finish_input();
             self.visualization.reset_tap();
@@ -810,12 +815,17 @@ impl Playback {
             self.graph_mapping = VecDeque::new();
         }
         Ok(
-            (!self.eof || self.offset_frames < self.pending.len() / channels)
+            (!self.eof || self.offset_frames < self.pending.len() / channels || !self.speed.idle())
                 && self.output.vacant_frames() > 0,
         )
     }
 
-    fn submit_pending(&mut self, max_frames: usize, channels: usize) -> usize {
+    fn submit_pending(
+        &mut self,
+        max_frames: usize,
+        output_left: &mut usize,
+        channels: usize,
+    ) -> usize {
         let start = self.offset_frames;
         let mut end = (start + max_frames).min(self.pending.len() / channels);
         let mut media_start =
@@ -847,6 +857,7 @@ impl Playback {
         let count = self.speed.push(
             &mut self.output,
             &self.pending[start * channels..end * channels],
+            output_left,
             &mut self.visualization.audible_tap(media),
         );
         if count != 0 && self.pending_discontinuity {
@@ -2287,6 +2298,34 @@ pub(super) mod tests {
             })
             .unwrap();
         render.unwrap()
+    }
+
+    #[test]
+    fn slow_refills_respect_initial_vacancy_through_eof() {
+        let file = pcm_samples(24_577);
+        let (mut playback, _) = test_playback_selected(file.path(), None);
+        let mut render = restart_at_speed(&mut playback, 0.5, 0.0);
+        let mut millis = 0;
+        for _ in 0..256 {
+            let budget = playback.output.vacant_frames().min(MAX_REFILL_FRAMES);
+            let before = playback.output.submitted();
+            let ready = playback
+                .fill_with(|| {
+                    render(&mut [0.0; 256], millis);
+                    millis += 32;
+                })
+                .unwrap();
+            assert!(playback.output.submitted() - before <= budget as u64);
+            if playback.eof && playback.speed.idle() {
+                assert!(!ready);
+                assert_eq!(playback.output.submitted(), 2 * 24_577);
+                return;
+            }
+            assert!(ready || playback.output.vacant_frames() == 0);
+            render(&mut [0.0; 512], millis);
+            millis += 64;
+        }
+        panic!("bounded speed refills did not finish");
     }
 
     #[test]

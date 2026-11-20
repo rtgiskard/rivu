@@ -225,33 +225,38 @@ impl SpeedStage {
         self.active()
     }
 
-    /// Admit source frames to the output; returns how many were consumed.
+    /// Return source frames consumed; debit `output_left` by output frames admitted.
     /// While stretching, `tap` receives each admitted run of stretched audio
     /// with the output frame at which it starts.
     pub(super) fn push(
         &mut self,
         output: &mut Output,
         input: &[f32],
+        output_left: &mut usize,
         tap: &mut impl FnMut(u64, &[f32]),
     ) -> usize {
         if !self.active() {
-            return output.push(input);
+            let frames = (input.len() / self.channels).min(*output_left);
+            let admitted = output.push(&input[..frames * self.channels]);
+            *output_left -= admitted;
+            return admitted;
         }
-        if !self.drain(output, tap) {
+        if !self.drain(output, output_left, tap) {
             return 0;
         }
         // Round up: a single vacant output frame must still admit a source frame,
         // or a refill reporting vacancy would make no progress below 1.0x. The
         // overshoot stays staged within the reserved bound.
+        let room = output.vacant_frames().min(*output_left);
         let frames = (input.len() / self.channels)
-            .min((output.vacant_frames() as f64 * self.speed.get()).ceil() as usize)
+            .min((room as f64 * self.speed.get()).ceil() as usize)
             .min(MAX_INPUT_FRAMES);
         if frames != 0 {
             let count = self.span(self.consumed, frames as u64);
             self.consumed += frames as u64;
             let input = &input[..frames * self.channels];
             self.stage(count, |stretch, out| stretch.process(input, out));
-            self.drain(output, tap);
+            self.drain(output, output_left, tap);
         }
         frames
     }
@@ -260,13 +265,14 @@ impl SpeedStage {
     pub(super) fn finish(
         &mut self,
         output: &mut Output,
+        output_left: &mut usize,
         tap: &mut impl FnMut(u64, &[f32]),
     ) -> bool {
         if !self.active() {
             return true;
         }
         if !self.finished {
-            if !self.drain(output, tap) {
+            if !self.drain(output, output_left, tap) {
                 return false;
             }
             self.finished = true;
@@ -281,7 +287,7 @@ impl SpeedStage {
             self.staged
                 .resize(len.max(self.staged_offset as i64) as usize, 0.0);
         }
-        self.drain(output, tap)
+        self.drain(output, output_left, tap)
     }
 
     /// No stretched audio remains to be admitted.
@@ -308,10 +314,19 @@ impl SpeedStage {
         self.useful += (frames - skipped) as u64;
     }
 
-    fn drain(&mut self, output: &mut Output, tap: &mut impl FnMut(u64, &[f32])) -> bool {
+    fn drain(
+        &mut self,
+        output: &mut Output,
+        output_left: &mut usize,
+        tap: &mut impl FnMut(u64, &[f32]),
+    ) -> bool {
         if self.staged_offset < self.staged.len() {
             let frame = output.submitted();
-            let admitted = output.push(&self.staged[self.staged_offset..]) * self.channels;
+            let pending = &self.staged[self.staged_offset..];
+            let frames = (pending.len() / self.channels).min(*output_left);
+            let admitted_frames = output.push(&pending[..frames * self.channels]);
+            *output_left -= admitted_frames;
+            let admitted = admitted_frames * self.channels;
             if admitted != 0 {
                 tap(
                     frame,
@@ -351,11 +366,25 @@ mod tests {
         for chunk in input.chunks(1000 * 2) {
             let mut rest = chunk;
             while !rest.is_empty() {
-                let frames = stage.push(&mut output, rest, &mut tap);
+                let mut budget = 511;
+                let before = output.submitted();
+                let frames = stage.push(&mut output, rest, &mut budget, &mut tap);
+                assert_eq!(output.submitted() - before, (511 - budget) as u64);
+                assert!(frames != 0 || budget == 0);
                 rest = &rest[frames * 2..];
             }
         }
-        assert!(stage.finish(&mut output, &mut tap) && stage.idle());
+        loop {
+            let before = output.submitted();
+            let mut budget = 511;
+            let done = stage.finish(&mut output, &mut budget, &mut tap);
+            assert_eq!(output.submitted() - before, (511 - budget) as u64);
+            if done {
+                break;
+            }
+            assert_eq!(budget, 0);
+        }
+        assert!(stage.idle());
         let mut played = vec![0.0; output.submitted() as usize * 2];
         device(&mut played, 0);
         if stage.stretching() {
@@ -421,7 +450,14 @@ mod tests {
         let layout = [Channel::FrontLeft, Channel::FrontRight];
         let (mut output, _device) =
             crate::output::test_backend_with_capacity(RATE, false, &layout, 2048);
-        while stage.push(&mut output, &tone(1000.0, 4000), &mut |_, _| {}) != 0 {}
+        let mut budget = output.vacant_frames();
+        while stage.push(
+            &mut output,
+            &tone(1000.0, 4000),
+            &mut budget,
+            &mut |_, _| {},
+        ) != 0
+        {}
         assert!(!stage.idle());
         stage.set(PlaybackSpeed::new(1.25).unwrap());
         stage.restart().unwrap();
@@ -438,6 +474,7 @@ mod tests {
         assert_eq!(output.vacant_frames(), 1);
         let mut stage = SpeedStage::new(PlaybackSpeed::new(0.5).unwrap(), 2, RATE).unwrap();
         // A refill that reports vacancy must make progress.
-        assert!(stage.push(&mut output, &tone(440.0, 16), &mut |_, _| {}) > 0);
+        let mut budget = 1;
+        assert!(stage.push(&mut output, &tone(440.0, 16), &mut budget, &mut |_, _| {}) > 0);
     }
 }
