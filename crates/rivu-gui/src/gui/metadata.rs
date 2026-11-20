@@ -24,7 +24,7 @@ use gpui::{
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_metadata::artwork::ArtworkManager;
-use rivu_presentation::time::{format_cue_frame, format_time};
+use rivu_presentation::track::{AudioDetails, CueDetails, track_kind_key};
 use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,
@@ -1229,134 +1229,64 @@ impl Metadata {
             self.tr("gl-track-kind"),
             track.map_or_else(
                 || placeholder.clone(),
-                |track| {
-                    self.tr(if track.cue.is_some() {
-                        "gl-cue-segment"
-                    } else {
-                        "gl-whole-file"
-                    })
-                },
+                |track| self.tr(track_kind_key(track)),
             ),
         );
         let cue = track.and_then(|track| track.cue.as_ref());
+        // Keep the labels in the layout even when no CUE details are available.
+        let (sheet, number, start, end) = match cue.map(CueDetails::format) {
+            Some(cue) => (
+                cue.sheet.into(),
+                cue.number.into(),
+                cue.start.into(),
+                cue.end.map_or_else(|| self.tr("gl-file-end"), Into::into),
+            ),
+            None => (
+                placeholder.clone(),
+                placeholder.clone(),
+                placeholder.clone(),
+                placeholder.clone(),
+            ),
+        };
         let cue_fields: [[(SharedString, SharedString); 2]; 2] = [
             [
-                (
-                    self.tr("gl-cue-sheet"),
-                    cue.map_or_else(
-                        || placeholder.clone(),
-                        |cue| cue.sheet.to_string_lossy().into_owned().into(),
-                    ),
-                ),
-                (
-                    self.tr("gl-cue-number"),
-                    cue.map_or_else(|| placeholder.clone(), |cue| cue.number.to_string().into()),
-                ),
+                (self.tr("gl-cue-sheet"), sheet),
+                (self.tr("gl-cue-number"), number),
             ],
             [
-                (
-                    self.tr("gl-cue-start"),
-                    cue.map_or_else(
-                        || placeholder.clone(),
-                        |cue| format_cue_frame(cue.start_frame).into(),
-                    ),
-                ),
-                (
-                    self.tr("gl-cue-end"),
-                    cue.map_or_else(
-                        || placeholder.clone(),
-                        |cue| {
-                            cue.end_frame.map_or_else(
-                                || self.tr("gl-file-end"),
-                                |frame| format_cue_frame(frame).into(),
-                            )
-                        },
-                    ),
-                ),
+                (self.tr("gl-cue-start"), start),
+                (self.tr("gl-cue-end"), end),
             ],
         ];
+        let audio = track
+            .map(|track| AudioDetails::format(track, "≈"))
+            .unwrap_or_default();
+        let audio_value = |value: Option<String>| -> SharedString {
+            value.map_or_else(
+                || {
+                    if track.is_some() {
+                        "-".into()
+                    } else {
+                        placeholder.clone()
+                    }
+                },
+                Into::into,
+            )
+        };
         let metadata: [[(SharedString, SharedString); 2]; 3] = [
             [
-                (
-                    self.tr("gl-codec"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            if track.codec.is_empty() {
-                                "-".into()
-                            } else {
-                                track.codec.to_ascii_lowercase().into()
-                            }
-                        },
-                    ),
-                ),
-                (
-                    self.tr("gl-sample-rate"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            if track.sample_rate == 0 {
-                                "-".into()
-                            } else {
-                                format!("{} Hz", track.sample_rate).into()
-                            }
-                        },
-                    ),
-                ),
+                (self.tr("gl-codec"), audio_value(audio.codec)),
+                (self.tr("gl-sample-rate"), audio_value(audio.sample_rate)),
             ],
             [
-                (
-                    self.tr("gl-channels"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            if track.channels == 0 {
-                                "-".into()
-                            } else {
-                                track.channels.to_string().into()
-                            }
-                        },
-                    ),
-                ),
-                (
-                    self.tr("gl-duration"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track
-                                .duration
-                                .map_or("-".into(), |value| format_time(value).into())
-                        },
-                    ),
-                ),
+                (self.tr("gl-channels"), audio_value(audio.channels)),
+                (self.tr("gl-duration"), audio_value(audio.duration)),
             ],
             [
-                (
-                    self.tr("gl-bitrate"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track.bitrate_bps.map_or("-".into(), |value| {
-                                format!(
-                                    "{}{:.0} kbps",
-                                    if track.bitrate_exact { "" } else { "≈" },
-                                    value as f64 / 1000.0
-                                )
-                                .into()
-                            })
-                        },
-                    ),
-                ),
+                (self.tr("gl-bitrate"), audio_value(audio.bitrate)),
                 (
                     self.tr("gl-bits-sample"),
-                    track.map_or_else(
-                        || placeholder.clone(),
-                        |track| {
-                            track
-                                .bits_per_sample
-                                .map_or("-".into(), |value| value.to_string().into())
-                        },
-                    ),
+                    audio_value(audio.bits_per_sample),
                 ),
             ],
         ];

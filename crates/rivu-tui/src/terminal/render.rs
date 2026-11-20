@@ -15,8 +15,8 @@ use ratatui::{
 use rivu_presentation::{
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext},
-    time::{format_cue_frame, format_time},
-    track::track_title,
+    time::format_time,
+    track::{AudioDetails, CueDetails, track_kind_key, track_title},
 };
 use rivu_protocol::model::{
     DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary, QueueRow,
@@ -399,50 +399,16 @@ fn details_lines(
                 colors,
             );
             group(&mut lines, "terminal-details-audio");
+            let audio = AudioDetails::format(track, "≈ ");
             detail_fields(
                 &mut lines,
                 &[
-                    ("gl-codec", track.codec.to_ascii_lowercase()),
-                    (
-                        "gl-sample-rate",
-                        if track.sample_rate == 0 {
-                            String::new()
-                        } else {
-                            format!("{} Hz", track.sample_rate)
-                        },
-                    ),
-                    (
-                        "gl-channels",
-                        if track.channels == 0 {
-                            String::new()
-                        } else {
-                            track.channels.to_string()
-                        },
-                    ),
-                    (
-                        "gl-duration",
-                        track.duration.map(format_time).unwrap_or_default(),
-                    ),
-                    (
-                        "gl-bitrate",
-                        track
-                            .bitrate_bps
-                            .map(|n| {
-                                format!(
-                                    "{}{:.0} kbps",
-                                    if track.bitrate_exact { "" } else { "≈ " },
-                                    n as f64 / 1000.0
-                                )
-                            })
-                            .unwrap_or_default(),
-                    ),
-                    (
-                        "gl-bits-sample",
-                        track
-                            .bits_per_sample
-                            .map(|n| n.to_string())
-                            .unwrap_or_default(),
-                    ),
+                    ("gl-codec", audio.codec.unwrap_or_default()),
+                    ("gl-sample-rate", audio.sample_rate.unwrap_or_default()),
+                    ("gl-channels", audio.channels.unwrap_or_default()),
+                    ("gl-duration", audio.duration.unwrap_or_default()),
+                    ("gl-bitrate", audio.bitrate.unwrap_or_default()),
+                    ("gl-bits-sample", audio.bits_per_sample.unwrap_or_default()),
                 ],
                 width,
                 i18n,
@@ -464,15 +430,7 @@ fn details_lines(
             detail_fields(
                 &mut lines,
                 &[
-                    (
-                        "gl-track-kind",
-                        i18n.text(if track.cue.is_some() {
-                            "gl-cue-segment"
-                        } else {
-                            "gl-whole-file"
-                        })
-                        .to_owned(),
-                    ),
+                    ("gl-track-kind", i18n.text(track_kind_key(track)).to_owned()),
                     ("gl-decoder-hint", decoder.to_owned()),
                 ],
                 width,
@@ -480,16 +438,16 @@ fn details_lines(
                 colors,
             );
             if let Some(cue) = &track.cue {
+                let cue = CueDetails::format(cue);
                 detail_fields(
                     &mut lines,
                     &[
-                        ("gl-cue-sheet", cue.sheet.to_string_lossy().into_owned()),
-                        ("gl-cue-number", cue.number.to_string()),
-                        ("gl-cue-start", format_cue_frame(cue.start_frame)),
+                        ("gl-cue-sheet", cue.sheet),
+                        ("gl-cue-number", cue.number),
+                        ("gl-cue-start", cue.start),
                         (
                             "gl-cue-end",
-                            cue.end_frame
-                                .map(format_cue_frame)
+                            cue.end
                                 .unwrap_or_else(|| i18n.text("gl-file-end").to_owned()),
                         ),
                     ],
