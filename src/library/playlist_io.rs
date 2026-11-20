@@ -201,106 +201,11 @@ async fn prepare_import(
             .await
             .with_context(|| format!("Reading import playlist {}", path.display()))?;
         builder.bytes_read = bytes.len();
-        let cancellation = cancellation.clone();
-        let mut roots_charge = budget.scoped();
-        if let Some(roots) = roots {
-            roots_charge.reserve(
-                roots
-                    .iter()
-                    .map(|root| std::mem::size_of::<PathBuf>() + root.as_os_str().len())
-                    .sum(),
-            )?;
-        }
-        let roots = roots.map(<[PathBuf]>::to_vec);
-        let budget = budget.clone();
-        // UTF-8 validation, line parsing and logical path expansion are bounded
-        // CPU work, not filesystem I/O on the async driver.
-        workers
-            .execute(
-                move || -> Result<(Vec<PathBuf>, super::import_budget::ImportBudgetScope)> {
-                    let text = std::str::from_utf8(
-                        bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes),
-                    )
-                    .with_context(|| {
-                        format!("Decoding import playlist {} as UTF-8", path.display())
-                    })?;
-                    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                    let mut paths = Vec::new();
-                    let mut charge = budget.scoped();
-                    for raw_line in text.lines() {
-                        cancellation.check()?;
-                        let line = raw_line.trim_end_matches('\r');
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        let item_path = PathBuf::from(line);
-                        let item_path = logical_path(&if item_path.is_absolute() {
-                            item_path
-                        } else {
-                            parent.join(item_path)
-                        })?;
-                        if let Some(roots) = &roots {
-                            ensure!(
-                                roots.iter().any(|root| item_path.starts_with(root)),
-                                "Import source is outside configured library roots: {}",
-                                item_path.display()
-                            );
-                        }
-                        ensure!(
-                            paths.len() < MAX_IMPORT_ENTRIES,
-                            "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
-                        );
-                        charge.reserve(item_path.as_os_str().len())?;
-                        charge.reserve_vec(&mut paths, 1)?;
-                        paths.push(item_path);
-                    }
-                    drop(roots_charge);
-                    Ok((paths, charge))
-                },
-            )
-            .await
-            .context("Playlist import parser panicked")??
+        parse_m3u_paths(workers, path, bytes, roots, &budget, cancellation).await?
     };
-    // Deduplicate on the blocking worker without copying occurrence-sized path
-    // payloads. The scoped index workspace is bounded by MAX_IMPORT_ENTRIES.
-    let (mut paths, sources, mut ordinary_sources, source_order_charge) = workers
-        .execute({
-            let budget = budget.clone();
-            let cancellation = cancellation.clone();
-            move || -> Result<_> {
-                let (sources, mut first_sources, charge) =
-                    unique_import_sources(&paths, &budget, &cancellation)?;
-                first_sources.retain(|&index| !is_cue_path(&paths[index]));
-                Ok((paths, sources, first_sources, charge))
-            }
-        })
-        .await
-        .context("Playlist import source ordering worker panicked")??;
+    let (paths, sources, non_regular_source) =
+        inspect_import_sources(workers, paths, &budget, cancellation).await?;
     builder.result.paths = sources;
-    let mut non_regular_source = None;
-    for start in (0..ordinary_sources.len()).step_by(super::source::SOURCE_BATCH_SIZE) {
-        cancellation.check()?;
-        let end = (start + super::source::SOURCE_BATCH_SIZE).min(ordinary_sources.len());
-        let cancellation = cancellation.clone();
-        (paths, ordinary_sources, non_regular_source) = workers
-            .execute(move || -> Result<_> {
-                let mut non_regular = None;
-                for &index in &ordinary_sources[start..end] {
-                    cancellation.check()?;
-                    if std::fs::metadata(&paths[index]).is_ok_and(|metadata| !metadata.is_file()) {
-                        non_regular = Some(index);
-                        break;
-                    }
-                }
-                Ok((paths, ordinary_sources, non_regular))
-            })
-            .await
-            .context("Import source inspection worker panicked")??;
-        if non_regular_source.is_some() {
-            break;
-        }
-    }
-    drop((ordinary_sources, source_order_charge));
     for (index, path) in paths.into_iter().enumerate() {
         cancellation.check()?;
         // Report prechecked errors in playlist order, including CUE failures.
@@ -374,6 +279,116 @@ async fn prepare_import(
         "Import playlist contains no entries"
     );
     Ok(builder.result)
+}
+
+async fn parse_m3u_paths(
+    workers: &BlockingExecutor,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    roots: Option<&[PathBuf]>,
+    budget: &super::import_budget::ImportBudget,
+    cancellation: &ScanCancellation,
+) -> Result<(Vec<PathBuf>, super::import_budget::ImportBudgetScope)> {
+    let mut roots_charge = budget.scoped();
+    if let Some(roots) = roots {
+        roots_charge.reserve(
+            roots
+                .iter()
+                .map(|root| std::mem::size_of::<PathBuf>() + root.as_os_str().len())
+                .sum(),
+        )?;
+    }
+    let roots = roots.map(<[PathBuf]>::to_vec);
+    let budget = budget.clone();
+    let cancellation = cancellation.clone();
+    workers
+        .execute(move || -> Result<_> {
+            let text =
+                std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
+                    .with_context(|| {
+                        format!("Decoding import playlist {} as UTF-8", path.display())
+                    })?;
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let mut paths = Vec::new();
+            let mut charge = budget.scoped();
+            for line in text.lines() {
+                cancellation.check()?;
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let item_path = PathBuf::from(line);
+                let item_path = logical_path(&if item_path.is_absolute() {
+                    item_path
+                } else {
+                    parent.join(item_path)
+                })?;
+                if let Some(roots) = &roots {
+                    ensure!(
+                        roots.iter().any(|root| item_path.starts_with(root)),
+                        "Import source is outside configured library roots: {}",
+                        item_path.display()
+                    );
+                }
+                ensure!(
+                    paths.len() < MAX_IMPORT_ENTRIES,
+                    "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
+                );
+                charge.reserve(item_path.as_os_str().len())?;
+                charge.reserve_vec(&mut paths, 1)?;
+                paths.push(item_path);
+            }
+            drop(roots_charge);
+            Ok((paths, charge))
+        })
+        .await
+        .context("Playlist import parser panicked")?
+}
+
+async fn inspect_import_sources(
+    workers: &BlockingExecutor,
+    paths: Vec<PathBuf>,
+    budget: &super::import_budget::ImportBudget,
+    cancellation: &ScanCancellation,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>, Option<usize>)> {
+    // Deduplicate by index without copying occurrence-sized path payloads.
+    let (mut paths, sources, mut ordinary_sources, _source_order_charge) = workers
+        .execute({
+            let budget = budget.clone();
+            let cancellation = cancellation.clone();
+            move || -> Result<_> {
+                let (sources, mut first_sources, charge) =
+                    unique_import_sources(&paths, &budget, &cancellation)?;
+                first_sources.retain(|&index| !is_cue_path(&paths[index]));
+                Ok((paths, sources, first_sources, charge))
+            }
+        })
+        .await
+        .context("Playlist import source ordering worker panicked")??;
+    for start in (0..ordinary_sources.len()).step_by(super::source::SOURCE_BATCH_SIZE) {
+        cancellation.check()?;
+        let end = (start + super::source::SOURCE_BATCH_SIZE).min(ordinary_sources.len());
+        let cancellation = cancellation.clone();
+        let non_regular;
+        (paths, ordinary_sources, non_regular) = workers
+            .execute(move || -> Result<_> {
+                let mut non_regular = None;
+                for &index in &ordinary_sources[start..end] {
+                    cancellation.check()?;
+                    if std::fs::metadata(&paths[index]).is_ok_and(|metadata| !metadata.is_file()) {
+                        non_regular = Some(index);
+                        break;
+                    }
+                }
+                Ok((paths, ordinary_sources, non_regular))
+            })
+            .await
+            .context("Import source inspection worker panicked")??;
+        if non_regular.is_some() {
+            return Ok((paths, sources, non_regular));
+        }
+    }
+    Ok((paths, sources, None))
 }
 
 /// Select the first occurrence of every normalized source. Only unique sources
