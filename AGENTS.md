@@ -4,6 +4,7 @@
 
 - MUST stay within the authorized scope and preserve user and other work
 - do not revert, clean up, or commit unrelated changes without authorization, and report unrelated findings separately
+- Treat application-created files as single-writer unless a supported workflow allows another writer or an explicit integrity requirement covers external modification. Do not report hypothetical external writes as defects or add checks or tests solely to guard against them.
 
 ## Efficiency
 
