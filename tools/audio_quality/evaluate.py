@@ -8,6 +8,7 @@ import argparse
 import hashlib
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import platform
 import sys
@@ -24,40 +25,69 @@ MAX_FRAMES = 12_000_000
 MAX_CHANNELS = 8
 
 
+def _identify_stream(path, stream):
+    digest = hashlib.sha256()
+    size = 0
+    while block := stream.read(1024 * 1024):
+        digest.update(block)
+        size += len(block)
+    return {"path": str(path), "sha256": digest.hexdigest(), "bytes": size}
+
+
 def identity(path):
     path = Path(path).resolve(strict=True)
-    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-    return {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
+        return _identify_stream(path, stream)
 
-
-def load(path, dtype="float64", *, max_frames=MAX_FRAMES):
-    info = sf.info(path)
-    if info.frames <= 0 or (max_frames is not None and info.frames > max_frames) or not 0 < info.channels <= MAX_CHANNELS:
-        raise ValueError(f"evaluation bound exceeded: {info.frames} frames/{info.channels} channels")
-    data, rate = sf.read(path, dtype=dtype, always_2d=True)
-    if data.shape != (info.frames, info.channels) or rate != info.samplerate:
-        raise ValueError(f"audio changed while loading: {path}")
-    if not np.isfinite(data).all():
-        raise ValueError(f"non-finite audio: {path}")
-    return data, rate
 
 @dataclass(frozen=True)
-class IdentifiedAudio:
+class Audio:
     data: np.ndarray
     rate: int
+
+
+@dataclass(frozen=True)
+class IdentifiedAudio(Audio):
     identity: dict
 
 
-def load_identified(path, dtype="float64", *, max_frames=MAX_FRAMES):
-    before = identity(path)
-    data, rate = load(path, dtype=dtype, max_frames=max_frames)
-    if identity(path) != before:
-        raise ValueError(f"audio changed while loading: {path}")
+def load_audio(source, dtype="float64", *, max_frames=MAX_FRAMES):
+    with sf.SoundFile(source) as reader:
+        shape = (reader.frames, reader.channels)
+        rate = reader.samplerate
+        if reader.frames <= 0 or (max_frames is not None and reader.frames > max_frames) or not 0 < reader.channels <= MAX_CHANNELS:
+            raise ValueError(f"evaluation bound exceeded: {reader.frames} frames/{reader.channels} channels")
+        data = reader.read(dtype=dtype, always_2d=True)
+    if data.shape != shape:
+        raise ValueError(f"incomplete audio: {source}")
+    if not np.isfinite(data).all():
+        raise ValueError(f"non-finite audio: {source}")
     data.flags.writeable = False
-    return IdentifiedAudio(data, rate, before)
+    return Audio(data, rate)
+
+
+def load_identified(path, dtype="float64", *, max_frames=MAX_FRAMES):
+    path = Path(path).resolve(strict=True)
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        audio = load_audio(stream, dtype=dtype, max_frames=max_frames)
+        # Hash the same file descriptor used to decode; reject an in-place
+        # edit across either pass or a pathname replacement during capture.
+        stream.seek(0)
+        captured = _identify_stream(path, stream)
+        after = path.stat()
+        if (not os.path.samestat(before, after) or before.st_ctime_ns != after.st_ctime_ns
+                or before.st_mtime_ns != after.st_mtime_ns or before.st_size != captured["bytes"]):
+            raise ValueError(f"audio changed while loading: {path}")
+    return IdentifiedAudio(audio.data, audio.rate, captured)
+
+
+def load_export_output(report, stem):
+    """Identify the selected export's stem before scoring it against the report."""
+    audio = load_identified(report["outputs"][stem])
+    if audio.identity["sha256"] != report["output_sha256"][stem]:
+        raise ValueError(f"exported WAV identity mismatch: {stem}")
+    return audio
 
 
 def require_alignment(reference, other, label):

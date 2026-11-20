@@ -15,13 +15,13 @@ if __package__:
     from .common import read_json, read_json_with_digest
     from .export import completed_export_report
     from ..audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
-    from ..audio_quality.evaluate import load_identified, require_alignment
+    from ..audio_quality.evaluate import load_audio, load_identified, require_alignment
 else:
     from common import read_json, read_json_with_digest
     from export import completed_export_report
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from audio_quality.metric_core import db_ratio, PreparedProjection, reconstruction_metrics, score_difference
-    from audio_quality.evaluate import load_identified, require_alignment
+    from audio_quality.evaluate import load_audio, load_identified, require_alignment
 
 
 TIMING_BOUNDARIES = {
@@ -193,7 +193,7 @@ def main():
         worker_seconds = time.perf_counter()-worker_start
         result = completed_export_report(completed, run_request, report["input_sha256"])
         stem = "speech" if request["operation"] == "speech" else "vocals"
-        output_pcm = load_identified(result["outputs"][stem], dtype="float32", max_frames=None)
+        output_pcm = load_audio(result["outputs"][stem], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, output_pcm, "output")
         output = output_pcm.data
         result["worker_subprocess_wall_seconds"] = worker_seconds
@@ -203,7 +203,7 @@ def main():
             result["upstream_difference"] = upstream.score(output, result["processing"]["core_seconds"])
             result["upstream_reference_sha256"] = upstream_sha256
         if request["operation"] == "separate":
-            accompaniment_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
+            accompaniment_pcm = load_audio(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
             require_alignment(reference_pcm, accompaniment_pcm, "accompaniment output")
             accompaniment = accompaniment_pcm.data
             result["mixture_reconstruction_peak_residual"] = reconstruction_metrics(noisy, output, accompaniment)[1]

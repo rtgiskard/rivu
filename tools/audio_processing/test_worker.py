@@ -578,6 +578,8 @@ class ExplicitExportTests(unittest.TestCase):
                 self.assertEqual(events[-1][1]["frames"], len(audio))
                 self.assertNotIn("load", [fields.get("stage") for _, fields in events])
                 report = json.loads((destination / "result.json").read_text())
+                self.assertEqual(report["output_sha256"], {"speech":digest(destination / "speech.wav")})
+                self.assertEqual(report["export_request_sha256"], canonical_digest(request))
                 self.assertTrue(report["processing"]["bypass"])
                 self.assertFalse(report["processing"]["model_executed"])
                 self.assertIsNone(report["processing"]["resampling"])
@@ -652,7 +654,8 @@ class ExplicitExportTests(unittest.TestCase):
                 sf.write(source, np.array([0.25, -0.25], dtype="float32"), 8000, subtype="FLOAT")
                 request = {**export_request(), "input_path":str(source), "output_dir":str(destination)}
                 outputs = {"speech":str(destination / "speech.wav")}
-                report = {"outputs":outputs, "note":"é", "export_request_sha256":canonical_digest(request)}
+                report = {"outputs":outputs, "note":"é", "output_sha256":{"speech":"0" * 64},
+                          "export_request_sha256":canonical_digest(request)}
                 empty_size = len((json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8"))
                 report["note"] += "x" * (MAX_REPORT_BYTES-empty_size+extra)
                 expected = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8")
@@ -695,7 +698,9 @@ class ExplicitExportTests(unittest.TestCase):
                     self.assertFalse(destination.exists())
                     self.assertNotIn("complete", events)
                 else:
-                    self.assertEqual((destination / "result.json").read_bytes(), expected)
+                    report["output_sha256"]["speech"] = digest(destination / "speech.wav")
+                    self.assertEqual((destination / "result.json").read_bytes(),
+                                     (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8"))
                     self.assertEqual(events[-1], "complete")
 
     def test_dry_speech_still_rejects_invalid_controls_tampered_artifacts_and_bad_samples(self):

@@ -13,6 +13,7 @@ Each --result is the actual worker's completed result.json, never an input model
 name standing in for output. Results from different input contents are rejected.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -25,10 +26,10 @@ else:
     from audio_processing.common import read_export_report
 
 if __package__:
-    from .evaluate import ReferenceEvaluation, channel_metrics, identity, load_identified, stereo_metrics
+    from .evaluate import ReferenceEvaluation, channel_metrics, load_export_output, load_identified, stereo_metrics
     from .metric_core import reconstruction_metrics
 else:
-    from evaluate import ReferenceEvaluation, channel_metrics, identity, load_identified, stereo_metrics
+    from evaluate import ReferenceEvaluation, channel_metrics, load_export_output, load_identified, stereo_metrics
     from metric_core import reconstruction_metrics
 
 
@@ -47,19 +48,22 @@ def compare(args):
               "models":[],"limits":"Same excerpt only; no listening review or full-corpus/model ranking. SI-SDR is scale invariant; inspect ordinary SNR, gain, stereo and peaks too. Mixture-minus-vocals reconstruction does not establish separation quality."}
     for path in args.result:
         path = Path(path).resolve(strict=True)
-        result = read_export_report(path, mixture_identity["sha256"],
-                                    mismatch="worker input content differs from selected mixture: " + str(path))
+        result, raw = read_export_report(path, mixture_identity["sha256"], operation="separate",
+                                         mismatch="worker input content differs from selected mixture: " + str(path))
+        report_identity = {"path":str(path), "bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest()}
+        del raw
         if (result["sample_rate"],result["frames"],result["channels"]) != (rate,len(mixture),2):
             raise ValueError("worker timeline differs from paired references: " + str(path))
-        vocal_pcm = load_identified(result["outputs"]["vocals"])
-        backing_pcm = load_identified(result["outputs"]["accompaniment"])
+        vocal_pcm = load_export_output(result, "vocals")
+        backing_pcm = load_export_output(result, "accompaniment")
         vocals, vocal_rate = vocal_pcm.data, vocal_pcm.rate
         backing, backing_rate = backing_pcm.data, backing_pcm.rate
         if vocals.shape != mixture.shape or backing.shape != mixture.shape or vocal_rate != rate or backing_rate != rate:
             raise ValueError("worker outputs violate alignment contract: " + str(path))
         residual_rms, residual_peak = reconstruction_metrics(mixture, vocals, backing)
         report["models"].append({
-            "model":result["model"],"worker_result":identity(path),
+            "model":result["model"],"worker_result":report_identity,
+            "export_request_sha256":result["export_request_sha256"],
             "request_sha256":result["request_sha256"],"worker_sha256":result["worker_sha256"],
             "packages":result["packages"],"device":result["device"],"threads":result["threads"],
             "processing":result["processing"],"performance":result["metrics"],

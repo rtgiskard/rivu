@@ -2,6 +2,7 @@
 import hashlib
 import importlib.metadata
 import json
+import re
 from pathlib import Path
 
 RUNTIME_FILES = ("worker.py", "mossformer.py", "request.schema.json", "event.schema.json")
@@ -17,12 +18,15 @@ def require(condition, code, message):
     if not condition:
         raise WorkerError(code, message)
 
-def digest(path):
+def digest_stream(stream):
     h = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            h.update(block)
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        h.update(block)
     return h.hexdigest()
+
+def digest(path):
+    with Path(path).open("rb") as stream:
+        return digest_stream(stream)
 
 def canonical_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -44,7 +48,8 @@ def read_json_with_digest(path):
     data = _json_bytes(path)
     return json.loads(data.decode("utf-8")), hashlib.sha256(data).hexdigest()
 
-def read_export_report(path, source_sha256, *, mismatch):
+def read_export_report(path, source_sha256, *, operation, request=None, mismatch):
+    """Return the validated report and the bounded bytes from which it was parsed."""
     with path.open("rb") as stream:
         data = stream.read(MAX_REPORT_BYTES + 1)
     if len(data) > MAX_REPORT_BYTES:
@@ -52,7 +57,25 @@ def read_export_report(path, source_sha256, *, mismatch):
     report = json.loads(data.decode("utf-8"))
     if not isinstance(report, dict) or report.get("source_sha256") != source_sha256:
         raise ValueError(mismatch)
-    return report
+    request_digest = report.get("export_request_sha256")
+    if not isinstance(request_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", request_digest):
+        raise ValueError("missing or invalid export request SHA256; re-export the audio")
+    if request is not None and request_digest != canonical_digest(request):
+        raise ValueError("worker export request does not match the submitted request")
+    stems = ("vocals", "accompaniment") if operation == "separate" else ("speech",)
+    outputs = report.get("outputs")
+    if not isinstance(outputs, dict) or set(outputs) != set(stems) or not all(
+            isinstance(p, str) and Path(p).is_absolute() for p in outputs.values()):
+        raise ValueError("invalid worker output paths or stems")
+    if request is not None:
+        directory = Path(request["output_dir"]).resolve()
+        if outputs != {stem:str(directory / (stem + ".wav")) for stem in stems}:
+            raise ValueError("worker output paths do not match the submitted export directory")
+    hashes = report.get("output_sha256")
+    if (not isinstance(hashes, dict) or set(hashes) != set(stems) or not all(
+            isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes.values())):
+        raise ValueError("missing or invalid exported WAV SHA256; re-export the audio")
+    return report, data
 
 def _validate_artifact_metadata(manifest, operation):
     require(isinstance(manifest, dict) and manifest.get("version") == 1 and manifest.get("operation") == operation,

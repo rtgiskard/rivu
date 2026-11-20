@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import io
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,6 +30,29 @@ else:
     from audio_quality import evaluate as quality, compare_separation, prepare_music, prepare_voicebank, run_classical
     from audio_quality.metric_core import projection_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
+
+
+def export_evidence(request, outputs):
+    return {"outputs":outputs, "export_request_sha256":export.common.canonical_digest(request),
+            "output_sha256":{stem:quality.identity(path)["sha256"] for stem, path in outputs.items()}}
+
+
+def replace_after_decode(target, *, in_place=False):
+    read_audio = sf.SoundFile.read
+    def read_and_replace(reader, *args, **kwargs):
+        data = read_audio(reader, *args, **kwargs)
+        if Path(reader.name.name) == target:
+            if in_place:
+                old_mtime = target.stat().st_mtime_ns
+                sf.write(target, data * 0.75, reader.samplerate, subtype="FLOAT")
+                # Deterministic even on a filesystem with coarse timestamps.
+                os.utime(target, ns=(old_mtime, old_mtime - 2_000_000_000))
+            else:
+                replacement = target.with_suffix(".replacement.wav")
+                sf.write(replacement, data * 0.75, reader.samplerate, subtype="FLOAT")
+                replacement.replace(target)
+        return data
+    return patch.object(sf.SoundFile, "read", read_and_replace)
 
 
 class MetricSemanticsTests(unittest.TestCase):
@@ -273,7 +297,7 @@ class MusicIdentityTests(unittest.TestCase):
                         path = destination / (stem + ".wav")
                         shutil.copyfile(folder / path.name, path)
                         outputs[stem] = str(path)
-                    result = {"source_sha256":evaluate.digest(request["input_path"]), "outputs":outputs,
+                    result = {"source_sha256":evaluate.digest(request["input_path"]), **export_evidence(request, outputs),
                               "processing":{"core_seconds":1}, "metrics":{"real_time_factor":1}}
                     (destination / "result.json").write_text(json.dumps(result))
                     event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
@@ -557,24 +581,17 @@ class EvaluationIdentityTests(unittest.TestCase):
         return folder, audio, argv
 
     def test_each_loaded_corpus_pcm_rejects_replacement_during_decode(self):
-        read_audio = sf.read
         for stem in ("mixture", "vocals", "accompaniment"):
             with self.subTest(stem=stem), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 folder, _, argv = self.music_corpus(root)
                 target = folder / (stem + ".wav")
-                def replace_after_read(path, *args, **kwargs):
-                    data, rate = read_audio(path, *args, **kwargs)
-                    if Path(path) == target:
-                        sf.write(path, data * 0.75, rate, subtype="FLOAT")
-                    return data, rate
-                with patch.object(sys, "argv", argv), patch.object(sf, "read", side_effect=replace_after_read):
+                with patch.object(sys, "argv", argv), replace_after_decode(target):
                     with self.assertRaisesRegex(ValueError, "audio changed while loading"):
                         evaluate.main()
                 self.assertFalse((root / "evaluation" / "track-00-request.json").exists())
 
     def test_separation_comparison_rejects_changed_reference_or_mixture(self):
-        read_audio = sf.read
         for stem in ("mixture", "vocals"):
             with self.subTest(stem=stem), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -582,12 +599,7 @@ class EvaluationIdentityTests(unittest.TestCase):
                 target = folder / (stem + ".wav")
                 args = SimpleNamespace(mixture=folder / "mixture.wav", reference=folder / "vocals.wav",
                                        provenance="test corpus", result=[])
-                def replace_after_read(path, *args, **kwargs):
-                    data, rate = read_audio(path, *args, **kwargs)
-                    if Path(path) == target:
-                        sf.write(path, data * 0.75, rate, subtype="FLOAT")
-                    return data, rate
-                with patch.object(sf, "read", side_effect=replace_after_read):
+                with replace_after_decode(target):
                     with self.assertRaisesRegex(ValueError, "audio changed while loading"):
                         compare_separation.compare(args)
 
@@ -596,22 +608,49 @@ class EvaluationIdentityTests(unittest.TestCase):
             root = Path(temporary)
             folder, audio, _ = self.music_corpus(root)
             mixture = folder / "mixture.wav"
-            result = {"source_sha256":quality.identity(mixture)["sha256"],
+            outputs = {stem:str(folder / (stem + ".wav")) for stem in ("vocals", "accompaniment")}
+            result = {"source_sha256":quality.identity(mixture)["sha256"], **export_evidence({"operation":"separate"}, outputs),
                       "sample_rate":8000, "frames":len(audio), "channels":2,
-                      "outputs":{stem:str(folder / (stem + ".wav")) for stem in ("vocals", "accompaniment")},
                       "model":{}, "request_sha256":"request", "worker_sha256":"worker",
                       "packages":{}, "device":"cpu", "threads":1, "processing":{}, "metrics":{}}
             path = root / "result.json"
             report_bytes = json.dumps(result).encode("utf-8")
             args = SimpleNamespace(mixture=mixture, reference=folder / "vocals.wav",
                                    provenance="test corpus", result=[path])
-            path.write_bytes(report_bytes.ljust(8 * 1024**2 - 1) + b"\n")
+            selected = report_bytes.ljust(8 * 1024**2 - 1) + b"\n"
+            path.write_bytes(selected)
             report = compare_separation.compare(args)
-            self.assertEqual(report["models"][0]["worker_result"]["bytes"], 8 * 1024**2)
+            self.assertEqual(report["models"][0]["worker_result"], {
+                "path":str(path.resolve()), "bytes":len(selected), "sha256":hashlib.sha256(selected).hexdigest()})
+            for stem, wav in outputs.items():
+                self.assertEqual(report["models"][0][stem], quality.identity(wav))
+            self.assertEqual(report["models"][0]["export_request_sha256"], result["export_request_sha256"])
             with path.open("ab") as stream:
                 stream.write(b"\n")
             with self.assertRaisesRegex(ValueError, "worker result JSON exceeds 8 MiB"):
                 compare_separation.compare(args)
+
+    def test_separation_rejects_swapped_or_unidentified_stems(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder, audio, _ = self.music_corpus(root)
+            outputs = {stem:str(folder / (stem + ".wav")) for stem in ("vocals", "accompaniment")}
+            mixture = folder / "mixture.wav"
+            path = folder / "result.json"
+            args = SimpleNamespace(mixture=mixture, reference=folder / "vocals.wav", result=[path], provenance="test")
+            report = {**export_evidence({"operation":"separate"}, outputs),
+                      "source_sha256":quality.identity(mixture)["sha256"], "channels":2, "frames":len(audio), "sample_rate":8000}
+            for hashes in (None, {}, {"vocals":"not a digest", "accompaniment":"0" * 64}):
+                with self.subTest(hashes=hashes):
+                    path.write_text(json.dumps(report | {"output_sha256":hashes}))
+                    with self.assertRaisesRegex(ValueError, "exported WAV SHA256"):
+                        compare_separation.compare(args)
+            # An older report can name a same-shape WAV from a different export.
+            for stem, other in (("vocals", "accompaniment"), ("accompaniment", "vocals")):
+                with self.subTest(stem=stem):
+                    path.write_text(json.dumps(report | {"outputs":outputs | {stem:outputs[other]}}))
+                    with self.assertRaisesRegex(ValueError, "exported WAV identity mismatch: " + stem):
+                        compare_separation.compare(args)
 
     def test_missing_or_different_worker_source_is_rejected_before_output_scoring(self):
         for source_hash in (None, "b"*64):
@@ -651,7 +690,7 @@ class EvaluationIdentityTests(unittest.TestCase):
                 sf.write(folder / "accompaniment.wav", audio * 0.25, 8000, subtype="FLOAT")
                 # A later edit must not relabel the admitted records.
                 manifest.write_text("{}")
-                result = {"source_sha256":identities["mixture"], "outputs":outputs,
+                result = {"source_sha256":identities["mixture"], **export_evidence(request, outputs),
                           "processing":{"core_seconds":24}, "metrics":{"real_time_factor":1.0}}
                 (destination / "result.json").write_text(json.dumps(result))
                 event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
@@ -910,6 +949,25 @@ class BenchmarkRepeatTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         export.completed_export_report(completed, request, report["source_sha256"])
 
+    def test_completed_event_and_source_cannot_admit_another_requests_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request = {"task_id":"same", "operation":"speech", "output_dir":str(root), "threads":1}
+            event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":"same"}
+            completed = subprocess.CompletedProcess([], 0, json.dumps(event), "")
+            report = {"source_sha256":"a" * 64, "outputs":{"speech":str(root / "speech.wav")},
+                      "output_sha256":{"speech":"b" * 64}}
+            for fields in ({}, {"export_request_sha256":export.common.canonical_digest(request | {"threads":2})}):
+                with self.subTest(fields=fields):
+                    (root / "result.json").write_text(json.dumps(report | fields))
+                    with self.assertRaisesRegex(ValueError, "export request"):
+                        export.completed_export_report(completed, request, report["source_sha256"])
+            wrong_directory = {"speech":str(root.parent / "previous-run" / "speech.wav")}
+            (root / "result.json").write_text(json.dumps(report | {"outputs":wrong_directory,
+                "export_request_sha256":export.common.canonical_digest(request)}))
+            with self.assertRaisesRegex(ValueError, "submitted export directory"):
+                export.completed_export_report(completed, request, report["source_sha256"])
+
     def benchmark_inputs(self, root):
         audio = np.array([[-0.25], [0.25], [-0.125], [0.125]], dtype="float32")
         paths = {name:root / (name + ".wav") for name in ("reference", "input", "upstream", "backing")}
@@ -926,17 +984,11 @@ class BenchmarkRepeatTests(unittest.TestCase):
         return paths, argv
 
     def test_changed_fixed_input_reference_upstream_or_backing_is_not_scored(self):
-        read_audio = sf.read
         for name in ("reference", "input", "upstream", "backing"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 paths, argv = self.benchmark_inputs(root)
-                def replace_after_read(path, *args, **kwargs):
-                    data, rate = read_audio(path, *args, **kwargs)
-                    if Path(path) == paths[name]:
-                        sf.write(path, data * 0.5, rate, subtype="FLOAT")
-                    return data, rate
-                with patch.object(sys, "argv", argv), patch.object(sf, "read", side_effect=replace_after_read):
+                with patch.object(sys, "argv", argv), replace_after_decode(paths[name], in_place=True):
                     with self.assertRaisesRegex(ValueError, "audio changed while loading"):
                         benchmark.main()
                 self.assertFalse((root / "worker-request-0.json").exists())
@@ -982,7 +1034,7 @@ class BenchmarkRepeatTests(unittest.TestCase):
                 output_path = destination/"speech.wav"
                 sf.write(output_path, outputs[len(requests)], rate, subtype="FLOAT")
                 requests.append(current)
-                result = {"outputs":{"speech":str(output_path)}, "processing":{"core_seconds":24},
+                result = {**export_evidence(current, {"speech":str(output_path)}), "processing":{"core_seconds":24},
                           "source_sha256":hashlib.sha256(input_path.read_bytes()).hexdigest()}
                 (destination/"result.json").write_text(json.dumps(result))
                 event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":"repeat"}

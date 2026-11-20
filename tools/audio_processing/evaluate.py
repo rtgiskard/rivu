@@ -37,14 +37,14 @@ if __package__:
     from .export import completed_export_report
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
-    from ..audio_quality.evaluate import load_identified, require_alignment
+    from ..audio_quality.evaluate import load_audio, load_identified, require_alignment
 else:
     from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from common import digest, read_json_with_digest
     from export import completed_export_report
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
-    from audio_quality.evaluate import load_identified, require_alignment
+    from audio_quality.evaluate import load_audio, load_identified, require_alignment
 
 def _paired_records(manifest, root):
     if not isinstance(manifest, dict) or manifest.get("schema") != 1:
@@ -178,7 +178,7 @@ def main():
         (output/(name+"-events.jsonl")).write_text(completed.stdout)
         (output/(name+"-stderr.txt")).write_text(completed.stderr)
         result = completed_export_report(completed, request, input_pcm.identity["sha256"])
-        estimate_pcm = load_identified(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32", max_frames=None)
+        estimate_pcm = load_audio(result["outputs"]["vocals" if operation=="separate" else "speech"], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, estimate_pcm, "output")
         estimate = estimate_pcm.data
         core=result["processing"]["core_seconds"]
@@ -191,7 +191,7 @@ def main():
             record["corpus_source"]={key:source_identity[key] for key in ("source", "sha256")}
         record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
         if backing:
-            estimated_pcm = load_identified(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
+            estimated_pcm = load_audio(result["outputs"]["accompaniment"], dtype="float32", max_frames=None)
             require_alignment(reference_pcm, estimated_pcm, "backing output")
             estimated_accompaniment = estimated_pcm.data
             record["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]

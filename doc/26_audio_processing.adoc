@@ -328,9 +328,15 @@ destination with an existing parent. It writes stem WAVs and `result.json` with
 an 8 GiB total audio-output limit and 256 MiB additional free-space reserve.
 The exporter, offline benchmark, corpus evaluator and separation comparer enforce
 the same 8 MiB limit on `result.json`, including its final newline.
-Completion follows closed/checked audio and a successfully written report;
-failure removes the new export directory. Detailed hashes and timing/energy
-evidence are collected for this explicit export only.
+The report records SHA256 digests of the canonical export request and each
+finalized stem WAV. Benchmark and corpus jobs check the completed task, source,
+request and output paths before scoring WAVs from their new export directory.
+The separation comparer instead starts from a user-selected report: it checks
+the mixture digest, verifies each stem against the report and records the
+identities of the report and WAVs it scored. Older exports without stem digests
+must be re-exported. Completion follows closed/checked audio and a successfully
+written report; failure removes the new export directory. Detailed evidence is
+collected for explicit export only.
 
 Dry file export still reads/validates finite source PCM, writes bit-exact float32
 samples and collects the report. It needs NumPy and SoundFile and declares a

@@ -32,8 +32,10 @@ def completed_export_report(completed, request, source_sha256):
             or last.get("version") != worker.EVENT_VERSION or last.get("task_id") != task_id):
         raise RuntimeError(json.dumps({"task_id": task_id, "exit": completed.returncode,
                                        "events": events, "stderr": completed.stderr}))
-    return common.read_export_report(Path(request["output_dir"]) / "result.json", source_sha256,
-                                     mismatch=f"worker input does not match task {task_id!r}")
+    report, _ = common.read_export_report(Path(request["output_dir"]) / "result.json", source_sha256,
+                                          operation=request["operation"], request=request,
+                                          mismatch=f"worker input does not match task {task_id!r}")
+    return report
 
 
 class FileInput:
@@ -127,11 +129,16 @@ def _export_admitted(request, emit, destination, source_input):
                        channels=info.channels, format=output_format, subtype="FLOAT")) for stem, path in outputs.items()}
             report = worker._process_validated(control, source_input, lambda stem, samples:writers[stem].write(samples),
                                                capture, collect_report=True)
-        for path in outputs.values():
-            actual = sf.info(path)
-            common.require((actual.frames, actual.channels, actual.samplerate) == (info.frames, info.channels, info.samplerate),
-                           "alignment", "written result format/length mismatch")
+        hashes = {}
+        for stem, path in outputs.items():
+            with Path(path).open("rb") as stream:
+                actual = sf.info(stream)
+                common.require((actual.frames, actual.channels, actual.samplerate) == (info.frames, info.channels, info.samplerate),
+                               "alignment", "written result format/length mismatch")
+                stream.seek(0)
+                hashes[stem] = common.digest_stream(stream)
         report["outputs"] = outputs
+        report["output_sha256"] = hashes
         report["export_request_sha256"] = common.canonical_digest(request)
         with (destination/"result.json").open("x", encoding="utf-8", newline="\n") as stream:
             size = 1
