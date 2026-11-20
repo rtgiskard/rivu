@@ -159,6 +159,10 @@ Explicit application shutdown stops the service and connected consumers; closing
 or killing only a frontend leaves the service alive. Accepted shutdown
 acknowledgements drain before transport retirement. Window/display resource release is described in
 link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
+Unexpected loss of the audio owner or a main IPC server panic retires Core
+with a failure instead of publishing an orderly shutdown. Finalization still
+attempts persistence without replacing the original failure. A panic in Core's
+state owner retires its resources without resuming the loop or replaying commands.
 
 The TUI restores terminal input and display state on normal exit, partial startup
 failure, and Rust panic unwinding. Cleanup failure is reported unless an earlier

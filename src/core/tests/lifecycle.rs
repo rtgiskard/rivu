@@ -791,6 +791,27 @@ fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
 }
 
 #[test]
+fn fatal_worker_exit_is_not_an_orderly_shutdown() {
+    for audio in [true, false] {
+        let (_directory, mut core) = fixture_with_database(Some(10.0));
+        let (control, shutdown) = CoreLifecycle::new();
+        let (_sender, requests) = async_channel::bounded(1);
+        let expected = if audio {
+            core.engine.send(AudioCommand::Shutdown).unwrap();
+            "Audio worker stopped unexpectedly"
+        } else {
+            control.fail_service(anyhow::anyhow!("Main IPC server panicked"));
+            "Main IPC server panicked"
+        };
+        core.run(requests, shutdown, &control);
+        let error = control.take_error().unwrap().to_string();
+        assert!(error.starts_with(expected), "{error}");
+        assert!(!core.shared.read().system.shutting_down);
+        assert_eq!(core.shared.read().playback.status, PlaybackStatus::Stopped);
+    }
+}
+
+#[test]
 fn lifecycle_shutdown_coalesces_without_business_queue_capacity() {
     let (control, shutdown) = CoreLifecycle::new();
     for _ in 0..1000 {

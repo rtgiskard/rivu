@@ -85,20 +85,25 @@ impl Core {
             Err(error) => {
                 self.state.system.last_error = Some(format!("Starting read queries: {error:#}"));
                 self.publish();
-                let error = error.context("Starting read queries");
-                let error = match self.finalize() {
-                    Ok(()) => error,
-                    Err(finalization) => {
-                        error.context(format!("Finalization also failed: {finalization:#}"))
-                    }
-                };
-                control.record_result(Err(error));
+                control
+                    .record_result(self.finish_run(Some(error.context("Starting read queries"))));
                 return;
             }
         }
+        let mut failure = None;
         while let Some(event) =
             futures::executor::block_on(self.next_event(&mut requests, &mut shutdown, control))
         {
+            failure = match event {
+                BusinessEvent::AudioStopped => {
+                    Some(anyhow::anyhow!("Audio worker stopped unexpectedly"))
+                }
+                BusinessEvent::Shutdown(_) => control.take_service_failure(),
+                _ => None,
+            };
+            if failure.is_some() {
+                break;
+            }
             let transition = self
                 .read_queries
                 .as_ref()
@@ -111,8 +116,7 @@ impl Core {
                 break;
             }
         }
-        drop(self.read_queries.take());
-        control.record_result(self.finalize());
+        control.record_result(self.finish_run(failure));
     }
 
     pub(super) async fn next_event(
@@ -218,11 +222,7 @@ impl Core {
                 }
                 self.publish();
             }
-            BusinessEvent::AudioStopped => {
-                self.state.system.last_error = Some("Audio worker stopped unexpectedly".into());
-                self.publish();
-                return false;
-            }
+            BusinessEvent::AudioStopped => unreachable!("run handles terminal audio events"),
             BusinessEvent::Scan(scan) => self.scan_event(scan),
             BusinessEvent::Relocation(event) => {
                 self.relocation_event(event);
@@ -516,8 +516,20 @@ impl Core {
         }
     }
 
+    fn finish_run(&mut self, failure: Option<anyhow::Error>) -> Result<()> {
+        drop(self.read_queries.take());
+        self.state.system.shutting_down = failure.is_none();
+        let finalization = self.finalize();
+        match (failure, finalization) {
+            (None, result) => result,
+            (Some(error), Ok(())) => Err(error),
+            (Some(error), Err(finalization)) => Err(anyhow::anyhow!(
+                "{error:#}; finalization also failed: {finalization:#}"
+            )),
+        }
+    }
+
     fn finalize(&mut self) -> Result<()> {
-        self.state.system.shutting_down = true;
         // Retire background database users before final writes on Core's connection.
         if let Some((reply, result)) = self.shutdown_export() {
             self.complete_background(reply, result);
@@ -559,7 +571,6 @@ impl Core {
         };
         let _ = self.engine.send(AudioCommand::Shutdown);
         self.state.playback.status = PlaybackStatus::Stopped;
-        self.state.system.shutting_down = true;
         self.publish();
         self.close_task_waiters();
         result

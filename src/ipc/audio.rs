@@ -84,10 +84,17 @@ impl AudioServer {
                         let workers = Arc::clone(&workers);
                         let stopped = stopped.clone();
                         clients.push(tasks.spawn(async move {
-                            if let Err(error) =
-                                session(stream, handle, instance, workers, stopped).await
+                            match std::panic::AssertUnwindSafe(session(
+                                stream, handle, instance, workers, stopped,
+                            ))
+                            .catch_unwind()
+                            .await
                             {
-                                tracing::debug!(%error, "audio_stream_session_ended");
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    tracing::debug!(%error, "audio_stream_session_ended")
+                                }
+                                Err(_) => tracing::error!("audio_stream_session_panicked"),
                             }
                         }));
                     }
@@ -110,8 +117,10 @@ impl AudioServer {
 impl Drop for AudioServer {
     fn drop(&mut self) {
         self.shutdown.close();
-        if let Some(worker) = self.worker.take() {
-            async_io::block_on(worker);
+        if let Some(worker) = self.worker.take()
+            && async_io::block_on(std::panic::AssertUnwindSafe(worker).catch_unwind()).is_err()
+        {
+            tracing::error!("audio_stream_server_panicked");
         }
     }
 }

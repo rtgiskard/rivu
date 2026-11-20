@@ -118,6 +118,10 @@ impl AppHandle {
             Err(async_channel::TrySendError::Closed(())) => bail!("Desktop launcher is stopped"),
         }
     }
+    pub(crate) fn fail_service(&self, error: anyhow::Error) {
+        self.runtime.fail_service(error);
+    }
+
     pub(crate) fn request_shutdown(&self) -> Result<()> {
         self.shutting_down.store(true, Ordering::Release);
         self.runtime.request_shutdown()
@@ -301,6 +305,9 @@ impl App {
     }
     pub fn run(mut self) -> Result<()> {
         let joined = self.runtime.join();
+        if let Err(error) = &joined {
+            tracing::error!(error = %format_args!("{error:#}"), "core_service_failed");
+        }
         self.stop_services();
         joined
     }

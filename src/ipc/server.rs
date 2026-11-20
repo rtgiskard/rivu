@@ -84,14 +84,24 @@ impl Server {
         let listener = Async::new(owner.listener.try_clone()?)?;
         let (shutdown, shutdown_rx) = async_channel::bounded(1);
         let instance_id = owner.instance_id();
-        let worker = executor.spawn(run_server(
-            listener,
-            handle,
-            app,
-            shutdown_rx,
-            executor.clone(),
-            instance_id,
-        ));
+        let executor_handle = executor.clone();
+        let supervisor = app.clone();
+        let worker = executor.spawn(async move {
+            if std::panic::AssertUnwindSafe(run_server(
+                listener,
+                handle,
+                app,
+                shutdown_rx,
+                executor_handle,
+                instance_id,
+            ))
+            .catch_unwind()
+            .await
+            .is_err()
+            {
+                supervisor.fail_service(anyhow::anyhow!("Main IPC server panicked"));
+            }
+        });
         tracing::info!(path = %data_dir.display(), "ipc_server_started");
         Ok(Self {
             data_dir,

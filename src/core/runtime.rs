@@ -57,6 +57,7 @@ struct CompletionState {
     finished: bool,
     callback: Option<Arc<dyn Fn() + Send + Sync>>,
     error: Option<anyhow::Error>,
+    service_failure: Option<anyhow::Error>,
 }
 
 impl CoreLifecycle {
@@ -78,6 +79,19 @@ impl CoreLifecycle {
                 anyhow::bail!("Rivu is stopped")
             }
         }
+    }
+
+    pub(crate) fn fail_service(&self, error: anyhow::Error) {
+        self.completion
+            .state
+            .lock()
+            .service_failure
+            .get_or_insert(error);
+        let _ = self.request_shutdown();
+    }
+
+    pub(super) fn take_service_failure(&self) -> Option<anyhow::Error> {
+        self.completion.state.lock().service_failure.take()
     }
 
     /// Acknowledges the shutdown request, not completion of runtime teardown.
@@ -350,9 +364,14 @@ impl CoreRuntime {
     }
     pub fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("Rivu core worker panicked"))?;
+            worker.join().map_err(|panic| {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("non-string panic payload");
+                anyhow::anyhow!("Rivu core worker panicked: {message}")
+            })?;
         }
         // Only expose finalization failures after Core and its owned resources
         // have physically retired; shutdown acknowledgement remains admission.
