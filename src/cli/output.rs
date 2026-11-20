@@ -10,6 +10,13 @@ use std::{
     path::Path,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutputMode {
+    Text,
+    Verbose,
+    Json,
+}
+
 pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
     let state = session.get_state(StateSections {
@@ -400,7 +407,7 @@ pub(super) fn show_task_ack(
     i18n: &Localizer,
     session: &rivu_client::ClientSession,
     ack: &rivu_protocol::response::Ack,
-    json: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     let ids = [
         ("scan", ack.scan_id),
@@ -408,11 +415,11 @@ pub(super) fn show_task_ack(
         ("processing", ack.processing_id),
     ];
     if !ids.iter().any(|(_, id)| id.is_some()) {
-        return show_ack(i18n, ack, json);
+        return show_ack(i18n, ack, mode);
     }
     let mut output = io::stdout().lock();
     let instance_id = super::tasks::instance_id(session)?;
-    if json {
+    if mode == OutputMode::Json {
         let mut value = serde_json::to_value(ack)?;
         let fields = value
             .as_object_mut()
@@ -442,13 +449,24 @@ pub(super) fn show_task_ack(
             );
         }
     } else {
-        show_ack(i18n, ack, false)?;
+        show_ack(i18n, ack, mode)?;
         for (kind, id) in ids {
             if let Some(id) = id {
                 writeln!(
                     output,
-                    "{kind}: {}",
-                    super::tasks::TaskReference { instance_id, id }
+                    "{}",
+                    i18n.format(
+                        "core-task-accepted",
+                        &[
+                            ("kind", kind.into()),
+                            (
+                                "id",
+                                super::tasks::TaskReference { instance_id, id }
+                                    .to_string()
+                                    .into()
+                            )
+                        ]
+                    )
                 )?;
             }
         }
@@ -460,10 +478,10 @@ pub(super) fn show_task_ack(
 pub(super) fn show_ack(
     i18n: &Localizer,
     ack: &rivu_protocol::response::Ack,
-    json: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     let mut output = io::stdout().lock();
-    if json {
+    if mode == OutputMode::Json {
         writeln!(output, "{}", serde_json::to_string_pretty(ack)?)?;
     }
     if !ack.is_success() {
@@ -474,7 +492,7 @@ pub(super) fn show_ack(
             ack.error.as_deref().unwrap_or("Command failed")
         );
     }
-    if !json {
+    if mode == OutputMode::Verbose {
         writeln!(
             output,
             "{}",
@@ -487,9 +505,13 @@ pub(super) fn show_ack(
     output.flush()?;
     Ok(())
 }
-pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool) -> Result<()> {
+pub(super) fn show_state(
+    i18n: &Localizer,
+    response: &StateResponse,
+    mode: OutputMode,
+) -> Result<()> {
     let mut output = io::stdout().lock();
-    if json {
+    if mode == OutputMode::Json {
         writeln!(output, "{}", serde_json::to_string_pretty(response)?)?;
         output.flush()?;
         return Ok(());
@@ -565,7 +587,9 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
             )
         )?;
     }
-    if let Some(state) = playback.playback.audio_output.as_deref() {
+    if mode == OutputMode::Verbose
+        && let Some(state) = playback.playback.audio_output.as_deref()
+    {
         writeln!(output, "{}:", i18n.text("audio-output"))?;
         for (label, value) in rivu_presentation::audio_output::output_rows(state, i18n) {
             writeln!(output, "  {label}: {}", TerminalEscaped(&value))?;
@@ -575,20 +599,27 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
     if let Some(progress) = &system.scan_progress {
         show_scan(i18n, progress)?;
     }
-    writeln!(
-        output,
-        "{}",
-        i18n.format(
-            "core-ffmpeg",
-            &[("status", terminal_text(&system.ffmpeg_status).into())]
-        )
-    )?;
-    output.flush()?;
-    if let Some(error) = &system.last_error {
-        let mut output = io::stderr().lock();
-        writeln!(output, "{}", TerminalEscaped(error))?;
-        output.flush()?;
+    if mode == OutputMode::Verbose {
+        writeln!(
+            output,
+            "{}",
+            i18n.format(
+                "core-ffmpeg",
+                &[("status", terminal_text(&system.ffmpeg_status).into())]
+            )
+        )?;
+        if let Some(error) = &system.last_error {
+            writeln!(
+                output,
+                "{}",
+                i18n.format(
+                    "core-status-last-error",
+                    &[("error", terminal_text(error).into())]
+                )
+            )?;
+        }
     }
+    output.flush()?;
     Ok(())
 }
 pub(super) fn show_scan(

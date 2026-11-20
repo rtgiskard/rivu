@@ -9,7 +9,7 @@ use self::{
     args::{
         Action, Args, PlaybackAction, PlaylistAction, QueueAction, Repeat, Switch, localize_help,
     },
-    output::{list_playlists, list_queue, show_ack, show_state},
+    output::{OutputMode, list_playlists, list_queue, show_ack, show_state},
 };
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
@@ -105,8 +105,15 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
     } = config::paths::Paths::resolve(args.data_dir, args.config);
     let action = args.action.expect("run requires an explicit subcommand");
     let mut wait_scan = false;
+    let mode = if args.json {
+        OutputMode::Json
+    } else if args.verbose {
+        OutputMode::Verbose
+    } else {
+        OutputMode::Text
+    };
     let command = match action {
-        Action::Processing(action) => return processing::run(&i18n, &data_dir, action, args.json),
+        Action::Processing(action) => return processing::run(&i18n, &data_dir, action, mode),
         #[cfg(feature = "gui")]
         Action::Gui { paths } => {
             return App::open_gui(
@@ -126,7 +133,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         #[cfg(feature = "tui")]
         Action::Tui => return App::open_tui(data_dir, config_path),
         Action::Library(action) => {
-            return library::run(&i18n, &data_dir, &config_path, action, args.json);
+            return library::run(&i18n, &data_dir, &config_path, action, mode);
         }
         Action::Playback(PlaybackAction::Devices) => {
             let devices = audio::devices()?;
@@ -154,12 +161,12 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
                 }
             };
             let response = rivu_client::get_state(&data_dir, sections)?;
-            return show_state(&i18n, &response, args.json);
+            return show_state(&i18n, &response, mode);
         }
-        Action::Task(action) => return tasks::run(&i18n, &data_dir, action, args.json),
+        Action::Task(action) => return tasks::run(&i18n, &data_dir, action, mode),
         Action::Quit => {
             let ack = rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown)?;
-            return show_ack(&i18n, &ack, args.json);
+            return show_ack(&i18n, &ack, mode);
         }
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
@@ -268,7 +275,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         },
         Action::Playback(PlaybackAction::Device { name }) => Command::Device { name },
     };
-    submit_command(&i18n, &data_dir, command, wait_scan, args.json)
+    submit_command(&i18n, &data_dir, command, wait_scan, mode)
 }
 
 fn submit_command(
@@ -276,18 +283,18 @@ fn submit_command(
     data_dir: &std::path::Path,
     command: Command,
     wait_scan: bool,
-    json: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
     let ack = session.request_ack(command)?;
     if !ack.is_success() {
-        return output::show_task_ack(i18n, &session, &ack, json);
+        return output::show_task_ack(i18n, &session, &ack, mode);
     }
     if wait_scan {
         let id = ack.scan_id.context("Scan startup omitted task ID")?;
-        return tasks::wait_scan(i18n, &mut session, id, json);
+        return tasks::wait_scan(i18n, &mut session, id, mode == OutputMode::Json);
     }
-    output::show_task_ack(i18n, &session, &ack, json)
+    output::show_task_ack(i18n, &session, &ack, mode)
 }
 
 // Resolve against the caller's cwd, without expanding or canonicalizing input.

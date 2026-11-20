@@ -18,6 +18,9 @@ pub(super) struct Args {
     pub(super) log_level: Option<rivu_utils::logging::LogLevel>,
     #[arg(long, global = true)]
     pub(super) json: bool,
+    /// Include additional details in text output.
+    #[arg(short, long, global = true)]
+    pub(super) verbose: bool,
     #[command(subcommand)]
     pub(super) action: Option<Action>,
 }
@@ -716,7 +719,7 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
     for (order, (name, positional)) in arguments.into_iter().enumerate() {
         let global = matches!(
             name.as_str(),
-            "data_dir" | "config" | "log_level" | "json" | "help" | "version"
+            "data_dir" | "config" | "log_level" | "json" | "verbose" | "help" | "version"
         );
         let name_key = name.replace('_', "-");
         let id = if path.is_empty() {
@@ -728,7 +731,10 @@ pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path:
             Some(i18n.text("core-help-help"))
         } else if name == "version" {
             Some(i18n.text("core-help-version"))
-        } else if matches!(name.as_str(), "data_dir" | "config" | "log_level" | "json") {
+        } else if matches!(
+            name.as_str(),
+            "data_dir" | "config" | "log_level" | "json" | "verbose"
+        ) {
             i18n.get_text(&format!("core-help-{name_key}"))
         } else {
             i18n.get_text(&id)

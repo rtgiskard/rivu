@@ -1,5 +1,14 @@
 core-ready = Rivu core ready. Data: { $path }
 core-command-accepted = Command accepted at revision { $revision }
+core-task-accepted = Task accepted ({ $kind }): { $id }
+core-status-last-error = Last reported error: { $error }
+core-processing-exported = Exported to { $path }
+core-processing-bypass-status = Bypass: { $value }
+core-task-wait-outcome-unavailable = Could not obtain the task outcome. To check, run with the same instance options
+core-processing-resume-target = Resume target
+core-processing-active-source = Active processed source
+core-processing-no-source = None
+core-processing-source-port = Node/port
 core-stats = Tracks: { $tracks }
     Plays: { $plays }
 core-listing-changed = Listing incomplete: data changed while reading; retry the command.
@@ -75,6 +84,7 @@ core-help-version = Print version
 core-help-data-dir = Data directory and instance to start or control
 core-help-config = Startup/probe configuration file
 core-help-log-level = Override this process's stderr and enabled file logging: debug, info, warning, error
+core-help-verbose = Include additional details in text output; does not change logging or JSON
 core-help-json = Print one JSON result; not available for GUI, serve, or TUI
 core-help-gui = Open the desktop UI and optionally import paths
 core-help-serve = Run the shared core in the foreground without a GUI

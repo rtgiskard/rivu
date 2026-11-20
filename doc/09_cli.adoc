@@ -23,7 +23,9 @@ details, or a subcommand's `--help` for arguments.
 |`--log-level LEVEL`
 |Override this process's stderr and enabled file logging: `debug`, `info`, `warning`, `error`
 |`--json`
-|Write results to stdout and runtime diagnostics as JSON to stderr; unavailable for GUI, serve and TUI
+|Write results to stdout and Rivu runtime diagnostics as JSON to stderr; unavailable for GUI, serve and TUI. The external installer used by `processing setup` keeps its own stderr format.
+|`-v`, `--verbose`
+|Include additional text details, such as command revisions and audio diagnostics; does not change JSON results or logging
 |===
 
 [source,sh]
@@ -37,6 +39,10 @@ rivu playback toggle
 rivu playback volume 50
 ----
 
+* *Success output:* Routine control commands are silent in text mode unless
+  `-v` is set. Background task starts still print a task reference. Commands
+  with a result, such as database optimization or a waited audio export, retain
+  their result summaries.
 * *State and tasks:* `rivu status`, `rivu task status KIND INSTANCE:ID`,
   `rivu task cancel KIND INSTANCE:ID` (`KIND`: `scan`, `relocation`, `processing`).
   Use the printed reference; it identifies both the task and its instance.

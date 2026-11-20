@@ -2,6 +2,7 @@ use super::args::{
     ProcessingAction, ProcessingAudition, ProcessingGraphAction, ProcessingGraphMode,
     ProcessingKind,
 };
+use super::output::OutputMode;
 use anyhow::{Context, Result};
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{model::*, response::StateSections};
@@ -125,7 +126,7 @@ fn show_settings(
         }
     }
     if let Some(task) = task {
-        super::tasks::emit_processing(i18n, instance_id, task, false)?;
+        super::tasks::emit_processing(i18n, instance_id, task, false, true)?;
     } else {
         writeln!(output, "{}", i18n.text("core-processing-latest"))?;
     }
@@ -148,10 +149,52 @@ fn equalizer_command(edit: &str, expected_revision: u64) -> Result<Command> {
     })
 }
 
+fn write_processing_source(
+    output: &mut impl Write,
+    i18n: &Localizer,
+    label: &str,
+    instance_id: u32,
+    source: Option<rivu_protocol::model::ProcessingAudition>,
+) -> Result<()> {
+    write!(output, "{}: ", i18n.text(label))?;
+    if let Some(source) = source {
+        write!(
+            output,
+            "{}",
+            super::tasks::TaskReference {
+                instance_id,
+                id: source.id
+            }
+        )?;
+        if let Some(port) = source.output {
+            write!(
+                output,
+                " · {} {}:{}",
+                i18n.text("core-processing-source-port"),
+                port.node,
+                port.port
+            )?;
+        }
+        if let Some(mode) = source.mode {
+            let key = match mode {
+                GraphExecutionMode::Auto => "processing-graph-auto-short",
+                GraphExecutionMode::Offline => "processing-graph-offline",
+                GraphExecutionMode::Realtime => "processing-graph-realtime",
+                GraphExecutionMode::Hybrid => "processing-graph-hybrid",
+            };
+            write!(output, " · {}", i18n.text(key))?;
+        }
+        writeln!(output)?;
+    } else {
+        writeln!(output, "{}", i18n.text("core-processing-no-source"))?;
+    }
+    Ok(())
+}
+
 fn show_processing(
     i18n: &Localizer,
     session: &mut rivu_client::ClientSession,
-    json: bool,
+    mode: OutputMode,
     graph_only: bool,
 ) -> Result<()> {
     let response = session.get_state(StateSections {
@@ -168,7 +211,7 @@ fn show_processing(
     let instance_id = super::tasks::instance_id(session)?;
     let playback = response.playback.context("Missing playback state")?;
     let mut output = std::io::stdout().lock();
-    if json {
+    if mode == OutputMode::Json {
         let processing = state
             .task
             .as_ref()
@@ -181,21 +224,34 @@ fn show_processing(
         };
         writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
     } else {
-        writeln!(
-            output,
-            "processing_bypassed: {}",
-            config.processing_bypassed
-        )?;
-        writeln!(
-            output,
-            "processing_selection: {:?}",
-            playback.processing_selection
-        )?;
-        writeln!(
-            output,
-            "processing_audition: {:?}",
-            playback.processing_audition
-        )?;
+        if !graph_only || mode == OutputMode::Verbose {
+            let value = i18n.text(if config.processing_bypassed {
+                "core-yes"
+            } else {
+                "core-no"
+            });
+            writeln!(
+                output,
+                "{}",
+                i18n.format("core-processing-bypass-status", &[("value", value.into())])
+            )?;
+        }
+        if mode == OutputMode::Verbose {
+            write_processing_source(
+                &mut output,
+                i18n,
+                "core-processing-resume-target",
+                instance_id,
+                playback.processing_selection,
+            )?;
+            write_processing_source(
+                &mut output,
+                i18n,
+                "core-processing-active-source",
+                instance_id,
+                playback.processing_audition,
+            )?;
+        }
         show_settings(
             i18n,
             &config,
@@ -212,19 +268,26 @@ pub(super) fn run(
     i18n: &Localizer,
     data_dir: &Path,
     action: ProcessingAction,
-    json: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     match action {
-        ProcessingAction::Setup(setup) => super::processing_setup::run(data_dir, setup, json),
-        action => run_live(i18n, data_dir, action, json),
+        ProcessingAction::Setup(setup) => {
+            super::processing_setup::run(data_dir, setup, mode == OutputMode::Json)
+        }
+        action => run_live(i18n, data_dir, action, mode),
     }
 }
 
-fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> {
+fn run_live(
+    i18n: &Localizer,
+    data_dir: &Path,
+    action: ProcessingAction,
+    mode: OutputMode,
+) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
     let mut wait = false;
     let command = match action {
-        ProcessingAction::Show => return show_processing(i18n, &mut session, json, false),
+        ProcessingAction::Show => return show_processing(i18n, &mut session, mode, false),
         ProcessingAction::Setup(_) => unreachable!("setup does not use a Core session"),
         ProcessingAction::Export {
             request,
@@ -248,7 +311,7 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
         },
         ProcessingAction::Graph(action) => match action {
             ProcessingGraphAction::Show => {
-                return show_processing(i18n, &mut session, json, true);
+                return show_processing(i18n, &mut session, mode, true);
             }
             ProcessingGraphAction::Edit {
                 edit,
@@ -366,12 +429,12 @@ fn run_live(i18n: &Localizer, data_dir: &Path, action: ProcessingAction, json: b
     };
     let ack = session.request_ack(command)?;
     if !wait || !ack.is_success() {
-        return super::output::show_task_ack(i18n, &session, &ack, json);
+        return super::output::show_task_ack(i18n, &session, &ack, mode);
     }
     let id = ack
         .processing_id
         .context("Processing startup omitted task id")?;
-    super::tasks::wait_processing(i18n, &mut session, id, json)
+    super::tasks::wait_processing(i18n, &mut session, id, mode == OutputMode::Json)
 }
 
 #[cfg(test)]

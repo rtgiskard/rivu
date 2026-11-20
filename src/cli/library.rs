@@ -1,4 +1,4 @@
-use super::output::{list_library, show_ack};
+use super::output::{OutputMode, list_library, show_ack};
 use super::{
     args::{LibraryAction, OtherTracksAction, Switch},
     client_path, output, submit_command, tasks,
@@ -102,8 +102,9 @@ pub(super) fn run(
     data_dir: &Path,
     config_path: &Path,
     action: LibraryAction,
-    json: bool,
+    mode: OutputMode,
 ) -> Result<()> {
+    let json = mode == OutputMode::Json;
     let mut output = std::io::stdout().lock();
     let result = match action {
         LibraryAction::Tags {
@@ -336,7 +337,7 @@ pub(super) fn run(
                 release_date: None,
             };
             let ack = rivu_client::request_ack(data_dir, command)?;
-            show_ack(i18n, &ack, json)
+            show_ack(i18n, &ack, mode)
         }
         LibraryAction::Duplicates {
             fingerprint,
@@ -471,7 +472,7 @@ pub(super) fn run(
                 target_id,
             })?;
             if !ack.is_success() || !wait {
-                return output::show_task_ack(i18n, &session, &ack, json);
+                return output::show_task_ack(i18n, &session, &ack, mode);
             }
             let id = ack
                 .relocation_id
@@ -481,7 +482,7 @@ pub(super) fn run(
         LibraryAction::Optimize => {
             let ack = rivu_client::request_ack(data_dir, Command::OptimizeDatabase)?;
             if json || !ack.is_success() {
-                return show_ack(i18n, &ack, json);
+                return show_ack(i18n, &ack, mode);
             }
             let report = ack
                 .database_optimization
@@ -511,7 +512,7 @@ pub(super) fn run(
         }
         action => {
             let (command, wait) = translate(action)?;
-            submit_command(i18n, data_dir, command, wait, json)
+            submit_command(i18n, data_dir, command, wait, mode)
         }
     };
     output.flush()?;
@@ -658,7 +659,7 @@ mod tests {
         id3v1[127] = 255;
         bytes.extend_from_slice(&id3v1);
         let data_dir = directory.path().join("no-server");
-        for json in [false, true] {
+        for mode in [OutputMode::Text, OutputMode::Json] {
             fs::write(&path, &bytes)?;
             let before = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
             assert_eq!(before.track_number, Some(1));
@@ -675,7 +676,7 @@ mod tests {
                     track_number: None,
                     disc_number: None,
                 },
-                json,
+                mode,
             )?;
             let after = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
             assert_eq!(after.title.as_deref(), Some("Changed"));
@@ -709,7 +710,7 @@ mod tests {
                     path: path.clone(),
                     enhanced: false,
                 },
-                true,
+                OutputMode::Json,
             )?;
             assert_eq!(fs::read(path)?, original);
         }
@@ -728,7 +729,7 @@ mod tests {
         let data_dir = directory.path().join("no-server");
         let i18n = Localizer::for_cli("en-US");
 
-        for json in [false, true] {
+        for mode in [OutputMode::Text, OutputMode::Json] {
             run(
                 &i18n,
                 &data_dir,
@@ -742,13 +743,13 @@ mod tests {
                     track_number: None,
                     disc_number: None,
                 },
-                json,
+                mode,
             )?;
         }
         assert_eq!(fs::read(&path)?, original);
         assert_eq!(fs::read_dir(directory.path())?.count(), 2);
 
-        for json in [false, true] {
+        for mode in [OutputMode::Text, OutputMode::Json] {
             run(
                 &i18n,
                 &data_dir,
@@ -762,7 +763,7 @@ mod tests {
                     track_number: Some(3),
                     disc_number: Some(2),
                 },
-                json,
+                mode,
             )?;
             let tags = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?
                 .context("supported WAV tags")?;

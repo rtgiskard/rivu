@@ -189,10 +189,11 @@ Open the information button in the Playback panel for Audio diagnostics.
 The Copy button beside Close copies the complete diagnostic text, including rows
 outside the visible scroll area. Source and application-stream speaker positions
 use the same abbreviations, such as `FL` and `FR`.
-`rivu status` and `rivu --json status` expose the same runtime snapshot; JSON places
-it under `playback.playback.audio_output`. No diagnostics are written to the database
-or periodically logged. The snapshot is retained after Stop and cleared when a new
-queue occurrence is selected; exiting the instance discards it.
+`rivu status -v` includes the runtime audio diagnostics; `rivu --json status`
+places the snapshot under `playback.playback.audio_output`. No diagnostics are
+written to the database or periodically logged. The snapshot is retained after
+Stop and cleared when a new queue occurrence is selected; exiting the instance
+discards it.
 
 Details distinguish the actual decoded/audition source, applied processing and gain,
 negotiated application stream, connected PipeWire sink and permitted remixing.

@@ -1,6 +1,6 @@
 use super::{
     args::{TaskAction, TaskKind},
-    output::show_scan,
+    output::{OutputMode, show_scan},
 };
 use anyhow::{Context, Result, bail, ensure};
 use rivu_presentation::i18n::Localizer;
@@ -71,7 +71,13 @@ pub(super) fn task_json<T: serde::Serialize>(
     Ok(value)
 }
 
-pub(super) fn run(i18n: &Localizer, data_dir: &Path, action: TaskAction, json: bool) -> Result<()> {
+pub(super) fn run(
+    i18n: &Localizer,
+    data_dir: &Path,
+    action: TaskAction,
+    mode: OutputMode,
+) -> Result<()> {
+    let json = mode == OutputMode::Json;
     let mut session = rivu_client::client_session(data_dir);
     let reference = match &action {
         TaskAction::Status { id, .. } | TaskAction::Cancel { id, .. } => *id,
@@ -85,18 +91,21 @@ pub(super) fn run(i18n: &Localizer, data_dir: &Path, action: TaskAction, json: b
                 reference.instance_id,
                 &scan_status(&mut session, id)?,
                 json,
+                None,
             ),
             TaskKind::Relocation => emit_relocation(
                 i18n,
                 reference.instance_id,
                 &relocation_status(&mut session, id)?,
                 json,
+                true,
             ),
             TaskKind::Processing => emit_processing(
                 i18n,
                 reference.instance_id,
                 &processing_status(&mut session, id)?,
                 json,
+                true,
             ),
         },
         TaskAction::Cancel { kind, .. } => {
@@ -106,7 +115,7 @@ pub(super) fn run(i18n: &Localizer, data_dir: &Path, action: TaskAction, json: b
                 TaskKind::Processing => Command::CancelProcessing { id },
             };
             let ack = session.request_ack(command)?;
-            super::output::show_task_ack(i18n, &session, &ack, json)
+            super::output::show_task_ack(i18n, &session, &ack, mode)
         }
     }
 }
@@ -136,6 +145,7 @@ pub(super) fn emit_processing(
     instance_id: u32,
     task: &ProcessingTaskStatus,
     json: bool,
+    show_error: bool,
 ) -> Result<()> {
     let mut output = std::io::stdout().lock();
     if json {
@@ -172,7 +182,17 @@ pub(super) fn emit_processing(
                 ]
             )
         )?;
-        if let Some(error) = &task.error {
+        if let Some(path) = &task.graph_exported_path {
+            writeln!(
+                output,
+                "{}",
+                i18n.format(
+                    "core-processing-exported",
+                    &[("path", TerminalEscaped(path.display()).to_string().into())]
+                )
+            )?;
+        }
+        if show_error && let Some(error) = &task.error {
             writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
@@ -210,7 +230,13 @@ fn relocation_status(
     Ok(task)
 }
 
-fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bool) -> Result<()> {
+fn emit_scan(
+    i18n: &Localizer,
+    instance_id: u32,
+    task: &ScanTaskStatus,
+    json: bool,
+    reported_error: Option<&str>,
+) -> Result<()> {
     let mut output = std::io::stdout().lock();
     if json {
         writeln!(
@@ -228,9 +254,10 @@ fn emit_scan(i18n: &Localizer, instance_id: u32, task: &ScanTaskStatus, json: bo
             }
         )?;
         show_scan(i18n, &task.progress)?;
-        write_scan_outcome(&mut output, i18n, task)?;
+        write_scan_outcome(&mut output, i18n, task, reported_error)?;
         if let Some(error) = &task.error
             && error != &task.message
+            && Some(error.as_str()) != reported_error
         {
             writeln!(output, "{}", TerminalEscaped(error))?;
         }
@@ -243,8 +270,9 @@ fn write_scan_outcome(
     output: &mut impl Write,
     i18n: &Localizer,
     task: &ScanTaskStatus,
+    reported_error: Option<&str>,
 ) -> Result<()> {
-    if !task.message.is_empty() {
+    if !task.message.is_empty() && Some(task.message.as_str()) != reported_error {
         writeln!(output, "{}", TerminalEscaped(&task.message))?;
     }
     if task.library_committed {
@@ -278,6 +306,7 @@ fn emit_relocation(
     instance_id: u32,
     task: &RelocationTaskStatus,
     json: bool,
+    show_error: bool,
 ) -> Result<()> {
     let mut output = std::io::stdout().lock();
     if json {
@@ -314,12 +343,33 @@ fn emit_relocation(
                 ]
             )
         )?;
-        if let Some(error) = &task.error {
+        if show_error && let Some(error) = &task.error {
             writeln!(output, "{}", TerminalEscaped(error))?;
         }
     }
     output.flush()?;
     Ok(())
+}
+
+fn wait_outcome(
+    i18n: &Localizer,
+    session: &mut rivu_client::ClientSession,
+    target: TaskTarget,
+) -> Result<(u32, TaskOutcome)> {
+    let (kind, id) = match target {
+        TaskTarget::Scan { id } => ("scan", id),
+        TaskTarget::Relocation { id } => ("relocation", id),
+        TaskTarget::Processing { id } => ("processing", id),
+    };
+    let instance_id = instance_id(session)?;
+    let reference = TaskReference { instance_id, id };
+    let outcome = session.wait_task(target).with_context(|| {
+        format!(
+            "{}: rivu task status {kind} {reference}",
+            i18n.text("core-task-wait-outcome-unavailable"),
+        )
+    })?;
+    Ok((instance_id, outcome))
 }
 
 pub(super) fn wait_scan(
@@ -328,14 +378,25 @@ pub(super) fn wait_scan(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    let TaskOutcome::Scan(task) = session.wait_task(TaskTarget::Scan { id })? else {
+    let (instance, TaskOutcome::Scan(task)) = wait_outcome(i18n, session, TaskTarget::Scan { id })?
+    else {
         bail!("IPC returned an unexpected task outcome");
     };
-    emit_scan(i18n, instance_id(session)?, &task, json)?;
-    match task.progress.phase {
-        ScanPhase::Completed => Ok(()),
-        _ => bail!("{}", task.error.as_deref().unwrap_or(&task.message)),
+    let error = (task.progress.phase != ScanPhase::Completed).then(|| {
+        task.error
+            .as_deref()
+            .or_else(|| (!task.message.is_empty()).then_some(task.message.as_str()))
+            .unwrap_or(if task.progress.phase == ScanPhase::Cancelled {
+                "Scan cancelled"
+            } else {
+                "Scan failed"
+            })
+    });
+    emit_scan(i18n, instance, &task, json, error)?;
+    if let Some(error) = error {
+        bail!("{error}");
     }
+    Ok(())
 }
 
 pub(super) fn wait_relocation(
@@ -344,15 +405,29 @@ pub(super) fn wait_relocation(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    let TaskOutcome::Relocation(task) = session.wait_task(TaskTarget::Relocation { id })? else {
+    let (instance, TaskOutcome::Relocation(task)) =
+        wait_outcome(i18n, session, TaskTarget::Relocation { id })?
+    else {
         bail!("IPC returned an unexpected task outcome");
     };
-    emit_relocation(i18n, instance_id(session)?, &task, json)?;
+    emit_relocation(
+        i18n,
+        instance,
+        &task,
+        json,
+        task.phase == RelocationPhase::Completed,
+    )?;
     match task.phase {
         RelocationPhase::Completed => Ok(()),
         _ => bail!(
             "{}",
-            task.error.as_deref().unwrap_or("Relocation cancelled")
+            task.error
+                .as_deref()
+                .unwrap_or(if task.phase == RelocationPhase::Cancelled {
+                    "Relocation cancelled"
+                } else {
+                    "Relocation failed"
+                })
         ),
     }
 }
@@ -363,15 +438,29 @@ pub(super) fn wait_processing(
     id: u64,
     json: bool,
 ) -> Result<()> {
-    let TaskOutcome::Processing(task) = session.wait_task(TaskTarget::Processing { id })? else {
+    let (instance, TaskOutcome::Processing(task)) =
+        wait_outcome(i18n, session, TaskTarget::Processing { id })?
+    else {
         bail!("IPC returned an unexpected task outcome");
     };
-    emit_processing(i18n, instance_id(session)?, &task, json)?;
+    emit_processing(
+        i18n,
+        instance,
+        &task,
+        json,
+        task.phase == ProcessingPhase::Complete,
+    )?;
     match task.phase {
         ProcessingPhase::Complete => Ok(()),
         _ => bail!(
             "{}",
-            task.error.as_deref().unwrap_or("Processing cancelled")
+            task.error
+                .as_deref()
+                .unwrap_or(if task.phase == ProcessingPhase::Cancelled {
+                    "Processing cancelled"
+                } else {
+                    "Processing failed"
+                })
         ),
     }
 }

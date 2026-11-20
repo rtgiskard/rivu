@@ -1,5 +1,14 @@
 core-ready = Rivu 核心已就绪。数据目录：{ $path }
 core-command-accepted = 命令已接受，修订号 { $revision }
+core-task-accepted = 任务已接纳（{ $kind }）：{ $id }
+core-status-last-error = 最近报告的错误：{ $error }
+core-processing-exported = 已导出到 { $path }
+core-processing-bypass-status = 旁路：{ $value }
+core-task-wait-outcome-unavailable = 未能取得任务结果。请使用相同的实例选项执行以下命令查询
+core-processing-resume-target = 恢复目标
+core-processing-active-source = 生效的处理源
+core-processing-no-source = 无
+core-processing-source-port = 节点/端口
 core-stats = 曲目：{ $tracks }
     播放次数：{ $plays }
 core-listing-changed = 列表未完成：读取期间数据已更改，请重试命令。
@@ -75,6 +84,7 @@ core-help-version = 显示版本
 core-help-data-dir = 要启动或控制的实例及其数据目录
 core-help-config = 启动或文件探测使用的配置文件
 core-help-log-level = 临时覆盖本进程的标准错误和已启用的文件日志等级：debug、info、warning、error
+core-help-verbose = 显示更多文本详情；不改变日志或 JSON 输出
 core-help-json = 输出单个 JSON 结果；不适用于 GUI、serve 或 TUI
 core-help-gui = 打开桌面界面，可同时导入路径
 core-help-serve = 在前台运行共享核心，不打开图形界面

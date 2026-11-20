@@ -481,7 +481,8 @@ resources. See link:../Makefile[the installation recipe].
 The default bundle is `DATA_DIR/neural/MODEL`; override the application directory
 with `--data-dir` or the bundle with `--directory PATH`. Existing bundles are
 never overwritten. Updates require a new bundle and its emitted paths. Results
-are JSON (`--json` selects compact output); installer diagnostics go to stderr.
+are JSON (`--json` selects compact output). The external installer's diagnostics
+are passed through to stderr as-is, even with `--json`.
 `--activate` submits the prepared paths through the running Core's neural-settings
 interface. It does not edit configuration directly, add graph nodes or start
 inference. Activation failure leaves the prepared bundle available.
