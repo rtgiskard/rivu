@@ -847,34 +847,28 @@ impl Store {
         drop((exact_json, prefixes_json, exact, prefixes, scope_workspace));
         // Exact identities never relocate. Only genuinely new destinations need
         // global same-fingerprint rows, even on unchanged duplicate-heavy scans.
-        let existing_identities: HashSet<_> = selected
-            .values()
-            .map(|record| identity(&record.path, record.cue.as_ref().map(Into::into)))
-            .collect();
-        let unresolved = || {
-            records.iter().filter(|record| {
-                !existing_identities.contains(&identity(&record.source.path, record.cue))
-            })
-        };
-        let candidate_hashes: HashSet<&str> = if exact_sources || result.scan_incomplete {
-            HashSet::new()
-        } else {
-            unresolved()
-                .filter_map(|record| record.source.fingerprint.as_deref())
-                .collect()
-        };
-        let ordinary_candidate_hashes: HashSet<&str> = if exact_sources || result.scan_incomplete {
-            HashSet::new()
-        } else {
-            unresolved()
-                .filter(|record| record.cue.is_none())
-                .filter_map(|record| record.source.fingerprint.as_deref())
-                .collect()
-        };
-        drop(existing_identities);
+        let relocation_allowed = !exact_sources && !result.scan_incomplete;
+        let mut candidate_hashes = HashSet::new();
+        let mut ordinary_candidate_hashes = HashSet::new();
+        if relocation_allowed {
+            let existing_identities: HashSet<_> = selected
+                .values()
+                .map(|record| identity(&record.path, record.cue.as_ref().map(Into::into)))
+                .collect();
+            for record in &records {
+                if let Some(hash) = record.source.fingerprint.as_deref()
+                    && !existing_identities.contains(&identity(&record.source.path, record.cue))
+                {
+                    candidate_hashes.insert(hash);
+                    if record.cue.is_none() {
+                        ordinary_candidate_hashes.insert(hash);
+                    }
+                }
+            }
+        }
         // Incomplete scans cannot relocate or mark missing. Exact record identities
         // are already in scope, so global same-content rows cannot affect this commit.
-        if !exact_sources && !result.scan_incomplete {
+        if !candidate_hashes.is_empty() {
             let mut q = tx.prepare(
                 "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
                  FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
@@ -895,10 +889,14 @@ impl Store {
         // Preserve that order for identities and global relocation candidates.
         let mut old: Vec<Existing> = selected.into_values().collect();
         old.sort_unstable_by_key(|record| record.id);
-        let identities: HashSet<TrackIdentity<'_>> = records
-            .iter()
-            .map(|r| identity(&r.source.path, r.cue))
-            .collect();
+        let identities: HashSet<TrackIdentity<'_>> = if candidate_hashes.is_empty() {
+            HashSet::new()
+        } else {
+            records
+                .iter()
+                .map(|r| identity(&r.source.path, r.cue))
+                .collect()
+        };
         let mut excluded_directories: HashSet<(&Path, &Path)> = result
             .skipped_directories
             .iter()
@@ -983,10 +981,9 @@ impl Store {
                     .as_ref()
                     .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
             };
-            if !exact_sources
-                && !identities.contains(&key)
-                && let Some(hash) = record.hash.as_deref()
+            if let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
+                && !identities.contains(&key)
                 && !unconfirmed(record)
                 && *absent_paths.entry(owner).or_insert_with(|| {
                     fs::symlink_metadata(owner)
@@ -1009,10 +1006,15 @@ impl Store {
         // never let scan order choose one of several newly found copies.
         let mut new_destinations: HashMap<RelocationKey<'_>, Option<TrackIdentity<'_>>> =
             HashMap::new();
-        for record in &records {
+        let destinations = if candidates_by_key.is_empty() {
+            &[][..]
+        } else {
+            records.as_slice()
+        };
+        for record in destinations {
             let destination = identity(&record.source.path, record.cue);
-            if !byidentity.contains_key(&destination)
-                && let Some(hash) = record.source.fingerprint.as_deref()
+            if let Some(hash) = record.source.fingerprint.as_deref()
+                && !byidentity.contains_key(&destination)
             {
                 new_destinations
                     .entry(relocation_key(hash, record.cue))
