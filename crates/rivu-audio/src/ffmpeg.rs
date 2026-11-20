@@ -550,6 +550,13 @@ impl Input {
                 .to_bytes()
                 .starts_with(b"pcm_")
     }
+
+    fn demuxer_is(&self, name: &CStr) -> bool {
+        let format = unsafe { (*self.format).iformat };
+        !format.is_null()
+            && !unsafe { (*format).name }.is_null()
+            && unsafe { CStr::from_ptr((*format).name) } == name
+    }
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -697,11 +704,16 @@ impl Decoder {
         }
         let p = unsafe { &*params };
         let codec_name = cstr(unsafe { (rt.f.codec_name)(p.codec_id) });
-        let profile = cstr(unsafe { (rt.f.profile_name)(p.codec_id, p.profile) });
-        let codec_text = if profile.is_empty() || profile == "unknown" {
-            codec_name.clone()
+        let tracker = input.demuxer_is(c"libopenmpt");
+        let codec_text = if tracker {
+            "Tracker module".to_owned()
         } else {
-            format!("{codec_name} ({profile})")
+            let profile = cstr(unsafe { (rt.f.profile_name)(p.codec_id, p.profile) });
+            if profile.is_empty() || profile == "unknown" {
+                codec_name.clone()
+            } else {
+                format!("{codec_name} ({profile})")
+            }
         };
         let stream_ref = unsafe { &*stream_ptr };
         let duration = rational_seconds(stream_ref.duration, stream_ref.time_base).or_else(|| {
@@ -712,7 +724,8 @@ impl Decoder {
                 Some(d as f64 / AV_TIME_BASE as f64)
             }
         });
-        let pcm = codec_name.starts_with("pcm_");
+        // libopenmpt emits synthesized PCM packets, not encoded file payloads.
+        let pcm = !tracker && codec_name.starts_with("pcm_");
         let lossless = matches!(
             codec_name.as_str(),
             "flac" | "alac" | "ape" | "tta" | "truehd" | "mlp"
@@ -746,12 +759,15 @@ impl Decoder {
             artist: String::new(),
             album: String::new(),
             duration,
-            bitrate_bps: pcm_bitrate.or_else(|| {
-                u64::try_from(p.bit_rate)
-                    .ok()
-                    .filter(|bitrate| *bitrate > 0)
-            }),
-            // Only encoded PCM width × channels × sample rate is reliable here.
+            bitrate_bps: if tracker {
+                None
+            } else {
+                pcm_bitrate.or_else(|| {
+                    u64::try_from(p.bit_rate)
+                        .ok()
+                        .filter(|bitrate| *bitrate > 0)
+                })
+            },
             bitrate_exact: pcm_bitrate.is_some(),
             track_number: None,
             disc_number: None,
@@ -763,6 +779,10 @@ impl Decoder {
             sample_rate: 0,
         };
         info.apply_tags(tags, path);
+        let mut packet_stats = PacketStats::new();
+        if tracker {
+            packet_stats.invalidate();
+        }
         let decoder = Self {
             rt,
             identity: input.identity,
@@ -785,7 +805,7 @@ impl Decoder {
             pending_frame: None,
             layout: Vec::new(),
             info,
-            packet_stats: PacketStats::new(),
+            packet_stats,
             expected_samples: if pcm {
                 u64::try_from(stream_ref.duration).ok().and_then(|ticks| {
                     let rate = u128::try_from(p.sample_rate).ok()?;

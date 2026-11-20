@@ -68,7 +68,7 @@ fn generate_ffmpeg_bindings() {
         .clang_arg(format!("--target={target}"))
         .allowlist_type("AV(FormatContext|InputFormat|OutputFormat|Dictionary|DictionaryEntry|Packet|Codec|CodecID|CodecContext|CodecParameters|Frame|Rational|ChannelLayout|Channel|ChannelOrder|MediaType|Discard|SampleFormat)")
         .allowlist_type("AVStreamGroup")
-        .opaque_type("AVInputFormat|AVStreamGroup|SwrContext")
+        .opaque_type("AVStreamGroup|SwrContext")
         .allowlist_type("SwrContext")
         .allowlist_var("LIBSWRESAMPLE_VERSION_MAJOR")
         .allowlist_var("AV_TIME_BASE")

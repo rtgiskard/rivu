@@ -38,15 +38,18 @@ pub(crate) fn is_audio_path(path: &Path) -> bool {
             | b"dtshd"
             | b"eac3"
             | b"flac"
+            | b"it"
             | b"m4a"
             | b"mka"
             | b"mkv"
             | b"mlp"
+            | b"mod"
             | b"mp3"
             | b"mp4"
             | b"oga"
             | b"ogg"
             | b"opus"
+            | b"s3m"
             | b"shn"
             | b"tak"
             | b"thd"
@@ -56,6 +59,7 @@ pub(crate) fn is_audio_path(path: &Path) -> bool {
             | b"wave"
             | b"webm"
             | b"wma"
+            | b"xm"
     )
 }
 
@@ -79,6 +83,12 @@ mod tests {
             "track.DtShD",
             "track.aif",
             "track.wave",
+            "track.DSF",
+            "track.DFF",
+            "track.MOD",
+            "track.XM",
+            "track.IT",
+            "track.S3M",
         ] {
             assert!(is_audio_path(Path::new(path)), "{path}");
         }
