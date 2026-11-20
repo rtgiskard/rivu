@@ -675,14 +675,6 @@ impl Output {
         let (producer, consumer) = HeapRb::try_new(capacity)
             .context("Cannot allocate audio output PCM buffer")?
             .split();
-        let scratch_samples = source_channels
-            .checked_mul(OutputCallback::BLOCK_FRAMES)
-            .context("Audio output callback buffer size overflow")?;
-        let mut scratch = Vec::new();
-        scratch
-            .try_reserve_exact(scratch_samples)
-            .context("Cannot allocate audio output callback buffer")?;
-        scratch.resize(scratch_samples, 0.0);
         let shared = Arc::new(OutputShared::new(options.gain, options.paused, analyzer));
         let (error_send, errors) = bounded(4);
         analyzer.reset(rate, source_layout);
@@ -690,7 +682,7 @@ impl Output {
             consumer,
             shared: shared.clone(),
             channels: source_channels,
-            scratch,
+            scratch: Vec::new(),
             mapping: Vec::new(),
             source_channels,
             rate,
@@ -938,11 +930,20 @@ impl Output {
     }
 }
 
+fn identity_or_mapping(channels: usize, mapping: Vec<Option<usize>>) -> Vec<Option<usize>> {
+    if mapping.iter().copied().eq((0..channels).map(Some)) {
+        Vec::new()
+    } else {
+        mapping
+    }
+}
+
 struct OutputCallback {
     consumer: HeapCons<f32>,
     shared: Arc<OutputShared>,
     channels: usize,
     scratch: Vec<f32>,
+    // Empty for a confirmed stream with identical channel order.
     mapping: Vec<Option<usize>>,
     source_channels: usize,
     rate: u32,
@@ -1038,6 +1039,21 @@ impl OutputCallback {
         for block in data[..count * self.channels].chunks_mut(Self::BLOCK_FRAMES * self.channels) {
             // Publish ring consumption once per block, including wrapped rings.
             // Scratch is fixed before stream start; every chunk contains whole frames.
+            if self.mapping.is_empty() {
+                debug_assert_eq!(self.channels, source_channels);
+                let consumed = self.consumer.pop_slice(block);
+                debug_assert_eq!(consumed, block.len());
+                for frame in block.chunks_exact_mut(self.channels) {
+                    let mut frame_peak = 0.0_f32;
+                    for sample in frame {
+                        *sample = (*sample * gain).clamp(-f32::MAX, f32::MAX);
+                        frame_peak = frame_peak.max(sample.abs());
+                    }
+                    peak = peak.max(frame_peak);
+                    overrange_frames += u64::from(frame_peak > 1.0);
+                }
+                continue;
+            }
             let samples = block.len() / self.channels * source_channels;
             let scratch = &mut self.scratch[..samples];
             let consumed = self.consumer.pop_slice(scratch);
@@ -1703,20 +1719,24 @@ fn run_stream(
         )
     })?;
     let (stream_layout, mapping, mono) = if auto_mix {
-        (
-            source_layout,
-            (0..source_layout.len()).map(Some).collect(),
-            false,
-        )
+        (source_layout, Vec::new(), false)
     } else {
         let mapping = channels::mapping(source_layout, &speakers)
             .with_context(|| format!("PipeWire sink {} cannot preserve this track", target.name))?;
         (
             speakers.as_slice(),
-            mapping,
+            identity_or_mapping(source_layout.len(), mapping),
             speakers == [Channel::FrontCenter] && target.positions.contains("MONO"),
         )
     };
+    if !mapping.is_empty() {
+        let samples = source_layout.len() * OutputCallback::BLOCK_FRAMES;
+        callback
+            .scratch
+            .try_reserve_exact(samples.saturating_sub(callback.scratch.len()))
+            .context("Cannot allocate audio output callback buffer")?;
+        callback.scratch.resize(samples, 0.0);
+    }
     callback.mapping = mapping;
     callback.channels = stream_layout.len();
     let rate = callback.rate;
@@ -2829,6 +2849,23 @@ mod pcm_tests {
         );
     }
 
+    #[test]
+    fn identity_render_preserves_wrapped_frames_and_silences_short_supply() {
+        let frames = OutputCallback::BLOCK_FRAMES + 13;
+        let stereo = [Channel::FrontLeft, Channel::FrontRight];
+        let (mut output, mut callback, _analyzer) =
+            test_output_layout(48_000, false, &stereo, &stereo, frames * 2);
+        assert_eq!(output.push(&[0.0; 34]), 17);
+        callback.render(&mut [0.0; 34], timestamp(0, 20));
+        let input: Vec<_> = (0..frames * 2).map(|i| i as f32 / 1024.0).collect();
+        assert_eq!(output.push(&input), frames);
+        let mut data = vec![-1.0; input.len() + 15];
+        callback.render(&mut data, timestamp(1, 21));
+        assert_eq!(&data[..input.len()], input.as_slice());
+        assert!(data[input.len()..].iter().all(|&sample| sample == 0.0));
+        assert_eq!(callback.consumer.occupied_len(), 0);
+    }
+
     fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, Arc<PcmControl>) {
         let stereo = [Channel::FrontLeft, Channel::FrontRight];
         test_output_layout(rate, paused, &stereo, &stereo, 128)
@@ -2882,7 +2919,10 @@ mod pcm_tests {
             shared,
             channels: device.len(),
             scratch: vec![0.0; source.len() * OutputCallback::BLOCK_FRAMES],
-            mapping: crate::channels::mapping(source, device).unwrap(),
+            mapping: identity_or_mapping(
+                source.len(),
+                crate::channels::mapping(source, device).unwrap(),
+            ),
             source_channels: source.len(),
             rate,
             clock: PlaybackClock::new(),
