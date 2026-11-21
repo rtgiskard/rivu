@@ -1031,6 +1031,43 @@ fn runtime_wire_round_trip_preserves_large_client_configuration_without_transfer
 }
 
 #[test]
+fn library_delta_preserves_equal_history_and_applies_changed_history() {
+    use crate::model::{HistoryEntry, LibrarySnapshot};
+
+    let delta = |revision, favorite| StateResponse {
+        revisions: StateRevisions {
+            library: revision,
+            ..Default::default()
+        },
+        library: Some(LibrarySnapshot {
+            count_revision: revision,
+            history: Arc::new(vec![HistoryEntry {
+                track_id: 42,
+                title: "Track".into(),
+                play_count: 2,
+                played_at: 17,
+                favorite,
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut observed = crate::response::ObservedState::new(1);
+    observed.apply(1, delta(1, false));
+    let retained = observed.snapshot().library.history.clone();
+
+    observed.apply(1, delta(2, false));
+    assert!(Arc::ptr_eq(&retained, &observed.snapshot().library.history));
+    assert_eq!(observed.snapshot().library.count_revision, 2);
+    assert_eq!(observed.applied().library, 2);
+
+    observed.apply(1, delta(3, true));
+    let updated = &observed.snapshot().library.history;
+    assert!(!Arc::ptr_eq(&retained, updated));
+    assert!(updated[0].favorite);
+}
+
+#[test]
 fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
     for scan_task_id in [None, Some(0), Some(42), Some(u64::MAX)] {
         let system = rivu_protocol::model::SystemState {

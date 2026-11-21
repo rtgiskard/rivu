@@ -437,7 +437,11 @@ impl ObservedState {
             state.queue = section;
             applied.queue = current.queue;
         }
-        if let Some(section) = response.library {
+        if let Some(mut section) = response.library {
+            // A library delta includes history even when only unrelated fields changed.
+            if section.history == state.library.history {
+                std::mem::swap(&mut section.history, &mut state.library.history);
+            }
             state.library = section;
             applied.library = current.library;
         }

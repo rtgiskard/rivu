@@ -275,7 +275,7 @@ pub enum PlaybackStatus {
 
 pub use rivu_format::config::RepeatMode;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub track_id: i64,
     pub title: String,
