@@ -316,12 +316,12 @@ async fn parse_m3u_paths(
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let item_path = PathBuf::from(line);
-                let item_path = logical_path(&if item_path.is_absolute() {
-                    item_path
+                let item_path = Path::new(line);
+                let item_path = if item_path.is_absolute() {
+                    logical_path(item_path)?
                 } else {
-                    parent.join(item_path)
-                })?;
+                    logical_path(&parent.join(item_path))?
+                };
                 if let Some(roots) = &roots {
                     ensure!(
                         roots.iter().any(|root| item_path.starts_with(root)),
