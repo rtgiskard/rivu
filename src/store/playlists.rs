@@ -326,32 +326,34 @@ impl Store {
         let limit = batch_limit(limit)?;
         // A LEFT JOIN keeps orphan entries visible so export fails rather than
         // silently dropping them. Project no playback, album or fingerprint data.
-        let suffix = if after.is_some() {
-            " AND (e.position,e.id)>(?2,?3) ORDER BY e.position,e.id LIMIT ?4"
+        macro_rules! export_sql {
+            ($suffix:literal) => {
+                concat!(
+                    "SELECT t.id,t.path,t.title,t.artist,t.duration,
+                            t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
+                            e.position,e.id
+                     FROM playlist_entries e LEFT JOIN tracks t
+                     ON t.id=e.track_id WHERE e.playlist_id=?1",
+                    $suffix,
+                )
+            };
+        }
+        let sql = if after.is_some() {
+            export_sql!(" AND (e.position,e.id)>(?2,?3) ORDER BY e.position,e.id LIMIT ?4")
         } else {
-            " ORDER BY e.position,e.id LIMIT ?2"
+            export_sql!(" ORDER BY e.position,e.id LIMIT ?2")
         };
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT t.id,t.path,t.title,
-                    t.artist,t.duration,
-                    t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
-                    e.position AS entry_position,e.id AS entry_id
-             FROM playlist_entries e LEFT JOIN tracks t
-             ON t.id=e.track_id WHERE e.playlist_id=?1{suffix}"
-        ))?;
+        let mut stmt = self.conn.prepare_cached(sql)?;
         let mut db_rows = if let Some(after) = after {
             stmt.query(params![playlist_id, after.position, after.id, limit + 1])?
         } else {
             stmt.query(params![playlist_id, limit + 1])?
         };
         let mut rows = Vec::with_capacity(limit as usize);
-        let mut last_cursor = None;
-        let mut has_more = false;
-        while let Some(row) = db_rows.next()? {
-            if rows.len() == limit as usize {
-                has_more = true;
-                break;
-            }
+        let next = loop {
+            let Some(row) = db_rows.next()? else {
+                break None;
+            };
             row.get::<_, Option<i64>>(0)?
                 .context("Playlist contains a missing library track")?;
             rows.push(PlaylistExportTrack {
@@ -361,12 +363,15 @@ impl Store {
                 duration: row.get(4)?,
                 cue: cue_from_row(row, 5)?,
             });
-            last_cursor = Some(PlaylistEntryCursor {
-                position: row.get("entry_position")?,
-                id: row.get("entry_id")?,
-            });
-        }
-        let next = has_more.then_some(last_cursor).flatten();
+            if rows.len() == limit as usize {
+                let cursor = PlaylistEntryCursor {
+                    position: row.get(9)?,
+                    id: row.get(10)?,
+                };
+                // The extra row proves continuation, even if it is an orphan.
+                break db_rows.next()?.is_some().then_some(cursor);
+            }
+        };
         Ok(Batch { rows, next })
     }
 
