@@ -5,7 +5,7 @@ use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
 use rivu_protocol::model::CueSegment;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -116,6 +116,7 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
         false,
         &ScanCancellation::default(),
         None,
+        non_regular_source,
     ))?
     .items)
 }
@@ -126,7 +127,15 @@ pub(crate) async fn prepare_playlist_import(
     cancellation: &ScanCancellation,
     roots: Option<&[PathBuf]>,
 ) -> Result<PlaylistImport> {
-    prepare_import(workers, path, is_cue_path(path), cancellation, roots).await
+    prepare_import(
+        workers,
+        path,
+        is_cue_path(path),
+        cancellation,
+        roots,
+        non_regular_source,
+    )
+    .await
 }
 
 struct ImportBuilder {
@@ -170,6 +179,7 @@ async fn prepare_import(
     cue: bool,
     cancellation: &ScanCancellation,
     roots: Option<&[PathBuf]>,
+    is_non_regular: impl Fn(&Path) -> bool + Clone + Send + 'static,
 ) -> Result<PlaylistImport> {
     cancellation.check()?;
     let path = logical_path(path)?;
@@ -198,19 +208,51 @@ async fn prepare_import(
         builder.bytes_read = bytes.len();
         parse_m3u_paths(workers, path, bytes, roots, &budget, cancellation).await?
     };
-    let (paths, sources, non_regular_source) =
-        inspect_import_sources(workers, paths, &budget, cancellation).await?;
+    let (mut paths, sources, checks) = workers
+        .execute({
+            let budget = budget.clone();
+            let cancellation = cancellation.clone();
+            move || -> Result<_> {
+                let (sources, checks) = unique_import_sources(&paths, &budget, &cancellation)?;
+                Ok((paths, sources, checks))
+            }
+        })
+        .await
+        .context("Playlist import source ordering worker panicked")??;
     builder.result.paths = sources;
-    for (index, path) in paths.into_iter().enumerate() {
+    let mut pending = Some(checks);
+    let mut non_regular = None;
+    for index in 0..paths.len() {
         cancellation.check()?;
-        // Report prechecked errors in playlist order, including CUE failures.
+        let cue = is_cue_path(&paths[index]);
+        if let Some(mut checks) = pending.take_if(|checks| checks.first.front() == Some(&index)) {
+            if cue {
+                checks.first.pop_front();
+            } else {
+                let token = cancellation.clone();
+                let inspect = is_non_regular.clone();
+                (paths, checks, non_regular) = workers
+                    .execute(move || -> Result<_> {
+                        let invalid = checks.inspect_batch(&paths, &token, inspect)?;
+                        Ok((paths, checks, invalid))
+                    })
+                    .await
+                    .context("Import source inspection worker panicked")??;
+                cancellation.check()?;
+            }
+            if non_regular.is_none() && !checks.first.is_empty() {
+                pending = Some(checks);
+            }
+        }
+        let path = std::mem::take(&mut paths[index]);
+        // An earlier occurrence can still fail to expand before this error.
         ensure!(
-            non_regular_source != Some(index),
+            non_regular != Some(index),
             "Import source is not a regular file: {}",
             path.display()
         );
         let path_bytes = path.as_os_str().len();
-        if is_cue_path(&path) {
+        if cue {
             if let Some(roots) = roots {
                 ensure!(
                     roots.iter().any(|root| path.starts_with(root)),
@@ -339,50 +381,36 @@ async fn parse_m3u_paths(
         .context("Playlist import parser panicked")?
 }
 
-async fn inspect_import_sources(
-    workers: &BlockingExecutor,
-    paths: Vec<PathBuf>,
-    budget: &super::import_budget::ImportBudget,
-    cancellation: &ScanCancellation,
-) -> Result<(Vec<PathBuf>, Vec<PathBuf>, Option<usize>)> {
-    // Deduplicate by index without copying occurrence-sized path payloads.
-    let (mut paths, sources, mut ordinary_sources, _source_order_charge) = workers
-        .execute({
-            let budget = budget.clone();
-            let cancellation = cancellation.clone();
-            move || -> Result<_> {
-                let (sources, mut first_sources, charge) =
-                    unique_import_sources(&paths, &budget, &cancellation)?;
-                first_sources.retain(|&index| !is_cue_path(&paths[index]));
-                Ok((paths, sources, first_sources, charge))
+#[derive(Debug)]
+struct SourceChecks {
+    // Only first occurrences need filesystem work. An unseen CUE is a barrier
+    // until the ordered expansion loop has read and validated it.
+    first: VecDeque<usize>,
+    _order_charge: super::import_budget::ImportBudgetScope,
+}
+
+impl SourceChecks {
+    fn inspect_batch(
+        &mut self,
+        paths: &[PathBuf],
+        cancellation: &ScanCancellation,
+        is_non_regular: impl Fn(&Path) -> bool,
+    ) -> Result<Option<usize>> {
+        for _ in 0..super::source::SOURCE_BATCH_SIZE {
+            cancellation.check()?;
+            let Some(index) = self.first.pop_front_if(|i| !is_cue_path(&paths[*i])) else {
+                break;
+            };
+            if is_non_regular(&paths[index]) {
+                return Ok(Some(index));
             }
-        })
-        .await
-        .context("Playlist import source ordering worker panicked")??;
-    for start in (0..ordinary_sources.len()).step_by(super::source::SOURCE_BATCH_SIZE) {
-        cancellation.check()?;
-        let end = (start + super::source::SOURCE_BATCH_SIZE).min(ordinary_sources.len());
-        let cancellation = cancellation.clone();
-        let non_regular;
-        (paths, ordinary_sources, non_regular) = workers
-            .execute(move || -> Result<_> {
-                let mut non_regular = None;
-                for &index in &ordinary_sources[start..end] {
-                    cancellation.check()?;
-                    if std::fs::metadata(&paths[index]).is_ok_and(|metadata| !metadata.is_file()) {
-                        non_regular = Some(index);
-                        break;
-                    }
-                }
-                Ok((paths, ordinary_sources, non_regular))
-            })
-            .await
-            .context("Import source inspection worker panicked")??;
-        if non_regular.is_some() {
-            return Ok((paths, sources, non_regular));
         }
+        Ok(None)
     }
-    Ok((paths, sources, None))
+}
+
+fn non_regular_source(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file())
 }
 
 /// Select the first occurrence of every normalized source. Only unique sources
@@ -391,11 +419,7 @@ fn unique_import_sources(
     paths: &[PathBuf],
     budget: &super::import_budget::ImportBudget,
     cancellation: &ScanCancellation,
-) -> Result<(
-    Vec<PathBuf>,
-    Vec<usize>,
-    super::import_budget::ImportBudgetScope,
-)> {
+) -> Result<(Vec<PathBuf>, SourceChecks)> {
     let mut charge = budget.scoped();
     let mut first_sources = Vec::new();
     charge.reserve_vec(&mut first_sources, paths.len())?;
@@ -415,7 +439,13 @@ fn unique_import_sources(
     }
     first_sources.sort_unstable();
     cancellation.check()?;
-    Ok((sources, first_sources, charge))
+    Ok((
+        sources,
+        SourceChecks {
+            first: first_sources.into(),
+            _order_charge: charge,
+        },
+    ))
 }
 
 /// Export a database-ordered stream of playlist occurrences atomically.
@@ -664,31 +694,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn import_reports_earlier_cue_failure_before_a_later_non_regular_source() -> Result<()> {
+    fn import_inspects_first_occurrences_only_up_to_the_next_unread_cue() -> Result<()> {
         use std::fmt::Write as _;
 
         let directory = tempfile::tempdir()?;
         let playlist = directory.path().join("list.m3u8");
         std::fs::create_dir(directory.path().join("directory.wav"))?;
+        let workers = BlockingExecutor::new(1);
+        let check = |entries: &str, expected: &[&str], message: &str| -> Result<()> {
+            std::fs::write(&playlist, entries)?;
+            let (send, inspected) = std::sync::mpsc::channel();
+            let result = futures::executor::block_on(prepare_import(
+                &workers,
+                &playlist,
+                false,
+                &ScanCancellation::default(),
+                None,
+                move |path| {
+                    send.send(path.to_owned()).unwrap();
+                    non_regular_source(path)
+                },
+            ));
+            let error = result.err().context("import should fail")?;
+            assert!(error.to_string().contains(message), "{error:#}");
+            let mut inspected = inspected.into_iter();
+            for name in expected {
+                assert_eq!(inspected.next(), Some(directory.path().join(name)));
+            }
+            assert_eq!(inspected.next(), None);
+            Ok(())
+        };
         let mut entries = String::new();
         for index in 0..super::super::source::SOURCE_BATCH_SIZE {
             writeln!(entries, "missing-{index}.wav")?;
         }
-        std::fs::write(&playlist, format!("missing.cue\n{entries}directory.wav\n"))?;
-        let error = import_m3u(&playlist).unwrap_err();
-        assert!(
-            error.to_string().contains("Reading import CUE"),
-            "{error:#}"
-        );
+        for prefix in ["", "first.wav\n"] {
+            check(
+                &format!("{prefix}missing.cue\n{entries}directory.wav\n"),
+                &prefix.lines().collect::<Vec<_>>(),
+                "Reading import CUE",
+            )?;
+        }
 
-        std::fs::write(&playlist, format!("{entries}directory.wav\n"))?;
-        let error = import_m3u(&playlist).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Import source is not a regular file"),
-            "{error:#}"
-        );
+        std::fs::write(
+            directory.path().join("valid.cue"),
+            "FILE song.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        )?;
+        let expected: Vec<_> = std::iter::once("first.wav")
+            .chain(entries.lines())
+            .chain(["directory.wav"])
+            .collect();
+        check(
+            &format!("first.wav\nvalid.cue\n./first.wav\n{entries}directory.wav\nmissing.cue\n"),
+            &expected,
+            "Import source is not a regular file",
+        )
+    }
+
+    #[test]
+    fn inspection_turn_is_bounded_and_checks_cancellation_between_sources() -> Result<()> {
+        let limit = super::super::source::SOURCE_BATCH_SIZE;
+        let paths: Vec<_> = (0..limit + 2)
+            .map(|index| PathBuf::from(format!("{index}.wav")))
+            .collect();
+        let token = ScanCancellation::default();
+        let (_, mut checks) = unique_import_sources(&paths, &Default::default(), &token)?;
+        assert_eq!(checks.inspect_batch(&paths, &token, |_| false)?, None);
+        assert_eq!(checks.first, [limit, limit + 1]);
+        let error = checks
+            .inspect_batch(&paths, &token, |path| {
+                assert_eq!(path, paths[limit]);
+                token.cancel();
+                false
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("scan cancelled"));
+        assert_eq!(checks.first, [limit + 1]);
         Ok(())
     }
 
@@ -700,7 +781,7 @@ mod tests {
             .collect();
         let budget = super::super::import_budget::ImportBudget::default();
         let before = budget.remaining();
-        let (sources, first_sources, charge) =
+        let (sources, checks) =
             unique_import_sources(&paths, &budget, &ScanCancellation::default())?;
         assert_eq!(
             sources,
@@ -710,7 +791,7 @@ mod tests {
                 PathBuf::from("c.wav")
             ]
         );
-        assert_eq!(first_sources, [0, 1, 3]);
+        assert_eq!(checks.first, [0, 1, 3]);
         let retained = sources.capacity() * std::mem::size_of::<PathBuf>()
             + sources
                 .iter()
@@ -718,10 +799,9 @@ mod tests {
                 .sum::<usize>();
         assert_eq!(
             budget.remaining(),
-            before - retained - first_sources.capacity() * std::mem::size_of::<usize>()
+            before - retained - checks.first.capacity() * std::mem::size_of::<usize>()
         );
-        drop(first_sources);
-        drop(charge);
+        drop(checks);
         assert_eq!(budget.remaining(), before - retained);
         Ok(())
     }

@@ -157,10 +157,14 @@ impl ScanRecord {
         }
     }
 
+    // Media buffers are charged as soon as the probe is retained. These are
+    // the remaining costs when the record is published under shared ownership.
+    fn shared_storage_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>() + self.path.capacity()
+    }
+
     pub(super) fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.path.as_os_str().len()
-            + media_retained_bytes(&self.media)
+        self.shared_storage_bytes() + media_retained_bytes(&self.media)
     }
 }
 
@@ -338,14 +342,6 @@ impl PendingSource {
             );
         }
         cancellation.check()?;
-        if let Some(budget) = budget {
-            budget.reserve(
-                std::mem::size_of::<ScanRecord>()
-                    + 2 * std::mem::size_of::<usize>()
-                    + self.path.as_os_str().len()
-                    + 64,
-            )?;
-        }
         let fingerprint = match self.fingerprint.take() {
             Some(fingerprint) => fingerprint,
             None => self
@@ -354,13 +350,17 @@ impl PendingSource {
                 .context("Audio hash was not initialized")?
                 .finalize(),
         };
-        Ok(Some(ScanRecord {
+        let record = ScanRecord {
             path: std::mem::take(&mut self.path),
             size,
             modified_ns,
             fingerprint: Some(fingerprint),
             media: self.media.take().context("Audio probe returned no media")?,
-        }))
+        };
+        if let Some(budget) = budget {
+            budget.reserve(record.shared_storage_bytes())?;
+        }
+        Ok(Some(record))
     }
 }
 

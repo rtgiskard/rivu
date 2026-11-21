@@ -603,7 +603,7 @@ where
             .values()
             .filter_map(|source| source.as_ref().ok())
             .filter(|source| Arc::strong_count(source) == 1)
-            .map(|source| source.retained_bytes() + 2 * std::mem::size_of::<usize>())
+            .map(|source| source.retained_bytes())
             .sum()
     } else {
         0
