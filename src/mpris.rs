@@ -244,6 +244,7 @@ async fn register(
 
 enum ServiceFailure {
     Disconnected,
+    Publication(zbus::Error),
     PublisherPanicked,
 }
 
@@ -251,7 +252,7 @@ struct Mpris {
     connection: Connection,
     cancel: oneshot::Sender<()>,
     publisher: async_executor::Task<()>,
-    panicked: futures::future::Fuse<oneshot::Receiver<()>>,
+    publisher_failure: futures::future::Fuse<oneshot::Receiver<ServiceFailure>>,
 }
 
 impl Mpris {
@@ -269,7 +270,7 @@ impl Mpris {
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
         let (cancel, mut cancelled) = oneshot::channel();
-        let (panic_notice, panicked) = oneshot::channel();
+        let (failure_notice, publisher_failure) = oneshot::channel();
         let bus = connection.clone();
         // Publish success before scheduling: an immediate bus-loss report must
         // never be overwritten by a publisher that has not started yet.
@@ -283,7 +284,6 @@ impl Mpris {
                 let mut loaded_artwork = None;
                 if !publish_until_cancelled(
                     &mut cancelled,
-                    &handle,
                     publish_changes(
                         &bus,
                         None,
@@ -293,10 +293,10 @@ impl Mpris {
                         previous_can_raise,
                     ),
                 )
-                .await
+                .await?
                     || previous.shutting_down
                 {
-                    return;
+                    return Ok(());
                 }
                 loop {
                     if artwork_load.is_none() {
@@ -341,7 +341,6 @@ impl Mpris {
                             let current_can_raise = app.can_raise();
                             if !publish_until_cancelled(
                                 &mut cancelled,
-                                &handle,
                                 publish_changes(
                                     &bus,
                                     Some((&previous, previous_can_raise)),
@@ -351,7 +350,7 @@ impl Mpris {
                                     current_can_raise,
                                 ),
                             )
-                            .await
+                            .await?
                             {
                                 break;
                             }
@@ -364,7 +363,7 @@ impl Mpris {
                         PublisherEvent::Artwork(result) => {
                             // Only physical completion frees this single-flight slot.
                             artwork_load = None;
-                            if !publish_until_cancelled(&mut cancelled, &handle, async {
+                            if !publish_until_cancelled(&mut cancelled, async {
                                 publish_artwork(
                                     &bus,
                                     &handle,
@@ -374,37 +373,39 @@ impl Mpris {
                                 )
                                 .await
                             })
-                            .await
+                            .await?
                             {
                                 break;
                             }
                         }
                     }
                 }
+                Ok(())
             })
             .catch_unwind()
             .await;
-            finish_publication(publication, panic_notice, artwork_load).await;
+            finish_publication(publication, failure_notice, artwork_load).await;
         });
         Self {
             connection,
             cancel,
             publisher,
-            panicked: panicked.fuse(),
+            publisher_failure: publisher_failure.fuse(),
         }
     }
 
     async fn failure(&mut self) -> ServiceFailure {
-        let publisher_panicked = async {
-            if (&mut self.panicked).await.is_err() {
-                // A normal publisher exit is not a panic (e.g. shutdown).
-                futures::future::pending::<()>().await;
+        let publisher = async {
+            match (&mut self.publisher_failure).await {
+                Ok(failure) => failure,
+                // Normal cancellation or shutdown doesn't report a failure.
+                Err(_) => futures::future::pending().await,
             }
         }
         .fuse();
-        futures::pin_mut!(publisher_panicked);
+        futures::pin_mut!(publisher);
         futures::select_biased! {
-            _ = publisher_panicked => ServiceFailure::PublisherPanicked,
+            failure = publisher => failure,
             _ = self.connection.closed().fuse() => ServiceFailure::Disconnected,
         }
     }
@@ -423,10 +424,15 @@ impl Mpris {
             && observed_intent == Some((true, state.enable_generation))
         {
             let message = match failure {
-                ServiceFailure::Disconnected => "MPRIS unavailable: session bus disconnected",
-                ServiceFailure::PublisherPanicked => "publisher stopped: publisher task panicked",
+                ServiceFailure::Disconnected => {
+                    "MPRIS unavailable: session bus disconnected".to_owned()
+                }
+                ServiceFailure::Publication(error) => format!("publisher stopped: {error}"),
+                ServiceFailure::PublisherPanicked => {
+                    "publisher stopped: publisher task panicked".to_owned()
+                }
             };
-            handle.report_mpris_status(message.to_owned());
+            handle.report_mpris_status(message);
         }
         self.retire().await;
     }
@@ -445,13 +451,20 @@ impl Mpris {
 }
 
 async fn finish_publication(
-    publication: std::thread::Result<()>,
-    panic_notice: oneshot::Sender<()>,
+    publication: std::thread::Result<zbus::Result<()>>,
+    failure_notice: oneshot::Sender<ServiceFailure>,
     artwork_load: Option<ArtworkLoad>,
 ) {
-    if publication.is_err() {
-        tracing::warn!("mpris_publisher_task_panicked");
-        let _ = panic_notice.send(());
+    match publication {
+        Ok(Ok(())) => (),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "mpris_publisher_stopped");
+            let _ = failure_notice.send(ServiceFailure::Publication(error));
+        }
+        Err(_) => {
+            tracing::warn!("mpris_publisher_task_panicked");
+            let _ = failure_notice.send(ServiceFailure::PublisherPanicked);
+        }
     }
     // Keep the waiter through physical completion even on panic or cancel.
     if let Some(load) = artwork_load {
@@ -462,25 +475,13 @@ async fn finish_publication(
 /// Cancellation releases backpressured bus sends without detaching their task.
 async fn publish_until_cancelled(
     cancelled: &mut oneshot::Receiver<()>,
-    handle: &CoreHandle,
     publication: impl Future<Output = zbus::Result<()>>,
-) -> bool {
-    let result = {
-        let publication = publication.fuse();
-        futures::pin_mut!(publication);
-        futures::select_biased! {
-            _ = cancelled.fuse() => None,
-            result = publication => Some(result),
-        }
-    };
-    match result {
-        Some(Ok(())) => true,
-        Some(Err(error)) => {
-            handle.report_mpris_status(format!("publisher stopped: {error}"));
-            tracing::warn!(error = %error, "mpris_publisher_stopped");
-            false
-        }
-        None => false,
+) -> zbus::Result<bool> {
+    let publication = publication.fuse();
+    futures::pin_mut!(publication);
+    futures::select_biased! {
+        _ = cancelled.fuse() => Ok(false),
+        result = publication => result.map(|()| true),
     }
 }
 
@@ -1358,13 +1359,12 @@ mod tests {
     #[test]
     fn publisher_cancellation_drops_pending_send_before_retirement_returns() {
         let (_directory, mut runtime) = runtime_fixture();
-        let handle = runtime.handle.clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
         let (cancel, mut cancelled) = oneshot::channel();
         let (polled, entered) = bounded(1);
         let publisher = runtime.test_executor().spawn(async move {
-            publish_until_cancelled(&mut cancelled, &handle, async move {
+            publish_until_cancelled(&mut cancelled, async move {
                 let _guard = guard;
                 polled.send(()).unwrap();
                 futures::future::pending::<zbus::Result<()>>().await
@@ -1373,7 +1373,7 @@ mod tests {
         });
         entered.recv_timeout(Duration::from_secs(5)).unwrap();
         cancel.send(()).unwrap();
-        assert!(!async_io::block_on(publisher));
+        assert!(!async_io::block_on(publisher).unwrap());
         assert!(dropped.load(Ordering::SeqCst));
         assert!(
             runtime
@@ -1392,40 +1392,15 @@ mod tests {
     }
 
     #[test]
-    fn publisher_failure_follows_connected_status_and_cancellation_wins_ready_error() {
-        let (_directory, mut runtime) = runtime_fixture();
-        let handle = &runtime.handle;
-        handle.report_mpris_status("Connected to desktop media controls".to_owned());
-        let (_cancel, mut cancelled) = oneshot::channel();
-        assert!(!async_io::block_on(publish_until_cancelled(
-            &mut cancelled,
-            handle,
-            async { Err(zbus::Error::Failure("test send failure".to_owned())) }
-        )));
-        let failure = "publisher stopped: test send failure";
-        wait_status(handle, failure);
+    fn publisher_cancellation_wins_ready_error() {
         let (cancel, mut cancelled) = oneshot::channel();
         cancel.send(()).unwrap();
-        assert!(!async_io::block_on(publish_until_cancelled(
-            &mut cancelled,
-            handle,
-            async {
+        assert!(
+            !async_io::block_on(publish_until_cancelled(&mut cancelled, async {
                 panic!("cancelled publication must not be polled");
-            }
-        )));
-        assert_eq!(
-            handle
-                .state(rivu_protocol::response::StateSections {
-                    system: true,
-                    ..Default::default()
-                })
-                .system
-                .unwrap()
-                .mpris_status,
-            failure
+            }))
+            .unwrap()
         );
-        runtime.control.request_shutdown().unwrap();
-        runtime.join().unwrap();
     }
 
     // These tests use an isolated session bus, never the user's desktop bus.
@@ -1765,13 +1740,22 @@ mod tests {
 
     #[test]
     fn publisher_panic_reports_before_artwork_retires_and_releases_bus_name() {
+        check_failed_publisher_retirement(true, "publisher stopped: publisher task panicked");
+    }
+
+    #[test]
+    fn publisher_error_retires_even_while_bus_is_connected() {
+        check_failed_publisher_retirement(false, "publisher stopped: test send failure");
+    }
+
+    fn check_failed_publisher_retirement(panics: bool, status: &str) {
         let bus = TestBus::start();
         let (directory, mut runtime) = runtime_fixture();
         set_enabled(&runtime.handle, true);
         let connection = bus.serve_root(AppHandle::new(&runtime, directory.path()));
         let retained = connection.clone();
         let (cancel, _cancelled) = oneshot::channel();
-        let (panic_notice, panicked) = oneshot::channel();
+        let (failure_notice, publisher_failure) = oneshot::channel();
         let (retiring, retirement_started) = oneshot::channel();
         let (release, released) = oneshot::channel();
         let artwork_cancelled = Arc::new(AtomicBool::new(false));
@@ -1784,24 +1768,32 @@ mod tests {
             .boxed(),
         };
         let publisher = runtime.test_executor().spawn(async move {
-            let publication = async { panic!("publisher panic regression") };
+            let publication = async {
+                if panics {
+                    panic!("publisher panic regression");
+                }
+                let (_cancel, mut cancelled) = oneshot::channel();
+                publish_until_cancelled(&mut cancelled, async {
+                    Err(zbus::Error::Failure("test send failure".into()))
+                })
+                .await?;
+                Ok(())
+            };
             let result = AssertUnwindSafe(publication).catch_unwind().await;
-            finish_publication(result, panic_notice, Some(load)).await;
+            finish_publication(result, failure_notice, Some(load)).await;
         });
         let mut service = Mpris {
             connection,
             cancel,
             publisher,
-            panicked: panicked.fuse(),
+            publisher_failure: publisher_failure.fuse(),
         };
         let failure = async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             service.failure(),
         ))
         .unwrap();
-        assert!(matches!(failure, ServiceFailure::PublisherPanicked));
-        // The worker can start retirement without an acknowledgement, but the
-        // controller must still report the panic before waiting for it to finish.
+        // The controller reports the failure before waiting for physical retirement.
         async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             retirement_started,
@@ -1812,10 +1804,7 @@ mod tests {
         let intent = Some((true, runtime.handle.mpris_service_state().enable_generation));
         let mut retirement = Box::pin(service.retire_failed(&runtime.handle, failure, intent));
         assert!(retirement.as_mut().now_or_never().is_none());
-        wait_status(
-            &runtime.handle,
-            "publisher stopped: publisher task panicked",
-        );
+        wait_status(&runtime.handle, status);
         assert!(!retained.is_closed());
         release
             .send(Err(zbus::Error::Failure("test completion".into())))
