@@ -459,7 +459,12 @@ async fn finish_publication(
         Ok(Ok(())) => (),
         Ok(Err(error)) => {
             tracing::warn!(error = %error, "mpris_publisher_stopped");
-            let _ = failure_notice.send(ServiceFailure::Publication(error));
+            // A socket write can fail before zbus's reader notices the disconnect.
+            let failure = match error {
+                zbus::Error::InputOutput(_) => ServiceFailure::Disconnected,
+                error => ServiceFailure::Publication(error),
+            };
+            let _ = failure_notice.send(failure);
         }
         Err(_) => {
             tracing::warn!("mpris_publisher_task_panicked");
@@ -1218,28 +1223,27 @@ mod tests {
         assert!(ack.is_success(), "{:?}", ack.error);
     }
 
+    #[track_caller]
     fn wait_status(handle: &CoreHandle, expected: &str) {
-        let changes = handle.subscribe_revisions(RevisionInterest::Sections(
-            rivu_protocol::response::StateSections::ALL,
-        ));
-        async_io::block_on(rivu_protocol::transport::timeout(
+        let sections = rivu_protocol::response::StateSections {
+            system: true,
+            ..Default::default()
+        };
+        let changes = handle.subscribe_revisions(RevisionInterest::Sections(sections));
+        let status = || handle.state(sections).system.unwrap().mpris_status;
+        let result = async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
             async {
-                while handle
-                    .state(rivu_protocol::response::StateSections {
-                        system: true,
-                        ..Default::default()
-                    })
-                    .system
-                    .unwrap()
-                    .mpris_status
-                    != expected
-                {
+                while status() != expected {
                     changes.recv().await.unwrap();
                 }
             },
-        ))
-        .unwrap();
+        ));
+        assert!(
+            result.is_ok(),
+            "timed out waiting for {expected:?}; got {:?}",
+            status()
+        );
     }
 
     struct Dropped(Arc<AtomicBool>);
