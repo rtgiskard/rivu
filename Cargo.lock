@@ -5375,6 +5375,7 @@ dependencies = [
  "event-listener",
  "futures-lite",
  "rivu-protocol",
+ "rivu-utils",
  "tempfile",
 ]
 

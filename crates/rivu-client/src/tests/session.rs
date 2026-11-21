@@ -25,6 +25,10 @@ fn playlist_test_response(total: usize) -> QueryResponse {
 
 #[test]
 fn client_session_reuses_connection_after_command_and_request_rejections() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::os::unix::net::UnixListener;
 
     let directory = socket_test_directory();
@@ -102,6 +106,10 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
 
 #[test]
 fn client_session_discards_partial_failed_response_before_next_explicit_request() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::{io::Write, os::unix::net::UnixListener};
 
     let directory = socket_test_directory();
@@ -178,6 +186,10 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
 
 #[test]
 fn cancelling_client_session_closes_pending_watch_with_partial_response_offered() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::{
         io::{Read, Write},
         os::unix::net::UnixListener,
@@ -217,6 +229,10 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response_offered(
 
 #[test]
 fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::{io::Read, os::unix::net::UnixListener};
     let directory = socket_test_directory();
     let listener =
@@ -264,6 +280,10 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
 
 #[test]
 fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::{
         io::{Read, Write},
         os::unix::net::UnixListener,
@@ -303,6 +323,10 @@ fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation
 
 #[test]
 fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::os::unix::net::UnixListener;
     let directory = socket_test_directory();
     let listener =
@@ -356,6 +380,10 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
 
 #[test]
 fn retained_query_uses_physical_request_and_returns_actual_reply() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::os::unix::net::UnixListener;
     let directory = socket_test_directory();
     let listener =
@@ -390,6 +418,10 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
 
 #[test]
 fn cancelling_retained_query_disconnects_its_physical_session() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     let directory = socket_test_directory();
@@ -414,6 +446,10 @@ fn cancelling_retained_query_disconnects_its_physical_session() {
 
 #[test]
 fn owner_cancel_during_handshake_skips_unsent_query_and_reuses_session() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use rivu_protocol::{
         query_tracking::QueryEpoch,
         response::{QueryError, ViewResponse},
@@ -475,6 +511,10 @@ fn owner_cancel_during_handshake_skips_unsent_query_and_reuses_session() {
 
 #[test]
 fn session_shutdown_disconnects_even_when_retained_query_owner_is_cancelled() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use std::{io::Read, os::unix::net::UnixListener};
 
     let directory = socket_test_directory();
@@ -499,6 +539,10 @@ fn session_shutdown_disconnects_even_when_retained_query_owner_is_cancelled() {
 
 #[test]
 fn owner_cancel_sends_identified_control_and_returns_the_physical_reply_before_the_next_request() {
+    if isolate_socket_test() {
+        return;
+    }
+
     use rivu_protocol::{
         query_tracking::QueryEpoch,
         response::{QueryError, QueryRevisions, ViewResponse},

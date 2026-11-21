@@ -14,4 +14,5 @@ futures-lite = "2"
 
 [dev-dependencies]
 rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
+rivu-utils = { path = "../rivu-utils", features = ["test-support"] }
 tempfile = "3.27"

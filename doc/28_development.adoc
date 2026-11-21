@@ -70,8 +70,9 @@ directory inodes so cleanup cannot recycle an address while a pre-exec child hol
 its listener. Rebind checks and Drop-driven EOF tests in binaries that spawn
 subprocesses must also run in a bounded single-test subprocess through
 `rivu_utils::test_support::run_in_subprocess`; directory pins do not prevent socket
-inheritance. The same runner bounds regressions that could block forever, such as
-opening a FIFO without a writer or joining a stuck worker: a thread-and-timeout
-wrapper cannot stop the blocked thread or its owner's destructor. A successful
-subprocess exit counts only if the child reached the test body.
+inheritance. Use the same runner for waits that could hang before their own
+deadline takes effect, such as fake-peer `accept()`, opening a writerless FIFO,
+or joining a stuck worker. The runner kills the private process group before
+reaping the test, so workers and private buses must stay in that group.
+A successful subprocess exit counts only if the child reached the test body.
 ====

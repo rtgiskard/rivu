@@ -600,8 +600,18 @@ mod tests {
         tempfile::tempdir_in(cache).unwrap()
     }
 
+    fn isolate_socket_test() -> bool {
+        // Includes accept before handshake and waits whose cancellation is
+        // itself under test. Socket I/O deadlines alone cannot bound these.
+        rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15))
+    }
+
     #[test]
     fn optimize_database_accepts_long_running_operation_reply() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::os::unix::net::UnixListener;
 
         let directory = socket_test_directory();
@@ -632,6 +642,10 @@ mod tests {
 
     #[test]
     fn command_timeout_is_unknown_and_next_request_is_not_a_replay() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use rivu_protocol::model::Command;
         use std::{io::Read, os::unix::net::UnixListener};
 
@@ -683,6 +697,10 @@ mod tests {
 
     #[test]
     fn handshake_and_encoding_failures_do_not_send_a_command() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use rivu_protocol::model::Command;
         use std::{io::Read, os::unix::net::UnixListener};
 
@@ -799,6 +817,10 @@ mod tests {
 
     #[test]
     fn bound_task_instance_mismatch_sends_neither_query_nor_cancel() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener};
 
         for cancel in [false, true] {
@@ -829,6 +851,10 @@ mod tests {
 
     #[test]
     fn cancelling_a_pending_handshake_never_sends_the_command() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener};
 
         let directory = socket_test_directory();
@@ -861,6 +887,10 @@ mod tests {
 
     #[test]
     fn cancelling_a_sent_command_is_unknown_and_never_replays_it() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener};
 
         let directory = socket_test_directory();
@@ -908,6 +938,10 @@ mod tests {
 
     #[test]
     fn cancelling_a_blocked_watch_wakes_the_session_and_closes_the_socket() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
 
         let directory = socket_test_directory();
@@ -943,6 +977,10 @@ mod tests {
     }
     #[test]
     fn cancelling_a_task_wait_closes_the_existing_session() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
         let directory = socket_test_directory();
         let listener =
@@ -977,6 +1015,10 @@ mod tests {
 
     #[test]
     fn task_wait_preserves_typed_error_but_disconnects_wrong_response() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use std::{io::Read, os::unix::net::UnixListener};
         let directory = socket_test_directory();
         let listener =
@@ -1017,6 +1059,10 @@ mod tests {
     }
     #[test]
     fn read_protocol_errors_reconnect_without_discarding_business_errors() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use rivu_protocol::response::{QueryError, QueryRevisions};
         use std::{io::Read, os::unix::net::UnixListener};
 
@@ -1076,6 +1122,10 @@ mod tests {
 
     #[test]
     fn conditional_reads_preserve_omitted_state_and_rebind_through_full_hello() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use rivu_protocol::model::{ConfigurationState, SystemState};
         use std::os::unix::net::UnixListener;
 
@@ -1259,6 +1309,10 @@ mod tests {
 
     #[test]
     fn task_wait_disconnects_for_wrong_id_or_nonterminal_outcome() {
+        if isolate_socket_test() {
+            return;
+        }
+
         use rivu_protocol::{
             model::{ScanPhase, ScanProgress, ScanTaskStatus, TaskTarget},
             response::TaskOutcome,
