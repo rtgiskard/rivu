@@ -11,7 +11,8 @@ import tempfile
 from unittest.mock import patch
 import unittest
 from runtime.worker import VERSION, deny_network, resample_exact, validate_request
-from common import MAX_REPORT_BYTES, RUNTIME_FILES, WorkerError, canonical_digest, digest, validate_artifacts, validate_manifest
+from bundle_fixture import bundle_fixture
+from common import MAX_REPORT_BYTES, WorkerError, canonical_digest, digest, validate_artifacts, validate_manifest
 from export import process_export
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,28 +20,6 @@ ROOT = Path(__file__).resolve().parents[2]
 def export_request():
     return {"version":1,"task_id":"test","operation":"speech","input_path":"/input.wav",
             "output_dir":"/new-output","model_manifest":"/manifest.json"}
-
-def bundle_fixture(base, operation="speech", model="MossFormer2_SE_48K", provenance=None):
-    """Current admission fixture with real sidecars but synthetic model metadata."""
-    import sys
-    runtime = base / "runtime"
-    runtime.mkdir(exist_ok=True)
-    for name in RUNTIME_FILES:
-        (runtime / name).write_bytes((Path(__file__).parent / "runtime" / name).read_bytes())
-    shared = base / "common.py"
-    shared.write_bytes((Path(__file__).parent / "common.py").read_bytes())
-    evidence = base / "weight-license.txt"
-    evidence.write_text("Factual test provenance; no permission grant.")
-    manifest = {"version":1, "operation":operation, "id":model, "packages":{"fixture":"1"},
-                "license_evidence":"weight-license.txt", "provenance":provenance or {},
-                "runtime":{"worker":str(runtime / "worker.py"), "interpreter":os.path.abspath(sys.executable),
-                           "interpreter_sha256":digest(sys.executable), "model_manifest":str(base / "manifest.json"),
-                           "worker_notice":"weight-license.txt", "cwd_independent":True},
-                "dependencies":{"fixture":{"version":"1", "notices":["weight-license.txt"],
-                    "license_expression":None, "license_classifiers":[], "notice_status":"test evidence"}},
-                "files":{str(path.relative_to(base)):digest(path) for path in [evidence, shared, *(runtime / name for name in RUNTIME_FILES)]}}
-    (base / "manifest.json").write_text(json.dumps(manifest))
-    return manifest
 
 class ProducerIdentityTests(unittest.TestCase):
     def make_sources(self, root, rate=8000):

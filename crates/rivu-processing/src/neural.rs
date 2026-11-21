@@ -696,10 +696,14 @@ fn run_model(
 }
 
 #[cfg(test)]
+mod subprocess_fixture;
+
+#[cfg(test)]
 mod tests {
+    use super::subprocess_fixture::{Fixture, MONO, STEREO, Worker, in_test_parent};
     use super::*;
+    use ModelOutputRetention::{BothStems, Speech, Vocals};
     use std::io::Cursor;
-    use std::path::{Path, PathBuf};
 
     #[test]
     fn readiness_cancellation_is_sticky_before_and_during_wait() {
@@ -916,58 +920,74 @@ mod tests {
 
     #[test]
     fn subprocess_success_preserves_pcm_and_maps_stems() {
-        subprocess_fixture(ProcessingOperation::Separate, 2, 8201, "success", None);
+        if in_test_parent() {
+            return;
+        }
+        Fixture::new(Worker::Wet("success"), BothStems, STEREO, 8201).assert_success();
     }
 
     #[test]
     fn subprocess_dry_reuses_input_storage_without_pcm_roundtrip() {
-        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(30)) {
+        if in_test_parent() {
             return;
         }
-        for channels in [1, 2] {
-            subprocess_fixture(
-                ProcessingOperation::Speech,
-                channels,
-                8201,
-                "dry-success",
-                None,
-            );
+        for layout in [MONO, STEREO] {
+            Fixture::new(Worker::RealDry, Speech, layout, 8201).assert_success();
         }
     }
 
     #[test]
     fn subprocess_dry_requires_valid_completion_and_successful_exit() {
-        for outcome in [
-            "dry-nonzero",
-            "dry-unexpected-pcm",
-            "dry-stream-output",
-            "dry-misaligned",
+        if in_test_parent() {
+            return;
+        }
+        for (worker, expected) in [
+            ("dry-nonzero", "Neural interpreter failed"),
+            (
+                "dry-unexpected-pcm",
+                "Unexpected PCM for retained dry input",
+            ),
+            (
+                "dry-stream-output",
+                "Missing or truncated neural output: speech",
+            ),
+            ("dry-misaligned", "Neural completion alignment mismatch"),
         ] {
-            subprocess_fixture(ProcessingOperation::Speech, 1, 37, outcome, None);
+            Fixture::new(Worker::Dry(worker), Speech, MONO, 37).assert_failure(expected);
         }
     }
 
     #[test]
     fn subprocess_failure_after_pcm_discards_unpublished_output() {
-        subprocess_fixture(
-            ProcessingOperation::Speech,
-            1,
-            8201,
-            "failure-after-pcm",
-            None,
-        );
+        if in_test_parent() {
+            return;
+        }
+        Fixture::new(Worker::Wet("failure-after-pcm"), Speech, MONO, 8201)
+            .assert_failure("fixture failure after PCM");
     }
 
     #[cfg(not(feature = "onnx"))]
     #[test]
     fn disabled_onnx_rejects_native_manifest_without_python_fallback() {
-        subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-disabled", None);
+        if in_test_parent() {
+            return;
+        }
+        let error = Fixture::new(Worker::NativeManifest, Speech, MONO, 1).rejection();
+        assert!(error.to_string().contains("onnx feature"), "{error:#}");
     }
 
     #[cfg(feature = "onnx")]
     #[test]
     fn enabled_onnx_rejects_invalid_native_manifest_without_python_fallback() {
-        subprocess_fixture(ProcessingOperation::Speech, 1, 1, "onnx-invalid", None);
+        if in_test_parent() {
+            return;
+        }
+        let error = Fixture::new(Worker::NativeManifest, Speech, MONO, 1).rejection();
+        // The native consumer must parse the manifest, rather than try Python.
+        assert!(
+            error.downcast_ref::<serde_json::Error>().is_some(),
+            "{error:#}"
+        );
     }
 
     #[cfg(feature = "onnx")]
@@ -1153,473 +1173,82 @@ mod tests {
 
     #[test]
     fn subprocess_complete_then_nonzero_exit_is_failure() {
-        subprocess_fixture(
-            ProcessingOperation::Speech,
-            1,
-            8201,
-            "complete-then-nonzero",
-            None,
-        );
+        if in_test_parent() {
+            return;
+        }
+        Fixture::new(Worker::Wet("complete-then-nonzero"), Speech, MONO, 8201)
+            .assert_failure("Neural interpreter failed");
     }
 
     #[test]
     fn subprocess_multi_window_duplex_backpressure_preserves_pcm() {
+        if in_test_parent() {
+            return;
+        }
         // More than the Linux maximum default pipe capacity in both directions;
         // the worker flushes each output window before reading the next input.
-        subprocess_fixture(ProcessingOperation::Speech, 1, 524_325, "success", None);
+        Fixture::new(Worker::Wet("success"), Speech, MONO, 524_325).assert_success();
     }
 
     #[test]
     fn neural_rejects_wrong_speakers_and_reversed_stereo_without_starting_worker() {
         use audio::Channel::*;
-        for (operation, layout) in [
-            (ProcessingOperation::Speech, vec![FrontLeft]),
-            (ProcessingOperation::Speech, vec![RearLeft, RearRight]),
-            (ProcessingOperation::Separate, vec![FrontRight, FrontLeft]),
+        if in_test_parent() {
+            return;
+        }
+        for (retain, layout) in [
+            (Speech, [FrontLeft].as_slice()),
+            (Speech, &[RearLeft, RearRight]),
+            (BothStems, &[FrontRight, FrontLeft]),
         ] {
-            subprocess_fixture(
-                operation,
-                layout.len() as u16,
-                1,
-                "unsupported-layout",
-                Some(Arc::from(layout)),
-            );
+            let error =
+                Fixture::new(Worker::Wet("unsupported-layout"), retain, layout, 1).rejection();
+            assert!(error.to_string().contains("speaker layout"), "{error:#}");
         }
     }
 
     #[test]
     fn subprocess_retains_only_requested_stems_with_a_single_stem_budget() {
-        for retain in [
-            ModelOutputRetention::Vocals,
-            ModelOutputRetention::Accompaniment,
-            ModelOutputRetention::BothStems,
-        ] {
-            subprocess_fixture_retaining(
-                ProcessingOperation::Separate,
-                2,
-                4096,
-                "retained-success",
-                None,
-                retain,
-            );
+        if in_test_parent() {
+            return;
+        }
+        for retain in [Vocals, ModelOutputRetention::Accompaniment, BothStems] {
+            Fixture::new(Worker::RetainedStems, retain, STEREO, 4096).assert_success();
         }
     }
 
     #[test]
     fn subprocess_validates_discarded_stem_and_completion() {
-        for failure in [
-            "nonfinite",
-            "infinity",
-            "unaligned",
-            "empty",
-            "wrong-stream",
-            "excess",
-            "truncated",
-            "missing-completion",
-            "completion-outputs",
-            "completion-frames",
-            "missing-provenance",
-            "after-completion",
-        ] {
-            subprocess_fixture_retaining(
-                ProcessingOperation::Separate,
-                2,
-                4096,
-                &format!("discard-{failure}"),
-                None,
-                ModelOutputRetention::Vocals,
-            );
+        if in_test_parent() {
+            return;
         }
-    }
-
-    fn subprocess_fixture(
-        operation: ProcessingOperation,
-        channels: u16,
-        frames: usize,
-        outcome: &str,
-        layout: Option<Arc<[audio::Channel]>>,
-    ) {
-        subprocess_fixture_retaining(
-            operation,
-            channels,
-            frames,
-            outcome,
-            layout,
-            if operation == ProcessingOperation::Speech {
-                ModelOutputRetention::Speech
-            } else {
-                ModelOutputRetention::BothStems
-            },
-        );
-    }
-
-    fn subprocess_fixture_retaining(
-        operation: ProcessingOperation,
-        channels: u16,
-        frames: usize,
-        outcome: &str,
-        layout: Option<Arc<[audio::Channel]>>,
-        retain: ModelOutputRetention,
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let worker = directory.path().join("pcm_worker.py");
-        let started = directory.path().join("worker-started");
-        // Requires python3 on PATH; only the standard library is used, not models.
-        std::fs::write(
-            &worker,
-            r#"import json, pathlib, signal, struct, sys
-pathlib.Path(__file__).with_name('worker-started').write_bytes(b'python worker entered')
-if sys.argv[1:] == ['--admission-probe']:
-    raise SystemExit(73)
-signal.alarm(10)  # A broken duplex exchange must fail rather than hang the suite.
-
-def read_frame():
-    header = sys.stdin.buffer.read(5)
-    assert len(header) == 5
-    kind, size = struct.unpack('<BI', header)
-    payload = sys.stdin.buffer.read(size)
-    assert len(payload) == size
-    return kind, payload
-
-def send(kind, payload):
-    sys.stdout.buffer.write(struct.pack('<BI', kind, len(payload)) + payload)
-
-assert sys.argv[1:] == ['--stream']
-kind, payload = read_frame()
-assert kind == 0
-request = json.loads(payload)
-assert request['version'] == 4
-assert request['sample_rate'] == 48000
-assert request['frames'] > 0
-speech = request['operation'] == 'speech'
-assert speech or request['operation'] == 'separate'
-channels = request['channels']
-assert channels in ((1, 2) if speech else (2,))
-outcome = request['model_manifest'].rsplit('/', 1)[-1]
-streams = [(17, 'speech', 1)] if speech else [(19, 'accompaniment', -1), (18, 'vocals', 1)]
-if speech and request['parameters']['wet_mix'] == 0:
-    kind, payload = read_frame()
-    assert kind == 2 and not payload, 'dry speech must not transport PCM'
-    assert sys.stdin.buffer.read() == b''
-    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
-        completed=request['frames'], total=request['frames'],
-        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
-    if outcome == 'dry-unexpected-pcm':
-        send(17, struct.pack('<f', 0))
-    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='complete',
-        sample_rate=request['sample_rate'], channels=channels,
-        frames=request['frames'] + (1 if outcome == 'dry-misaligned' else 0),
-        outputs=dict(speech=True if outcome == 'dry-stream-output' else 'input'),
-        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
-    sys.stdout.buffer.flush()
-    raise SystemExit(7 if outcome == 'dry-nonzero' else 0)
-send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
-    completed=0, total=request['frames'], model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
-sys.stdout.buffer.flush()
-pcm = bytearray()
-while True:
-    kind, payload = read_frame()
-    if kind == 2:
-        assert not payload
-        break
-    assert kind == 1
-    pcm.extend(payload)
-    values = struct.unpack('<%df' % (len(payload) // 4), payload)
-    for kind, name, gain in streams:
-        data = struct.pack('<%df' % len(values), *(gain * x for x in values))
-        if name == 'accompaniment':
-            if outcome == 'discard-nonfinite':
-                data = struct.pack('<f', float('nan')) + data[4:]
-            elif outcome == 'discard-infinity':
-                data = struct.pack('<f', float('inf')) + data[4:]
-            elif outcome == 'discard-unaligned':
-                data = data[:-1]
-            elif outcome == 'discard-empty':
-                send(kind, b'')
-            elif outcome == 'discard-wrong-stream':
-                kind = 17
-            elif outcome == 'discard-excess':
-                data += bytes(channels * 4)
-            elif outcome == 'discard-truncated':
-                data = data[:-channels * 4]
-        for offset in range(0, len(data), 4096):
-            send(kind, data[offset:offset + 4096])
-    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
-        completed=len(pcm) // (4 * channels), total=request['frames'],
-        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
-    sys.stdout.buffer.flush()
-assert sys.stdin.buffer.read() == b''
-expected = [((i % 17) - 8) / 4 for i in range(request['frames'] * channels)]
-assert pcm == struct.pack('<%df' % len(expected), *expected)
-if outcome == 'failure-after-pcm':
-    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='error',
-        code='inference', message='fixture failure after PCM')).encode())
-    sys.stdout.buffer.flush()
-    raise SystemExit(7)
-if outcome != 'discard-missing-completion':
-    outputs = {name: True for _, name, _ in streams}
-    if outcome == 'discard-completion-outputs':
-        outputs.pop('accompaniment')
-    model = dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64)
-    if outcome == 'discard-missing-provenance':
-        model.pop('sha256')
-    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='complete',
-        sample_rate=request['sample_rate'], channels=channels,
-        frames=request['frames'] + (1 if outcome == 'discard-completion-frames' else 0),
-        outputs=outputs, model=model)).encode())
-    if outcome == 'discard-after-completion':
-        send(19, bytes(channels * 4))
-sys.stdout.buffer.flush()
-if outcome == 'complete-then-nonzero':
-    raise SystemExit(7)
-"#,
-        )
-        .unwrap();
-        let rejected = matches!(
-            outcome,
-            "unsupported-layout" | "onnx-disabled" | "onnx-invalid"
-        );
-        if rejected {
-            // Exercise this exact interpreter/script before using absence of its marker.
-            // Also require the admission error below, so an interpreter failure or a
-            // child killed before Python executes cannot masquerade as valid rejection.
-            let probe = Command::new("python3")
-                .arg(&worker)
-                .arg("--admission-probe")
-                .env("PYTHONDONTWRITEBYTECODE", "1")
-                .status()
-                .expect("admission fixture requires python3 on PATH");
-            assert_eq!(probe.code(), Some(73));
-            assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
-            std::fs::remove_file(&started).unwrap();
-        }
-        let real_dry = outcome == "dry-success";
-        let model_id = if operation == ProcessingOperation::Speech {
-            "MossFormer2_SE_48K"
-        } else {
-            "melband_roformer_kim"
-        };
-        let (worker, interpreter, manifest, hash) = if real_dry {
-            // Use the same synthetic, provisioned bundle as the Python transport tests,
-            // but send the request and consume the real worker's events from Rust.
-            let setup = Command::new("python3")
-                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/audio_processing"))
-                .args(["-B", "-c", "from test_worker import bundle_fixture, canonical_digest, Path; import sys; print(canonical_digest(bundle_fixture(Path(sys.argv[1])))); print(sys.executable)"])
-                .arg(directory.path()).output().unwrap();
-            assert!(
-                setup.status.success(),
-                "{}",
-                String::from_utf8_lossy(&setup.stderr)
-            );
-            let stdout = String::from_utf8(setup.stdout).unwrap();
-            let (hash, interpreter) = stdout.trim_end().split_once('\n').unwrap();
+        for (worker, expected) in [
+            ("discard-nonfinite", "Nonfinite neural output"),
+            ("discard-infinity", "Nonfinite neural output"),
+            ("discard-unaligned", "Unaligned neural PCM frame"),
+            ("discard-empty", "Unaligned neural PCM frame"),
+            ("discard-wrong-stream", "Unexpected neural PCM stream"),
+            ("discard-excess", "Neural output exceeds source length"),
             (
-                directory.path().join("runtime/worker.py"),
-                PathBuf::from(interpreter),
-                directory.path().join("manifest.json"),
-                hash.to_owned(),
-            )
-        } else {
-            let path = directory.path().join(outcome);
-            let manifest = if matches!(outcome, "onnx-disabled" | "onnx-invalid") {
-                serde_json::json!({"backend":"onnx"})
-            } else {
-                serde_json::json!({"id":model_id})
-            };
-            std::fs::write(&path, manifest.to_string()).unwrap();
-            (worker, "python3".into(), path, "a".repeat(64))
-        };
-        let config = rivu_format::config::NeuralConfig {
-            speech_interpreter: interpreter.clone(),
-            separation_interpreter: interpreter,
-            worker,
-            speech_manifest: Some(manifest.clone()),
-            separation_manifest: Some(manifest),
-            speech_wet_mix: if outcome.starts_with("dry-") {
-                0.0
-            } else {
-                1.0
-            },
-            ..Default::default()
-        };
-        let mut budget = audio::PcmBudget::new(64 * 1024 * 1024);
-        let expected: Vec<f32> = (0..frames * usize::from(channels))
-            .map(|i| {
-                if outcome.starts_with("dry-") && i == 0 {
-                    -0.0
-                } else {
-                    ((i % 17) as f32 - 8.0) / 4.0
-                }
-            })
-            .collect();
-        let layout = layout.unwrap_or_else(|| {
-            if channels == 1 {
-                Arc::from([audio::Channel::FrontCenter])
-            } else {
-                Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight])
-            }
-        });
-        let build_input = |budget: &Arc<audio::PcmBudget>| {
-            let mut builder =
-                audio::PcmBuilder::new(48_000, Arc::clone(&layout), Arc::clone(budget)).unwrap();
-            builder.push(&expected).unwrap();
-            builder.finish().unwrap()
-        };
-        let mut input = build_input(&budget);
-        if outcome == "retained-success" {
-            // Admit only the source and the requested stems, including directory
-            // charges. Building the omitted stem and dropping it later cannot fit.
-            let count = retain.streams().into_iter().filter(|&keep| keep).count() as u64;
-            let limit = input.retained_bytes() * (1 + count);
-            drop(input);
-            budget = audio::PcmBudget::new(limit);
-            input = build_input(&budget);
-        }
-        let source_bytes = budget.used_bytes();
-        let (tx, rx) = async_channel::bounded(8);
-        let mut progress = ProgressReporter::new(&tx, 7);
-        progress.report(ProcessingPhase::Rendering, 0, None);
-        let mut prepared_provenance = ModelProvenance::default();
-        let outcome_result = match prepare(
-            operation,
-            &config,
-            input.sample_rate(),
-            input.layout(),
-            &mut prepared_provenance,
-            &AtomicBool::new(false),
-        ) {
-            Ok(model) => run(
-                ModelRequest {
-                    task_id: 7,
-                    operation,
-                    retain,
-                    input: &input,
-                    config: &config,
-                    budget: Arc::clone(&budget),
-                    cancel: &Cancellation::new().unwrap(),
-                },
-                model,
-                &mut progress,
+                "discard-truncated",
+                "Missing or truncated neural output: accompaniment",
             ),
-            Err(error) => ModelOutcome {
-                provenance: prepared_provenance,
-                result: Err(error),
-            },
-        };
-        let result = outcome_result.result;
-        let provenance = outcome_result.provenance;
-        if rejected {
-            let error = match result {
-                Ok(_) => panic!("rejected input must not publish PCM"),
-                Err(error) => error,
-            };
-            if outcome == "unsupported-layout" {
-                assert!(error.to_string().contains("speaker layout"), "{error:#}");
-            } else if outcome == "onnx-disabled" {
-                assert!(error.to_string().contains("onnx feature"), "{error:#}");
-            } else {
-                // The native consumer must parse the manifest, rather than try Python.
-                assert!(
-                    error.downcast_ref::<serde_json::Error>().is_some(),
-                    "{error:#}"
-                );
-            }
-            assert!(
-                !started.exists(),
-                "rejected input started the Python worker"
-            );
-            assert_eq!(rx.len(), 1);
-            assert_eq!(budget.used_bytes(), source_bytes);
-            return;
-        }
-        if !real_dry {
-            assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
-        }
-        assert_eq!(rx.len(), 2);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            super::super::Event::Progress {
-                phase: ProcessingPhase::Rendering,
-                ..
-            }
-        ));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            super::super::Event::Progress {
-                phase: ProcessingPhase::Processing,
-                ..
-            }
-        ));
-        if !matches!(outcome, "success" | "dry-success" | "retained-success") {
-            let error = match result {
-                Ok(_) => panic!("failed worker must not publish PCM"),
-                Err(error) => format!("{error:#}"),
-            };
-            let expected_error = match outcome {
-                "failure-after-pcm" => Some("fixture failure after PCM"),
-                "dry-nonzero" | "complete-then-nonzero" => Some("Neural interpreter failed"),
-                "dry-unexpected-pcm" => Some("Unexpected PCM for retained dry input"),
-                "dry-stream-output" => Some("Missing or truncated neural output: speech"),
-                "dry-misaligned" => Some("Neural completion alignment mismatch"),
-                _ => None,
-            };
-            if let Some(expected) = expected_error {
-                assert!(error.contains(expected), "{error}");
-            }
-            if let Some(failure) = outcome.strip_prefix("discard-") {
-                let expected = match failure {
-                    "nonfinite" | "infinity" => "Nonfinite neural output",
-                    "unaligned" | "empty" => "Unaligned neural PCM frame",
-                    "wrong-stream" => "Unexpected neural PCM stream",
-                    "excess" => "Neural output exceeds source length",
-                    "truncated" => "Missing or truncated neural output: accompaniment",
-                    "missing-completion" => "Neural worker exited without completion",
-                    "completion-outputs" => "Neural completion outputs mismatch",
-                    "completion-frames" => "Neural completion alignment mismatch",
-                    "missing-provenance" => "Missing model hash",
-                    "after-completion" => "Neural data after completion",
-                    _ => unreachable!(),
-                };
-                assert!(error.contains(expected), "{error}");
-            }
-            assert_eq!(budget.used_bytes(), source_bytes);
-            assert_eq!(provenance.id.as_deref(), Some(model_id));
-            assert_eq!(provenance.sha256.as_deref(), Some(hash.as_str()));
-            return;
-        }
-        let outputs =
-            result.expect("neural worker must complete successfully (requires python3 on PATH)");
-        if outcome == "dry-success" {
-            assert_eq!(
-                budget.used_bytes(),
-                source_bytes,
-                "dry output duplicated PCM storage"
-            );
-        }
-        assert_eq!(provenance.id.as_deref(), Some(model_id));
-        assert_eq!(provenance.sha256.as_deref(), Some(hash.as_str()));
-        if outcome == "retained-success" {
-            let count = retain.streams().into_iter().filter(|&keep| keep).count() as u64;
-            assert_eq!(budget.used_bytes(), source_bytes * (1 + count));
-        }
-        let retained = retain.streams();
-        for (pcm, present, gain) in [
-            (outputs.denoised, retained[0], 1.0),
-            (outputs.vocals, retained[1], 1.0),
-            (outputs.accompaniment, retained[2], -1.0),
+            (
+                "discard-missing-completion",
+                "Neural worker exited without completion",
+            ),
+            (
+                "discard-completion-outputs",
+                "Neural completion outputs mismatch",
+            ),
+            (
+                "discard-completion-frames",
+                "Neural completion alignment mismatch",
+            ),
+            ("discard-missing-provenance", "Missing model hash"),
+            ("discard-after-completion", "Neural data after completion"),
         ] {
-            assert_eq!(pcm.is_some(), present);
-            if let Some(pcm) = pcm {
-                assert_eq!(pcm.sample_rate(), 48_000);
-                assert_eq!(pcm.channels(), channels);
-                assert_eq!(pcm.layout(), input.layout());
-                assert_eq!(pcm.frames(), frames as u64);
-                let mut actual = vec![0.0; expected.len()];
-                assert_eq!(pcm.read_frames(0, &mut actual), frames);
-                for (actual, expected) in actual.iter().zip(&expected) {
-                    assert_eq!(actual.to_bits(), (expected * gain).to_bits());
-                }
-            }
+            Fixture::new(Worker::Wet(worker), Vocals, STEREO, 4096).assert_failure(expected);
         }
     }
 

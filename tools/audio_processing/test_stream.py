@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from runtime import worker
 import common
-from test_worker import bundle_fixture
+from bundle_fixture import bundle_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 
