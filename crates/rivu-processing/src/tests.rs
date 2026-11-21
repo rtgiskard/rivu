@@ -1,7 +1,7 @@
 use super::export::prepare_export;
 use super::render::ProgressReporter;
 use super::*;
-use crate::test_support::write_float_wav;
+use rivu_audio::test_support::write_float_wav;
 use std::time::Duration;
 
 fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
@@ -12,17 +12,10 @@ fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
 
 const PCM: [f32; 4] = [0.125, -0.25, 0.5, 0.0];
 
-fn bounded(run: impl FnOnce() + Send + 'static) {
-    let (completed, receive) = std::sync::mpsc::channel();
-    let worker = thread::spawn(move || {
+fn bounded(run: impl FnOnce()) {
+    if !rivu_utils::test_support::run_in_subprocess(Duration::from_secs(10)) {
         run();
-        completed.send(()).unwrap();
-    });
-    // A regression that blocks admission or shutdown must fail, not hang the suite.
-    receive
-        .recv_timeout(Duration::from_secs(10))
-        .expect("processing admission or shutdown blocked");
-    worker.join().unwrap();
+    }
 }
 
 fn next_event(service: &mut Service) -> Event {
@@ -64,7 +57,9 @@ fn source_fixture(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source.wav");
     write_float_wav(&path, channels, sample_rate, samples).unwrap();
-    let mut track = crate::test_support::artwork_track(path);
+    let mut track = rivu_protocol::test_support::artwork_track(path);
+    track.channels = channels;
+    track.sample_rate = sample_rate;
     track.bits_per_sample = Some(32);
     let config = Arc::new(Config::default());
     (directory, track, config)
@@ -414,38 +409,37 @@ fn shutdown_keeps_prepared_hybrid_nodes_when_the_offline_prefix_is_cancelled() {
 
 #[test]
 fn standalone_profile_rejects_empty_frame_and_out_of_source_selections() {
-    let (_directory, mut service, track, _) = fixture();
-    let mut config = Config::default();
-    config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
-    config.denoise.fft_size = 256;
-    let config = Arc::new(config);
-    for selection in [
-        NoiseSelection {
-            start_seconds: 0.0,
-            end_seconds: 0.5 / 8_000.0,
-        },
-        NoiseSelection {
-            start_seconds: 0.0,
-            end_seconds: 5.0 / 8_000.0,
-        },
-        NoiseSelection {
-            start_seconds: 5.0 / 8_000.0,
-            end_seconds: 6.0 / 8_000.0,
-        },
-    ] {
-        service
-            .start(
-                track.clone(),
-                Arc::clone(&config),
-                ProcessingOperation::Denoise,
-                Some(selection),
-            )
-            .unwrap();
-        loop {
-            if let Event::Finished { result, .. } = next_event(&mut service) {
-                service.finish_task(service.active_id().unwrap()).unwrap();
-                assert!(result.is_err(), "invalid selection must not publish PCM");
-                break;
+    let (_directory, track, _) = source_fixture(1, 8_000, PCM);
+    let mut service = Service::new();
+    // Wet zero bypasses denoising but must still validate the profile frames.
+    for wet in [1.0, 0.0] {
+        let mut config = Config::default();
+        config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
+        config.denoise.fft_size = 256;
+        config.denoise.wet = wet;
+        let config = Arc::new(config);
+        for (start, end) in [(0.0, 0.5), (0.0, 5.0), (5.0, 6.0)] {
+            service
+                .start(
+                    track.clone(),
+                    Arc::clone(&config),
+                    ProcessingOperation::Denoise,
+                    Some(NoiseSelection {
+                        start_seconds: start / 8_000.0,
+                        end_seconds: end / 8_000.0,
+                    }),
+                )
+                .unwrap();
+            loop {
+                match next_event(&mut service) {
+                    Event::Progress { .. } => {}
+                    Event::Finished { result, .. } => {
+                        service.finish_task(service.active_id().unwrap()).unwrap();
+                        assert!(result.is_err(), "wet {wet}, {start}..{end}");
+                        break;
+                    }
+                    _ => panic!("standalone denoise leaked graph events"),
+                }
             }
         }
     }
@@ -518,43 +512,8 @@ fn standalone_native_tail_preserves_operation_outputs_and_single_pcm_budget() {
     }
 }
 
-#[test]
-fn standalone_wet_zero_still_validates_profile_source_frames() {
-    let (_directory, mut service, track, _) = fixture();
-    let mut config = Config::default();
-    config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Profile;
-    config.denoise.fft_size = 256;
-    config.denoise.wet = 0.0;
-    let config = Arc::new(config);
-    for end in [0.5, 5.0] {
-        service
-            .start(
-                track.clone(),
-                Arc::clone(&config),
-                ProcessingOperation::Denoise,
-                Some(NoiseSelection {
-                    start_seconds: 0.0,
-                    end_seconds: end / 8_000.0,
-                }),
-            )
-            .unwrap();
-        loop {
-            match next_event(&mut service) {
-                Event::Progress { .. } => {}
-                Event::Finished { result, .. } => {
-                    service.finish_task(service.active_id().unwrap()).unwrap();
-                    assert!(result.is_err());
-                    break;
-                }
-                _ => panic!("standalone denoise leaked graph events"),
-            }
-        }
-    }
-}
-
-fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
-    let mut config = Config::default();
-    let graph = &mut config.processing_graph;
+pub(super) fn chain(kinds: Vec<GraphNodeKind>) -> ProcessingGraph {
+    let mut graph = ProcessingGraph::default();
     graph.edges.clear();
     let mut from = GraphPort { node: 1, port: 0 };
     for (index, kind) in kinds.into_iter().enumerate() {
@@ -573,7 +532,14 @@ fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
         from,
         to: GraphPort { node: 2, port: 0 },
     });
-    Arc::new(config)
+    graph
+}
+
+fn graph_config(kinds: Vec<GraphNodeKind>) -> Arc<Config> {
+    Arc::new(Config {
+        processing_graph: chain(kinds),
+        ..Default::default()
+    })
 }
 
 fn completed_graph(
@@ -971,19 +937,11 @@ fn failed_prepared_model_task(
     }
 }
 
-#[test]
-fn model_preparation_provenance_survives_later_graph_preparation_failure() {
-    let (directory, track, _) = preparation_fixture();
-    // Preparation must fail before source allocation, and no interpreter exists.
-    let mut service = Service::with_memory_limit(1);
-    let config = graph_config(vec![
-        GraphNodeKind::Speech {
-            config: preparation_only_model(directory.path(), "prepared-first", "python"),
-        },
-        GraphNodeKind::Speech {
-            config: preparation_only_model(directory.path(), "rejected-second", "unsupported"),
-        },
-    ]);
+fn failed_prepared_graph(
+    service: &mut Service,
+    track: Track,
+    config: Arc<Config>,
+) -> (ProcessingTaskStatus, Vec<GraphNodeStatus>) {
     let task = service
         .start_graph(
             track,
@@ -998,7 +956,44 @@ fn model_preparation_provenance_survives_later_graph_preparation_failure() {
             },
         )
         .unwrap();
-    let (status, nodes) = failed_prepared_model_task(&mut service, task);
+    failed_prepared_model_task(service, task)
+}
+
+fn failed_prepared_node<'a>(
+    status: &'a ProcessingTaskStatus,
+    nodes: &[GraphNodeStatus],
+    node: u64,
+    id: &str,
+) -> &'a GraphNodeStatus {
+    let prepared = nodes.iter().find(|entry| entry.node == node).unwrap();
+    assert_eq!(prepared.phase, ProcessingPhase::Queued);
+    assert_eq!(prepared.model_id.as_deref(), Some(id));
+    let terminal = status
+        .graph_nodes
+        .iter()
+        .find(|entry| entry.node == node)
+        .unwrap();
+    assert_eq!(terminal.phase, ProcessingPhase::Failed);
+    assert_eq!(terminal.model_id.as_deref(), Some(id));
+    // Python preparation knows the declared identity, not a verified hash.
+    assert!(terminal.model_sha256.is_none());
+    terminal
+}
+
+#[test]
+fn model_preparation_provenance_survives_later_graph_preparation_failure() {
+    let (directory, track, _) = preparation_fixture();
+    // Preparation must fail before source allocation, and no interpreter exists.
+    let mut service = Service::with_memory_limit(1);
+    let config = graph_config(vec![
+        GraphNodeKind::Speech {
+            config: preparation_only_model(directory.path(), "prepared-first", "python"),
+        },
+        GraphNodeKind::Speech {
+            config: preparation_only_model(directory.path(), "rejected-second", "unsupported"),
+        },
+    ]);
+    let (status, nodes) = failed_prepared_graph(&mut service, track, config);
     assert!(
         status
             .error
@@ -1007,18 +1002,7 @@ fn model_preparation_provenance_survives_later_graph_preparation_failure() {
             .contains("Unsupported model backend")
     );
     for (node, id) in [(3, "prepared-first"), (4, "rejected-second")] {
-        let prepared = nodes.iter().find(|entry| entry.node == node).unwrap();
-        assert_eq!(prepared.phase, ProcessingPhase::Queued);
-        assert_eq!(prepared.model_id.as_deref(), Some(id));
-        let terminal = status
-            .graph_nodes
-            .iter()
-            .find(|entry| entry.node == node)
-            .unwrap();
-        assert_eq!(terminal.phase, ProcessingPhase::Failed);
-        assert_eq!(terminal.model_id.as_deref(), Some(id));
-        // Python preparation knows the declared identity, not a verified hash.
-        assert!(terminal.model_sha256.is_none());
+        failed_prepared_node(&status, &nodes, node, id);
     }
     assert!(
         status
@@ -1045,21 +1029,7 @@ fn model_preparation_provenance_survives_graph_decode_failure() {
             })
             .collect(),
     );
-    let task = service
-        .start_graph(
-            track,
-            config,
-            GraphRequest {
-                target: GraphPort { node: 2, port: 0 },
-                mode: GraphExecutionMode::Offline,
-                export_path: None,
-                source_run: None,
-                cached_output: None,
-                audio_export: None,
-            },
-        )
-        .unwrap();
-    let (status, nodes) = failed_prepared_model_task(&mut service, task);
+    let (status, nodes) = failed_prepared_graph(&mut service, track, config);
     assert!(
         status
             .error
@@ -1069,17 +1039,7 @@ fn model_preparation_provenance_survives_graph_decode_failure() {
     );
     assert_eq!(nodes.len(), 2);
     for (node, id) in [(3, "prepared-first"), (4, "prepared-second")] {
-        let prepared = nodes.iter().find(|entry| entry.node == node).unwrap();
-        assert_eq!(prepared.phase, ProcessingPhase::Queued);
-        assert_eq!(prepared.model_id.as_deref(), Some(id));
-        let terminal = status
-            .graph_nodes
-            .iter()
-            .find(|entry| entry.node == node)
-            .unwrap();
-        assert_eq!(terminal.phase, ProcessingPhase::Failed);
-        assert_eq!(terminal.model_id.as_deref(), Some(id));
-        assert!(terminal.model_sha256.is_none());
+        let terminal = failed_prepared_node(&status, &nodes, node, id);
         assert!(terminal.error.is_none());
     }
     assert!(status.model_id.is_none());
@@ -1630,31 +1590,39 @@ fn cached_export_cancelled_before_encoding_has_no_executed_nodes() {
     });
 }
 
+fn exhaust_failed_spawns<T: std::fmt::Debug>(
+    service: &mut Service,
+    mut start: impl FnMut(&mut Service) -> Result<T>,
+) -> std::sync::mpsc::Sender<()> {
+    let release = block_reclamation(service);
+    service.reclaimer.as_mut().unwrap().fail_spawns = true;
+    for _ in 0..64 {
+        let error = start(service).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected processing worker spawn failure")
+        );
+        assert!(service.active_id().is_none());
+    }
+    assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
+    service.reclaimer.as_mut().unwrap().fail_spawns = false;
+    release
+}
+
 #[test]
 fn failed_processing_spawns_do_not_consume_retirement_capacity() {
     bounded(|| {
         let (_directory, mut service, track, config) = fixture();
         let budget = Arc::clone(&service.budget);
-        let release = block_reclamation(&mut service);
-        service.reclaimer.as_mut().unwrap().fail_spawns = true;
-        for _ in 0..64 {
-            let error = service
-                .start(
-                    track.clone(),
-                    config.clone(),
-                    ProcessingOperation::Denoise,
-                    None,
-                )
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("injected processing worker spawn failure")
-            );
-            assert!(service.active_id().is_none());
-        }
-        assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
-        service.reclaimer.as_mut().unwrap().fail_spawns = false;
+        let release = exhaust_failed_spawns(&mut service, |service| {
+            service.start(
+                track.clone(),
+                config.clone(),
+                ProcessingOperation::Denoise,
+                None,
+            )
+        });
         let status = service
             .start(track, config, ProcessingOperation::Denoise, None)
             .unwrap();
@@ -1685,19 +1653,8 @@ fn failed_mix_spawns_do_not_consume_retirement_capacity() {
     bounded(|| {
         let (_directory, mut service, _track, _config) = fixture();
         let budget = Arc::clone(&service.budget);
-        let release = block_reclamation(&mut service);
-        service.reclaimer.as_mut().unwrap().fail_spawns = true;
-        for _ in 0..64 {
-            let error = service.start_mix(1, 7, 0.0, 0.0).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("injected processing worker spawn failure")
-            );
-            assert!(service.active_id().is_none());
-        }
-        assert_eq!(service.sender.len(), service.sender.capacity().unwrap());
-        service.reclaimer.as_mut().unwrap().fail_spawns = false;
+        let release =
+            exhaust_failed_spawns(&mut service, |service| service.start_mix(1, 7, 0.0, 0.0));
         service.start_mix(1, 7, 0.0, 0.0).unwrap();
         unblock_reclamation(&mut service, release);
         let path = match next_event(&mut service) {

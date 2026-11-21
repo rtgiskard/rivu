@@ -551,7 +551,8 @@ mod tests {
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn resampled_wav_finalization_preserves_empty_and_short_sources() {
-        if !audio::export_encoder_available(AudioExportFormat::Flac) {
+        // The WAV path needs only the runtime resampler, not any optional encoder.
+        if audio::ExportConverter::new(44_100, 4, 48_000, 4).is_err() {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
@@ -791,7 +792,8 @@ fn encoded_export_cancellation_discards_every_unpublished_file() {
             },
         };
         let cancel = AtomicBool::new(false);
-        let outcome = prepare_streaming_encoded_export(
+        let mut wrote = false;
+        let error = prepare_streaming_encoded_export(
             48_000,
             &[audio::Channel::FrontCenter],
             &destination,
@@ -799,11 +801,17 @@ fn encoded_export_cancellation_discards_every_unpublished_file() {
             &cancel,
             |writer| {
                 writer.write_frames(&[0.125; 8192])?;
+                wrote = true;
                 cancel.store(true, Ordering::Release);
                 Ok(())
             },
+        )
+        .unwrap_err();
+        assert!(
+            wrote,
+            "{format:?} failed before the post-write cancellation"
         );
-        assert!(outcome.is_err());
+        assert_eq!(error.to_string(), "Processing cancelled", "{format:?}");
         assert!(!destination.exists());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }

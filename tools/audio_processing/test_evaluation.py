@@ -32,6 +32,17 @@ else:
     from audio_quality.music_manifest import music_records
 
 
+def worker_with_source_hash(source_hash):
+    def worker(command, **kwargs):
+        request = json.loads(Path(command[-1]).read_text())
+        destination = Path(request["output_dir"])
+        destination.mkdir()
+        (destination / "result.json").write_text(json.dumps({} if source_hash is None else {"source_sha256":source_hash}))
+        event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
+        return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
+    return worker
+
+
 def export_evidence(request, outputs):
     return {"outputs":outputs, "export_request_sha256":export.common.canonical_digest(request),
             "output_sha256":{stem:quality.identity(path)["sha256"] for stem, path in outputs.items()}}
@@ -659,14 +670,7 @@ class EvaluationIdentityTests(unittest.TestCase):
             with self.subTest(source_hash=source_hash), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 _, _, argv = self.music_corpus(root)
-                def worker(command, **kwargs):
-                    request = json.loads(Path(command[-1]).read_text())
-                    destination = Path(request["output_dir"])
-                    destination.mkdir()
-                    (destination / "result.json").write_text(json.dumps({"source_sha256":source_hash}))
-                    event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":request["task_id"]}
-                    return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
-                with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run", side_effect=worker):
+                with patch.object(sys, "argv", argv), patch.object(evaluate.subprocess, "run", side_effect=worker_with_source_hash(source_hash)):
                     with self.assertRaisesRegex(ValueError, "worker input does not match"):
                         evaluate.main()
 
@@ -805,6 +809,15 @@ class PreparedQualityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         quality.evaluate(args)
 
+    def render_estimate(self, source, estimate, profile, mode, repeat, reference):
+        input_audio, rate = sf.read(source, always_2d=True)
+        if mode == "profile":
+            profile_audio, profile_rate = sf.read(profile[0], always_2d=True)
+            self.assertEqual(profile_rate, rate)
+            np.testing.assert_array_equal(profile_audio, input_audio - reference[:, None])
+        factor = {"stationary":1.0, "profile":0.75, "adaptive":0.5}[mode] - repeat * 0.125
+        sf.write(estimate, input_audio * factor, rate, subtype="FLOAT")
+
     def test_classical_modes_share_the_pair_and_score_each_final_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -826,18 +839,12 @@ class PreparedQualityTests(unittest.TestCase):
             def render(command, **kwargs):
                 _, source, estimate, config_path, *profile = command
                 config = json.loads(Path(config_path).read_text())
-                input_audio, rate = sf.read(source, always_2d=True)
-                if config["mode"] == "profile":
-                    profile_audio, profile_rate = sf.read(profile[0], always_2d=True)
-                    self.assertEqual(profile_rate, rate)
-                    np.testing.assert_array_equal(profile_audio, input_audio - reference[:, None])
                 repeat = int(Path(estimate).stem.rsplit("-", 1)[1])
-                factor = {"stationary":1.0, "profile":0.75, "adaptive":0.5}[config["mode"]] - repeat * 0.125
-                sf.write(estimate, input_audio * factor, rate, subtype="FLOAT")
+                self.render_estimate(source, estimate, profile, config["mode"], repeat, reference)
                 if Path(source) == noisy_path:
                     # Scoring and the oracle profile must use the same loaded reference,
                     # not a later file version with a newly attached identity.
-                    sf.write(ref_path, reference * 0.5, rate, subtype="FLOAT")
+                    sf.write(ref_path, reference * 0.5, 8000, subtype="FLOAT")
                 return subprocess.CompletedProcess(command, 0, json.dumps({"core_seconds":repeat + 1}), "")
             argv = ["run_classical.py", "--binary", str(binary), "--corpus", str(corpus),
                     "--output", str(root / "results"), "--repeats", "2"]
@@ -904,14 +911,8 @@ class PreparedQualityTests(unittest.TestCase):
                     if profile:
                         self.assertNotIn(profile[0], profiles)
                         profiles.add(profile[0])
-                input_audio, rate = sf.read(source, always_2d=True)
-                if config["mode"] == "profile":
-                    profile_audio, profile_rate = sf.read(profile[0], always_2d=True)
-                    self.assertEqual(profile_rate, rate)
-                    np.testing.assert_array_equal(profile_audio, input_audio - reference_by_source[source][:, None])
                 self.assertFalse(Path(estimate).exists())
-                factor = {"stationary":1.0, "profile":0.75, "adaptive":0.5}[config["mode"]] - repeat * 0.125
-                sf.write(estimate, input_audio * factor, rate, subtype="FLOAT")
+                self.render_estimate(source, estimate, profile, config["mode"], repeat, reference_by_source[source])
                 outputs[estimate] = quality.identity(estimate)
                 return subprocess.CompletedProcess(command, 0, json.dumps({"core_seconds":repeat + 1}), "")
             with patch.object(sys, "argv", argv), patch.object(run_classical.subprocess, "run", side_effect=render), patch("builtins.print"):
@@ -1006,14 +1007,7 @@ class BenchmarkRepeatTests(unittest.TestCase):
             with self.subTest(source_hash=source_hash), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 _, argv = self.benchmark_inputs(root)
-                def worker(command, **kwargs):
-                    request = json.loads(Path(command[-1]).read_text())
-                    destination = Path(request["output_dir"])
-                    destination.mkdir()
-                    (destination / "result.json").write_text(json.dumps({"source_sha256":source_hash}))
-                    event = {"version":export.worker.EVENT_VERSION, "type":"complete", "task_id":"identity"}
-                    return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
-                with patch.object(sys, "argv", argv), patch.object(benchmark.subprocess, "run", side_effect=worker):
+                with patch.object(sys, "argv", argv), patch.object(benchmark.subprocess, "run", side_effect=worker_with_source_hash(source_hash)):
                     with self.assertRaisesRegex(ValueError, "worker input does not match"):
                         benchmark.main()
 

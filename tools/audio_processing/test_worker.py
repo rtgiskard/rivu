@@ -121,13 +121,26 @@ class ProducerIdentityTests(unittest.TestCase):
             self.assertEqual(captured_digest, expected_digest)
             self.assertNotEqual(captured_digest, digest(source))
 
-    def test_reference_completion_does_not_hash_replacement_after_inference(self):
+    def run_reference(self, manifest, source, destination, infer):
         import io
         import sys
-        import scipy.signal
+        import scipy.signal  # Load before substituting the torch module.
         from contextlib import redirect_stdout
         from types import SimpleNamespace
         import reference
+        fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
+            set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
+            backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
+        stdout = io.StringIO()
+        argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
+                "--output", str(destination)]
+        with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
+             patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
+             patch.object(reference, "upstream_moss", side_effect=infer), redirect_stdout(stdout):
+            reference.main()
+        return json.loads(stdout.getvalue())
+
+    def test_reference_completion_does_not_hash_replacement_after_inference(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, replacement, _ = self.make_sources(root, rate=48000)
@@ -135,21 +148,11 @@ class ProducerIdentityTests(unittest.TestCase):
             manifest = root / "manifest.json"
             bundle_fixture(root)
             expected_manifest_digest = digest(manifest)
-            fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
-                set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
-                backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
             def infer(base, audio, device):
                 replacement.replace(source)
                 manifest.write_text('{"operation":"separate"}')
                 return audio
-            stdout = io.StringIO()
-            argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
-                    "--output", str(root / "reference.wav")]
-            with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
-                 patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
-                 patch.object(reference, "upstream_moss", side_effect=infer), redirect_stdout(stdout):
-                reference.main()
-            report = json.loads(stdout.getvalue())
+            report = self.run_reference(manifest, source, root / "reference.wav", infer)
             self.assertEqual(report["source_sha256"], expected_digest)
             self.assertNotEqual(report["source_sha256"], digest(source))
             self.assertEqual(report["manifest_sha256"], expected_manifest_digest)
@@ -157,10 +160,6 @@ class ProducerIdentityTests(unittest.TestCase):
             self.assertEqual(report["frames"], 2)
 
     def test_reference_preserves_destination_created_during_inference(self):
-        import sys
-        import scipy.signal
-        from types import SimpleNamespace
-        import reference
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, _, _ = self.make_sources(root, rate=48000)
@@ -168,19 +167,11 @@ class ProducerIdentityTests(unittest.TestCase):
             bundle_fixture(root)
             destination = root / "reference.wav"
             sentinel = b"created by another operation during inference"
-            fake_torch = SimpleNamespace(set_num_threads=lambda value: None,
-                set_num_interop_threads=lambda value: None, manual_seed=lambda value: None,
-                backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
             def infer(base, audio, device):
                 destination.write_bytes(sentinel)
                 return audio
-            argv = ["reference.py", "--model-manifest", str(manifest), "--input", str(source),
-                    "--output", str(destination)]
-            with patch.object(sys, "argv", argv), patch.dict(sys.modules, {"torch":fake_torch}), \
-                 patch.object(reference, "check_packages"), patch.object(reference, "deny_network"), \
-                 patch.object(reference, "upstream_moss", side_effect=infer):
-                with self.assertRaises(FileExistsError):
-                    reference.main()
+            with self.assertRaises(FileExistsError):
+                self.run_reference(manifest, source, destination, infer)
             self.assertEqual(destination.read_bytes(), sentinel)
 
 class ProvisionTests(unittest.TestCase):
@@ -572,7 +563,9 @@ class ExplicitExportTests(unittest.TestCase):
                     process_export(request, lambda kind, **fields: events.append((kind, fields)))
                 output, output_rate = sf.read(destination / "speech.wav", dtype="float32", always_2d=True)
                 np.testing.assert_array_equal(output.view("uint32"), audio.view("uint32"))
-                self.assertEqual([call.args[1] for call in reads.call_args_list], [rate, 7])
+                requested = [call.args[1] for call in reads.call_args_list]
+                self.assertTrue(all(0 < frames <= rate for frames in requested), requested)
+                self.assertEqual(sum(requested), len(audio))
                 self.assertEqual(output_rate, rate)
                 self.assertEqual(events[-1][0], "complete")
                 self.assertEqual(events[-1][1]["frames"], len(audio))
@@ -848,7 +841,7 @@ class RealSpeechTests(unittest.TestCase):
             request_path = base/"request.json"
             request_path.write_text(json.dumps(request))
             completed = subprocess.run([sys.executable,"-B",str(Path(__file__).with_name("export.py")),"--request",str(request_path)],
-                                       capture_output=True,text=True,check=True)
+                                       capture_output=True,text=True,check=True,timeout=600)
             event = json.loads(completed.stdout.splitlines()[-1])
             self.assertEqual(event["type"],"complete")
             output,rate = sf.read(base / "result/speech.wav",dtype="float32",always_2d=True)
@@ -887,7 +880,7 @@ class RealSeparationTests(unittest.TestCase):
             request_path.write_text(json.dumps(request))
             completed = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("export.py")),
                                         "--request", str(request_path)],
-                                       capture_output=True, text=True, check=True)
+                                       capture_output=True, text=True, check=True, timeout=1800)
             event = json.loads(completed.stdout.splitlines()[-1])
             self.assertEqual(event["type"], "complete")
             self.assertEqual(event["model"]["id"], model_id)

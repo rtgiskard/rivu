@@ -25,8 +25,6 @@ mod neural;
 mod reclaim;
 mod render;
 #[cfg(test)]
-mod test_support;
-#[cfg(test)]
 mod tests;
 
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;

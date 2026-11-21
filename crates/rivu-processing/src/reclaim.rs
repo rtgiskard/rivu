@@ -37,7 +37,7 @@ enum Work {
 pub(super) struct Reclaimer {
     sender: Option<mpsc::SyncSender<Work>>,
     worker: Option<JoinHandle<()>>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fail_spawns: bool,
 }
 
@@ -82,7 +82,7 @@ impl Reclaimer {
         Ok(Self {
             sender: Some(sender),
             worker: Some(worker),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             fail_spawns: false,
         })
     }
@@ -164,7 +164,7 @@ impl Reclaimer {
         work: impl FnOnce(Result<()>) -> T + Send + 'static,
     ) -> Result<(JoinHandle<T>, Release)> {
         let (sender, receiver) = mpsc::channel::<std::result::Result<(), String>>();
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if self.fail_spawns {
             return Err(std::io::Error::other("injected processing worker spawn failure").into());
         }

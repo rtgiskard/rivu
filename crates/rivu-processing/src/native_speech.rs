@@ -965,17 +965,20 @@ mod tests {
         let mut restored =
             StreamingResampler::new(RATE, 384000, 1, HOP as u64, (HOP * 24) as u64, &cancel)
                 .unwrap();
-        let mut emitted = 0;
+        let (mut calls, mut emitted) = (0, 0);
         let error = restored
             .push(&[0.25; HOP], &cancel, |position, block| {
                 assert_eq!(position, 0);
+                calls += 1;
                 emitted += block.len();
                 cancel.store(true, std::sync::atomic::Ordering::Release);
                 Ok(())
             })
             .unwrap_err();
         assert!(error.to_string().contains("cancelled"));
-        assert_eq!(emitted, 4096);
+        // One nonempty bounded batch, then cancellation before the full expansion.
+        assert_eq!(calls, 1);
+        assert!(emitted > 0 && emitted < HOP * (384000 / RATE as usize));
         assert!(restored.finish().is_err());
     }
 

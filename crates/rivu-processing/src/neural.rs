@@ -699,6 +699,7 @@ fn run_model(
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn readiness_cancellation_is_sticky_before_and_during_wait() {
@@ -745,10 +746,7 @@ mod tests {
 
     #[test]
     fn readiness_pidfd_waits_for_exit_after_both_output_eofs() {
-        if crate::test_support::run_in_subprocess(
-            "neural::tests::readiness_pidfd_waits_for_exit_after_both_output_eofs",
-            std::time::Duration::from_secs(20),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(20)) {
             return;
         }
         let cancel = Cancellation::new().unwrap();
@@ -923,6 +921,9 @@ mod tests {
 
     #[test]
     fn subprocess_dry_reuses_input_storage_without_pcm_roundtrip() {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(30)) {
+            return;
+        }
         for channels in [1, 2] {
             subprocess_fixture(
                 ProcessingOperation::Speech,
@@ -1045,10 +1046,7 @@ mod tests {
 
     #[test]
     fn prepare_rejects_nonregular_manifests_without_waiting_for_a_writer() {
-        if crate::test_support::run_in_subprocess(
-            "neural::tests::prepare_rejects_nonregular_manifests_without_waiting_for_a_writer",
-            std::time::Duration::from_secs(5),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(5)) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
@@ -1269,7 +1267,7 @@ mod tests {
         // Requires python3 on PATH; only the standard library is used, not models.
         std::fs::write(
             &worker,
-            format!(r#"import json, pathlib, signal, struct, sys
+            r#"import json, pathlib, signal, struct, sys
 pathlib.Path(__file__).with_name('worker-started').write_bytes(b'python worker entered')
 if sys.argv[1:] == ['--admission-probe']:
     raise SystemExit(73)
@@ -1290,7 +1288,7 @@ assert sys.argv[1:] == ['--stream']
 kind, payload = read_frame()
 assert kind == 0
 request = json.loads(payload)
-assert request['version'] == {WORKER_REQUEST_VERSION}
+assert request['version'] == 4
 assert request['sample_rate'] == 48000
 assert request['frames'] > 0
 speech = request['operation'] == 'speech'
@@ -1303,20 +1301,20 @@ if speech and request['parameters']['wet_mix'] == 0:
     kind, payload = read_frame()
     assert kind == 2 and not payload, 'dry speech must not transport PCM'
     assert sys.stdin.buffer.read() == b''
-    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
+    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
         completed=request['frames'], total=request['frames'],
-        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
     if outcome == 'dry-unexpected-pcm':
         send(17, struct.pack('<f', 0))
-    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
+    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='complete',
         sample_rate=request['sample_rate'], channels=channels,
         frames=request['frames'] + (1 if outcome == 'dry-misaligned' else 0),
         outputs=dict(speech=True if outcome == 'dry-stream-output' else 'input'),
-        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7 if outcome == 'dry-nonzero' else 0)
-send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
-    completed=0, total=request['frames'], model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
+    completed=0, total=request['frames'], model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
 sys.stdout.buffer.flush()
 pcm = bytearray()
 while True:
@@ -1346,26 +1344,26 @@ while True:
                 data = data[:-channels * 4]
         for offset in range(0, len(data), 4096):
             send(kind, data[offset:offset + 4096])
-    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='progress',
+    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='progress', stage='inference',
         completed=len(pcm) // (4 * channels), total=request['frames'],
-        model=dict(id='stdlib-fixture', sha256='fixture-hash'))).encode())
+        model=dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64))).encode())
     sys.stdout.buffer.flush()
 assert sys.stdin.buffer.read() == b''
 expected = [((i % 17) - 8) / 4 for i in range(request['frames'] * channels)]
 assert pcm == struct.pack('<%df' % len(expected), *expected)
 if outcome == 'failure-after-pcm':
-    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='error',
+    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='error',
         code='inference', message='fixture failure after PCM')).encode())
     sys.stdout.buffer.flush()
     raise SystemExit(7)
 if outcome != 'discard-missing-completion':
-    outputs = {{name: True for _, name, _ in streams}}
+    outputs = {name: True for _, name, _ in streams}
     if outcome == 'discard-completion-outputs':
         outputs.pop('accompaniment')
-    model = dict(id='stdlib-fixture', sha256='fixture-hash')
+    model = dict(id='MossFormer2_SE_48K' if speech else 'melband_roformer_kim', sha256='a'*64)
     if outcome == 'discard-missing-provenance':
         model.pop('sha256')
-    send(0, json.dumps(dict(version={WORKER_EVENT_VERSION}, task_id=request['task_id'], type='complete',
+    send(0, json.dumps(dict(version=4, task_id=request['task_id'], type='complete',
         sample_rate=request['sample_rate'], channels=channels,
         frames=request['frames'] + (1 if outcome == 'discard-completion-frames' else 0),
         outputs=outputs, model=model)).encode())
@@ -1374,33 +1372,69 @@ if outcome != 'discard-missing-completion':
 sys.stdout.buffer.flush()
 if outcome == 'complete-then-nonzero':
     raise SystemExit(7)
-"#),
+"#,
         )
         .unwrap();
-        // Exercise this exact interpreter/script before using absence of its marker.
-        // Also require the admission error below, so an interpreter failure or a
-        // child killed before Python executes cannot masquerade as valid rejection.
-        let probe = Command::new("python3")
-            .arg(&worker)
-            .arg("--admission-probe")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .status()
-            .expect("admission fixture requires python3 on PATH");
-        assert_eq!(probe.code(), Some(73));
-        assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
-        std::fs::remove_file(&started).unwrap();
-        let manifest = if matches!(outcome, "onnx-disabled" | "onnx-invalid") {
-            &b"{\"backend\":\"onnx\"}"[..]
+        let rejected = matches!(
+            outcome,
+            "unsupported-layout" | "onnx-disabled" | "onnx-invalid"
+        );
+        if rejected {
+            // Exercise this exact interpreter/script before using absence of its marker.
+            // Also require the admission error below, so an interpreter failure or a
+            // child killed before Python executes cannot masquerade as valid rejection.
+            let probe = Command::new("python3")
+                .arg(&worker)
+                .arg("--admission-probe")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .status()
+                .expect("admission fixture requires python3 on PATH");
+            assert_eq!(probe.code(), Some(73));
+            assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
+            std::fs::remove_file(&started).unwrap();
+        }
+        let real_dry = outcome == "dry-success";
+        let model_id = if operation == ProcessingOperation::Speech {
+            "MossFormer2_SE_48K"
         } else {
-            &b"{\"id\":\"stdlib-fixture\",\"sha256\":\"fixture-hash\"}"[..]
+            "melband_roformer_kim"
         };
-        std::fs::write(directory.path().join(outcome), manifest).unwrap();
+        let (worker, interpreter, manifest, hash) = if real_dry {
+            // Use the same synthetic, provisioned bundle as the Python transport tests,
+            // but send the request and consume the real worker's events from Rust.
+            let setup = Command::new("python3")
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/audio_processing"))
+                .args(["-B", "-c", "from test_worker import bundle_fixture, canonical_digest, Path; import sys; print(canonical_digest(bundle_fixture(Path(sys.argv[1])))); print(sys.executable)"])
+                .arg(directory.path()).output().unwrap();
+            assert!(
+                setup.status.success(),
+                "{}",
+                String::from_utf8_lossy(&setup.stderr)
+            );
+            let stdout = String::from_utf8(setup.stdout).unwrap();
+            let (hash, interpreter) = stdout.trim_end().split_once('\n').unwrap();
+            (
+                directory.path().join("runtime/worker.py"),
+                PathBuf::from(interpreter),
+                directory.path().join("manifest.json"),
+                hash.to_owned(),
+            )
+        } else {
+            let path = directory.path().join(outcome);
+            let manifest = if matches!(outcome, "onnx-disabled" | "onnx-invalid") {
+                serde_json::json!({"backend":"onnx"})
+            } else {
+                serde_json::json!({"id":model_id})
+            };
+            std::fs::write(&path, manifest.to_string()).unwrap();
+            (worker, "python3".into(), path, "a".repeat(64))
+        };
         let config = rivu_format::config::NeuralConfig {
-            speech_interpreter: "python3".into(),
-            separation_interpreter: "python3".into(),
+            speech_interpreter: interpreter.clone(),
+            separation_interpreter: interpreter,
             worker,
-            speech_manifest: Some(directory.path().join(outcome)),
-            separation_manifest: Some(directory.path().join(outcome)),
+            speech_manifest: Some(manifest.clone()),
+            separation_manifest: Some(manifest),
             speech_wet_mix: if outcome.starts_with("dry-") {
                 0.0
             } else {
@@ -1474,10 +1508,7 @@ if outcome == 'complete-then-nonzero':
         };
         let result = outcome_result.result;
         let provenance = outcome_result.provenance;
-        if matches!(
-            outcome,
-            "unsupported-layout" | "onnx-disabled" | "onnx-invalid"
-        ) {
+        if rejected {
             let error = match result {
                 Ok(_) => panic!("rejected input must not publish PCM"),
                 Err(error) => error,
@@ -1501,7 +1532,9 @@ if outcome == 'complete-then-nonzero':
             assert_eq!(budget.used_bytes(), source_bytes);
             return;
         }
-        assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
+        if !real_dry {
+            assert_eq!(std::fs::read(&started).unwrap(), b"python worker entered");
+        }
         assert_eq!(rx.len(), 2);
         assert!(matches!(
             rx.try_recv().unwrap(),
@@ -1522,8 +1555,16 @@ if outcome == 'complete-then-nonzero':
                 Ok(_) => panic!("failed worker must not publish PCM"),
                 Err(error) => format!("{error:#}"),
             };
-            if outcome == "failure-after-pcm" {
-                assert!(error.contains("fixture failure after PCM"), "{error}");
+            let expected_error = match outcome {
+                "failure-after-pcm" => Some("fixture failure after PCM"),
+                "dry-nonzero" | "complete-then-nonzero" => Some("Neural interpreter failed"),
+                "dry-unexpected-pcm" => Some("Unexpected PCM for retained dry input"),
+                "dry-stream-output" => Some("Missing or truncated neural output: speech"),
+                "dry-misaligned" => Some("Neural completion alignment mismatch"),
+                _ => None,
+            };
+            if let Some(expected) = expected_error {
+                assert!(error.contains(expected), "{error}");
             }
             if let Some(failure) = outcome.strip_prefix("discard-") {
                 let expected = match failure {
@@ -1542,12 +1583,12 @@ if outcome == 'complete-then-nonzero':
                 assert!(error.contains(expected), "{error}");
             }
             assert_eq!(budget.used_bytes(), source_bytes);
-            assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
-            assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
+            assert_eq!(provenance.id.as_deref(), Some(model_id));
+            assert_eq!(provenance.sha256.as_deref(), Some(hash.as_str()));
             return;
         }
-        let outputs = result
-            .expect("stdlib neural worker must complete successfully (requires python3 on PATH)");
+        let outputs =
+            result.expect("neural worker must complete successfully (requires python3 on PATH)");
         if outcome == "dry-success" {
             assert_eq!(
                 budget.used_bytes(),
@@ -1555,8 +1596,8 @@ if outcome == 'complete-then-nonzero':
                 "dry output duplicated PCM storage"
             );
         }
-        assert_eq!(provenance.id.as_deref(), Some("stdlib-fixture"));
-        assert_eq!(provenance.sha256.as_deref(), Some("fixture-hash"));
+        assert_eq!(provenance.id.as_deref(), Some(model_id));
+        assert_eq!(provenance.sha256.as_deref(), Some(hash.as_str()));
         if outcome == "retained-success" {
             let count = retain.streams().into_iter().filter(|&keep| keep).count() as u64;
             assert_eq!(budget.used_bytes(), source_bytes * (1 + count));

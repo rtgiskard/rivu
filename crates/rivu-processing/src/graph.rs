@@ -1312,28 +1312,8 @@ mod tests {
         );
     }
 
-    fn chain(kinds: Vec<GraphNodeKind>) -> ProcessingGraph {
-        let mut graph = ProcessingGraph::default();
-        graph.edges.clear();
-        let mut from = GraphPort { node: 1, port: 0 };
-        for (index, kind) in kinds.into_iter().enumerate() {
-            let id = index as u64 + 3;
-            graph.nodes.push(GraphNode {
-                id,
-                kind,
-                position: [0.0; 2],
-            });
-            let to = GraphPort { node: id, port: 0 };
-            graph.edges.push(GraphEdge { from, to });
-            from = to;
-            graph.next_id = id + 1;
-        }
-        graph.edges.push(GraphEdge {
-            from,
-            to: GraphPort { node: 2, port: 0 },
-        });
-        graph
-    }
+    use crate::tests::chain;
+
     fn pcm(samples: &[f32], budget: &Arc<audio::PcmBudget>) -> audio::PcmAudio {
         let mut builder = audio::PcmBuilder::new(
             48000,
@@ -2298,20 +2278,7 @@ mod tests {
     fn output_prefix_validates_the_opened_source_before_returning() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.wav");
-        let mut writer = hound::WavWriter::create(
-            &path,
-            hound::WavSpec {
-                channels: 1,
-                sample_rate: 48000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )
-        .unwrap();
-        for _ in 0..2048 {
-            writer.write_sample(0.125_f32).unwrap();
-        }
-        writer.finalize().unwrap();
+        rivu_audio::test_support::write_float_wav(&path, 1, 48_000, [0.125; 2048]).unwrap();
         let cancel = AtomicBool::new(false);
         let renderer = audio::SourceRenderer::open(
             &path,

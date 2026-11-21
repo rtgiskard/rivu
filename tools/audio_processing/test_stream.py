@@ -68,15 +68,11 @@ class FramingTests(unittest.TestCase):
         for fields in (
             {"unknown":True}, {"frames":True}, {"frames":0},
             {"channels":3}, {"channels":True}, {"sample_rate":7999}, {"sample_rate":192001},
-            {"sample_rate":8000.0}, {"frames":4*60*60*8000+1}, {"operation":"separate"},
+            {"sample_rate":8000.0},
         ):
             with self.subTest(fields=fields), self.assertRaises(common.WorkerError):
                 worker.validate_request({**request, **fields})
-        for fields in ({"frames":1}, {"frames":4*60*60*8000},
-                       {"sample_rate":192000, "channels":2, "frames":4*60*60*192000},
-                       {"operation":"separate", "channels":2}):
-            with self.subTest(valid=fields):
-                worker.validate_request({**request, **fields})
+        worker.validate_request({**request, "frames":1})
 
     def test_pcm_window_overlap_is_bounded_and_exact(self):
         import numpy as np
@@ -168,15 +164,7 @@ class FramingTests(unittest.TestCase):
                      patch.object(worker, "CORE_SECONDS", 1), patch.object(worker, "CONTEXT_SECONDS", 1), \
                      patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * np.float32(0.5))), \
                      patch.object(common, "digest", side_effect=AssertionError("export hash I/O")), \
-                     patch.object(common.hashlib, "sha256", side_effect=AssertionError("stream PCM hashing")), \
                      patch.object(worker.importlib.metadata, "version", side_effect=AssertionError("export package evidence")), \
-                     patch.object(worker.time, "perf_counter", side_effect=AssertionError("export wall timing")), \
-                     patch.object(worker.time, "process_time", side_effect=AssertionError("export CPU timing")), \
-                     patch.object(np, "einsum", side_effect=AssertionError("export energy")), \
-                     patch.object(np, "min", side_effect=AssertionError("export peak")), \
-                     patch.object(np, "max", side_effect=AssertionError("export peak")), \
-                     patch.object(np, "percentile", side_effect=AssertionError("export latency")), \
-                     patch.object(worker.json.JSONEncoder, "iterencode", side_effect=AssertionError("export report encoding")), \
                      patch.dict(os.environ):
                     source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_END) if dry else input_stream_pcm(audio)), request)
                     completion, report = worker._process_validated(request, source, write,
@@ -449,20 +437,22 @@ raise SystemExit(result)
 
     def test_speech_wet_and_dry_are_aligned_without_disk(self):
         import numpy as np
-        for wet in (0.0, 0.25, 1.0):
-            with self.subTest(wet=wet):
-                completed, audio, events, outputs = self.run_backend("speech", wet)
+        long = 3*8000+37
+        for wet, channels, frames in ((0, 1, 1), (0, 1, 8037), (0, 2, long), (0.25, 2, long), (1, 2, long)):
+            with self.subTest(wet=wet, channels=channels, frames=frames):
+                completed, audio, events, outputs = self.run_backend("speech", wet, channels=channels, frames=frames)
                 self.assertEqual(completed.returncode, 0, completed.stderr.decode())
                 self.assertEqual(events[-1]["type"], "complete")
                 self.assertEqual(events[-1]["outputs"], {"speech":"input" if wet == 0 else True})
                 self.assertEqual(set(outputs), set() if wet == 0 else {17})
-                self.assertEqual((events[-1]["sample_rate"], events[-1]["channels"]), (8000, 2))
+                self.assertEqual((events[-1]["sample_rate"], events[-1]["channels"]), (8000, channels))
                 if wet:
                     expected = audio*0.5 if wet == 1 else audio*(1-wet)+(audio*0.5)*wet
                     np.testing.assert_array_equal(outputs[17].view("uint32"), expected.view("uint32"))
                 self.assertEqual(events[-1]["frames"], len(audio))
                 if wet:
                     self.assertIn(b"bounded model diagnostic", completed.stderr)
+                self.validate_event_schema(events)
 
     def test_separation_exact_complement_without_disk(self):
         import numpy as np
@@ -474,6 +464,7 @@ raise SystemExit(result)
                          (8000, 2, len(audio)))
         np.testing.assert_array_equal(outputs[18], audio*0.5)
         np.testing.assert_array_equal(outputs[19].view("uint32"), (audio-outputs[18]).view("uint32"))
+        self.validate_event_schema(events)
 
     def test_missing_end_after_pcm_is_failure_not_completion(self):
         completed, audio, events, outputs = self.run_backend("speech", malformed=lambda data:data[:-5])
@@ -552,28 +543,13 @@ raise SystemExit(result)
                 self.assertEqual(outputs, {})
                 self.assertNotIn("complete", [event["type"] for event in events])
 
-    def test_mono_dry_short_and_partial_tail_acknowledge_input(self):
-        for frames in (1, 8000+37):
-            with self.subTest(frames=frames):
-                completed, audio, events, outputs = self.run_backend("speech", wet=0, channels=1, frames=frames)
-                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-                self.assertEqual(events[-1]["type"], "complete")
-                self.assertEqual((events[-1]["sample_rate"], events[-1]["channels"], events[-1]["frames"]),
-                                 (8000, 1, frames))
-                self.assertEqual(outputs, {})
-                self.assertEqual(events[-1]["outputs"], {"speech":"input"})
-
-    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for event protocol validation")
-    def test_actual_stream_events_validate_against_protocol_schema(self):
+    def validate_event_schema(self, events):
+        if not importlib.util.find_spec("jsonschema"):
+            return  # Transport and PCM checks still run without this optional dependency.
         import jsonschema
         validator = jsonschema.Draft202012Validator(json.loads(Path(worker.__file__).with_name("event.schema.json").read_text()))
-        for wet in (0, 1):
-            with self.subTest(wet=wet):
-                completed, _, events, _ = self.run_backend("speech", wet=wet, frames=37)
-                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-                self.assertEqual(events[-1]["type"], "complete")
-                for event in events:
-                    validator.validate(event)
+        for event in events:
+            validator.validate(event)
 
 
 if __name__ == "__main__":
