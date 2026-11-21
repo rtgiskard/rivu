@@ -22,7 +22,7 @@
 ## Validation and Evidence
 
 - For Rust source changes, MUST run `make lint` and relevant existing behavior tests; use a throwaway behavior check if no suitable test exists
-- `make lint` checks all features, including font embedding; [Makefile](Makefile) defines the checks and [readme.adoc](readme.adoc) documents build and font prerequisites
+- `make lint` checks all features, including font embedding; see [Makefile](Makefile) for the checks, and [Build and install](doc/00_getting_started.adoc#build-and-install) and [Font embedding](doc/00_getting_started.adoc#font-embedding) for prerequisites
 - For build configuration or dependency changes, choose checks for the affected packages and features; build the relevant artifacts when acceptance depends on linking or release behavior
 - When feature behavior or conditional compilation changes, MUST validate affected enabled and disabled combinations; all-features checks miss disabled branches
 - For documentation-only changes, check content, links, and command consistency; no lint or build is required

@@ -7,9 +7,10 @@ directory); path overrides are described in
 link:00_getting_started.adoc#files-and-data-directories[Files and data directories].
 A missing file uses defaults. The optional top-level `schema_version` defaults
 to the current schema; see <<configuration-schema,Configuration schema>>.
-Omitted setting groups and fields use their defaults. Unreadable files, malformed
-TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
-invalid values are errors, not a reason to fall back to defaults.
+Omitted setting groups and fields use their defaults where omission is allowed.
+A supplied record or variant must still include its required fields. Unreadable
+files, malformed TOML, unknown keys, misplaced fields, unsupported explicit
+schema versions, and invalid values are errors, not a reason to use defaults.
 Paths are literal: `~` and environment variables are not expanded.
 
 Use Settings to change the running instance, then Apply to save. To edit TOML
@@ -60,27 +61,26 @@ enabled = true
 
 |Layouts and panel-instance preferences / `layout.json`
 |Layout edits, panel-settings Apply and layout selection update desktop-session memory only.
-|Explicit Sync layouts to file, or orderly exit of the desktop process when its last window closes.
-|The last window flushes the final layout and ends the desktop event loop; the Core service continues. A new desktop process loads the persisted collection.
-|Unsaved desktop-session edits can be lost. Failed input is protected from replacement on ordinary exit; see link:05_layout.adoc#layout[Layout].
+|Explicit Sync layouts to file or orderly desktop exit.
+|Closing the last window exits the desktop and flushes the layout; Core continues.
+|Unsaved edits can be lost; see link:05_layout.adoc#layout[Layout] for Sync and recovery.
 
 |Queue / library database
 |Queue order, removals and current occurrence change independently of configuration and layouts.
 |Queue mutations save as they execute. Shutdown retries only an unsaved runtime selection.
 |Not a queue-save boundary; successful database saves do not depend on window close.
-|Only successfully saved state is recoverable. Restart restores the selected occurrence in Stopped state at position zero, not playback position, playing/paused state or shuffle history; see link:04_playback.adoc#queue[Queue recovery].
+|Only successfully saved state is recoverable; see link:04_playback.adoc#queue[Queue recovery].
 |===
 
 Configuration saves patch values changed since startup or the last successful save, preserving
 untouched values, comments and formatting. Omitted defaults stay absent; explicitly
 written defaults remain, and returning a field to its default writes it explicitly.
 Clearing an optional setting removes its key. Changed arrays may be replaced as
-a unit, including their internal comments and formatting. New files contain only
-default overrides.
+a unit, including their internal comments and formatting. A normal first save
+writes only default overrides and does not insert a schema-version line.
 
 Unchanged configuration needs no write. Startup leaves an existing file untouched;
-a missing file is created on the first save or orderly exit. Database and layout
-persistence are independent of configuration saving.
+a missing file is created on the first save or orderly Core exit.
 
 [[apply-and-validation]]
 === Apply and validation
@@ -91,8 +91,10 @@ An edited field wins over a concurrent change to that field; folder edits replac
 the roots list. Playback controls already accepted in memory are included.
 
 Validation or save failure retains the draft; earlier runtime changes remain
-active. Invalid text blocks Apply even in an inactive control. Settings opens
-the affected page; Reset field text restores only that field's accepted value.
+active. An invalid value can block Apply even when its control is disabled, if
+it is still part of the submitted settings. For Spectrum bar layout, only the
+selected mode's value is parsed. Settings opens the affected page when the error
+identifies a field; Reset field text restores only that field's accepted value.
 Edits made while Apply is pending await the next Apply, and the editor cannot
 close until completion. Discard then closes it and drops unsubmitted edits.
 
@@ -105,10 +107,12 @@ output settings are not reapplied. Display-only changes do not reopen audio.
 Settings Apply validates and saves editable configuration; processing-graph changes
 use their separate revision-checked commands and cannot be applied here.
 
-Save failures appear in logs, `rivu status` and the desktop notice. Correct the
-cause and retry; exit makes one final attempt. Atomic replacement prevents partial
-writes, not power loss. An audio-application failure after a successful save does
-not roll back the saved configuration.
+Runtime save failures are logged and can appear in the desktop footer and in
+`rivu status -v` or `rivu --json status`. Status reports the current system error,
+not a history of failed saves; plain-text `rivu status` omits it. Correct the cause
+and retry; orderly Core exit attempts to save pending configuration. Atomic
+replacement prevents partial writes, not power loss. An audio-application failure
+after a successful save does not roll back the saved configuration.
 
 [[file-access-and-external-editors]]
 === File access and external editors
@@ -491,12 +495,10 @@ General → Appearance, after the shared GPU buffer budget:
 |===
 
 Apply updates these limits in open windows for subsequent frames; no restart is
-needed. Discard leaves the active limits unchanged. When a frame exceeds either
-limit, all scene filters are skipped for that frame while the base interface
-remains visible. This does not change the selected material; filters can resume
-when the frame fits the limits. Water-surface count limits are independent and
-skip water effects separately. The texture budget is not a total GPU-memory cap
-and is separate from the startup-only shared GPU buffer budget described below.
+needed. Discard leaves the active limits unchanged. The texture budget is not a
+total GPU-memory cap and is separate from the startup-only shared GPU buffer
+budget below. See link:25_gpu_rendering.adoc#_source_image_sampling_and_scene_filter_resources[Scene-filter resources]
+for frame admission and fallback behavior.
 
 `interface.gpu_material_budget_mib` accepts `16`–`1024` MiB, default `64`. Change it
 under Settings → Visualizations → General → Appearance, then restart the
@@ -574,7 +576,8 @@ segments count as tracks while their shared source path contributes bytes once.
 Separate source paths count separately even when their content is identical.
 Unscanned folders show zero after loading. Statistics load asynchronously when
 Settings opens and refresh after catalog changes or draft-root changes. Removing
-a root changes the draft only; Discard restores the saved roots.
+a root changes the draft only; Discard drops the draft removal without changing
+Core's current roots, including folders accepted in Library but not yet saved.
 
 [[artwork-cache-maintenance]]
 === Artwork cache maintenance

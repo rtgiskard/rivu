@@ -240,14 +240,16 @@ To play a library track, use `rivu playback play TRACK_ID`. This starts the firs
 existing occurrence of that track in queue order, or appends one if the track is
 not queued. It does not replace the queue. Use `rivu queue play QUEUE_ID` when a
 particular occurrence matters; track IDs and queue occurrence IDs are not
-interchangeable. Desktop Play actions on Library, album tracks, Recent tracks,
-and playlist tracks use library-track playback; Queue rows use occurrence playback.
+interchangeable. GUI and TUI Play actions on Library and playlist tracks use
+library-track playback, as do album and Recent track actions. Queue rows use
+occurrence playback.
 
 Whole-album and whole-playlist Play replace the queue with the complete saved
 order and start its first entry; Append adds the complete collection without
 changing playback. CLI `rivu playlist play PLAYLIST_ID` does not ask for confirmation.
-The GUI and TUI ask before replacing a nonempty queue by default; cancelling
-preserves queue and playback. Configure `interface.confirm_queue_replace` under
+The GUI and TUI ask before replacing a nonempty queue when
+`interface.confirm_queue_replace` is enabled (the default). Cancelling preserves
+queue and playback. Configure it under
 link:01_config.adoc#volume-and-playback-controls[Volume and playback controls].
 
 [source,sh]
@@ -263,9 +265,11 @@ rivu playback seek 30
 Keyboard volume and speed steps, repeat cycling, and shuffle toggles accumulate against
 the core's current state, even before the display updates. Ctrl+Left/Right and
 seek-slider arrows seek by five seconds; slider Home/End and terminal
-Ctrl+Home/End seek to zero or the known duration. A delayed seek cannot affect a
-different queue occurrence. Pointer dragging and CLI seek/volume specify absolute
-targets.
+Ctrl+Home/End seek to zero or the known duration. Interactive seeks, including
+absolute slider seeks, bind to the displayed queue occurrence; a delayed request
+cannot seek a different occurrence. `rivu playback seek 30` is an absolute
+seek without an occurrence ID: it applies to the track current when Core
+executes it. CLI volume also specifies an absolute target.
 
 Manual selection stops at a source that cannot be opened or decoded, including
 a missing file or a track requiring disabled FFmpeg support. Previous playback
@@ -284,8 +288,8 @@ A missing file under an absent, unreadable, or empty music folder, such as an
 unmounted drive, also stops playback and reports the folder instead of skipping.
 
 Skipped-source messages are aggregated and remain visible after playback
-continues, through the existing GUI footer, TUI message area, and CLI status
-error output. These are application messages, not system desktop notifications.
+continues, in the GUI footer, TUI message area, `rivu status -v`, and JSON
+status (`system.last_error`). These are application messages, not desktop notifications.
 
 An open failure does not roll back earlier queue edits, including an occurrence
 appended by library-track Play. Whole-album and whole-playlist Play are manual
@@ -375,15 +379,18 @@ link:02_library.adoc#track-information[track information and hover rules].
 Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero in the queue after removing the
 moved selection; the end position is valid, larger positions are rejected.
-`queue move QUEUE_ID INDEX --expected-revision REVISION` requires the observed
-queue revision (`queue.revision` in `rivu --json status`). Refresh state and the
-listing, then choose the position again if Core rejects a stale revision.
+For `queue move QUEUE_ID INDEX --expected-revision REVISION`, first read
+`queue.revision` from `rivu --json status`, then run `queue list` and choose the
+position using that listing. Submit the earlier revision; `queue list` binds
+its current-occurrence marker and all batches to one revision but does not
+print it. If Core rejects a stale revision, fetch the revision and listing
+again in that order and choose the position anew.
 `queue add TRACK_ID...` appends
 every supplied occurrence in argument order without starting playback;
 `queue clear` empties the queue and stops playback. Removing queue occurrences
 does not unregister their library tracks. JSON listings contain occurrence rows
-with zero-based positions and display metadata. Discard incomplete listings after
-concurrent changes and retry; see link:02_library.adoc#paged-views[Paged views].
+with zero-based positions and display metadata. For incomplete listing output,
+see link:09_cli.adoc#cli-command-conventions[CLI conventions].
 
 [[adding-local-files]]
 === Adding local files
@@ -398,18 +405,19 @@ configures a folder.
 
 This operation does not scan parent folders or apply the scan minimum-duration
 filter. Directories, CUE sheets, and playlists are not expanded. Unsupported or
-unreadable files are skipped and reported; valid files are still added. Registration
-and insertion commit together. If the chosen insertion position becomes stale,
-the entire operation fails without registering new tracks or appending elsewhere.
+unreadable files are skipped and reported; valid files are still added. Core
+rechecks the insertion position before Saving. Registration, insertion, and the
+current queue selection are written in one transaction. A stale position fails
+the operation without registering new tracks or appending elsewhere.
 
 [source,sh]
 ----
 rivu queue add-paths song.wav another.flac song.wav --wait
 ----
 
-For positional CLI insertion, supply both `--index` and `--expected-revision` from
-the observed queue state (`rivu --json status`). `--wait` reports the
-operation's completion, including skipped-file errors even when valid files were
+For positional CLI insertion, read `queue.revision` before listing Queue, as
+for `queue move` above. Pass the chosen `--index` and that `--expected-revision`.
+A terminal result can report skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
 link:02_library.adoc#other[Other]. Clearing Queue does not remove them from Library.
 
@@ -438,7 +446,7 @@ a current occurrence it is disabled; a removed entry is not replaced by a duplic
 
 Hover a row for Favorite, Play, Remove, Move up, and Move down. Actions target
 that occurrence without changing selection; Favorite updates the library track
-and all its occurrences. The toolbar offers group removal and Save queue as playlist.
+and all its occurrences. The toolbar offers group removal.
 
 Drag a selection to move it in original queue order, or an unselected row to move
 only that occurrence. The group stays fixed during the gesture. A row's upper/lower
@@ -449,13 +457,11 @@ reject the drag.
 Cross-collection drops use these same boundaries. For supported sources, copy
 versus reorder semantics, and occurrence preservation, see
 link:03_playlist.adoc#transfers-and-queue-saving[Transfers and queue saving].
-Positional drops require an unfiltered Queue; a changed target rejects the old
-position rather than appending elsewhere.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 
 The Queue panel menu contains Randomize queue, Remove duplicates,
-Save queue as playlist, and Clear queue. These actions target the entire queue;
+Save as playlist…, and Clear queue. These actions target the entire queue;
 Clear requires confirmation. Track-group actions live in row context menus:
 Append to queue, Add to playlist, explicit Favorite and Unfavorite, and removal
 of the selected occurrences. Play targets the clicked occurrence. Favorite

@@ -36,11 +36,11 @@ Spectrum use the latest result rather than replaying skipped publications.
 |Event |Audio-view drawing / animation |Live analysis |Spectrogram history |Waveform summary / full request |Artwork
 
 |Pause
-|Freezes the last displayed frame and audio-driven animation.
+|Freezes live-audio presentation and audio-driven animation.
 |No analysis runs.
 |Retained, without advancing audio time.
-|No new playback coverage while paused; explicit full previews are separate from live analysis.
-|Rotation freezes; animated source covers can continue.
+|No new playback coverage; an explicit full scan can still update the preview.
+|Rotation freezes; animated source covers can continue in an active window.
 
 |Inactive tab / reliably reported hidden window
 |Drawing and animation stop; returning does not replay hidden time.
@@ -80,9 +80,11 @@ Spectrum use the latest result rather than replaying skipped publications.
 
 Hiding is not disabling; losing focus alone is not hiding. Panel and window rows
 describe the demand they own, not a global shutdown of other windows or panels.
-For Artwork's independent rotation and source-animation clocks, see
-link:05_layout.adoc#artwork-panel[Artwork panel]. Scheduling and continuity details
-are in link:23_visuals.adoc#presentation-scheduling-and-visibility[Presentation scheduling and visibility].
+Artwork rotation follows playback; Stop, changing tracks, or choosing Static
+resets the cover upright. Animated source covers use their own timeline and can
+play in Static mode. Both forms of motion respect reduced-motion settings. See
+link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation design]
+for scheduling and focus policy.
 
 Stop retires analysis results; the optional radial idle fade may keep the last
 drawing briefly. Seek and source replacement retire instantaneous views, but
@@ -107,17 +109,19 @@ normal initial state.
 [[shared-visualization-settings]]
 === Shared visualization settings
 
-* `visualizations.general.signal` selects one shared signal for all audio-data views:
-  `"before"` is before the active realtime processing chain; `"after"` (default)
-  includes the active chain and monitor EQ. Both are before master volume.
-  Change it under Visualizations → General → Appearance. Analysis runs
-  asynchronously; strict audio/visual synchronization is not guaranteed.
+* `visualizations.general.signal` selects one shared signal for all audio-data views.
+  At 1× playback, `"before"` taps before the active realtime processing chain;
+  `"after"` (default) includes that chain and monitor EQ. Both are before master
+  volume. At any other playback speed, both realtime choices observe the same
+  speed-adjusted output. Change the setting under Visualizations → General →
+  Appearance. Analysis is asynchronous, not strictly synchronized to audio.
   Changing the signal resets realtime analysis history, but does not clear the
-  rolling waveform or automatically start a full waveform scan. Equalizer changes
-  preserve realtime history; newly visited waveform intervals replace their old data.
-  An explicit full waveform request sends the selected signal; processing and EQ
-  are captured when the service handles it, not necessarily at the click. The
-  prior display remains visible; see link:23_visuals.adoc#waveform[Waveform capture].
+  rolling waveform or start a full scan. Equalizer changes preserve realtime
+  history; newly visited waveform intervals replace their old data.
+  An explicit full waveform scan separately honors the selected Before/After
+  mode, regardless of playback speed. The service captures processing and EQ
+  when it handles the request; the prior display stays visible until new data
+  arrives. See link:23_visuals.adoc#waveform[Waveform capture].
 
 * `visualizations.general.background` sets the background for all views (default
   `"#08090C"`). Radial, stereo-analysis, fractal, and Oscilloscope styles use the
@@ -128,8 +132,8 @@ normal initial state.
 * `visualizations.general.analysis_fft_size`, `visualizations.general.analysis_window`, and
   `visualizations.general.analysis_rate_hz` apply to live-analysis styles, not Waveform,
   which requests neither FFT nor PCM snapshots.
-  Oscilloscope uses unwindowed PCM bounded by the selected FFT size; the analysis
-  window does not affect its PCM, but changing it still clears that view.
+  Oscilloscope uses unwindowed PCM snapshots of at most the smaller of the FFT
+  size and 4096 frames. Changing the analysis window still clears the view.
   FFT size accepts powers of two from `512` to `32768` and defaults to `8192`.
   Window accepts `hann`, `blackman_harris` (default), or `none`.
   Changing size or window clears visualization history.
@@ -208,15 +212,15 @@ Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
 above the centerline, right below; the filled body is RMS amplitude and the outer
 line is peak amplitude. Unknown intervals remain blank. The GUI session builds
 the preview progressively from admitted PCM; `Load full waveform now` explicitly
-requests a complete preview. Summaries are bounded to 1024 bins and not persisted.
+requests a complete preview. Both sources of waveform data are session-local.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
 Seeking gestures stay bound to the queue entry at press time. If playback moves
 to another entry before release, the old gesture cannot seek the new entry.
 Escape or a geometry change cancels the gesture without seeking.
-To preview a track without starting playback, select it in Library and use
-`Load full waveform now`. A selected track with no decoded samples can also
-build its preview through playback.
+`Load full waveform now` targets the current track, even when playback is
+stopped. If there is no current track, select a track in Library to set the
+Track details target, then use the action to preview it without starting playback.
 
 `visualizations.waveform.seek_enabled` defaults to `true`. Disable Click and drag to seek in
 the Waveform settings page or its panel right-click menu to prevent accidental
@@ -247,11 +251,11 @@ rendering only, not playback volume or decoded preview data.
 Visualization panels expose their local style, reference lines and labels in the right-click menu; Oscilloscope also
 offers Overlay channels.
 
-Inactive Spectrum fields retain their values and are still validated by Apply.
-If a retained value is invalid, open Visualizations → Spectrum: choose a Style
-other than Solid to edit the active bar-layout value or gap, or enable Peak markers to
-edit marker hold or gravity. Correct the value, then restore the desired style
-or toggle and apply again. Disabling a field does not discard or repair its value.
+Apply validates values that still belong to Spectrum settings even if their
+controls are disabled. Only the selected bar-layout mode's width or count is
+validated. To fix invalid text in a disabled control, temporarily choose a
+non-Solid style for bar layout or gap, or enable Peak markers for hold or gravity.
+Correct the value before restoring the desired style or toggle.
 
 Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
 `outline`, `led`, `line`, or `solid` (default `solid`). Motion freezes while paused.
@@ -360,7 +364,8 @@ labels that would overlap. Eleven styles are available:
   colors as solid traces. By default, channels are separate, with left above
   right. Enabling Overlay channels draws both traces on the same time and amplitude axes.
   A rising zero crossing on the left triggers a configured sweep; right-only
-  audio triggers on the right. Short FFT windows show the available half-window.
+  audio triggers on the right. The sweep normally uses at most half the available
+  PCM snapshot and can be shorter than the configured span.
   Reference lines mark channel centers and amplitude limits, with ten equal time
   intervals; Separate mode gives each channel its own guides.
   Labels show channel order as `L / R`, input amplitude limits and the actual

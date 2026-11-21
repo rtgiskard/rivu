@@ -340,12 +340,20 @@ alpha-correct interpolation for fractional source alpha, while ordinary no-effec
 images retain their hardware sampling path. Sharing a texture does not make this
 work free. Native Metal explicitly rejects these new image/filter operations.
 
+Source-image effects compose on one sprite in a fixed order: wave displacement
+selects the sampling center, source blur samples around it, then quantization
+precedes grain. Feathering masks the resulting image. These effects reuse decoded
+artwork; they do not create per-frame bitmaps or form a reorderable chain.
+
 Backdrop frost uses two separable Gaussian passes over captured scene content.
 Each pass combines adjacent discrete Gaussian taps with one weighted linear
 texture fetch, retaining the three-sigma footprint and clamped edges. For radius
 `r = ceil(3 * sigma)`, the fetch bound drops from `2r + 1` to `r + 1` per fragment
 per pass, without another target or downsampling. Floating-point accumulation
 and hardware interpolation can differ within the renderer's 8-bit tolerance.
+Backdrop sigma is capped at 32 physical pixels: the material frame resolves the
+effective logical sigma as `min(requested, 32 / physical_scale)` without changing
+the stored preset when the output scale changes.
 
 Frames without backdrop blur draw their
 root directly into the output, retaining only one viewport target per active
@@ -358,12 +366,17 @@ settings are defined in link:01_config.adoc#_appearance_and_library_display[Appe
 Filter validation and procedural-water counts share one allocation-free scene
 preflight before filter or water resources are established. Scenes with neither
 operation bypass that traversal by inspecting their existing effect collections.
+Exceeding the configured texture-byte or nesting limit, the 64-marker cap, or
+device texture dimensions skips all scene filters for the frame and preserves
+ordinary content. Unbalanced filter groups are rendering errors, not this fallback.
 More than 256 water panels skips all procedural water for that frame. Water and
 filter admission are independent, and both resume on later in-limit frames.
-Filter pipelines are created only for the first admitted filtered frame. An unfiltered
-frame releases filter targets but retains established pipelines for reuse; water alone does not create
-filter resources. Target sizes still follow the viewport: this does not introduce
-a persistent image cache or change the filter budget.
+
+Filter pipelines are created only for the first admitted filtered frame. An
+unfiltered frame releases filter targets but retains established pipelines for
+reuse. Water alone does not create filter resources. Filter targets follow viewport
+size; filters introduce painter-order barriers, and fade groups use grayscale
+text coverage. Neither operation adds production CPU readback.
 
 [[shared-local-multisample-scratch]]
 === Shared local multisample scratch
@@ -430,22 +443,27 @@ raster origins, resize and resource recovery.
 === Admission and retirement
 
 Buffers are initialized through write-only mapped storage, never by reinterpreting
-Rust models or overwriting a submitted revision. WGPU's zero-initialization
-guarantee covers unwritten ABI padding; encoding writes only meaningful fields,
-without a second whole-buffer zero pass. Failed pre-submit work follows the
+Rust models or overwriting a submitted revision. WGPU's zero initialization covers
+unwritten bytes. Encoding explicitly zeros padding in rectangle and segment
+records and initializes placement records to zero, but avoids a second zero pass
+over the whole upload buffer. Failed pre-submit work follows the
 renderer's queue-flush/finalization path so later draw failure cannot strand a
 provisional submission. Reusable preparation storage does not retain CPU
 publications after preparation, including rejected work. Placement slabs remain
 exact-sized and immutable through submission completion.
 
-Unsupported capabilities and capacity pressure omit the affected material and
-report an error without preventing unrelated controls from rendering. Capability
-admission checks multisampled shading and storage limits before shader creation.
-Diagnostics coalesce persistent failure episodes rather than logging each record
-or repaint.
+A scene-recording error can return from `paint_gpu` to the calling panel.
+Successful recording only admits the command into the scene; it does not confirm
+an upload or presentation. At backend material admission, unsupported capability
+or material-budget pressure can omit the affected material without discarding
+unrelated controls. WGPU checks multisampled shading and storage limits before
+shader creation and coalesces diagnostics by failure episode; it does not return
+these later rejections to the panel. Shared scene errors have a different scope:
+failure in the MSAA instance-transport preflight can prevent the entire frame
+from presenting, including ordinary controls.
 
-The unified renderer defaults to 64 MiB of shared charged buffer capacity,
-8,192 allocation charges, 4,096 drawing records per frame and eight outstanding
+In addition to the configured shared buffer byte limit, the unified renderer
+defaults to 8,192 allocation charges, 4,096 drawing records per frame and eight outstanding
 completion callbacks. Buffer bytes and allocation counts conservatively charge two
 initialization copies, including after completion; these are admission accounting
 limits, not measured VRAM or a budget for the entire GPUI window. CPU payload

@@ -43,10 +43,9 @@ snapshots. Native PCM is observed through the shared-memory transport, with
 display analysis in the desktop worker. Core, storage, IPC, MPRIS and tray services
 retain their service lifetime independently of the desktop.
 
-Closing the last window releases display demand and window resources, flushes
-the final layout after the GPUI event loop returns, and exits the desktop process.
-Reopening starts a new desktop from the persisted layout and current Core state.
-Core acknowledgment and service joins remain outside the graphical event loop.
+The desktop releases display demand in the GPUI loop and flushes layout state
+after the loop returns; see <<_initialization_and_teardown,Initialization and teardown>>.
+Core acknowledgment and service joins also remain outside the graphical event loop.
 User Quit passes through draft guards; forced application shutdown does not depend
 on an open window.
 
@@ -84,10 +83,10 @@ single-child containers collapse, and directly nested same-axis splits flatten.
 Panel and container IDs share an allocator within each runtime layout; they are
 neither collection-wide identities nor persisted IDs.
 
-A root-to-leaf path contains at most 32 splits; tab groups do not count toward
-that depth. Loading, saving, and editing enforce the same limit. There is no
-fixed sibling-count budget. Depth bounds recursive model and rendering work and
-keeps accepted layouts within the JSON reader's nesting allowance.
+Loading, saving, and editing enforce the same
+link:05_layout.adoc#layout-file[layout-format depth limit]. It bounds recursive
+model and rendering work and keeps accepted layouts within the JSON reader's
+nesting allowance. There is no fixed sibling-count budget.
 
 Structural edits preflight normalized depth and boundary representability before
 consuming the original tree. Rejection preserves panel order, active tabs,
@@ -175,15 +174,13 @@ on its axis; the remaining center merges tabs. Corners with two competing edges
 and separator gutters are neutral. The outline and direction label identify
 the destination panel; shading previews the moved panel's final rectangle.
 
-Unknown panel-kind keys survive layout loading and appear as named placeholders;
-they are not silently discarded.
-
-A target transition prepares one candidate using the actual move and measured
-reconciliation. Its projection previews source removal, collapse and gutters;
-release consumes that same candidate, with no fallback to a different target.
-Unchanged targets reuse it. Layout edits, viewport resize, interface scale or
-physical scale changes revoke candidates and measurements. Until the next
-prepaint publishes fresh bounds, docking has no target and release changes nothing.
+Preview prepares a candidate using the actual move and measured reconciliation,
+including source removal, collapse and gutters. Release resolves the target at
+the pointer's current position using the same algorithm; it need not commit the
+last drawn preview. An unchanged target can reuse its candidate. Layout edits,
+viewport resize, interface scale or physical scale changes revoke candidates and
+measurements. Until prepaint publishes fresh bounds, release has no target and
+leaves the tree unchanged.
 
 Tab-index targeting checks the active panel's tab-bar visibility and takes
 priority over edge zones. The entire visible tab row, including gaps and its
@@ -337,9 +334,8 @@ are errors. Runtime IDs and edit locking are omitted.
 The desktop-session owner retains immutable snapshots of layout edits; named
 layouts share trees until an edit copies the affected tree. Rendering borrows
 the active tree from a shared collection snapshot rather than copying the tree
-per frame. Validation, encoding and file I/O stay off the GUI. Manual sync cancels
-previews and captures committed state; panel-settings Apply publishes only to
-session memory.
+per frame. Validation, encoding and file I/O stay off the GUI. Sync captures the
+current committed revision, not a mutable reference to subsequent edits.
 
 The writer serializes one in-flight and one replaceable pending sync snapshot.
 Later edits do not alter a captured request or suppress its feedback. A newer
@@ -351,26 +347,26 @@ overwriting a newer completed one without an unbounded request queue.
 
 The writer validates unchanged content but skips encoding and I/O against its
 last successful snapshot; runtime IDs and locks do not affect equality. Only the
-captured successful request advances this baseline. Missing input is initialized
-on sync or exit; failed startup input remains protected until explicit Sync.
-External file changes are not watched or merged.
+captured successful request advances this baseline. Missing input has no saved
+baseline. Failed startup input can be replaced only after explicit Sync
+authorizes writing; authorization does not require the sync to succeed.
 
 Validation precedes a unique sibling temporary file and atomic rename. Failure
 preserves the destination, baseline and session edits; atomicity does not promise
 power-loss durability. The latest request reports success or failure; success
-clears only its own save error. Manual Sync retries the latest collection, not
-ordinary layout edits or an automatic retry loop. Named operations preserve a
-valid selected layout independently of file writes.
+clears only its own save error. Ordinary edits publish a new revision but do not
+enqueue a retry.
 
 === Initialization and teardown
 
-Initialization reads persisted layouts once, admitting ordinary files and rejecting
-FIFOs or links to them without waiting. Closing the last window ends the GPUI loop;
-the desktop then calls `flush_layouts`, joins the persistence worker and exits,
-propagating save failure. Dirty state is flushed unless failed startup input is
-being protected. The quit observer does not wait for file I/O inside GPUI's deadline.
-Reopening creates a new desktop from the persisted collection, with editing locked;
-there is no cross-close in-memory session. Abnormal exit can lose unsynced edits.
+After the GPUI loop returns, the desktop flushes the latest layout revision and
+joins the writer, propagating save failure. The quit observer does not wait for
+file I/O inside GPUI's deadline. The flush honors the failed-input protection
+unless the user has explicitly requested Sync. With saving allowed, it can retry
+a previously failed latest dirty revision once. If that revision is already
+pending or in flight, the flush waits for its result and does not retry a failure
+observed in the same flush. For write triggers and desktop versus Core lifetime,
+see link:01_config.adoc#persistence-responsibilities[Persistence responsibilities].
 
 == Rationale and alternatives
 
@@ -436,12 +432,10 @@ effects, ordered scene filters and procedural water execution are maintained in
 https://github.com/rtgiskard/gpui-wgpu[gpui-wgpu]; both patched crates use the same
 revision pinned in the workspace manifest. Rivu does not carry a renderer copy.
 
-Textures is a live editor outside the Settings transaction: opening or closing it
-preserves the existing Settings draft, and material edits neither Apply nor
-Discard that draft. Core owns the saved material configuration; the GUI owns its
-presentation and renderer resources. User entry points, switches, persistence,
-Reset behavior and TOML parameters are documented in
-link:01_config.adoc#desktop-settings[Appearance and library display].
+Core owns the saved material configuration. The GUI owns the live editor and
+renderer resources; its material edits are independent of the Settings draft.
+See link:01_config.adoc#_appearance_and_library_display[Appearance and library display]
+for controls and persistence.
 The twenty-six studies are grouped as follows, without changing their rendering
 compositions:
 
@@ -487,17 +481,18 @@ draft. The renderer consumes the accepted preferences without changing semantic
 theme colors, playback, queue state or saved-layout syntax. Menus and dialogs
 retain opaque elevated surfaces and input barriers.
 
-Idle rows and tabs paint no background on any surface. Rows, tabs, buttons and
-scroll-edge fades share the host's surface policy: materials scale background
-opacity by 0.2 without changing semantic colors, text, icons or keyboard focus
-borders. This is independent of panel opacity.
-Expanded search matches its collapsed button's background and hover fill;
+Idle rows and tabs paint no background. Rows, tabs, buttons and scroll-edge
+fades share the host surface policy: ordinary surfaces use unscaled fill;
+material surfaces multiply interaction fill alpha by the configured
+`interaction_background_strength` (see
+link:01_config.adoc#_appearance_and_library_display[Appearance and library display]).
+This is independent of panel opacity and does not alter semantic colors, text,
+icons or focus borders. Expanded search matches its collapsed button's fill;
 menus, dialogs and standalone input fields remain opaque.
 
-Floating row actions follow the row's selection and hover colors at 80% opacity
-(16% with materials), without extra button hover fills or changes to text layout.
-Only material surfaces add local backdrop blur. Album-card actions remain bare
-icons without a backdrop.
+Floating row actions use the same selection or hover fill, with no extra button
+hover fill or text reflow. Only material surfaces add local backdrop blur.
+Album-card actions remain bare icons without a backdrop.
 
 The GUI projects the saved preferences into its material state. Factory defaults
 are compiled from
@@ -508,12 +503,12 @@ through window coordination. The window-local
 atmosphere runtime reconciles material identity, transition policy, track and
 visibility in one resource-demand update. Material actions update only that
 demand, not unrelated features; track, layout and window lifecycle changes use
-the same entry. Identity or enablement changes and edits to list-edge fade
-invalidate cached appearance consumers. Other parameter edits notify only the
-root composition and controls. Crossing zero transition duration updates predecessor
-ownership immediately, including while paused. These transitions do not depend on
-a Core playback revision. The shell owns control-card attachment and focus,
-not the preference lifetime.
+the same entry. Material identity, enablement, list-edge fade and interaction
+background strength changes invalidate cached appearance consumers. Other
+parameter edits notify the root composition and controls. Crossing zero transition
+duration updates predecessor ownership immediately, including while paused.
+These transitions do not depend on a Core playback revision. The shell owns
+control-card attachment and focus, not the preference lifetime.
 
 Before constructing the layout, the window samples one material frame from the
 existing atmosphere owner. Root and panel decorations consume the same accepted
@@ -543,12 +538,11 @@ small derivative does not eliminate the cost of decoding the full source image.
 The effect uses ordinary GPUI image and gradient composition, not live backdrop
 blur or desktop/compositor transparency, and adds no animation timer.
 
-Track changes invalidate the old atmosphere immediately; obsolete completions
-cannot publish for a newer track. With
-link:01_config.adoc[default artwork fallback] enabled, artwork-dependent backgrounds
-use the shared bundled SVG when no real cover is available or decoding rejects it.
-Otherwise only the unavailable image layer is omitted; neither case retains the
-previous track's cover.
+Track changes invalidate the old target immediately; obsolete completions cannot
+publish for the new track. An enabled cover transition can retain the predecessor
+while the new target is pending. A missing or failed target retires that predecessor:
+the image layer uses the bundled SVG if the shared artwork fallback is enabled,
+and is otherwise omitted.
 Leaving an artwork-dependent material or hiding the window releases its atmosphere
 consumer's image references; other artwork consumers retain their own ownership.
 Turning material effects off also stops material animation and releases the
@@ -604,18 +598,8 @@ the card. A covering metadata confirmation owns focus until dismissed. Closing
 the last window drops transient editors, not saved preferences; reopening cannot
 revive the old modal focus owner.
 
-The source-image studies from Gradient translucency through Celtic storybook share
-decoded artwork rather than generating per-frame bitmaps. Image masks,
-sampling blur, UV waves, grain and color quantization compose on one sprite.
-All effect sampling stays within the source atlas tile and handles fractional
-source alpha correctly; ordinary no-effect images retain their sampling semantics.
-Sharing a texture does not make sampling work free. Native Metal explicitly
-rejects these new image/filter operations.
-
-Source-image effects have a fixed order: wave displacement selects the sampling
-center, source blur samples around it, then color quantization precedes grain.
-Feathering masks the resulting image; this is not an arbitrary reorderable chain.
-Backdrop capture and subtree isolation remain separate scene operations because
+Source-image effects transform shared decoded artwork, not painted controls.
+Backdrop capture and subtree isolation are separate scene operations because
 their inputs and painter-order boundaries differ from source-image sampling.
 
 Backdrop frost captures already-painted geometry and blurs it before the panel
@@ -626,34 +610,17 @@ blur interpolate the composed parent/group result so translucent backdrop alpha
 is not counted twice. Plain fades retain transparent isolation and source-over
 composition.
 
-Per-window target storage and fade-depth limits are runtime settings; defaults
-and accepted ranges are in
-link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
-The target-byte budget charges renderer-owned filter targets, not the output.
-Ordered filter markers remain capped at 64. Exceeding a configured limit, that
-marker cap or device texture dimensions skips all scene filters for the frame
-and preserves ordinary content; unbalanced filter groups remain rendering errors.
-Backdrop sigma is capped at 32 physical pixels after logical-to-physical conversion.
-The material frame resolves its effective logical sigma to
-`min(requested, 32 / physical_scale)`; the session retains the requested value
-rather than changing its preset when output scale changes.
-More than 256 water panels skips all procedural water for that frame. Water and
-filter admission are independent, and both resume on later in-limit frames.
-Filters introduce painter-order barriers and can reduce batching; fade groups
-use grayscale text coverage. They add no production CPU readback or
-desktop/compositor transparency. Sampling and filter-resource implementation
-boundaries belong to link:25_gpu_rendering.adoc[GPU Rendering Design].
+Filter and water admission, sampling and temporary-target accounting belong to
+link:25_gpu_rendering.adoc#_source_image_sampling_and_scene_filter_resources[Source-image sampling and scene-filter resources].
+These effects do not imply desktop or compositor transparency.
 
 Only an enabled cover transition retains one predecessor. Its clock starts after
 the new source decode is ready; hiding, disabling motion, zero duration or changing
 material identity retires the predecessor. Same-material duration edits retain the
 active clock. A predecessor can observe pending/ready work but never initiate a
-cold decode. Material owners consume real-cover lookups directly: a missing or
-failed target clears obsolete imagery. The shared
-link:01_config.adoc[default artwork fallback] preference controls replacement with
-the same generated default artwork used by cover panels. Opaque-cover dissolves
-compensate source-over alpha to retain constant backdrop contribution. Combined
-feathered masks use ordinary source-over coverage rather than exact dual-texture
+cold decode. Opaque-cover dissolves compensate source-over alpha to retain
+constant backdrop contribution. Combined feathered masks use ordinary source-over
+coverage rather than exact dual-texture
 alpha interpolation. Celtic storybook is an original
 storybook-style experiment, not an imported film asset or character reproduction.
 

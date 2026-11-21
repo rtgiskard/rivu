@@ -39,8 +39,9 @@ or limiter.
   node output or Run an Output node with the chosen execution mode.
 . Follow the task to completion; confirm the actual audition before comparing
   with Original at fixed levels.
-. To save audio, use Export for an original track, a graph output, or a retained
-  result. Retained audition results alone do not survive session retirement.
+. To save audio, use Export for an original track, the current graph or a
+  retained graph port. Standalone results are for audition; use a graph node
+  for processed audio you want to export.
 
 [[playback-and-export-routes]]
 === Playback and export routes
@@ -64,12 +65,10 @@ flowchart TB
     subgraph Export["Explicit export, independent of playback"]
         Original["Explicit original track"] --> Render["Render or reuse selected source"]
         Graph["Current graph captured at admission"] --> Render
-        Frozen["Retained run and requested graph port"] --> Render
+        Frozen["Retained graph run and requested port"] --> Render
         Render --> ExportEQ["Optional captured Monitor EQ"]
-        ExportEQ --> Encode["Encode temporary output"]
-        Encode --> Validate{"Core cancellation and source checks pass?"}
-        Validate -->|Yes| Publish["Publish without overwriting destination"]
-        Validate -->|No| Discard["Discard temporary output"]
+        ExportEQ --> Encode["Worker encodes temporary output"]
+        Encode --> Publish["Core validates and publishes without overwriting"]
     end
 ----
 
@@ -168,10 +167,8 @@ selecting an audition. Process output targets the first Output node. To process
 another Output, select it and use Preview selected, or use its ID in the CLI.
 Neither action applies drafts implicitly.
 
-Audition and Results actions use the frozen run, as shown in
-<<playback-and-export-routes,Playback and export routes>>. Current-graph export
-captures the requested output and revision at admission. Neither action applies
-graph drafts implicitly.
+Results actions use the frozen graph. Current-graph export captures the requested
+port and committed graph revision at admission, without applying drafts.
 
 Accepted graph and processing-setting edits save to `config.toml` immediately,
 independently of Settings Apply. Drafts, viewport and retained audio are not
@@ -180,13 +177,20 @@ configuration commits. See link:01_config.adoc#saving-configuration[Saving confi
 [[encoded-export]]
 === Encoded export
 
-Choose one source from <<playback-and-export-routes,the export route>>; a completed
-processing task is not required for an original or current-graph export. The
-Results shortcut binds the frozen run rather than later editor changes. Track
-identity stays explicit; changing the playing track does not retarget an export draft.
-In Export, Current graph starts at the first Output node, or uses the selected
-graph port if there is no Output node. Use selected port explicitly changes the
-draft target; selecting another port in Graph does not retarget an existing draft.
+Choose Original, Current graph or a frozen graph port. Original and Current
+graph do not require a completed task. The Results export shortcut binds a
+retained graph run and port, not later graph edits. There is no direct export of
+standalone restoration, speech or separation results, including a standalone
+stem mix. To export those operations, build the equivalent graph and export its
+output. A Separation node exposes vocals on port 0 and accompaniment on port 1;
+connect both ports to a Mix node to export a stem mix.
+
+Current graph starts at the first Output node, or uses the selected graph port
+if there is no Output node. Use selected port to change the draft target;
+selecting another port or playing another track does not retarget an existing
+export draft. A frozen port reuses cached audio when available; otherwise the
+requested part of the frozen graph runs offline with source decoding settings
+captured from current configuration at the new export's admission.
 
 Export's captured Monitor EQ is optional post-processing, not an automatic repeat
 of graph EQ nodes. Playback volume, ReplayGain and temporary bypass do not enter
@@ -221,17 +225,19 @@ export-page demand, never on ordinary startup or from rendering a control.
 Missing encoders are unavailable rather than replaced with another format.
 Compressed export and rate/channel conversion require the `ffmpeg` build feature
 and the corresponding runtime libraries and encoders. Native-only builds support
-wav export without rate/channel conversion. With the build feature included,
-export remains available when `playback.ffmpeg_enabled` is false: that preference
-controls playback decoding only. See
+wav export without rate/channel conversion. Encoding and conversion do not use
+`playback.ffmpeg_enabled`. This setting does govern input decoding when an
+export opens source media, including uncached frozen ports: a source that needs
+FFmpeg can fail even for native wav output. A cached port does not re-decode the
+source, but still requires the source identity to match. See
 link:00_getting_started.adoc#ffmpeg-and-native-only-builds[Build dependencies].
 
 Choose a new output file in an existing directory. Desktop destinations are
 absolute; CLI destinations may be relative to the invoking client's directory.
-Each submission freezes its source, graph, EQ and encoding parameters. Progress
-and cancellation use the processing task lifecycle; closing the page does not
-cancel an admitted task. Files are published only after successful encoding and
-source validation, without overwriting an existing destination.
+Export starts a separate task; closing the page does not cancel it. The worker
+writes a temporary file, and Core publishes it only after validation and without
+overwriting an existing destination. See
+link:26_audio_processing.adoc#execution-and-source-lifetimes[Execution and source lifetimes].
 
 CLI requests use the same model:
 
@@ -241,10 +247,11 @@ rivu processing export '{"source":{"original":{"track_id":42}},"path":"out.flac"
 ----
 
 Use `source.graph` with `track_id`, `target: {node, port}` and the current graph
-`revision` for a graph export. `source.frozen` takes a retained run `id` and
-`target`; pass `--instance` from that run's task reference to avoid applying a
-session-local ID to another Core instance. `monitor_eq` optionally carries a
-complete `EqualizerConfig` snapshot.
+`revision` for a current-graph export. In JSON, `source.frozen` takes the numeric
+retained graph run `id` and `target`; `--instance` is mandatory and takes the
+instance portion of that run's `INSTANCE:ID` reference. The separate
+`processing graph export` command instead takes the qualified `INSTANCE:ID`
+directly. `monitor_eq` optionally carries a complete `EqualizerConfig` snapshot.
 
 === Equalizer
 
@@ -458,9 +465,6 @@ graph nodes select the backend from the prepared manifest; each graph node has
 its own model configuration. Native speech does not use Python interpreter or
 worker paths. It requires the `onnx` build feature (enabled by default); builds
 without it reject native manifests rather than falling back to Python.
-Model manifests must resolve to ordinary files; symlinks to ordinary files are
-accepted. FIFOs and other non-regular inputs are rejected during preparation
-without waiting for a writer.
 
 Use `rivu processing setup MODEL` to prepare a model without starting Core.
 Installed distributions include the preparation tools; Python 3 is required.
@@ -512,14 +516,9 @@ Short inputs and partial final frames retain the original length. Numerical
 comparisons must use the same padding; see
 link:26_audio_processing.adoc#timeline-and-source-identity[Timeline and source identity].
 
-Native preparation validates the manifest contract and pinned bundle hashes
-before materializing source PCM. Native manifests accept at most 256 KiB and
-bundle artifacts at most 16 MiB in total, independently of retained PCM.
-Dry runs validate the bundle without loading ONNX Runtime. Cancellation is not
-a hard deadline for manifest/filesystem reads. Restart Rivu to change a
-successfully loaded ONNX Runtime; initialization failures remain retryable.
-The read bounds, cancellation points and runtime ownership are specified in
-link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
+Restart Rivu to change a successfully loaded ONNX Runtime library. See
+link:26_audio_processing.adoc#runtime-contracts[Runtime contracts] for native
+validation, dry execution and runtime ownership.
 
 For Python models, install `uv` first (Arch Linux:
 `sudo pacman -S --needed python uv`). Setup installs a CPU environment beneath
@@ -575,32 +574,34 @@ interpreter identity preserves the venv path, not just its resolved base binary.
 The checkout sources are under `tools/audio_processing/runtime/`; they are not
 interchangeable with a prepared bundle's worker.
 
-Keep the complete provisioned bundle together: hashed `common.py`, runtime
-sidecars/schema, model assets and license/dependency records. Its manifest binds
-bundle paths, interpreter hash and dependency pins. To provision verified assets offline using
-the installed tools and automatically retain the source bundle's interpreter:
-
+Keep the complete provisioned bundle together with its runtime, model assets
+and license/dependency records. Python bundles bind absolute paths, the
+interpreter hash and dependency pins. Copying or moving the directory alone does
+not rebind those paths. To generate a new bundle offline from verified local
+assets, using the source bundle's provisioned interpreter by default:
 [source,shell]
 ----
 python3 /usr/local/share/rivu/audio_processing/prepare.py --manifest /absolute/moss/manifest.json --directory /absolute/new-moss-bundle
 ----
 
 Adjust `/usr/local` for the installation prefix, or use the checkout's
-`tools/audio_processing/prepare.py`. The destination must be new and its parent
-must exist. Provisioning retains the installed interpreter rather than copying
-its environment. Assets are hard-linked on the same filesystem and copied
-otherwise; treat both bundles as immutable. After runtime updates, reprovision
-with the updated tools into a new bundle and configure its emitted paths. Do not
-patch hashed bundle files in place or assume a directory move updates absolute
-manifest paths.
+`tools/audio_processing/prepare.py`. Choose a new destination with an existing
+parent. For Python bundles, add `--interpreter /absolute/venv/bin/python` to use
+a different existing environment that satisfies the manifest's package pins;
+preserve the venv symlink. Neither mode installs or copies an environment.
+Provisioning verifies local artifacts, reuses model assets by hard link where
+possible (copies across filesystems), and generates a new Python runtime snapshot
+and manifest from the preparation tools and selected environment. Use the
+emitted paths. Update Python bundles the same way instead of editing hashed
+files in place.
 
-Python application inference uses worker protocol version 4. Earlier bundles
-must be reprovisioned with updated tools and their emitted paths configured;
-inference never rewrites an older bundle or falls back to another runtime.
-The streaming path requires Linux `pidfd_open` support and permission, not
-generic Unix support; readiness/setup failures report the OS error rather than
-falling back to timed polling. Protocol, dry-path and child-lifecycle details
-belong to link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
+Application inference accepts model manifests that are regular files or symlinks
+to them; FIFOs are rejected without waiting for a writer. This is an inference
+check, not a setup or offline provisioning guarantee. Python application inference
+uses worker protocol version 4 and requires Linux `pidfd_open` support and
+permission. Reprovision earlier bundles with updated tools and configure the
+emitted paths; inference does not rewrite them or fall back to another runtime.
+See link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
 Benchmark and corpus file adapters are separate from application inference;
 their output limits and evidence boundaries are documented in
 link:26_audio_processing.adoc#evidence-and-performance[Evidence and performance].
@@ -648,10 +649,8 @@ speech and 44.1 kHz for separation. Output preserves the original rate, layout
 and exact frame count. No implicit downmix or duplicated mono separation is offered.
 
 Speech Wet=0 reuses dry PCM without executing a model or resampling. Input,
-controls, manifest and artifact hashes are still validated. Native dry bypass
-does not load ONNX Runtime. The application Python dry stream does not load
-NumPy or model-execution dependencies; the separate file adapter requires NumPy
-and SoundFile and records bypass/model-not-executed in `result.json`.
+controls, manifest and artifact hashes are still validated; see
+link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
 
 [[tasks-retention-and-audition]]
 === Tasks, retention and audition
@@ -665,46 +664,12 @@ The returned nonzero decimal instance/task reference binds status, cancellation,
 audition and export to the accepting service. Bare IDs are insufficient; a
 restart cannot retarget an old reference to a new task.
 
-Cancellation acknowledgement accepts the request, not worker retirement.
-Cancellation invalidates publication and retires partial PCM; Python children
-are terminated/reaped, while native ONNX checks between model frames and
-resampling batches. Registered source/media changes invalidate publication, but
-later configuration/graph edits cannot change the captured snapshot.
-Starting another source, Stop or clearing the queue revokes pending automatic
-audition even without physical playback. It does not cancel processing or erase
-valid retained audio. A realtime node is `complete` once its runner is prepared;
-in Hybrid mode the prepared suffix stays `complete` even if rendering the offline
-prefix fails or is cancelled. Node phases describe
-work, not whether that runner is playing. The selected-audio line describes playback.
-
-Numeric progress is coalesced at 100 ms and cannot accumulate behind a slow
-consumer. Phase changes, graph-node stages and terminal results remain reliable.
-
-Node-specific preparation errors identify that node. Failures or cancellations
-during final graph compilation, rendering or output publication identify the
-requested output node; an earlier node-specific error is not reported again.
-If Core rejects publication after the worker succeeded, the receipt identifies
-the unpublished node and port without changing completed node phases. A cached
-export identifies the port in the receipt without inventing node execution.
-
-Preparation/backend validation runs on workers, so accepted starts can fail
-asynchronously; Queued may include waiting for retired audio's reservation.
-Failure or unwinding produces a terminal result after neural child retirement.
-Core rechecks cancellation/source identity before publication, commits terminal
-state, then completes waits. Validation/admission failure does not revoke PCM;
-later audition failure can mark an operation `failed` while leaving valid audio
-available. Eviction changes availability, not the recorded outcome. Model nodes
-retain independently known identity/hashes on failure; the operation remains a graph.
-
-Manifest/decoder capabilities are checked before whole-source allocation or
-native-prefix execution; runners still perform full artifact/runtime validation.
-Native preparation checks cancellation between decoder calls, without a hard
-deadline for decoder/filesystem operations. Retained audition rechecks the
-registered decoder hint and media identity. Uncertain database/queue recovery
-rejects it without replacing playback or committing a late stem-mix selection.
-Audition compares the validated source with the session's loaded source, not only
-the track ID. A same-ID source or CUE-range change reloads that occurrence while
-preserving playing/paused status and navigation history; stale results remain invalid.
+Cancellation acknowledgement does not mean the worker has stopped. Stop,
+starting another source or clearing the queue revokes pending automatic audition
+without cancelling the processing task. An immediate refusal leaves retained
+results alone; an admitted non-export task can retire unpinned results before
+worker validation, even if the new task fails. See
+link:26_audio_processing.adoc#execution-and-source-lifetimes[Execution and source lifetimes].
 
 `task cancel processing INSTANCE:ID` also returns a matching selected audition to
 Original after preparation has completed. For realtime/hybrid runs it marks the
@@ -712,18 +677,13 @@ task cancelled; stopping a cached offline audition leaves its completed status
 intact. Current status, bounded task history and retained runs resolve the same
 task record, including later audition or stem-mix failure.
 
-Results are immutable shared in-memory PCM: node execution creates no processing
-directory, intermediate WAV, request file or result report. The 512 MiB PCM
-budget is not a process-RSS limit; exhaustion fails without disk spill. Selected
-audition audio stays pinned, and temporary results must be explicitly exported
-to keep them. Full charging, retirement, history and receipt rules belong to
+Results are in memory for this session. Selected audition audio stays pinned;
+export a graph port to keep audio as a file. For memory limits, eviction and
+receipt retention, see
 link:22_cache.adoc#processing-output-retention[Processing output retention].
-Outputs preserve the ordered speaker layout, sample rate and immutable frame
-count through processing, mixing and audition; channel count alone is not a layout.
-Graph model nodes retain only output ports needed by the selected target and
-its remaining dependencies. Unneeded separation streams are still fully received
-and validated, but do not accumulate retained PCM. Standalone separation retains
-both stems for audition and mixing; graph fan-out retains both when required.
+All processing and export sources are limited to files no larger than 8 GiB.
+Neural input also must be nonempty and at most four hours; see
+link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
 
 [[processing-objects-and-capabilities]]
 Task outcome, snapshot addressability, cached audio and playback selection are
@@ -737,12 +697,16 @@ independent capabilities:
 |Use for status, cancellation and waits. Realtime `complete` means the immutable
 live plan is ready, not that a file or PCM output exists; `graph_outputs` is empty.
 Completed records can outlive both PCM and snapshot addressability.
-|Frozen run: instance-qualified run ID and node/port
-|Captured graph and settings; `graph_actions_available` reports addressability
-|Up to four snapshots support recomputation after PCM retirement. Failed or
-cancelled runs may remain usable. Results exposes every frozen graph output port,
-not only the original target or cached ports; actions can execute another valid closure.
-|Cached PCM: run and output port
+|Standalone result: `INSTANCE:ID`
+|Retained restoration/speech audio or both separation stems
+|Audition available outputs or remix the two separation stems. Standalone results
+are not graph ports and cannot be exported directly.
+|Frozen graph run: instance-qualified run ID and node/port
+|Captured graph and node settings; `graph_actions_available` reports addressability
+|Failed or cancelled runs may still have a retained graph. Results exposes every
+frozen output port, not just the original target or cached ports; actions can
+execute another valid closure under current source decoding settings.
+|Cached graph PCM: run and output port
 |Immutable rendered samples, independently available from the run snapshot
 |Cached audition is immediate without a new task; uncached audition starts a new
 run and ID. PCM availability can be revoked without changing the task outcome.
@@ -753,35 +717,12 @@ source-independent permanent asset.
 |Selection pins its audio while valid. Returning to Original changes playback,
 not the recorded task outcome; matching cancellation follows the rules above.
 |Export receipt and file
-|Receipt `id` identifies export; `graph_run_id` identifies the frozen run
-|Export starts a new task: follow its new `processing_id` or `--wait`, not the
-original run ID. It copies cached output or renders the frozen closure offline;
-later edits affect neither path. The file persists independently of receipt
-retention, and the receipt occupies no audition slot.
+|Receipt `id` identifies the export task; for a frozen source, `graph_run_id`
+identifies the graph run it used
+|Follow the new `processing_id` or use `--wait`, not the source run's ID.
+Export reuses cached PCM or renders the requested source; it does not select an
+audition. The published file persists independently of the receipt.
 |===
-
-Standalone restoration and native-only graphs share the native execution engine:
-they decode blocks and retain only final PCM plus bounded DSP/delay state.
-Uncached, entirely native exports instead stream to an
-unpublished encoded file without whole-output PCM; cached exports share existing PCM.
-Model ancestors and Hybrid boundaries retain their PCM requirements. Export
-checks the cached render's source stamp against the current source, never
-relabeling old samples as a new source version.
-
-For fixed graph/format, native streaming export's output memory is independent
-of duration; decoder, DSP/profile, delays and existing caches remain costs, so
-this is not a constant-RSS guarantee. Profile capture requires a valid source
-range and includes upstream context/latency. Published output retains decoded
-source length, discarding preroll and cropping tails. Cancellation or source/
-destination validation failure discards temporary output; only Core publishes
-completed files. Graph proof reuse, decoder borrowing and capture-pass lifetimes
-are specified in
-link:26_audio_processing.adoc#execution-and-source-lifetimes[Execution and source lifetimes].
-
-Neural graphs retain budgeted PCM at model boundaries; source media files are
-limited to 8 GiB and neural input must be nonempty and at most four hours.
-Each Python source context window is bounded to 128 MiB, excluding model
-weights/workspace. These are additional limits, not a total-memory guarantee.
 
 [source,shell]
 ----
@@ -848,26 +789,12 @@ native realtime plan, then a useful precomputed-prefix/live-suffix hybrid, then
 offline rendering. It never changes algorithms. `settings.graph_mode` records
 the actual selected mode; `settings.graph_boundary` identifies a hybrid boundary.
 Explicit modes reject unsupported plans instead of silently changing modes.
-Native realtime planning supports IIR/FIR EQ, non-Profile classical restoration,
-Mix and Output; Profile capture and neural inference require an offline prefix
-or fully offline execution. A native plan also has admission bounds: at most 32
-channels, 64 MiB estimated state, two seconds of latency and 300,000,000
-arithmetic-work units/second. These are planning limits, not measured device-deadline
-guarantees. Heavier graphs can require Hybrid/Offline execution even when their
-state fits in memory; an EQ configuration supported by the DSP crate alone can
-still be rejected by the realtime graph planner. See
-link:26_audio_processing.adoc#graph-resource-admission[Graph resource admission] for effective-work accounting,
-bypass rules and the scope of the state estimate.
-
-Admission checks capability and budgets before allocating DSP state. A selected
-plan can still fail numerical construction, in which case automatic selection
-continues with the next candidate.
-
-Hybrid has one cached boundary port, which every path into the live target must
-cross. An uncached source branch or another separation port cannot use that
-same stream. Planning/FFT preparation runs on the processing worker, not Core
-dispatch or the device callback. Task references and `--wait` follow
-<<tasks-retention-and-audition,the common task contract>>.
+Profile capture and neural inference need Hybrid or Offline execution; heavy
+native graphs can also exceed live limits. Hybrid uses a single cached port for
+the live suffix. See
+link:26_audio_processing.adoc#graph-resource-admission[Graph resource admission]
+for supported nodes, boundary rules and resource limits. Task references and
+`--wait` follow <<tasks-retention-and-audition,the common task contract>>.
 
 Realtime completion and cached/uncached actions follow
 <<processing-objects-and-capabilities,the capability table>>; automatic audition
@@ -882,23 +809,10 @@ rivu processing graph audition INSTANCE:7 3 --port 0
 rivu processing graph export INSTANCE:7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
 ----
 
-Results actions use the frozen graph's available ports and source checks in
-<<processing-objects-and-capabilities,the capability table>>. Export completion
-belongs to its newly admitted task, independently of the source run's outcome.
-`settings.graph_export_path` records the admitted destination with its parent resolved;
-`graph_exported_path` is populated only after the completed export is published.
-Export accepts a real filesystem path, including spaces; relative destinations
-are anchored to the invoking client's working directory, not the core's. Choose
-a new file in an existing directory; existing destinations are never overwritten.
-The parent is resolved at admission so retargeting a directory alias cannot redirect
-the export. The worker writes a temporary sibling only for this explicit export,
-then commits without overwriting an existing destination after cancellation and
-source checks. These checks do not guarantee safety against arbitrary concurrent
-directory replacement. The output is float32 RIFF/WAVE with the actual speaker
-mask and samples in ascending WAVE-speaker-bit order. RIFF size overflow fails
-rather than switching to RF64; evaluation exports choose RIFF/RF64 per stem.
-Publication requests no file or directory storage sync and does not guarantee
-survival of power or operating-system failure; see
-link:91_design_decisions.adoc#DEC-018[file publication policy].
-In-memory results remain session-owned; source files are not modified.
+The `processing graph export` shortcut selects the frozen port with default
+float32 RIFF/WAVE encoding, without Monitor EQ or rate/channel conversion. Use
+<<encoded-export,Encoded export>> for other formats or settings. WAVE stores
+the actual speaker mask and orders samples by WAVE speaker bit; RIFF size
+overflow fails rather than switching to RF64. Follow the new export task:
+`graph_exported_path` is populated only after Core publishes the file.
 

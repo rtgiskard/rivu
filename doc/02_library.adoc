@@ -8,13 +8,9 @@ browsing and CUE discovery. Registration does not itself start playback. Browse
 tracks, albums, or recent activity to build a queue or a
 link:03_playlist.adoc[playlist]. Registration, scanning, and ordinary metadata edits
 change Rivu's database, not the audio files. Explicit <<source-file-tags,source tag
-editing>> is a separate offline operation.
-
-CLI paths are relative to the invoking client's working directory; absolute paths
-are accepted. Rivu does not expand `~` or shell variables inside a path: use shell
-expansion (for example, `"$HOME/Music"`), not a quoted `"~/Music"`. Except for the
-local `library probe`, `library tags`, and independent migration tool, library
-commands address the running host for the selected data directory.
+writes>> are available in the GUI's Track details and through the offline
+`rivu library tags` command. For path, output, and waiting rules, see
+link:09_cli.adoc#cli-command-conventions[CLI conventions].
 
 [[other]]
 == Other
@@ -31,8 +27,10 @@ matches. To add local files, see link:04_playback.adoc#adding-local-files[Adding
 Hover its header for `Check files`. Checking visits registered audio files without
 discovering new tracks or reimporting CUE sheets. Confirmed absence marks a track
 missing; permission and read errors do not. A successful check clears missing state.
-`Force reread` also refreshes unchanged metadata. Both preserve identities, user
-data, and queue/playlist references. CUE labels and source bounds are retained;
+`Force reread` also reprobes unchanged files. Refresh preserves track identities,
+favorites, listening statistics, decoder hints, and queue/playlist references.
+For ordinary files, rereading source tags can overwrite database-only descriptive
+edits such as title and artist. CUE labels and source bounds are retained;
 audio properties and durations are refreshed from the source.
 
 [source,sh]
@@ -84,18 +82,9 @@ reread. Readable tracks may be saved even when the task fails: fix errors and re
 before cleaning missing records. Path, admission and recovery rules are under
 <<scan-policies-and-recovery,Scan policies and recovery>>.
 
-Scans, Other checks, playlist imports, and external-file queue additions share one
-media-task slot; another request is rejected while one is active. Library shows
-scan and check results, Playlists shows imports, and Queue shows file additions.
-Rejected requests have separate dismissible errors and do not replace accepted
-task feedback. See <<cancellation,Cancellation>> for waiting, status, and shutdown.
-
-The Playlists result reports the library commit and playlist creation separately.
-A playlist ID confirms creation even if refreshing the view failed; an unconfirmed
-commit does not prove rollback. Inspect the saved results before retrying.
-When a failed task has error details, Copy beside Dismiss copies the full task
-error, not the progress summary or a window notification. Copy leaves the result
-in place. Library scan errors stay in Library.
+For shared media-task admission, progress, errors, and shutdown, see
+<<cancellation,Cancellation>>. Playlist imports report
+link:03_playlist.adoc#commit-and-export-lifecycle[library and playlist commits separately].
 
 Cancelling a desktop file chooser changes neither configuration nor existing
 errors; this also applies to playlist import and export.
@@ -154,8 +143,8 @@ retry that failed dependency.
 Dragging a directory adds its full contents, regardless of display filters. To add
 only matching, favorite, or missing tracks, select and drag the track rows.
 
-Click selects one row; Ctrl/Command-click toggles it. Shift-click selects a range
-from the original anchor; Ctrl/Command-Shift-click adds that range. Range selection
+Click selects one row; Ctrl-click toggles it. Shift-click selects a range
+from the original anchor; Ctrl-Shift-click adds that range. Range selection
 includes unloaded rows, disabling selection actions and dragging until loading
 finishes. Track transfers follow display order, independent of which pages are
 cached. Changing search or filters cancels a loading range.
@@ -329,7 +318,8 @@ Recent entries reflect edited titles and current counts. Crossing the counting
 threshold refreshes activity; editing a title does not. GUI Last played sorting
 and TUI Recent ordering use the current playing or paused track's live timestamp,
 placing it first among equal-second timestamps when newest-first.
-Up to 256 recent tracks are retained.
+Core publishes up to 256 recent tracks; older `last_played` timestamps remain
+in the database even when they fall outside that published list.
 
 If saving final listening statistics fails, Rivu keeps the pending facts in memory
 and retries on playback transitions and orderly shutdown, without double-counting
@@ -338,8 +328,8 @@ independent controls such as volume remain available. A failed Recent view refre
 retains its own recovery work without blocking new playback or resaving confirmed
 statistics. Pending in-memory recovery does not survive process exit.
 
-`rivu library history --limit N` returns up to N retained rows (default 20) in both
-text and JSON output. See <<cli-output,CLI output>> for result shapes.
+`rivu library history --limit N` takes up to N rows from that published list
+(default 20), in both text and JSON.
 
 [[paged-views]]
 == Paged views
@@ -414,7 +404,10 @@ library database are not synchronized automatically.
 |Uses the displayed values
 |After successful file save, including verified fingerprint, size and modification time
 |Yes
-|These are separate writes, not a cross-store transaction. If the file succeeds but database synchronization fails, retry only database synchronization; the UI blocks another file write until resolved.
+|These are separate writes, not a cross-store transaction. A synchronization error
+can follow a successful file replacement and database fingerprint update. Inspect
+the result and retry only database synchronization; the UI blocks another file
+write until resolved.
 
 |Offline CLI: `library tags`
 |Source tags and supplied options
@@ -641,8 +634,9 @@ sources may still be imported. Invalid UTF-8 paths are local errors, not grounds
 to reject unrelated readable tracks.
 
 An initially `NotFound` requested path is confirmed absent and can mark tracks
-missing. Disappearance during reading is uncertain until a later scan. Invalid
-scopes or bounded diagnostics may also restrict missing detection and relocation.
+missing. Disappearance during reading is uncertain until a later scan. If scan
+error or uncertain-scope records are truncated, automatic relocation and new
+missing marks are disabled for the entire scan.
 A build without a decoder does not mark a stored whole-file track missing
 just because it cannot discover that format. Confirmed absence still counts
 within the scanned scope.
@@ -682,8 +676,9 @@ scan to refresh metadata already stored in the library.
 === Cancellation
 
 Scans, Other checks, playlist imports, and external-file queue additions share
-this lifecycle. An accepted CLI request returns a `scan_id`, not proof of success;
-use `--wait` to wait for its result, or query and cancel that task explicitly:
+one media-task slot. Another start is rejected while work is active. An accepted
+CLI start is not proof of success; use `--wait` or the printed task reference
+(see link:09_cli.adoc#cli-command-conventions[CLI conventions]):
 
 [source,sh]
 ----
@@ -691,13 +686,13 @@ rivu task status scan INSTANCE:TASK_ID
 rivu task cancel scan INSTANCE:TASK_ID
 ----
 
-Use the instance-qualified reference printed by the command, not a bare numeric
-ID. References from a stopped instance are rejected. The core retains its latest
-32 media-task results, not persistent history. Status success confirms retrieval,
-not task success: inspect phase and error. Closing a waiting client stops waiting,
-not the task; request cancellation explicitly.
+Core retains its latest 32 media-task results in memory, not persistent history.
+Task references from a stopped instance are rejected.
 
-In the desktop, the owning panel shows phase, counts, current path, and message.
+Library shows scan and check feedback, Playlists shows imports, and Queue shows
+external-file additions. The owning desktop panel shows phase, counts, current
+path, and message. Rejected starts have separate dismissible errors. Copy beside
+Dismiss copies the full task error without dismissing the result.
 Completed, failed, and cancelled results stay visible until dismissed or replaced
 by a later accepted media task. Dismissal hides progress and message, without
 undoing saved data, clearing a separate request error, or deleting the retained
@@ -706,11 +701,11 @@ task result. Closing the desktop window does not cancel a task.
 [source,mermaid]
 ----
 flowchart TD
-    prepare["Preparation"] -->|"Ready to save"| recovery["Recover queue and persist pending playback selection"]
-    prepare -->|"Cancel or Core shutdown"| discard["Discard prepared results and retire work"]
-    recovery -->|"Failure"| noSave["Save nothing and keep existing playback"]
-    recovery -->|"Success"| saving["Saving: cancellation refused"]
-    saving --> result["Inspect final result: failure may include committed changes"]
+    accepted["Accepted"] --> prepare["Preparation: cancellable"]
+    prepare -->|"Cancel or Core shutdown"| discard["Retire without committing the task's changes"]
+    prepare -->|"Preparation fails"| failed["Failed"]
+    prepare -->|"Ready to save"| saving["Saving: cancellation refused"]
+    saving --> result["Terminal result: failure may include committed changes"]
     saving -.-> shutdown["Core shutdown waits for the result"]
 ----
 
@@ -719,8 +714,10 @@ slot. An active probe must return and work must retire before another task start
 During Saving, database reads and edits report maintenance in progress; published
 status and existing-playback controls remain available. Inspect the result before
 retrying.
-Playlist imports have additional
-link:03_playlist.adoc#commit-and-export-lifecycle[commit boundaries].
+Scans, Other checks, and imports recover the queue before entering Saving, then
+persist the current queue selection before committing library changes. See the
+separate commit rules for link:03_playlist.adoc#commit-and-export-lifecycle[imports]
+and link:04_playback.adoc#adding-local-files[external-file queue additions].
 
 [[same-files-and-relocation]]
 == Same files and relocation
@@ -763,9 +760,8 @@ Closing the review requests cancellation of its ongoing verification. Cancellati
 before commit leaves identities unchanged; it cannot undo a completed commit.
 A status-read failure does not establish task completion: the review retains its
 task identity, so closing it can still request cancellation.
-CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
-final outcome; otherwise query status or cancel using that ID. The running core
-retains the latest 32 task results, not persistent task history.
+Use the link:09_cli.adoc#cli-command-conventions[CLI task reference or `--wait`];
+the running Core retains the latest 32 relocation results, not persistent history.
 
 [source,sh]
 ----
@@ -835,46 +831,11 @@ optimization finishes.
 filter to include both states. For machine-readable records, use
 `rivu --json library list --query "Artist"`.
 
-Human-readable CLI output escapes terminal control characters in metadata,
-names, paths, device information, and error details. Embedded tabs and line
-breaks appear as `\t`, `\n`, and `\r`; other controls use visible escapes such
-as `\x1b` and `\u{009b}`. Ordinary Unicode and the command's own row/column
-separators are preserved. This display-only escaping does not modify stored
-values or JSON data.
+For stdout, JSON diagnostics, exit status, and task waiting, see
+link:09_cli.adoc#cli-command-conventions[CLI conventions]. Library result shapes:
 
-`--json` writes one result value to stdout. Long-running commands with `--wait`
-write only their terminal task result, not acceptance/progress events. Runtime
-diagnostics are JSON objects on stderr with `error` and, for transport command
-failures, `status`. No Core revision or task ID is invented for an uncertain
-transport result. Argument/usage errors retain Clap diagnostics and exit status 2;
-runtime failures exit 1. A successful command exits 0.
-
-After a failed listing, discard its possibly partial or invalid output before
-retrying; see <<paged-views,Paged views>>.
-Queue listing binds its current-occurrence marker and all batches to the initial
-queue revision; a concurrent queue change fails the listing instead of combining
-different snapshots.
-
-Result shapes follow the queried resource:
-
-* `library list` returns full track records; `queue list` returns occurrence rows.
-  `playlist list` returns summaries (`id`, `name`, `entry_count`);
-  `playlist show PLAYLIST_ID` returns entries. `library history` returns retained
-  history rows up to `--limit`.
-* `status` returns instance state. `configuration` contains the settings snapshot
-  and `config_path`; live volume, shuffle, repeat and output selection are reported
-  in the playback and system sections and can be newer than that snapshot.
-  Field contracts: link:21_ipc.adoc[IPC].
-* Command acknowledgements report `Succeeded`, `Failed`, `NotAdmitted`, or
-  `Unknown`, including failed authoritative results on stdout. Failure need not
-  mean rollback; an unknown outcome requires inspecting state before retrying.
-  See link:21_ipc.adoc#request-failures-and-completion[IPC request failures and completion].
-* Task acknowledgements and results supply instance-qualified references. Reuse
-  those references rather than constructing them from numeric IDs. `--wait` exits
-  unsuccessfully for failed or cancelled tasks while retaining terminal results
-  on stdout. Inspect the operation's commit boundaries before retrying. See
-  <<cancellation,Cancellation>>, <<same-files-and-relocation,Relocation>>, and
-  link:26_audio_processing.adoc[Audio processing].
+* `library list` returns full track records; `library history` returns published
+  recent rows up to `--limit`.
 * Successful `library optimize` acknowledgements include that operation's size
   report in `database_optimization`. The latest successful report in System
   status is observational and must not be mistaken for a failed command's result.
@@ -884,8 +845,7 @@ Result shapes follow the queried resource:
   `library other count` returns a number; `library other locate` returns its
   tagged location result.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
-  and decoder status; `playback devices` returns an array of device names.
+  and decoder status.
 
-Playlist export returns after writing the file, not after starting a background
-task. Protocol and query contracts are described in link:21_ipc.adoc[IPC].
+Protocol and query contracts are described in link:21_ipc.adoc[IPC].
 

@@ -33,9 +33,11 @@ loads within a session cannot replace an edited workspace.
 == Queue control and mutation working memory
 
 SQLite owns complete queue order. Core retains only the current queue projection
-and at most 4096 successful starts for navigation history. Navigation uses the
-queue-order index; history reconciliation checks retained identities. Neither
-queue size nor duplicate occurrence identity depends on page-cache limits.
+and at most 4096 occurrence selections admitted by navigation history policy,
+not 4096 successful audio starts. Navigation uses the queue-order index; history
+reconciliation checks retained identities. Repeat All auto-skip separately tracks
+occurrences tried in the current search. That temporary set can grow to queue size
+and is released when playback starts successfully or the search ends.
 
 Bulk edits retain their selection and affected positions, not a second complete
 queue. Randomization temporarily retains a full ID permutation and releases it
@@ -92,11 +94,12 @@ metadata. Unrelated Library changes preserve scoped playlist and Queue counts.
 Unrelated changes and bitrate-only updates preserve library totals; affected
 metadata searches invalidate them.
 
-Writable counts also detect independent SQLite commits and bypass reuse inside
-writer transactions, preventing rollback leakage. There is no polling timer or
-collection-sized row cache. Connections retain at most 64 parameterized statements;
-values and offsets do not create new identities. Root aggregation is request-local
-and shares work for identical normalized roots while preserving input order.
+Writable counts bypass reuse inside writer transactions, preventing rollback
+leakage. Back in autocommit, a changed SQLite `total_changes()` or `data_version`
+clears the scalar LRU, including after independent commits. There is no polling
+timer or collection-sized row cache. Connections retain at most 64 parameterized
+statements; values and offsets do not create new identities. Root aggregation is
+request-local and shares work for identical normalized roots while preserving input order.
 Persistent album summaries are transactional database projections, not evictable
 pages. See link:21_ipc.adoc#transactional-inputs-and-bounded-storage-queries[IPC storage queries].
 
@@ -114,20 +117,22 @@ position changes do not rediscover the layout, but source/seek identity, playbac
 state, visibility, and waveform progress still govern whether retained data is
 usable. Structural ownership belongs to link:24_layout.adoc[GUI layout].
 
-Bitrate changes retire display payloads for demand-driven reload while preserving
-selection, counts, and navigation geometry, including known-empty results. Album
-and member unfiltered totals follow the album revision independently of bitrate
-and playback statistics; fresh payload pages reuse those totals rather than
-querying them again. Page responses still require their complete query stamp.
-These updates create no history or reverse track-to-view index. See
-link:21_ipc.adoc#query-results-and-pagination[IPC query results].
+The Album Browser keeps summary cards separate from member rows. Payload-only
+changes retire member rows for demand-driven reload while preserving selection,
+counts, geometry, and known-empty results. Statistics and bitrate changes do
+not retire album cards. No reverse track-to-view index is required. See
+link:21_ipc.adoc#query-results-and-pagination[IPC query stamps].
+Fresh unfiltered pages reuse valid album and member totals rather than requesting
+those totals again.
 
-Album cards retain summary fields and artwork source identity, not full tracks.
-Playback statistics invalidate member payloads through track metadata freshness,
-not the album token; counts, selection and geometry remain. The global metadata
-revision can also invalidate unrelated member pages, avoiding per-album epochs.
-Whole-album ID pagination checks only the album token so statistics do not cancel
-collection operations, while membership/order changes still reject the result.
+Whole-album ID collection accepts each successful page against the album token
+and current collection intent. Core still validates the full `AlbumTracks`
+stamp for each retained page: a concurrent statistics or bitrate update can
+return `RevisionChanged` before GUI acceptance. Membership or order changes
+also revoke the accumulated selection.
+
+Range anchors can survive bitrate-only changes, but range responses still need
+their full stamp. Hover uses retained rows rather than requesting Track again.
 
 [[demand-cancellation-and-physical-retirement]]
 ==== Demand, cancellation, and physical retirement
@@ -148,21 +153,15 @@ sequenceDiagram
     participant O as Demand owner
     participant E as Client retained exchange
     participant C as Core query owner
-    participant S as SQL worker
     O->>E: Submit A under projection epoch A
     E->>C: QueryRetained(A)
-    C->>S: Execute A with physical lease
     O->>O: B replaces A, revoke A publication rights
     Note over O,E: Hide or logical timeout also revokes rights, not occupancy
     O->>E: Cancel A, retain latest eligible demand B
     E->>C: QueryCancel(A)
-    Note over E,C: QueryCancel has no independent response
-    C->>S: Request cooperative cancellation
-    S->>S: SQL exits, detach handler, clean up snapshot
-    S-->>C: Physical work retired
-    C->>C: Release A lease
-    C-->>E: Original A Query response
-    E->>E: Drain A response, retire client slot
+    Note over E,C: Same exchange until read retirement or disconnect
+    C-->>E: Original A Query response after physical read retirement
+    E->>E: Drain response, retire client slot
     E-->>O: Matching retirement, reject obsolete payload
     O->>E: Re-drive B only if still eligible
     E->>C: QueryRetained(B)
@@ -178,6 +177,10 @@ retires on disconnection. Old completions cannot publish or clear B. SQL cleanup
 and wire semantics are defined in
 link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation].
 
+Directory reads and playing-occurrence lookups use tracker receipts for query
+identity and freshness. Invalidation occurs when identity changes, before any
+replacement read is planned.
+
 Library navigation, panel hiding and window cancellation discard both active
 logical locate demand and any queued locate intent. A cancelled locate retains
 its physical slot until completion, but that completion cannot reveal ancestors
@@ -192,10 +195,8 @@ review epoch and page projection instead of rebinding an old offset to a new gro
 
 GUI admission allows two seconds, followed by twelve seconds for response
 presentation. Timeout displays an error and requests cancellation; an explicit
-retry still waits for the retirement shown above. Cancellation is cooperative,
-not a hard filesystem/I/O cutoff. Retained IPC exchanges have no response-wait
-deadline. Transport errors have no payload stamp and do not prove data changed;
-command and framing deadlines are independent
+retry still waits for the retirement shown above. Transport errors have no
+payload stamp and do not prove data changed. Wire deadlines are independent
 (link:21_ipc.adoc#request-failures-and-completion[IPC waiting limits]).
 
 `RevisionChanged` and owner-scoped `Cancelled` retire the obsolete read without
@@ -216,8 +217,8 @@ retry preserves valid pages, but obsolete authority requires fresh page reads.
 |===
 |Owner |Retained demand and execution boundary
 |Library browser
-|One root/search-count worker; configured-root rows are local data and remain
-visible without counts. Root aggregates count each track once.
+|Separate root-total and search-count slots; configured-root rows are local data
+and remain visible without counts. Root aggregates count each track once.
 |Library tree
 |At most four physical reads and four coalesced pending branch demands. Collapsing
 discards queued subtree demand, not submitted slots; repeated demand does not
@@ -260,7 +261,8 @@ link:24_layout.adoc[GUI layout] for interaction ownership.
 |Buffer |Retention bound
 |Album, Playlist catalog/entry, Queue pages
 |The larger of eight pages or visible pages plus three; failed offsets have the
-same separate bound.
+same separate bound when recording a failure; reducing viewport demand does not
+immediately trim that failure table.
 |Library tree pages and failures
 |One shared LRU bound: the larger of sixteen pages or current demand, including
 unverified ancestry. Expansion/selection identities are separate from payloads.
@@ -292,12 +294,11 @@ expired presentation even if no query completes or other frame is requested.
 This is not polling and does not delay an available fresh result. Request
 deadlines and physical worker retirement remain independent.
 
-GUI replies compare the affected pages or snapshots, including row identity,
-order, fields, and total, before replacing presentation. Unchanged album pages
-keep existing cover demand; notifications needed to restore current input,
-loading status, or selection still occur. Changed payloads replace old content
-directly, without an empty intermediate frame. Expiry exposes the normal loading
-or failure surface; an identical reply after expiry must restore that surface.
+Album cards compare page presentation before replacement so unchanged cards keep
+their cover demand. Queue, Playlist, and album-member pages replace accepted
+payloads directly. Notifications still restore input, loading status, or
+selection when needed. Expiry exposes the normal loading or failure surface;
+an identical reply after expiry must restore the presentation.
 Failures or rejected authority may discard the affected old presentation sooner.
 Retained rows never authorize positional actions or commands requiring current
 facts. Header and match counts follow the retained rows and leave with them.
@@ -338,15 +339,14 @@ Queue reconciliation failures retain occurrences but leave positions unavailable
 Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
-Library matching counts depend on filters and data revisions, not row sort order.
-The catalog count revision is independent of row-content revisions: play counts,
-last-played timestamps and bitrate-only changes do not discard these scalar totals.
-The batched root-count owner supplies unfiltered root totals; matching-count reads
-wait for its complete current snapshot rather than querying those totals again.
-Unfiltered root and Other totals follow roots/structure freshness independently;
-warm totals are reused across filter changes. Overlapping configured roots count
-each track once. Sorting neither cancels a valid in-flight count nor refetches
-unchanged totals.
+The GUI issues Library search counts as `LibraryRootPage` with `limit = 0` and
+`sort = Id`. Changing display sort does not change that query, but statistics
+and bitrate changes can stale its row-query stamp and trigger another request,
+even when Store reuses the scalar total. Matching-count reads wait for the
+current unfiltered root-count snapshot rather than querying root totals again.
+Unfiltered root totals and `OtherTracksCount` follow structure freshness and
+are reusable across filter changes. Overlapping configured roots count each
+track once.
 
 Loading text waits 150 ms while placeholders retain geometry; errors and retries
 are immediate. A cancellable per-view wake follows current requests and retires on
@@ -387,8 +387,9 @@ source changes. Scrolling and playback reuse those styled lines.
 [[processing-output-retention]]
 == Processing output retention
 
-The processing service owns immutable PCM and frozen run snapshots, independently
-of windows and query caches. Active, retained and retiring PCM share a 512 MiB
+Core owns publication of immutable PCM and retained run snapshots independently
+of windows and query caches. Workers produce results; Core admits or rejects
+them. Active, retained and retiring PCM share a 512 MiB
 allocation budget. Clones and slices share their backing reservation; the final
 owner releases the charge. This does not cap decoder/DSP state, model weights,
 Python inference workspace or total process RSS.
@@ -400,22 +401,25 @@ history they consume.
 
 Successful admission of a non-export run retires unselected PCM and prepared
 runners before the worker allocates. The selected audition stays pinned; capacity
-exhaustion fails rather than evicting it or spilling to disk. At most four frozen
-run snapshots support later graph recomputation. Availability is revoked when PCM
-is retired, including in current/history status. The latest 32 terminal statuses
+exhaustion fails rather than evicting it or spilling to disk. At most four retained
+runs preserve graph and source identity, not all recomputation settings; see
+link:21_ipc.adoc[IPC processing commands]. Availability is revoked when PCM is
+retired, including in current/history status. The latest 32 terminal statuses
 can outlive retained audio. Export jobs preserve their source handles, occupy no
 audition slot and publish only a file and receipt; publication does not request
 storage synchronization (link:91_design_decisions.adoc#DEC-018[file publication policy]).
 
 Standalone stem mixes belong to the selected audition, not a second result cache.
-Completed mixes whose selection was revoked or rejected retire off Core; retained
+Completed mixes whose selection was revoked or rejected are reclaimed; retained
 stems remain available for another mix.
 
-One bounded reclamation worker releases rejected/replaced payloads off Core.
+One reclamation worker normally releases rejected/replaced payloads off Core.
+If its 18-item mailbox is full or disconnected, reclamation runs on the calling
+thread. Not waiting for mailbox capacity does not guarantee off-thread drops.
 Rejected cached auditions drop only temporary aliases while the result cache owns
 the PCM; repeated admission failures do not enqueue reclamation work.
-Workers wait for preceding retirement without blocking Core; charges persist
-while playback, exports or aliases still own the PCM. Export publication rechecks
+Workers wait for preceding retirement; charges persist while playback, exports
+or aliases still own the PCM. Export publication rechecks
 cancellation and source identity before its atomic no-clobber commit. Shutdown
 joins workers; live audio survives until its final playback owner releases it.
 For task controls and audition, see the
@@ -607,13 +611,11 @@ and 18 channels (2.25 MiB of samples).
 These capacities follow
 link:../crates/rivu-shm/src/lib.rs[the shared-memory storage and retention contract].
 
-Capture appends contiguous fragments within logical blocks without publication
-allocation. Readers cannot pin slots or extend retention. Mapping/sample capacities
-are not RSS limits; direct-observation fences and transport ownership belong to
+Capture publication does not allocate. Mapping/sample capacities are not RSS
+limits; read validation and overwrite semantics belong to
 link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport]. Each GUI reader
-also reuses stereo scratch for at most 1024 frames (8 KiB of sample storage),
-validating the complete SHM read before analysis and waveform ingestion. GUI
-analysis history and the audio worker's processed Before FIFO are separate allocations.
+reuses stereo scratch for at most 1024 frames (8 KiB of sample storage), separate
+from GUI analysis history and the audio worker's processed Before FIFO.
 
 The processed Before tap's native-channel source-aligned FIFO is separate from the analysis ring
 and waveform retention. Capture-identity changes, inactive analysis or exhaustion
@@ -891,9 +893,10 @@ link:23_visuals.adoc#artwork-composition-and-animation[Artwork composition and a
 
 === Window-owned real-cover decoding
 
-Real-cover sharing uses immutable content path, encoded policy and decoded budget;
-neither pixels nor remembered failures cross policy identities. All file I/O uses
-the background decode seat shown above, never render-time I/O.
+Each window owns publication rights, remembered failures, and display leases,
+not the decoder. The desktop application shares the background decode seat and
+reusable workspace. Sharing keys include immutable content path, encoded policy,
+decoded budget, and tier. File I/O uses the background seat, never render-time I/O.
 
 Static previews select the smallest sufficient tier from actual physical display
 size. Album-card demand is capped at 560 pixels, accepting display upscaling above
@@ -925,14 +928,14 @@ Terminal source retirement also applies to scene-held images never painted.
 Updating a path without changing track ID/fingerprint updates queued and current
 lookup inputs without resetting artwork rotation or inventing a transition.
 
-Revisiting an image after its last consumer retires decodes it again; there is
-no idle decoded-image cache across selections or windows. A still-live consumer
-can supply the shared decode. Each real-cover decode uses
-`interface.artwork_decode_budget_mib` (default `64`, range `1`–`1024` MiB),
+There is no idle decoded-image cache. A weak index can reuse matching immutable
+pixels across windows while any consumer still holds a strong reference; after
+the last release, revisiting requires decoding again. Each real-cover decode
+uses `interface.artwork_decode_budget_mib` (default `64`, range `1`–`1024` MiB),
 including cumulative BGRA pixels and conservative frame/vector overhead. The
-budget includes every composited GIF/WebP animation frame; even tiny frames
-incur an overhead charge. It applies per immutable content path per window, not
-across all active/retired images or windows. Settings operation is described in
+budget includes every composited GIF/WebP frame; even tiny frames incur overhead.
+It bounds an individual decode, not the aggregate of active and retired images.
+Settings operation is described in
 link:01_config.adoc#desktop-settings[Desktop settings].
 
 A committed budget change invalidates shared cover loads and completed failures,
@@ -1110,15 +1113,10 @@ Failed first-tile reservation leaves no empty page or consumed page slot.
 Device recovery clears old atlas tiles and adopts the replacement device's
 texture-dimension limit before new requests.
 
-Closing the last window exits the desktop process. GPUI display connections,
-GPU contexts, font caches, worker buffers and allocator state retire with that
-process rather than remaining in a windowless service. Submitted GPU work still
-obeys backend retirement rules during teardown.
-
-Playback, IPC, tray, MPRIS and accepted business operations belong to the separate
-Core service and remain alive. Reopening starts a new desktop and rebuilds its
-derived caches from current service state. Process exit releases desktop-owned
-memory; this is not a promise about Core's retained business or audio caches.
+At desktop process exit, GPUI display connections, GPU contexts, font caches,
+worker buffers and allocator state retire. Submitted GPU work still obeys backend
+retirement rules. This does not release Core business or audio caches; see
+link:20_architecture.adoc#consumer-and-application-lifetimes[Process lifetimes].
 
 GUI and tray have separate process-local startup Localizers. A saved language
 change requires restarting the GUI for window strings and restarting the Core

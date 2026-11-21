@@ -35,16 +35,13 @@ presentation visibility; each style owns its rendering state.
 Resource capacities and release points belong to
 link:22_cache.adoc#visualization-caching[Visualization caching].
 
-Visualization analysis is separate from audio output and observes samples before
-master volume gain. One global `visualizations.general.signal` setting selects `before`
-or `after` (default): before the active realtime processing chain, or after that
-chain including monitor EQ. The audio worker writes the selected native-channel
-signal once into a bounded shared-memory window. The GUI reads it directly and
-folds channels into logical stereo for `rivu-analysis`, outside both playback and
-paint callbacks. There is one FFT path, not parallel before/after analyzers.
-At a playback speed other than 1×, the window instead carries the stretched output
-for both settings, with media time advancing at that speed; see
-link:04_playback.adoc#playback-speed[Playback speed].
+The audio worker writes one native-channel signal into a bounded shared-memory
+window, before master volume. At 1× the tap follows the shared
+link:06_visualizations.adoc#shared-visualization-settings[Before/After setting];
+at other speeds it observes stretched output for either choice, with media time
+advancing at playback speed. The GUI folds this stream into logical stereo for
+`rivu-analysis`, outside both playback and paint callbacks. There is one FFT
+path, not separate Before and After analyzers.
 Each block carries its admitted output-frame position. GUI ingestion stops before
 a block starting more than 1024 frames ahead of the observed audible cursor and
 resumes on PCM or cursor notifications, without clock polling or deadline
@@ -80,9 +77,12 @@ not comparisons of media timestamps. Seek/source replacement, confirmed gaps
 and dropped analysis samples start new segments; ordinary clock corrections do
 not. With a realtime graph, gap markers follow latency-trimmed output admission,
 so an FFT cannot bridge a break or discard valid earlier pending audio.
-Invalid seek targets leave decoder, output and analysis unchanged; obsolete
-asynchronous rejections cannot undo newer transport intent. Decoder seek
-execution failure stops playback rather than resuming uncertain decoder state.
+A seek rejected before admission leaves decoder, output and analysis unchanged.
+An admitted seek publishes a revision before backend execution. If the backend
+rejects it, Core corrects the position with another revision: instantaneous GUI
+analysis can be retired without a successful decoder seek. Obsolete rejections
+cannot undo newer intent. Decoder seek execution failure stops playback rather
+than resuming uncertain decoder state.
 
 [[ingestion-and-publication]]
 === Ingestion and publication
@@ -130,10 +130,9 @@ Shared-memory observation, identity fences and partial-tail admission follow
 link:21_ipc.adoc#realtime-pcm-transport[Realtime PCM transport]; reader scratch is
 bounded by link:22_cache.adoc#resource-boundaries[Resource boundaries]. Each
 scheduling round processes at most 32 logical blocks and yields between
-continuations. `analysis_rate_hz` limits publications and demanded FFT transforms,
-not PCM ingestion. No fresh input means no publication timer; paused and disabled
-gates revoke pending analysis and timed wakeups. Hidden history retains collection
-demand but never constructs an invisible GPU drawing.
+continuations. `analysis_rate_hz` limits fresh analysis results and demanded FFT
+transforms, not PCM ingestion or invalidation publications. No fresh input means
+no analysis publication timer.
 
 Analysis always observes the latest complete window. When that window is shorter
 than the analysis interval, a transient between observed windows can be absent
@@ -218,11 +217,11 @@ musical bands take maxima, energy bands sum power, and Spectrogram publishes dB
 bins. Spatial analysis still reconstructs separate channel power for pan. Pool
 exhaustion does not prevent current-window band-energy computation.
 
-Demand is not payload readiness. Exhausting a bounded Density, PCM, or Spectrogram
-snapshot pool omits that payload from the next frame, without blocking Spectrum,
-RMS, band power, or other available payloads. The affected renderer keeps its last drawing and
-matching readouts until a usable replacement arrives; it never pairs an old
-snapshot with newer metrics.
+Demand is not payload readiness. An exhausted snapshot pool omits that optional
+payload without blocking Spectrum, RMS, band power or other available payloads.
+Density and Oscilloscope retain the last usable payload without pairing it with
+newer metrics or timing. Spectrogram still advances its accepted time, so old
+tiles can scroll; no column is inserted for the missing interval.
 
 [[presentation-scheduling-and-visibility]]
 === Presentation scheduling and visibility
@@ -231,12 +230,10 @@ snapshot with newer metrics.
 ==== Independent analysis and display clocks
 
 The <<ingestion-and-publication,three scheduling rhythms>> share one window-local
-`VisualizerRuntime` and staging across panels. `interface.animation_fps` caps
-Artwork, Spectrum, Spectrogram and Audio Visualizer animation: `0` follows window
-frames, and `1`–`240` limits requests per second. It throttles neither analysis nor
-Waveform processing. Artwork uses the same native-frame gate and cancellable
-display deadline as audio visualization. Positive limits share one time origin,
-delivering due updates together; late deadlines coalesce without catch-up.
+`VisualizerRuntime` and staging across panels. Artwork and audio views use the
+same native-frame gate and cancellable display deadline under the shared
+link:01_config.adoc#animation[Animation FPS cap]. Positive limits share one time
+origin, delivering due updates together; late deadlines coalesce without catch-up.
 Scheduling a callback does not dirty the window: accepted input or animation
 changes notify only affected panels. Configuration refreshes reuse unchanged
 staging rather than treating it as new audio; neither animation clock refreshes
@@ -255,12 +252,12 @@ the producer marks real sample gaps independently of publication cadence.
 
 ==== Pause, Stop, and semantic invalidation
 
-Pause cancels analysis and audio-driven animation, preserving the last displayed
-frame in every visualization style. The presentation owner does not dispatch the
-worker's pause-reset publication to renderers, including during resume before
-fresh input is ready. Resumption reanchors display time rather than replaying the
-suspension. A paused business update can request one refresh, but does not advance
-animation or start the optional Audio Visualizer idle fade.
+Pause revokes live analysis and timed audio-driven animation, not the independent
+finite Waveform request. The presentation owner holds the last live drawing by
+withholding the worker's pause-reset publication, including on resume until fresh
+input is ready. Resumption reanchors display time rather than replaying the
+suspension. A paused business update can request one refresh without advancing
+animation or triggering the idle fade; accepted finite data can update the preview.
 
 Stop retires all analysis input. With `fade_when_idle` enabled, a confirmed physical
 close of the displayed live source can fade its last bounded radial drawing for
@@ -271,12 +268,10 @@ Stop preserves the original cause and never restarts the fade or restores a
 hidden, cleared or already released drawing. Clearing the queue, replacing the
 source or an unmatched close clears the drawing rather than guessing continuity.
 
-Source replacement and seek retire instantaneous results without clearing compatible
-Spectrogram history. FFT/window/signal changes and disabling visualizations clear
-incompatible retained results even while paused or hidden. These semantic facts
-are independent of producer continuity generation and seek previews.
-Disabling visualizations discards live-analysis views rather than freezing them;
-the retained waveform summary follows <<visualization-enablement,Visualization enablement>>.
+Semantic invalidations apply independently of producer continuity generation and
+seek previews. Pause does not shield an old drawing from a source/seek or
+FFT/window/signal change. Enablement has its own
+<<visualization-enablement,acceptance fence>>.
 
 ==== Appearance changes without new audio
 
@@ -292,8 +287,9 @@ range and axis settings invalidate only affected retained drawings and rebuild
 from compatible working levels/history. Spectrum, Spectrogram and Waveform share
 one signal palette; palette changes preserve Spectrum geometry and retained
 Spectrogram scalar history.
-Peak envelopes continue evolving while their markers are disabled, but peak-only
-changes do not refresh visible Spectrum output.
+Peak envelopes can evolve with markers disabled without invalidating visible
+output solely for that animation step. Peak settings changes can still rebuild
+the presentation.
 
 Fractal color and bloom edits republish the frozen scene's material without
 advancing its simulation or accepting audio. Hidden-window retirement still
@@ -312,79 +308,60 @@ enabled. Playback, commands, and shutdown remain independent of presentation.
 
 ==== Visibility and layout retention
 
-A reliable Hidden notification cancels presentation clocks and suspends demand for
-instantaneous styles. Configured Spectrogram and Waveform views continue bounded
-history collection. Reveal uses the latest collected history without replaying
-hidden audio; switching one panel never suspends unaffected visible panels.
-No invisible history update assembles a new GPU drawing. Final drawings,
-inactive-tab state and GUI analysis-worker pools have distinct lifetimes defined in
-link:22_cache.adoc#resource-boundaries[Resource boundaries].
-Loss of focus alone never disables analysis. Without reliable visibility
-notifications, compositor throttling limits native animation callbacks but not
-the worker's bounded analysis cadence.
+Hide cancels presentation clocks without treating visibility as a source change.
+Demand is reconciled per panel; collection and drawing have separate permission
+checks. Reveal reanchors display time and presents the latest retained history
+without building GPU drawings while hidden. Final drawings, inactive-tab state
+and GUI analysis-worker pools have distinct lifetimes defined in
+link:22_cache.adoc#resource-boundaries[Resource boundaries]. Without reliable
+visibility notifications, compositor throttling limits native animation callbacks
+but not the worker's bounded analysis cadence. For visible outcomes, see the
+link:06_visualizations.adoc#visualization-behavior[behavior matrix].
 
 [[visualization-enablement]]
 == Visualization enablement
 
-Visualization enablement gates GUI demand and the audio-worker tap. Disabling
-discards shared analysis, Spectrogram history, stereo fields and fractal scenes,
-and releases waveform display/interaction caches, but retains the bounded session
-waveform summary and already-completed preview. FFT plans and working storage
-remain reusable; live analysis needs a new complete audio window on resumption.
-Settings, source identity, playback and accounting survive. Transition generations
-reject queued samples and late full-load results, including quick on/off switches.
-Submitted graphics retain their independent
-link:22_cache.adoc#resource-boundaries[completion-aware lifetime].
+Enablement gates GUI demand and the audio-worker tap. A transition generation
+rejects queued samples and late finite results even across a quick off/on switch.
+Live analysis needs a new complete audio window on resumption; Waveform's retained
+data does not backfill missed PCM. Retention and release are described in
+link:22_cache.adoc#visualization-caching[Visualization caching].
 
-Disabling collects no additional waveform coverage and performs no backfill.
-Retained intervals remain available on re-enablement; subsequent admitted PCM
-fills unknown intervals or overwrites revisited bins. Disabling cancels the GUI's explicit
-finite-render requests. Decode loops observe cancellation between packets, but
-cannot interrupt a blocking file/container/codec call; physical admission remains
-held until worker exit. Cancellation is not a load failure. Re-enabling restores
-the retained waveform display but does not restart an interrupted full load.
-The application-menu Visualizations switch changes enablement immediately through
-Core. The Settings control instead follows its draft's Apply/Discard contract.
-The disabled-state icon and controls are described in
+Disabling cancels the GUI's finite request; cancellation is not a load failure
+and does not free the physical worker before it exits. This gate belongs to the
+GUI, not the finite-render endpoint. For controls and visible outcomes, see
 link:06_visualizations.adoc#visualization-enablement[Visualization enablement].
 
 [[waveform]]
 == Waveform
 
-One GUI-session summary supplies every Waveform panel. Core and audio execution
-own PCM capture/rendering, not waveform statistics or display geometry. Realtime
-collection and an explicit finite baseline converge on that same summary:
+Core and audio execution own PCM capture/rendering, not waveform statistics.
+The GUI keeps separate realtime and finite accumulators. Panels share the GUI's
+selected display frame, not a summary that both producers write:
 
 [source,mermaid]
 ----
 flowchart TB
-    R["Shared realtime reader and stereo fold, also used by live analysis"]
-    RT["Admitted PCM, fenced traversal and source mapping"]
-    Q["Explicit Before/After request, capture source/state and start order"]
-    F["Finite render, fold accepted PCM blocks without whole-track retention"]
-    I["Validate current source, request and suspension identities"]
-    M["Per-bucket merge: protect realtime visits after request start"]
-    S["Unique session summary: at most 1024 bins, no disk persistence"]
-    P["Waveform panels share latest visible snapshot"]
-    E["Render failure: report error, keep valid partial preview, not complete"]
-    R --> RT
-    RT -->|"every admitted block updates visited bins"| S
+    RT["Realtime reader: fold admitted PCM with fenced source and traversal"]
+    S["Transport-owned rolling summary"]
+    Q["Explicit request: target, Before/After, and start revision"]
+    F["Finite worker: fold PCM into a separate bounded summary"]
+    M["GUI: validate request and source, merge into full preview"]
+    P["Shared display: matching full preview, otherwise progressive frame"]
+    RT --> S
     Q --> F
-    F -->|"progressive valid blocks"| I
-    I -->|"matching identities only"| M
-    M -->|"time overlap and sample-weighted energy"| S
-    F -->|"failure never rolls back to pre-request state"| E
-    E -.->|"preserve already accepted statistics"| S
-    S -->|"at most one snapshot per drain turn, recheck source/revision and presentation permission"| P
-    S -->|"hidden: collect without snapshots, reveal: publish synchronously"| P
+    F -->|"partial or complete scan frame"| M
+    S -->|"same-source visits after request start take precedence"| M
+    M -->|"full preview"| P
+    S -->|"progressive frame"| P
 ----
 
 Progressive collection is the default. Only admitted PCM fills bins; undecoded,
 skipped or overwritten intervals remain blank, distinct from known silence.
 Collection therefore follows the GUI subscription, not decoder activity alone.
 Unknown or underestimated timelines coarsen existing bins to preserve the bound.
-Subsequent playback can overwrite an installed finite baseline, including reducing
-old Peak and RMS values after lower-gain processing.
+Subsequent playback can replace visited bins in the GUI preview, including
+reducing old Peak and RMS values after lower-gain processing.
 Contiguous fragments accumulate without counting an accepted prefix twice.
 The first admitted PCM block supplies the realtime summary's sample rate;
 catalog metadata does not calibrate its bins. PCM media start and step locate
@@ -393,22 +370,22 @@ by the accepted frame offset times the step.
 Epochs, gaps and applied intent fence traversal and mapping boundaries rather
 than deriving positions from Core progress notifications.
 
-An explicit full load keeps the previous display through its Track query until
-the first valid finite PCM arrives. It progressively supplies a baseline rather
-than creating another display mode or automatically rescanning the source.
-The request specifies Before/After and optional selected-source-relative range.
-Core captures the immutable actual source, admitted graph and monitor EQ when
-servicing it, including retained PCM for memory-backed audition. Without active
-playback, rendering opens the selected original source with its saved decoder
-hint, not a persisted graph. Reconstruction failures are errors, never fallback.
-After is a rerender of the captured state, not a recording of past audible output.
-Subsequent configuration edits do not mutate that capture.
+An explicit full load targets the current track if present, even when Stopped;
+otherwise it uses the Track details target. A current track binds the scan to
+the playback source generation only when not Stopped. The previous display
+remains through request admission until the first valid finite PCM arrives.
+The finite endpoint honors the requested Before/After independently of the
+realtime speed rule. Core captures the actual source and processing state when
+servicing a bound request, including retained PCM for memory-backed audition.
+An unbound request opens the original source using its saved decoder hint; it
+does not apply a persisted graph. After is a rerender, not past audible output.
 
-The per-bucket order fence in the diagram prevents a late baseline from erasing
-realtime intervals visited after that request began. Finite blocks never require
-whole-track PCM retention. The finite protocol and physical
-worker cancellation lifetime are authoritative in
-link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering].
+The request's start revision protects newer realtime visits from a late scan
+baseline. Merge updates the GUI full preview, never the transport summary.
+A failed scan reports the error and can leave accepted partial data visible,
+but cannot mark it complete. Finite blocks do not require whole-track PCM
+retention. See link:21_ipc.adoc#finite-pcm-rendering[Finite PCM rendering]
+for protocol and cancellation lifetime.
 
 [cols="1,3",options="header"]
 |===
@@ -429,25 +406,24 @@ still fence sample traversal and mapping.
 merge checks the current source/request and rejects stale completion; its start
 order protects subsequently visited realtime buckets.
 |Suspension and visibility
-|Suspension generations reject stale full-load completion. Pause and panel hiding
-retain the session summary and explicit preview; hiding is not cancellation.
-Disabling visualizations cancels finite requests and stops collection while
-retaining completed preview and summary, as defined in
-<<visualization-enablement,Visualization enablement>>. Gating full-load requests
-while disabled is GUI presentation policy, not an endpoint restriction.
+|Pause and hiding do not cancel a finite request. Epoch checks reject results
+from before an enablement transition; see
+<<visualization-enablement,Visualization enablement>>.
 |===
 
 An open playback source retains its decoder until reload, independently of the
-saved hint used by a new explicit preview. Without playback, configured Waveform
-panels keep the selected Track query current even with Details closed, without
-requesting artwork or opening an editor.
+saved hint used by a new explicit preview. If there is no current track, a
+configured Waveform in a visible window keeps the fallback Track query current
+while visualizations are enabled, even with Details closed. That demand requests
+neither artwork nor an editor.
 
 Display aggregation keeps left and right statistics separate. Peak takes the
 maximum known value; RMS uses decoded-sample-weighted energy,
 `sqrt(sum(rms_i^2 * count_i) / sum(count_i))`, before display gain and gamma.
 Channel fallback uses matching mono values and mono counts. Missing intervals are
-not zero-valued samples. The 1024-bin limit trades whole-track time resolution for
-bounded storage; it does not introduce zoom, interpolation or a second display mode.
+not zero-valued samples. Bounded summary storage trades whole-track time
+resolution for memory; it does not introduce zoom or interpolation. See
+link:22_cache.adoc#waveform[Waveform caching] for the summary and GPU column bounds.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
@@ -488,19 +464,17 @@ decibel floor remain empty rather than creating a minimum-height colored band.
 All styles normalize the gradient to the full plot bounds, with the strongest
 color at the top and the visible minimum at the bottom. A curve below the plot's
 ceiling neither stretches to fill it nor acquires a local-height gradient.
-Spectrum, Spectrogram and Waveform use the same palette: Inferno, Magma, Viridis,
-Cividis, Grayscale or Deadbeef (default). Deadbeef starts at deep blue rather than
-black; scientific color maps retain their complete standard ranges. Palette
-selection does not change intensity, RMS mixing, Peak mapping or signal geometry.
-Options are documented in link:06_visualizations.adoc#visualizations[Visualizations].
+Spectrum, Spectrogram and Waveform share a signal palette. Deadbeef starts at
+deep blue rather than black; scientific color maps retain their complete standard
+ranges. Palette selection does not change intensity, RMS mixing, Peak mapping or
+signal geometry. See link:06_visualizations.adoc#visualizations[palette options].
 
 Peak markers are discrete, solid-colored markers drawn separately from the body.
 They are not connected into a curve, preserving their transient-marker meaning.
 
 Rectangle coverage uses shared MSAA to avoid darkening adjacent zero-gap columns.
-Upload or paint failure reports an error rather than changing the fill. Geometry
-reuse and capacity belong to link:22_cache.adoc#spectrum[Spectrum caching];
-transport and admission belong to
+Geometry reuse and capacity belong to link:22_cache.adoc#spectrum[Spectrum caching];
+GPU schemas and admission belong to
 link:25_gpu_rendering.adoc#implemented-fixed-schema-slices[GPU rendering].
 
 == Audio Visualizer ownership
@@ -534,8 +508,8 @@ rotation, geometry, opacity and intensity remain presentation settings.
 
 === Oscilloscope
 
-Oscilloscope consumes the same selected before/after signal as FFT analysis,
-but uses unwindowed stereo PCM rather than reconstructing samples from FFT bins.
+Oscilloscope consumes the shared <<analysis-boundary,realtime tap>> as
+unwindowed stereo PCM rather than reconstructing samples from FFT bins.
 Only visible Oscilloscope instances request PCM.
 The worker shares immutable snapshots of the latest bounded PCM window. Pool
 exhaustion omits optional PCM without blocking audio or other analysis. Panels
@@ -545,10 +519,11 @@ link:22_cache.adoc#resource-boundaries[Resource boundaries]; configuration range
 defaults and panel controls belong to
 link:06_visualizations.adoc#audio-visualizer[Audio Visualizer].
 
-A rising zero crossing on the left anchors a sweep of the configured time span.
-A silent left channel selects the right trigger; a window shorter than two
-requested sweeps shows its available half-window. Without a crossing, the latest
-complete sweep is used. Trigger selection happens once per accepted publication.
+A rising zero crossing on the left anchors the sweep, with a right-channel trigger
+for right-only audio. To leave room for trigger search, the sweep normally uses
+at most half the exported PCM snapshot, not half the FFT window. Without a
+crossing, it uses the latest complete sweep. Trigger selection happens once per
+accepted publication.
 Painting partitions the sweep into at most one bucket per physical pixel,
 preserving finite minimum and maximum amplitudes in each channel instead of
 dropping peaks. Invalid amplitudes are omitted. Gain scales drawing before
@@ -582,7 +557,8 @@ rather than summing crowded logarithmic rows, which would make color depend on
 bin density instead of signal level.
 Spatial frequency mapping follows the accepted frame's sample rate and bin count,
 not settings awaiting a new frame. Calibrated linear bin power preserves
-single-sided DC/Nyquist normalization without a CPU dB-to-power round trip.
+single-sided normalization including Nyquist without a CPU dB-to-power round trip;
+the field excludes DC.
 Overflowing power is omitted rather than promoted to a saturated bright cell.
 
 Both styles share one fixed-resolution numerical GPU publication per style across
@@ -692,24 +668,19 @@ The default cover is separate from the application icon, retaining decorative
 rings and a full square composition. GUI styles apply the same corner treatment
 to real and default covers; MPRIS leaves clipping and corners to the media host.
 
-Artwork uses the shared window frame gate described under
-<<independent-analysis-and-display-clocks,Independent analysis and display clocks>>,
-and the same `interface.animation_fps` cap. This caps animation requests, not overall
-window submissions from playback or input. Rotation and animated covers share one demand;
-lower caps drop source frames rather than slowing their timeline. Cursor catch-up
-is bounded by frame count even after a long delay; all-zero-delay sources advance
-one frame per redraw. Each element retains its own cursor over shared decoded data.
-Pausing or static mode stops rotation, but a visible animated source can continue.
-Hiding or reduced motion cancels pending animation work. Focus loss alone does
-not stop rotation; the shared animation cap and native frame delivery still limit it.
-Animated source images retain GPUI's focus-based playback policy; source animation
-alone does not keep the artwork owner ticking while the window is inactive.
-Resuming rotation does not replay suspended time. Visualization enablement does not affect artwork.
+Artwork shares the window frame gate with audio views but has separate rotation
+and source-image clocks. Rotation integrates only visible playback time;
+suspension clears the tick anchor so reveal does not catch up. Source-animation
+demand separately requires window activation; focus loss alone does not stop
+rotation. Reduced motion cancels scheduled artwork animation without coupling it
+to audio visualization enablement.
 
-Artwork frames invalidate only visible rotating instances or active-window
-animated-source consumers. Loading, failed and single-frame images create no
-source-animation demand; successful animated decodes do. Shared source/style
-changes still invalidate all affected consumers.
+Each element has its own source cursor over shared decoded frames. The request
+cap can skip source frames without slowing their timeline. Catch-up is bounded
+by frame count; all-zero-delay sources advance one frame per redraw. A frame
+invalidates only visible rotating instances or eligible animated-source consumers.
+Source or style changes can invalidate all affected consumers. See the
+link:06_visualizations.adoc#visualization-behavior[behavior matrix] for user-visible states.
 
 == Failure boundaries
 
@@ -723,9 +694,12 @@ that query. Once decoding starts, ordinary metadata changes do not cancel it:
 the source, saved-hint, request-generation, and suspension checks described under
 <<waveform,Waveform>> govern pending and completed previews.
 
-Spectrum tessellation and Waveform/Spectrogram GPU publication/paint failures are
-surfaced as visualization errors. Accepted analysis clears data-consistency errors;
-a successful paint clears rendering errors even while audio is paused.
+Panels can report application-side errors such as Spectrum tessellation,
+GPU publication construction or scene recording through `paint_gpu`. Accepted
+analysis clears data-consistency errors; successful application-side paint can
+clear rendering errors even while paused. That success does not acknowledge GPU
+submission or presentation. Backend material rejection and shared-scene failure
+are described in link:25_gpu_rendering.adoc#admission-and-retirement[Admission and retirement].
 Stereo-analysis publication/paint failures revoke stale GPU content while retaining
 accepted CPU values. Pending publication gets at most one attempt per ordinary
 update, including unchanged input, until success; no retry timer or catch-up loop

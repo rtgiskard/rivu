@@ -35,7 +35,7 @@ and link:23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 |===
 |Command |Coverage
 |`make lint`
-|Formatting and all workspace targets/features, including link:00_getting_started.adoc#font-embedding[font embedding]; requires `rustfmt` and `clippy`
+|Rust and C++ formatting and Clippy for all workspace targets/features, including link:00_getting_started.adoc#font-embedding[font embedding]; requires `rustfmt`, `clang-format` and `clippy`
 |`make test`
 |Rust and Python behavior suites below
 |`make test-rust`
@@ -43,9 +43,9 @@ and link:23_visuals.adoc#pinned-gpu-extensions[pinned GPUI extensions].
 |`make test-python`
 |Synthetic audio-processing worker and evaluation tests; no model downloads
 |`cargo test --locked -p rivu-ui --example showcase`
-|Showcase dropdown keyboard regression
+|Run just the showcase dropdown keyboard regression from `make test-rust`
 |`cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac`
-|Local decoder/metadata patch regressions outside the workspace
+|Run just the non-workspace decoder/metadata patch regressions from `make test-rust`
 |===
 
 Rust tests need the build/font prerequisites and `dbus`; they use private session

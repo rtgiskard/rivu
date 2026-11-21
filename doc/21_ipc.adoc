@@ -36,17 +36,11 @@ at mapping boundaries. Generation identifies the Core source, applied intent
 identifies accepted audio/seek state, and epoch/gap fences mapping discontinuities.
 
 The window uses blocks of at most 1024 frames and 18 native float channels,
-including standard speaker indices. Output setup sizes active retention for its
-bounded prefetch, a 200 ms observer allowance and a maximum FFT window, with at
-least 32 slots and two boundary slots. Contiguous short writes extend the latest
+including standard speaker indices. Contiguous short writes extend the latest
 logical block instead of consuming a new slot for every decoder fragment.
-Native-channel stride and active pages are configured and prefaulted outside
-capture publication. Retention is bounded independently of the number of clients
-(at most 16); neither readers nor a stalled GUI can extend it. Resource bounds
-belong to link:22_cache.adoc#visualization-caching[Visualization caching].
-There is no private Core capture queue or per-client PCM queue. GUI stereo
-scratch/history and the audio worker's processed Before FIFO are separate
-allocations.
+The window serves at most 16 clients and has no private Core capture queue or
+per-client PCM queue. For allocation and retention bounds, see
+link:22_cache.adoc#visualization-caching[Visualization caching].
 
 PCM publications and cursor progress wake enabled receivers. Each subscription
 request acknowledges its own revision and current sequence/frame-offset frontier;
@@ -67,6 +61,8 @@ Readers never pin slots: a writer may replace samples during direct observation.
 Metadata and post-read revision/configuration fences reject overwritten observations;
 the window is not a lossless snapshot. Slow consumers resume from retained data
 rather than extending storage or reconstructing overwritten history.
+The GUI folds native channels into reusable stereo scratch and validates the
+complete SHM observation before handing it to analysis or waveform consumers.
 
 [[finite-pcm-rendering]]
 == Finite PCM rendering
@@ -92,7 +88,8 @@ limit an accepted render's lifetime.
 `Start` identifies the captured source, native sample rate, channel layout and
 optional full-source duration. Ordered `Pcm` chunks carry sequence, media start,
 media seconds per frame and interleaved float samples; `Complete` carries rendered
-frame count and duration. A CUE selection is the origin for range and media time.
+frames actually sent and the duration of the full selected source, not the
+requested range. A CUE selection is the origin for range and media time.
 Realtime and finite layouts contain 1–18 unique standard channel IDs; both
 endpoints validate the same count, ID range and uniqueness constraints before
 exposing native channels to consumers.
@@ -169,7 +166,8 @@ do not expire under this rule.
 
 An oversized prefix closes immediately, before consuming its body. Invalid headers,
 types, versions, malformed Postcard, and trailing payload bytes within the limit
-receive Error and close that session. Other sessions remain usable.
+are fatal to the exchange. The ordinary request loop sends Error before closing
+where possible; failures during an in-flight exchange can close without Error.
 
 Query read-ahead is bounded to one maximum request frame plus its prefix. Complete
 frames wait untimed and in order behind earlier replies; incomplete tails retain
@@ -242,27 +240,12 @@ The Hello response contains a random nonzero `u32` instance ID encoded as four
 little-endian bytes, generated once per server start. Zero is invalid. Its role
 and equality semantics are defined in <<identity-and-freshness,Identity and freshness>>.
 
-The GUI retains fatal connection failures independently of dismissible window
-notifications. After closing the window and retiring its IPC workers, it returns
-the failure to the launcher as an unsuccessful exit. Closing the window locally
-or receiving a normal Core shutdown remains a successful exit; neither path
-replays commands or restarts the service.
-The GUI analysis worker also reports an unwind panic through its fatal connection
-path, withdrawing its current frame before notifying the desktop owner.
-
 The TUI uses independent retained command, query, and Watch sessions. The Watch
-Hello supplies initial state and pins the instance; the loading screen still
-accepts `q`. Other sessions must bind to that instance. Command/query reconnection
-cannot target a replacement instance, and Watch never automatically reconnects.
-A fatal connection, handshake, or identity error restores the terminal and exits,
-without replaying queued commands.
-Permanent command or query worker termination is fatal to the TUI owner as well;
-it is not reported as a busy queue or left as an indefinitely pending read.
-
-Query replacement cancels the active read, drains its physical exchange, then
-sends only the latest pending query. TUI exit closes in-flight waits, including
-command and Hello waits. TUI state and Watch requests exclude processing tasks;
-processing-only progress does not wake or redraw the terminal.
+Hello supplies initial state and pins the instance. Command and query sessions
+must bind to that instance; Watch never automatically reconnects. TUI State and
+Watch requests exclude Processing, so processing-only updates do not wake them.
+Frontend exit and failure policy belongs to
+link:20_architecture.adoc#consumer-and-application-lifetimes[Consumer and application lifetimes].
 
 === Message types
 
@@ -445,9 +428,12 @@ instead appear in the Query result, and core command failures in an unsuccessful
 Ack. Transport failure or an oversized response can end the connection without
 a usable response.
 
-Core's command/request queue holds at most 64 operations. Admission allows two
-seconds, followed by twelve seconds for an ordinary reply or 120 seconds for
-`LoadSourceTags`, `SaveSourceTags`, and database optimization.
+Admission to the serial Core request queue allows two seconds, followed by
+twelve seconds for an ordinary reply or 120 seconds for `LoadSourceTags`,
+`SaveSourceTags`, and database optimization. Ordinary and retained queries both
+pass through Core admission before dispatch can try the read-worker queue. Either
+stage can reject admission independently; see
+link:20_architecture.adoc[Core and client architecture].
 UI fire-and-forget sends fail with `Rivu is busy or stopped`
 rather than blocking. IPC adds one second to the operation's waiting budget for
 the server bridge; it does not classify commands again. Local ShowWindow and
@@ -459,8 +445,9 @@ acknowledgements, has a five-second completion deadline covering write and flush
 Client request writes use the same five-second write-and-flush deadline, including
 Hello, Watch, and WaitTask requests; serialization precedes it. A stalled write
 discards that connection, so server writes cannot block teardown indefinitely.
-Accepted operations still finish their replies during shutdown rather than
-cancelling acknowledgements when shutdown starts.
+Shutdown does not immediately cancel accepted replies. The transport stops
+accepting new sessions and gives existing connections up to 120 seconds to
+drain in total, subject to the individual write deadline. Delivery is not guaranteed.
 Client response reads start after write/flush and include the operation budget,
 bridge allowance, server response-write deadline and one additional transport
 second:
@@ -505,18 +492,22 @@ are conservatively `Unknown`, even without evidence that bytes reached the peer.
 The client's `CommandFailure` carries no invented Core revision or task ID.
 `Shutdown` is an App lifecycle request. After its local pending-edit guards,
 the GUI's `Quit application` sends it through the instance-bound command worker;
-`Close window` only retires the desktop. Neither action confirms unsubmitted
-inline Details text. Shutdown acknowledgement means accepted shutdown, not final persistence or worker
-retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
+`Close window` does not send Shutdown. Neither action confirms unsubmitted
+inline Details text. Shutdown acknowledgement means accepted shutdown, not final
+persistence or worker retirement. Blocking I/O and cooperative cancellation
+provide no hard exit deadline.
 The host attempts each final persistence domain even if another fails, retires
 its workers and services, then exits with failure if final persistence failed.
 The earlier successful shutdown acknowledgement is not changed by that result.
 If read-worker startup fails, the host still attempts final persistence and retains
 both the startup cause and any finalization failure in its returned error.
 
-Failed exchanges, including an unexpected response type, discard the client
-connection and its bound instance identity. A later explicit request can reconnect
-and perform a fresh Hello, but clients never automatically replay a failed command.
+A valid protocol `Error` on a bound State or Query exchange returns a request
+error without discarding the socket. Transport failures and unexpected response
+types discard the connection and its current Hello identity. An explicit
+`bind_instance` expectation survives that drop: a later request can reconnect
+and perform Hello, but must still match that instance. Failed commands are never
+automatically replayed.
 
 `rivu_client::SessionCancellation` permanently cancels a client session and wakes
 current and future waits, discarding its connection. It does not cancel accepted
@@ -683,8 +674,11 @@ distinct roles of publication, section, query and consumer tokens.
 
 `Query::stamp` selects query-dependent freshness for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
-content; directory/location projections also use structure. Album projections use
-the Core-owned `album` collection token rather than the global library token.
+content; directory/location projections also use structure. `Albums` uses only
+the Core-owned `album` token. `AlbumTracks` uses `album` for collection authority
+and adds `library` and `bitrate` for row payload freshness. Retained pages require
+the complete stamp when Core validates the pinned SQLite snapshot, even when the
+consumer will use only their IDs.
 A single Track query uses `track = {track_id, revision}`. Bitrate-bearing payloads
 also select the bitrate revision described below.
 Root counts use structure only. Root size/count statistics use library content,
@@ -722,24 +716,21 @@ cache, and retained metadata cannot recreate a deleted playlist's scope.
 
 `LibrarySnapshot.bitrate_revision` advances only after a source-conditional
 commit actually changes the `bitrate_bps`/`bitrate_exact` pair.
-`QueryRevisions.bitrate` participates in stamps for payloads containing bitrate:
-Track, library/directory rows, album representatives and members, Queue rows,
-playlist entries, and duplicate members. Counts, statistics, summaries without
-Track payloads, and ID/location-only queries do not depend on this revision.
-Bitrate-only publication does not advance structure, collection membership, or
-count revisions, and does not query Queue, album, or playlist membership.
+`QueryRevisions.bitrate` participates in stamps for bitrate-bearing row queries:
+Track, library/directory rows, album members, Queue rows, playlist entries, and
+duplicate members. Album representatives do not carry bitrate. A row query
+keeps its stamp when used as a count-only page (`limit = 0`); dedicated counts,
+statistics, summaries without Track payloads, and ID/location-only queries do
+not select bitrate. Bitrate-only publication does not advance structure,
+collection membership, or count revisions, and does not query Queue, album, or
+playlist membership.
 
 `LibrarySnapshot.count_revision` / `QueryRevisions.counts` track catalog matching
-and membership facts independently of row freshness. Read-side scalar caches retain
-library, directory and album counts across playback-statistic and bitrate-only
-changes; text, path, favorite, missing-state and membership changes invalidate
-the affected count domains. Core and clients must use the same wire schema and
-be upgraded together.
+and membership facts independently of row freshness. It supports scalar lookup
+reuse, not freshness of a count-only row-query response. See
+link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
 
-Consumers discard old-stamp payloads and reload on demand; hidden views wait for
-reveal. Hover uses retained rows, not another Track request. Range anchors ignore
-bitrate-only changes, while range responses still require their full stamp.
-Selection, count and display-retention consequences belong to
+For display reuse, range anchors and consumer publication rights, see
 link:22_cache.adoc#window-local-query-retention[Window-local query retention].
 Playback statistics use scoped metadata revisions, not bitrate, and publish with
 EOF facts.
@@ -755,11 +746,11 @@ none, so selection relocation uses the explicitly scoped locations query.
 Consumer generations and acknowledgements follow
 <<identity-and-freshness,the independent intent and publication rules>>.
 
-GUI directory reads and playing-occurrence lookups retain tracker-issued receipts
-for query identity and freshness rather than a second owner query and stamp.
-Identity changes invalidate the tracker immediately, before another read is
-planned. Branch/page demand, occurrence selection and physical worker retirement
-remain consumer responsibilities; invalidating a receipt does not free a worker.
+Queue and playlist-entry continuations carry matching rank, the original
+occurrence keyset, and a fixed-size scope. A one-match lookahead determines
+whether there is another batch. Stable sequential traversal searches each
+interval at most twice, plus indexed keyset seeks, without scanning previous
+prefixes or retaining a per-client map or full-list cache.
 
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages
@@ -835,9 +826,10 @@ directory source expansion: dragging a directory still adds its complete content
 `Page<LibraryRow>` for registered tracks outside current configured roots;
 `OtherTracksCount` returns its unfiltered total. With no roots, both include the
 whole library. `OtherTracksLocate {track_id, query, favorite, missing, sort}`
-returns the matching rank or a filtered/unavailable result. These queries depend
-on library content and root configuration; discard stale results when either
-changes. `DirectoryRow::OtherTracks` identifies the collection, not a filesystem path.
+returns the matching rank or a filtered/unavailable result. The page and locate
+depend on library content and structure; the page also selects bitrate.
+`OtherTracksCount` depends on `structure` alone. `DirectoryRow::OtherTracks`
+identifies the collection, not a filesystem path.
 Display track rows include their logical source `path`.
 
 `QueuePage`, `QueueBatch`, `QueueEntries`, `PlaylistSummaries`,
@@ -855,9 +847,9 @@ or entry identities, not filtered offsets.
 
 `Albums {query, sort, offset, limit}` returns `Page<AlbumSummary>`;
 `AlbumTracks {key, query, offset, limit}` returns `Page<LibraryRow>`. Both use the
-interactive page limit and the Core-owned `album` token, with the bitrate token
-for their track payloads. An album key is the exact effective title plus its
-immediate parent directory (no trailing slash, except `/`).
+interactive page limit, with the distinct freshness rules above. An album key is
+the exact effective title plus its immediate parent directory (no trailing slash,
+except `/`).
 Blank/Unicode-whitespace-only titles are ineligible; nonblank keys are not normalized. Artist
 differences do not split an album and child directories never merge. Blank/stale
 keys return empty member pages with total zero.
@@ -942,6 +934,8 @@ validation, playback effects, and revision publication.
 `MoveQueue` and `MoveQueueEntries` carry the queue `expected_revision` observed
 when choosing their target index. The index is an insertion slot after removing
 the distinct selection, in `0..=total-selected_count`; larger values are rejected.
+For `MoveQueueEntries`, an empty selection succeeds after the revision check,
+without checking the insertion index.
 Core rejects stale revisions before changing positions; clients must refresh and
 choose a new target rather than replaying the old index. A successful move advances
 the queue revision only if order changes.
@@ -1175,12 +1169,8 @@ retries an incomplete recovery. Existing playback Pause and Stop do not require
 queue recovery. External admission repeats the readiness and insertion-baseline
 check before authorizing Saving, since preparation can outlive queue changes.
 
-Count-only pages omit row projection. Sequential filtered batches carry matching
-rank, occurrence keyset and a fixed-size query/revision scope. Core supplies the
-stamp in serialized dispatch and Store rejects foreign scopes before reading,
-even without `expected`. A matching lookahead determines continuation. Batches
-retain no cross-request SQLite snapshot, per-client map or full-list cache;
-clients still honor limits and revision/continuation validation.
+See <<query-results-and-pagination,Query results and pagination>> for the
+count-only page and filtered batch contracts.
 
 Directory/root queries are case-sensitive and preserve literal path characters
 and Unicode. Storage enforces one ordinary whole-file identity per path while
@@ -1299,9 +1289,7 @@ native-only builds have no FFmpeg status polling wakeups.
 Application service ownership, MPRIS/tray teardown, logging publication and writer
 retirement are described in
 link:20_architecture.adoc#application-service-retirement[Application service retirement].
-Service teardown follows shutdown acceptance; it does not strengthen the Ack into
-proof of completed stop, persistence or physical retirement. Accepted shutdown
-acknowledgements drain under the response-write deadline described in
+Shutdown acknowledgement is admission evidence only; see
 <<request-failures-and-completion,Request failures and completion>>.
 
 === Audio processing commands
@@ -1390,18 +1378,21 @@ source opens paused/live-ready and cannot replace newer playback intent. Plannin
 and execution algorithms belong to link:26_audio_processing.adoc[Audio processing].
 
 `ProcessingGraphAudition { id, node: {node,port} }` takes the retained `graph_run_id`,
-not an export task ID. It selects retained PCM directly, or queues a new preparation
-task using the frozen snapshot when that output has no cache. `AudioExport` with a
-`frozen` source exports it. Cancelled or stale-source tasks publish neither partial
-PCM nor partial export files. `CancelProcessing` also stops the selected live
-audition, but only while its run and playback generation still match.
+not an export task ID. It selects retained PCM directly, or queues preparation
+for an uncached port using the retained graph and revalidated source identity.
+`AudioExport` with a `frozen` source uses the same run. Cancelled or stale-source
+tasks publish neither partial PCM nor partial export files. `CancelProcessing`
+also stops the selected live audition while its run and playback generation match.
 
 `AudioExport { request }` starts a processing task for encoded export without
 changing playback. `request.source` is `original { track_id }`,
 `graph { track_id, target, revision }`, or `frozen { id, target }`. A current graph
-request checks its revision; a frozen request uses the retained run's snapshot, and
-an unrendered frozen port executes only its ancestor closure. Existing cached PCM is
-encoded without re-decoding or running DSP again.
+request checks its revision. A frozen request with cached PCM encodes that PCM
+without decoding or running DSP again. For an uncached port, recomputation uses
+the retained graph, executes only the port's ancestor closure, and revalidates
+the source. For both uncached audition and frozen export, settings outside the
+graph, including media buffering and FFmpeg, come from the current preferences
+checkpoint.
 `monitor_eq` is an optional complete EQ snapshot applied after the selected
 source, independently of playback controls. `encoding` specifies the format,
 optional sample rate/channel conversion, PCM precision, bitrate and compression

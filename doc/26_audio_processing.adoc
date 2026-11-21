@@ -73,6 +73,11 @@ ONNX Runtime, FFT and model-hash dependencies; `ffmpeg` enables decoder FFmpeg
 support. The application forwards these without implicitly enabling processing
 defaults. Worker test hooks require the explicit `test-support` feature.
 
+Application inference preparation requires a regular model manifest. Symlinks
+to regular files are accepted; FIFOs and other non-regular files are rejected
+without waiting for a writer. This is the application inference check, not a
+guarantee of the setup or offline provisioning tools.
+
 Native preparation validates the manifest and pinned artifacts before source PCM
 allocation. The public entry reads at most 1 MiB plus one byte of manifest data
 without per-chunk cancellation checks; the native backend then enforces its
@@ -92,10 +97,12 @@ Python application inference runs `worker.py --stream`; protocol version 4 is
 defined by `VERSION` and `EVENT_VERSION` in
 link:../tools/audio_processing/runtime/worker.py[the worker contract]. Stdin/stdout
 carry JSON controls and interleaved float32-le PCM in frames with a one-byte kind,
-four-byte little-endian length and at most 64 KiB payload. Requests declare rate,
-channels and exact frame count, not paths. Each child handles one task: request,
-declared PCM, empty input-end marker, then immediate stdin EOF. The producer closes
-stdin without waiting for completion; trailing bytes fail. Diagnostics use stderr.
+four-byte little-endian length and at most 64 KiB payload. The request carries
+the absolute `model_manifest` path, rate, channels and exact frame count; no
+source-audio path or output path crosses the stream. Each child handles one
+task: request, declared PCM, empty input-end marker, then immediate stdin EOF.
+The producer closes stdin without waiting for completion; trailing bytes fail.
+Diagnostics use stderr.
 Completion identifies model, format, frames and stems; Rust validates framing,
 finite/aligned PCM, completion and successful exit before publication.
 
@@ -119,20 +126,56 @@ inference output allocation; aliases, source forks and remaining branches retain
 their backing storage. Source format/frame metadata outlives retired PCM. Graph
 model nodes retain only ports needed by the selected target and remaining
 dependencies; unused separation streams are fully received/validated without
-retaining their PCM. Standalone separation retains both stems. Source media is
-limited to 8 GiB, neural input to nonempty sequences of at most four hours, and
-each Python source context window to 128 MiB excluding weights/workspace.
+retaining their PCM. Standalone separation retains both stems. Neural input
+must be nonempty and at most four hours; each Python source context window is
+limited to 128 MiB excluding model weights/workspace. These limits are separate
+from the source-file and shared retained-PCM limits.
 Shutdown joins processing/reclamation workers; live PCM remains valid until its
 last owner releases it. Original media and explicit exports are not result caches.
 
 [[execution-and-source-lifetimes]]
 === Execution and source lifetimes
 
+Core resolves the track and, for frozen actions, revalidates its registered
+identity (path, CUE range, decoder hint and fingerprint) and media stamp. If
+database recovery leaves that identity uncertain, Core refuses to use or publish
+the result. All application processing and export sources must be regular media
+files no larger than 8 GiB; this is a file-size limit, not a decoded duration or
+memory limit.
+
+A synchronous refusal before admission (for example, a busy service, an invalid
+target or source stamp, or an existing export destination) leaves older retained
+audio untouched. An admitted non-export run retires old unpinned PCM and prepared
+runners before its worker proceeds; export jobs do not retire them. Worker
+validation of manifests, decoder capabilities, runtimes and plans can still
+fail after retirement and does not restore the retired audio. The selected
+audition remains pinned. For budget charging, reclamation and snapshot retention,
+see link:22_cache.adoc#processing-output-retention[Processing output retention].
+
+Cancellation revokes publication, not physical worker ownership. Native work
+checks cancellation between decoder calls, model frames or resampling batches;
+these checks do not impose a hard deadline on decoder or filesystem calls.
+Core records the terminal outcome before completing waits. A later audition
+failure can mark the operation failed while leaving valid retained audio usable.
+
 One run borrows its immutable graph for shared full-graph validation and topology.
 Candidate planning still checks boundary dominance, format, capabilities and
 budgets; only structural proof and execution-prefix order are reused. Public
 planning validates all stored nodes, including controls outside the selected
 output. Graph edits require a new proof, not revision-based cache reuse.
+
+Frozen graph actions address a retained graph run and node/port, not the results
+of a standalone restoration, speech or separation task. A cached frozen port
+shares the existing PCM without re-decoding or running graph DSP. On a cache
+miss, Core builds the new task from current application configuration, replacing
+only its graph with the retained graph (including node-local settings). It
+recomputes the requested ancestor closure using the newly captured source
+decoder settings, including `playback.ffmpeg_enabled` and the media read buffer
+size. Frozen audition requests Auto; frozen export runs offline. A source that
+requires FFmpeg decoding can therefore fail uncached recomputation after FFmpeg
+input is disabled. Export encoding and rate/channel conversion are independent
+of that input preference; their availability follows the build and runtime
+libraries.
 
 Standalone restoration and native-only graphs decode blocks, retaining final PCM
 plus bounded DSP/delay state. Uncached entirely native exports stream to an
@@ -153,14 +196,47 @@ Actual decoded frames establish EOF even with unknown duration; true EOF checks
 source identity/cancellation and flushes context. File output discards causal
 preroll and crops all tails to decoded source length, including FIR tails longer
 than latency. Out-of-source profiles fail. Cached export validates its source
-stamp rather than relabeling old samples. Cancellation or source/destination
-validation failure discards temporary encoded output; only Core publishes it.
+stamp rather than relabeling old samples.
+
+The worker encodes and finalizes a temporary sibling of the destination resolved
+at admission. Only Core publishes the file: it rechecks cancellation,
+registered source identity and stamp, and the resolved destination, then commits
+without clobbering an existing file. Failure discards the temporary output.
+The admitted destination appears in `settings.graph_export_path`; only a
+successful commit sets `graph_exported_path`. Parent resolution prevents
+retargeting a directory alias after admission; it does not guarantee safety
+against arbitrary concurrent directory replacement. Publication does not request
+file or directory storage sync; see
+link:91_design_decisions.adoc#DEC-018[File publication policy].
+
+Numeric progress within a phase is coalesced (at most once per 100 ms and skipped
+if the event channel is not empty); phase changes, graph-node stages and terminal
+results are delivered reliably while the channel is open. A realtime node is
+complete once its runner is prepared; a prepared Hybrid suffix stays complete
+even when the offline prefix fails or is cancelled. Final compilation, rendering
+or publication failures and cancellations are attributed to the requested target
+unless already attributed to a specific node. A publication failure does not
+undo completed node phases, and a cached export does not report graph node
+execution.
 
 [[graph-resource-admission]]
 === Graph resource admission
 
-Admission uses a lightweight plan before preparing DSP, delay lines or PCM blocks;
-Auto/Hybrid candidates rejected for capability or budget allocate no DSP state.
+Realtime planning supports IIR/FIR EQ, non-Profile classical restoration, Mix
+and Output; Profile capture and neural inference need an offline prefix or
+fully offline execution. Hybrid uses a single cached boundary port that every
+path into the live target crosses. A separate source branch or another port of
+the same separation node cannot substitute for that stream.
+
+The native live plan is limited to 32 channels, 64 MiB of estimated state, two
+seconds of latency and 300,000,000 arithmetic-work units per second. These are
+planning limits, not measured device deadlines. Planning and DSP preparation
+run on the worker, not Core dispatch or the device callback. The lightweight
+plan checks capability and budget before allocating DSP, delays or PCM blocks;
+Auto/Hybrid skips rejected candidates without constructing DSP state. If a
+selected candidate fails numerical construction, an automatic search can try
+the next candidate.
+
 The work estimate counts effective DSP: disabled/solo-excluded IIR bands and
 identity peak/shelf sections consume no stage estimates. Disabled EQ and fully
 bypassed restoration have no DSP latency/state, but edges and node buffers still

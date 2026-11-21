@@ -92,11 +92,9 @@ automatically replayed, and an old desktop cannot silently attach to a replaceme
 Core instance.
 
 Core owns capture and audio identity; `rivu-analysis` runs display DSP in the GUI
-background worker. Native-channel PCM is folded into reusable stereo scratch and
-the complete SHM read is validated before either consumer receives it. Overwrites
-discard old realtime data without blocking playback; Core publishes no Waveform
-statistics. Explicit previews use the
-link:21_ipc.adoc#finite-pcm-rendering[finite PCM endpoint].
+background worker. Core publishes no Waveform statistics. The GUI consumes the
+link:21_ipc.adoc#realtime-pcm-transport[realtime PCM window]; explicit previews
+use the link:21_ipc.adoc#finite-pcm-rendering[finite PCM endpoint].
 `rivu-presentation` supplies localization, keyboard semantics, theme mapping and
 shared images without GPUI, audio execution or database dependencies.
 
@@ -156,8 +154,9 @@ The service writes and flushes its readiness message to stdout. If either fails,
 startup returns an error after normal application teardown and exits unsuccessfully,
 including when a pipe reader has closed; it does not panic or retry the output.
 Explicit application shutdown stops the service and connected consumers; closing
-or killing only a frontend leaves the service alive. Accepted shutdown
-acknowledgements drain before transport retirement. Window/display resource release is described in
+or killing only a frontend leaves the service alive. Shutdown acknowledgements
+are subject to link:21_ipc.adoc#request-failures-and-completion[bounded IPC drain].
+Window/display resource release is described in
 link:22_cache.adoc#renderer-buffers-atlases-and-display-lifecycle[Resource lifecycles].
 Unexpected loss of the audio owner or a main IPC server panic retires Core
 with a failure instead of publishing an orderly shutdown. Finalization still
@@ -168,6 +167,17 @@ The TUI restores terminal input and display state on normal exit, partial startu
 failure, and Rust panic unwinding. Cleanup failure is reported unless an earlier
 run error takes precedence; unwinding preserves the original panic. Process
 abort and uncatchable termination cannot restore the terminal.
+
+During initial TUI loading, Ctrl+C exits; `q` is not handled there. Permanent
+command/query worker loss or a fatal connection, handshake or identity failure
+exits through terminal cleanup without replaying queued commands.
+TUI exit also closes in-flight waits, including command and Hello waits.
+
+The GUI retains fatal IPC failures independently of dismissible notifications
+and returns them after its workers retire. An analysis-worker unwind withdraws
+its current frame and reports through that same fatal path. Local window close
+and orderly Core shutdown do not surface as fatal failures. None of these exits
+replays commands or restarts Core.
 
 === Owner execution and retirement
 
@@ -188,16 +198,14 @@ completion or shutdown.
 Core serializes foreground SQLite writes with their revision transitions. Admitted
 background saves retain independent transaction evidence until Core accepts their
 completion; database commit and display-projection refresh are not one atomic
-operation. A separate query owner has a 64-entry work queue, reuses one read
-connection, and pins at most one SQLite snapshot, validated against captured
-Core revisions, per request. Its queue is independent of Core request admission.
-The publication fence and save gate prevent reads from pairing committed database
-changes with preceding state. Count reuse follows data-domain revisions;
-maintenance waits for physical snapshot retirement.
-
-Reads have owner-scoped cancellation and retain their physical lease through SQL
-exit and snapshot cleanup; see link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation].
-Accepted commands have independent lifetimes.
+operation. Queries first enter the serial Core request queue (64 items); Core
+checks maintenance and projection readiness and captures revisions before
+trying the separate read-worker queue (also 64 items). The bounds are independent,
+but admission is sequential. The read worker reuses one connection and pins at
+most one SQLite snapshot at a time. The publication fence and save gate keep
+committed database changes from pairing with preceding state. See
+link:21_ipc.adoc#retained-read-cancellation[Retained reads and cancellation] for
+read retirement; accepted commands have independent lifetimes.
 
 App supplies execution capabilities independently of the business `CoreHandle`
 and retains `TaskRuntime` through Core, service and IPC retirement. The desktop
@@ -228,18 +236,19 @@ sequenceDiagram
 
 Waiter cancellation does not by itself cancel an accepted command; operation
 cancellation follows that owner's contract. Neither cancellation nor shutdown
-rolls back an already committed transaction. Reads retain their physical lease
-through SQL exit and snapshot cleanup even after the consumer stops waiting.
+rolls back an already committed transaction.
 
 [[application-service-retirement]]
 === Application service retirement
 
 App owns and joins MPRIS, tray, and logging independently of windows.
 MPRIS registration is asynchronous and cancellable; failures wait for a later
-off/on transition, not a retry timer. Teardown removes interfaces, allows up to
-one second for active replies and a separate second for connection close, then
-joins the publisher. Synchronous artwork work still has to finish. Metadata
-signals reflect exposed-value changes, not ordinary clock or unrelated queue updates.
+off/on transition, not a retry timer. Teardown first cancels and joins the
+publisher, including any synchronous artwork work already underway. It then
+removes interfaces and drains active replies under a one-second deadline, with
+a separate second for connection close. Those deadlines do not bound publisher
+retirement. Metadata signals reflect exposed-value changes, not ordinary clock
+or unrelated queue updates.
 
 Tray registration reconciles current publication state independently of bus setup.
 Unchanged menus retain their revision; shutdown cancels bus work and closes under
@@ -254,9 +263,10 @@ when constructing an appender, so changes take effect on the next enable or host
 restart. Native pruning during preparation is not rolled back after a failed
 save. Producers retire before file output is flushed, outside GUI callbacks, and
 session shutdown waits for the file writer to close.
-Standalone Core runtimes install no process subscriber. Processing shutdown closes
-event admission, joins workers, and drains unpublished outputs; retained auditions
-last until service retirement. See
+Standalone Core runtimes install no process subscriber. Core owns processing
+publication: workers return outputs, and Core admits or rejects them. Processing
+shutdown closes event admission, joins workers, and drains unpublished outputs;
+retained auditions last until service retirement. See
 link:22_cache.adoc#processing-output-retention[Processing output retention].
 
 [[storage-and-preparation-work]]
@@ -272,14 +282,13 @@ across shared sources within configured roots. Force bypasses reuse.
 Scan selection keeps outermost descendant ranges and uncovered exact owners,
 respecting path-component boundaries without weakening coverage protection.
 
-Count-only pages omit row projection; queue/playlist totals do not join metadata.
-Unfiltered entry pages seek contiguous positions; playlist totals use indexed
-maximum positions. Filtered random-access pages count and skip matches in SQL.
-Sequential filtered batches instead retain matching rank, occurrence keyset and
-a fixed-size query/revision scope, with one matching lookahead. Stable traversal
-searches each interval at most twice plus indexed keyset seeks, rather than
-recounting every preceding prefix. It needs no retained SQLite snapshot,
-per-client map or full-list cache.
+Count-only pages omit row projection. Unfiltered Queue and playlist-entry totals
+use indexed maximum positions without joining track metadata. Filtered totals
+join tracks to evaluate matches even for a count-only request on a cache miss.
+Unfiltered entry pages seek contiguous positions; filtered random access counts
+and skips matches in SQL. Sequential traversal uses the
+link:21_ipc.adoc#query-results-and-pagination[filtered continuation contract]
+instead of recounting preceding prefixes.
 
 Directory/root lookups use indexed, case-sensitive component ranges. Directory
 pages count and select children before projecting payloads; temporary work scales
@@ -310,8 +319,7 @@ This avoids both a second control implementation and a universal whole-library
 snapshot on every playback update.
 
 TUI page demand, selection recovery, and read planning are described in
-link:22_cache.adoc#terminal-projections[Terminal projections]. Cancelled reads
-retain their physical slot until the exchange retires.
+link:22_cache.adoc#terminal-projections[Terminal projections].
 
 Local Processing snapshots share task metadata immutably; copy-on-write keeps
 older publications stable. Socket responses encode a task value. The TUI does

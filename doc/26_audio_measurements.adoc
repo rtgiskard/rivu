@@ -4,9 +4,9 @@
 
 These records were separated from the current design on 2026-11-13. Experiment
 dates and source identities are retained only where recorded; this date does not
-identify a measurement revision or imply renewed verification. Current workflow,
-acceptance requirements and remaining gaps belong in
-link:26_audio_processing.adoc[Audio processing].
+identify a measurement revision or imply renewed verification. For current
+acceptance requirements and remaining gaps, see
+link:26_audio_processing.adoc#remaining-acceptance-limits[Audio processing design].
 
 == Recorded local evidence and remaining limits
 
@@ -16,10 +16,6 @@ under `.cache/`, not installed files. Several quality/GUI/graph bundles, includi
 `eq-candidate.json`, `audio-quality-corpus/`, `neural/acceptance-evidence/` and
 `audio-graph-evidence/`, are absent from the current local archive. Check artifact
 availability and source identity before reusing any record for acceptance.
-
-Human listening, quiet-content/stereo-artifact approval, broad lossless fullband
-music coverage and device-specific underrun/deadline evidence remain gaps.
-Reference parity, scalar improvement and reconstruction do not close them.
 
 === Native ONNX speech integration checks
 
@@ -34,8 +30,8 @@ input special cases or establish speech quality, listening acceptance or
 cross-runtime bit equality. These observations are not acceptance of the current
 standalone or graph dispatch paths.
 
-The historical artifact is
-link:../.cache/native-speech-runtime/acceptance.json[`.cache/native-speech-runtime/acceptance.json`].
+The historical artifact was recorded locally as
+`.cache/native-speech-runtime/acceptance.json` (not a repository file).
 Its `source_sha256` map identifies the measured source files (including their old
 `src/processing*` locations); `model_manifests` and runtime fields identify the
 models and runtime. `numeric_reference` and its `constant_diagnosis` record the

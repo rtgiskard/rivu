@@ -51,10 +51,14 @@ operations, see link:02_library.adoc#sqlite-maintenance[SQLite maintenance].
 [[application-invocation]]
 == Automatic startup migration
 
-On a database version mismatch, GUI and headless startup run
+On a database version mismatch, Core startup runs
 `rivu-migrate --data-dir DATA --config CONFIG apply` with resolved host paths,
 selecting the executable beside `rivu` or otherwise from `PATH`. Current and empty
 databases skip this step.
+
+If a GUI or TUI waiting for Core times out, the service may still be starting or
+migrating. Check the service before retrying. If you need the full migration
+report and backup paths, use the explicit upgrade procedure before starting Core.
 
 A missing tool, failed conversion or a database that remains incompatible stops
 startup. Rivu does not retry blindly, reset data or restore a backup automatically.
@@ -74,10 +78,10 @@ playback statistics, list references and queue state are preserved. Subsequent
 rescans may replace stored tags. Format 5 and unknown schema objects are rejected.
 
 Missing default resources are reported without creation. With explicit
-`--data-dir`, a missing `library.db` is an error; `--config` alone does not select
-a database. Valid unversioned configuration is current and remains untouched.
-See link:27_migration.adoc#configuration-schema[Configuration schema] for version rules and <<configuration-compatibility>>
-for manual setting changes.
+`--data-dir`, a missing `library.db` is an error. `--config` without `--data-dir`
+still targets the default data directory: `apply` can migrate a supported old
+database there. Valid unversioned configuration is current and remains untouched;
+see link:27_migration.adoc#configuration-schema[Configuration schema].
 
 === Client and protocol changes
 

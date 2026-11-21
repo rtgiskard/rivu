@@ -62,8 +62,9 @@ cannot establish compatibility.
 The current configuration schema permits an omitted `schema_version`, meaning
 current, not historical. Its version is defined by `CONFIG_SCHEMA_VERSION` in
 link:../crates/rivu-format/src/config.rs[rivu-format's configuration contract].
-Missing files use defaults. New serialization includes the version;
-format-preserving saves retain its omission, and loading never adds it. Database,
+Missing files use defaults. Full serialization writes the version; normal
+application saves patch the existing TOML (or empty text on first save) and can
+leave the version omitted. Loading never inserts it. Database,
 configuration and application versions evolve independently.
 
 Explicit noncurrent versions are rejected before field decoding; malformed TOML
@@ -86,8 +87,10 @@ Runtime tokens are not persisted. External writes require stopping Rivu first.
 == Target selection and exclusion
 
 Target selection follows the application's
-link:00_getting_started.adoc#files-and-data-directories[path rules]; `--config` alone does
-not select a database. Targets remain fixed for one operation.
+link:00_getting_started.adoc#files-and-data-directories[path rules]. Configuration
+and data-directory overrides are independent; see
+link:10_upgrading.adoc#supported-source-formats[target selection for upgrades].
+Targets remain fixed for one operation.
 
 Check opens SQLite read-only without creating application directories, writer
 locks or backups. SQLite may still update WAL shared-memory sidecars. Its result
@@ -149,8 +152,9 @@ partial evidence and never trigger restoration. The SQLite migration connection
 uses `synchronous=FULL` for its transaction, including WAL durability. Backup
 publication and the migration transaction are separate boundaries, not a
 cross-resource commit.
-Backup and transaction/WAL growth need disk space; preflight's capacity estimate
-is advisory and later storage errors still fail. Transformations remain in SQLite,
+Before allocating a backup, preflight rejects insufficient available space against
+an estimate for the backup and transaction/WAL growth. Passing this check does
+not guarantee enough space through completion. Transformations remain in SQLite,
 without whole-library buffers, scanning, network access or decoder probing.
 
 [[failure-and-reentry]]
@@ -174,9 +178,11 @@ symlinks), strict version/input rejection, missing resources, preserved user dat
 transaction failure/reentry, no-ops, retained backups, directory aliases and ownership
 exclusion. These are requirements, not a record of checks run by this document.
 
-Historical-format regressions use fixed source-format fixtures, independent of the
-current schema, and verify both preserved data and subsequent reads, writes and
-trigger behavior. Updating the current format must not silently redefine old inputs.
+Acceptance requires fixed historical fixtures that do not depend on the current
+schema, with checks of preserved data and subsequent reads, writes and triggers.
+Not all current regressions provide independent fixtures: the format-4 input uses
+the production conversion, and the format-6 reference derives from the current
+schema. Updating the current format must not silently redefine those old inputs.
 
 Integration proof must run the tool, then load settings and query/write its database
 with the application. Unit tests or compilation alone are insufficient.

@@ -18,12 +18,16 @@ Without a search, each page retains its selection and scroll position.
 The active tab identifies the page; its selection/total counter appears at the
 right of navigation when space permits. The content area adds a heading only for
 context such as a directory path or playlist name, not another copy of the tab.
-`Right` opens a playlist; Enter plays the selected playlist, track, or queue
-occurrence. In Library track lists and playlist details, `e` enqueues the selected
-track. `Alt+e` enqueues the selected Library directory or the complete Other
-collection, regardless of filters. Selecting a row alone does not change playback.
-Whole-playlist playback asks on the status line before replacing a nonempty queue:
-`y` or Enter confirms; `n` or Esc cancels.
+`Right` opens a playlist. Enter in the catalog plays the whole playlist; in
+playlist details it plays the selected *track*, reusing its first queue
+occurrence or appending one if absent. Delete in playlist details removes the
+selected *entry*. In Queue, Enter and Delete target the exact occurrence.
+In Library track lists and playlist details, `e` enqueues the selected track.
+`Alt+e` enqueues the selected Library directory or complete Other collection,
+regardless of filters. Selecting a row alone does not change playback.
+Whole-playlist Play asks before replacing a nonempty queue if
+`interface.confirm_queue_replace` is enabled (the default): `y` or Enter confirms;
+`n` or Esc cancels. See link:04_playback.adoc#transport-and-timing[Playback].
 
 Press `Shift+M` to pick up a row in Queue, the playlist catalog, or a playlist's
 tracks. Up/Down or `k`/`j` moves it one row at a time in the preview; Enter saves
@@ -43,10 +47,6 @@ Outside search editing, reorder mode, help, and details, press `:` to open the c
 the bottom row. Enter executes; Escape cancels. Submitted search results remain
 browsable with command mode, without clearing the search. Commands are bounded
 to 256 UTF-8 bytes and support Backspace.
-Command input is cyan. Confirmed queue additions/removals and successful scans
-use green feedback; ordinary progress is secondary text, warnings orange, and
-errors red. Queue-change confirmations do not replace an unexpired warning or
-error. Messages still share the bottom row rather than adding extra rows.
 
 [cols="1,3",options="header"]
 |===
@@ -54,7 +54,7 @@ error. Messages still share the bottom row rather than adding extra rows.
 |`:q`, `:quit` |Close this TUI only; Core and playback continue
 |`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
 |`:now` |Jump to the playing or paused occurrence in Queue without changing playback. If a Queue search hides it, clear the search and retry.
-|`:save [NAME]` |In Queue, save the entire queue as a new playlist, including order and duplicates even under search
+|`:save [NAME]` |In Queue, save the entire queue (even if empty) as a new playlist, preserving order and duplicates even under search
 |`:rename [NAME]` |In the Playlists list, rename the selected playlist
 |`:help` |Open the scrollable help page, including command descriptions
 |===
@@ -62,8 +62,9 @@ error. Messages still share the bottom row rather than adding extra rows.
 Type a name directly (for example, `:save Friday Night`; no quotes are needed),
 or omit it to open the name editor. Rename starts with the current name. Enter
 submits; Esc discards an unsubmitted draft. Names are trimmed and cannot replace
-an existing playlist of the same name. A failed save keeps the draft for editing.
-Neither command changes playback or queue contents.
+an existing playlist of the same name. A rejected name save keeps the draft
+for editing. After a save error or unknown outcome, check Playlists before
+retrying. Neither command changes playback or queue contents.
 
 Bare `q` has no action outside editors and remains ordinary text inside them.
 Escape cancels or returns; it never closes the client. Unknown commands and
@@ -92,8 +93,8 @@ The search scope follows the page:
 
 * Queue searches its occurrences; Playlists searches playlist names, and playlist
   details searches that playlist's entries. Track searches match title, artist,
-  album, and file name, including unloaded pages. Repeated tracks retain their
-  distinct queue or playlist occurrence identities for play and removal.
+  album, and file name, including unloaded pages. Repeated tracks remain distinct
+  rows; filtering does not change the Enter or Delete targets described above.
 * At Library's top level, search shows matching tracks from the full library,
   matching title, artist, album, or full source path. Within a directory, search keeps
   immediate tracks and directories with matching descendants, using the same
@@ -114,10 +115,10 @@ resource boundaries: link:22_cache.adoc#terminal-projections[Terminal projection
 
 Library's link:02_library.adoc#other[Other] entry is hidden at the top level when
 the unfiltered collection is empty.
-`Alt+f` / `Alt+m` toggle favorite-only / missing-only filters; `Alt+s` cycles ID,
-album, and most-played sorting. Selection follows its track through changes while
-that track remains in the results. `Alt+c` checks registered files;
-`Alt+Shift+c` forces rereading. Collection-wide Alt actions also work on its header.
+Within Other, `Alt+f` / `Alt+m` toggle favorite-only / missing-only filters;
+`Alt+s` cycles ID, album, and most-played sorting. Selection follows its track
+while that track remains in the results. `Alt+c` checks registered files and
+`Alt+Shift+c` forces rereading; both also work on Other's top-level row.
 `Alt+x` cancels an active scan before its saving phase. F1 lists the actions for
 the current context.
 
@@ -131,11 +132,15 @@ state.
 
 The status row shows volume, shuffle, repeat, speed when not 1×, and current-track codec, sample rate,
 bit depth, and available bitrate in `kbps` where space permits, without distinguishing
-estimated and confirmed bitrates. A separate bottom row holds notices, then scan
-status, core errors, or the startup help hint, in that priority order. Reorder mode
-keeps its controls at the start of that row. Notices and
-startup help expire automatically. Playback transitions update the fixed playback
-display rather than replacing messages.
+estimated and confirmed bitrates. The bottom row holds a local notice, active
+scan status, Core error, or startup help hint, in that order. Green queue
+Added/Removed notices reflect the net count change between snapshots, not an
+acknowledgement of this client's action. Changes by another client can trigger
+them; a same-size replacement does not. These notices do not replace an
+unexpired warning or error. Command input is cyan, progress is secondary text,
+warnings orange, and errors red. Reorder controls stay at the start of the row;
+notices and the startup hint expire. Playback updates the fixed playback display
+rather than replacing messages.
 
 Press `i` outside the query editor for read-only details of the selected track,
 directory, or playlist. Playback changes do not replace that target. Track details
@@ -148,9 +153,6 @@ Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and rest
 the source position. Long query errors can be scrolled independently; loading and
 errors preserve the track details' reading position for a later successful refresh.
 Help and details own navigation while open; actions do not reach the underlying list.
-
-Position, duration, and playback controls remain available while browsing. Warnings
-and errors are distinct; ordinary playback updates do not replace a visible failure.
 
 Left goes to a parent directory; Left/Esc leaves playlist details.
 With search closed, Esc returns from Library tree or playlist catalog to Queue.

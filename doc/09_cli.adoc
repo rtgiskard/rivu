@@ -8,6 +8,7 @@ for installation, instance selection and data directories.
 
 == Command conventions
 
+anchor:cli-command-conventions[]
 Control commands require a running core. `library probe`, `library tags`,
 `playback devices`, and `processing setup` also work without Core (setup contacts
 it only with `--activate`). Use `rivu -h` for concise help, `rivu --help` for startup
@@ -43,18 +44,37 @@ rivu playback volume 50
   `-v` is set. Background task starts still print a task reference. Commands
   with a result, such as database optimization or a waited audio export, retain
   their result summaries.
-* *State and tasks:* `rivu status`, `rivu task status KIND INSTANCE:ID`,
-  `rivu task cancel KIND INSTANCE:ID` (`KIND`: `scan`, `relocation`, `processing`).
-  Use the printed reference; it identifies both the task and its instance.
-* *Completion:* `--wait` waits for scan, import, relocation or processing results
-  rather than acceptance. A timeout does not prove failure; do not retry blindly.
-* *JSON:* paginated lists stream one array and may be incomplete on failure;
-  check the exit status before consuming stdout.
-* *Output failures:* text and JSON writes, including the final flush, return exit
-  status 1 if stdout fails (including a closed pipe). A command may already have
-  taken effect before its output fails; do not retry it blindly.
-* *Paths:* preset, playlist and graph export paths are relative to the invoking
-  client's working directory, not the core's.
+* *Tasks:* `rivu task status KIND INSTANCE:ID` retrieves a task result, not
+  proof that the task succeeded; inspect its phase and error. `rivu task cancel
+  KIND INSTANCE:ID` requests cancellation (`KIND`: `scan`, `relocation`, or
+  `processing`). Use the instance-qualified reference supplied by the command,
+  not a bare numeric ID. Closing a waiting client does not cancel the task.
+* *Completion:* Acceptance is not completion. For commands that support
+  `--wait`, a received terminal result is written to stdout without separate
+  acceptance or progress output, even if the task failed or was cancelled.
+  A rejected start can return a failed acknowledgement instead; a timeout or
+  connection failure while waiting may leave no terminal result. Inspect the
+  task or saved state before retrying an uncertain outcome. Even an authoritative
+  failure can report changes that were already committed.
+* *JSON:* `--json` writes a command-specific result to stdout, including
+  authoritative failure acknowledgements when available. Runtime diagnostics go
+  to stderr as objects with `error` and, for transport command failures, `status`;
+  an uncertain transport result does not invent a revision or task ID.
+  Listings may stream an array (`playlist list`) or an object containing rows
+  (`playlist show`, which also identifies the playlist and revision). Discard
+  incomplete listing output on failure; check the exit status before using it.
+* *Text output:* Control characters in metadata, paths, and diagnostics are
+  escaped for display (for example, `\n`, `\t`, or `\x1b`); this does not change
+  stored values or JSON data.
+* *Exit status:* Success is 0, runtime failure is 1, and argument or usage
+  errors retain Clap diagnostics and exit 2. A stdout write or final flush
+  failure, including a closed pipe, exits 1 even if an operation took effect.
+* *Paths:* Relative command-line filesystem paths use the invoking client's
+  working directory, not the Core's; absolute paths are accepted. Rivu does
+  not expand `~` or shell variables: let the shell expand `~/Music` or use
+  `"$HOME/Music"`, not `"~/Music"`. Paths inside a playlist document have
+  link:03_playlist.adoc#m3u-document-paths[their own base directory].
 
-Details: link:02_library.adoc#cli-output[CLI output] and
+See also link:02_library.adoc#cli-output[Library result shapes],
+link:21_ipc.adoc#request-failures-and-completion[IPC request outcomes], and
 link:01_config.adoc#logging-and-diagnostics[logging and diagnostics].

@@ -11,12 +11,13 @@ queue creates an independent copy, not a live link.
 
 Create a playlist with New playlist in the desktop Playlists panel, or import an
 M3U/M3U8 or CUE file with Import. To collect tracks already in Rivu, use a track
-menu's Add to playlist action; to keep the current listening order, use Queue →
-Save queue as playlist. These operations do not change the source collection.
+menu's Add to playlist action; to keep the listening order, use the Queue panel
+menu → Save as playlist…. Neither action changes the source collection.
 
 Names must contain a non-whitespace character and no control characters. Creating,
-renaming, saving a queue, and importing reject an existing name. Comparison is
-exact, including case and whitespace: CLI/API names retain outer whitespace,
+renaming, and saving a queue require a unique name. Imports check uniqueness
+only after the library commit (see <<commit-and-export-lifecycle>>). Comparison
+is exact, including case and whitespace: CLI/API names retain outer whitespace,
 while the desktop name dialog trims it.
 
 Use `playlist list` for playlist IDs and `playlist show PLAYLIST_ID` for entry IDs
@@ -41,9 +42,8 @@ Text listings begin with `playlist_id=ID revision=REV`. With `--json`, the resul
 `{"playlist_id":ID,"revision":REV,"entries":[...]}`, including empty playlists.
 The revision and all streamed entry pages belong to one pinned traversal.
 
-Saving a queue as a playlist is atomic: failure leaves no newly created empty
-playlist. For whole-playlist versus individual-track playback, confirmation, and
-queue replacement failures, see link:04_playback.adoc#transport-and-timing[Playback].
+For queue snapshots, see <<transfers-and-queue-saving>>. For whole-playlist
+versus individual-track playback, see link:04_playback.adoc#transport-and-timing[Playback].
 
 [[desktop-ui]]
 == Desktop UI
@@ -61,11 +61,9 @@ before reordering. Order survives restart, with new playlists appended; it does
 not affect tracks or Queue. A changed catalog rejects an in-progress drag.
 
 Hover a catalog row for Play and its actions menu; they target that row, not the
-selected playlist. Play loads the complete saved order; Append copies it without
-changing playback. Empty or unknown playlists leave Queue unchanged. Append
-rejects changed contents rather than copying a stale or partial list. Playback
-and queue-replacement behavior are described under
-link:04_playback.adoc#transport-and-timing[Playback].
+selected playlist. Empty or unknown playlists leave Queue unchanged. Append
+rejects changed contents rather than copying a stale or partial list. See
+link:04_playback.adoc#transport-and-timing[Playback] for Play, Append and confirmation.
 
 The row menu also offers Add current track, Remove duplicates, Rename, and Delete.
 Add current track uses the playback track, not Library selection, and requires a
@@ -91,6 +89,8 @@ row moves only that entry. The upper/lower half of a row inserts before/after it
 and blank space appends. The accent line marks the boundary. The dragged group
 stays fixed; dropping on that group or pressing Esc cancels. Reordering saves
 the playlist without changing Queue.
+Clear the track search before dragging: filtered playlist track rows cannot
+start a drag, even to an unfiltered destination.
 
 A drag is rejected if membership or order changes, the playlist is deleted, or
 you switch playlists before dropping, even away and back. Renames and edits to
@@ -138,26 +138,6 @@ other playlists do not invalidate it.
 |None
 |None
 
-|Whole-playlist or whole-album Play
-|Queue
-|Replace the queue with an independent copy of the complete collection
-|Saved collection order and duplicates survive, regardless of search
-|Playlist or album unchanged
-|Start the first entry
-
-|Play an individual Library, album, Recent tracks, or playlist track
-|Queue
-|Reuse its first existing occurrence in queue order, or append one if absent; do not replace the queue
-|Other occurrences remain intact
-|Source collection unchanged
-|Start that occurrence
-
-|Play a Queue row
-|Queue
-|Select that exact occurrence; no transfer
-|No order or multiplicity change
-|None
-|Start that occurrence
 |===
 
 A named catalog row is an explicit destination, even when another playlist is
@@ -174,9 +154,12 @@ tracks. This selector also works when
 the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#desktop-selection-and-directory-tree[shared selection rules].
 
-For a nonempty queue, use Queue → Save queue as playlist. The default name is
-`Queue_YYYYMMDD_HHMMSS`. The dialog uses the same naming and background-save rules
-as New playlist and Rename. Failed queue-selection loading offers Retry.
+Open the Queue panel menu and choose Save as playlist…. The desktop requires a
+nonempty queue to open the dialog. The default name is `Queue_YYYYMMDD_HHMMSS`.
+Saving copies the entire queue as it exists at submission time, including an
+empty queue if it was cleared while the dialog was open. Playlist creation and
+copying are one transaction, but a later view refresh can still report failure.
+Check Playlists before retrying after an error or uncertain response.
 
 === Loading and selection recovery
 
@@ -209,12 +192,10 @@ below use the same whole-playlist semantics.
 
 === Import workflow
 
-CLI input and export paths use the invoking client's working directory, as
-described under link:02_library.adoc[Library]; paths inside an imported document
-instead resolve relative to that document. An M3U/M3U8 document itself need not
-be inside a library root. All audio and CUE paths, including a directly imported
-CUE sheet, must lie within configured logical roots; see
-link:02_library.adoc#scan-policies-and-recovery[Library scan boundaries and errors].
+An M3U/M3U8 document itself need not be inside a library root. See
+<<m3u-document-paths,M3U/M3U8>> for the distinction between command arguments
+and paths stored in the document.
+
 Imports scan referenced sources before creating the playlist. Only identities
 successfully read or validly reused by that scan are eligible; an old library row
 does not make a failed source eligible. Readable tracks can produce a partial
@@ -223,21 +204,23 @@ link:02_library.adoc#minimum-duration-for-new-tracks[minimum-duration admission 
 excludes short new ordinary tracks unless a successfully validated CUE sheet in
 the same import references them. Import fails if no entries resolve successfully.
 
-Without `--name`, the name is the input filename without its extension. Explicit
-and default names are validated before scanning or saving. Imports share the
-media-task slot, with desktop feedback in Playlists; use `--wait` for completion.
-Preparation can be cancelled without saving; Saving cannot. Status, errors,
-dismissal and shutdown follow link:02_library.adoc#cancellation[Library cancellation].
+Without `--name`, the name is the input filename without its extension. Both
+explicit and default names are checked for format before scanning. Playlists
+shows import task feedback; see link:02_library.adoc#cancellation[shared media-task phases]
+and link:09_cli.adoc#cli-command-conventions[CLI waiting rules].
 
 Repeated paths retain every playlist occurrence in input order.
 
 === Input limits and cancellation
 
 Import documents and referenced sources must be ordinary files, not directories,
-devices, or FIFOs. Referenced directories are never recursively imported; use
-`library scan` for discovery. Input decoding, CUE parsing, out-of-root paths, and
-non-regular M3U source checks run before source scanning: failure aborts without
-saving tracks or creating a playlist. Partial results apply only to later scans.
+devices, or FIFOs. Use `library scan` for recursive discovery. Preparation checks
+document decoding, CUE syntax, the paths listed directly in M3U, and the path of
+a directly imported CUE sheet. An out-of-root direct reference or a rejected
+non-regular M3U source aborts preparation without saving tracks or a playlist.
+A CUE sheet's internal `FILE` paths are checked during scanning instead. For
+example, if M3U lists a readable song and a CUE whose `FILE` is out of root, the
+sheet fails but the song can still be saved and included in the new playlist.
 
 Limits are 16 MiB per M3U, 1 MiB per CUE, 64 MiB aggregate input (distinct sheets
 read once), and 100,000 expanded occurrences. Exceeding input or retained-data
@@ -252,12 +235,12 @@ lifecycle], with two separate commits:
 [source,mermaid]
 ----
 flowchart TD
-    validate["Validate name, input and referenced paths"] -->|"Invalid input or limits exceeded"| noSave["Stop without saving tracks or a playlist"]
+    validate["Validate name format and prepare input"] -->|"Invalid input or limits exceeded"| noSave["Stop without saving tracks or a playlist"]
     validate -->|"Valid"| scan["Scan sources: later errors may leave eligible partial results"]
     scan --> library["Commit library changes"]
     library -->|"Failure"| noPlaylist["Do not create a playlist"]
-    library -->|"Success: library_committed"| playlist["Create playlist from eligible occurrences"]
-    playlist -->|"Failure"| libraryOnly["Keep committed library changes"]
+    library -->|"Success: library_committed"| playlist["Resolve eligible entries, check name uniqueness, and create playlist"]
+    playlist -->|"Failure, e.g. no eligible entries or name already used"| libraryOnly["Keep committed library changes"]
     playlist -->|"Success: playlist_id"| refresh["Refresh views"]
     refresh -->|"Success"| complete["Report result, including any scan errors"]
     refresh -->|"Failure"| committed["Keep both commits and report refresh error"]
@@ -279,19 +262,22 @@ Wait for completion and inspect the destination before retrying.
 
 [source,sh]
 ----
-rivu playlist import mix.m3u8 --name "Mix" --wait
+rivu playlist import mix.m3u8 --name "Imported Mix" --wait
 rivu playlist export PLAYLIST_ID exported/mix.m3u8
 ----
 
 === M3U/M3U8
 
+anchor:m3u-document-paths[]
 Import accepts UTF-8, including BOM, and resolves entries as local filesystem
 paths relative to the playlist file. Blank lines and lines beginning with `#`
 are ignored, including `#EXTINF`: imported metadata comes from the audio/CUE scan,
 not those directives. Paths are not shell input, URLs, or recursively imported
 M3U files. Ordinary audio and complete CUE sheets may be mixed.
 
-Export paths are relative to the destination directory, which must already exist.
+Relative paths *written into* the M3U are based on the export file's directory,
+which must already exist. CLI input and destination arguments follow the
+link:09_cli.adoc#cli-command-conventions[CLI path rules] instead.
 Invalid paths, CUE validation failures and write errors preserve an existing target
 under the atomic replacement rules above.
 Paths that cannot be represented as UTF-8 or contain CR/LF line breaks are

@@ -47,10 +47,11 @@ link:04_playback.adoc[Playback and desktop integration] for details.
 [[files-and-data-directories]]
 == Files and data directories
 
-Library, queue, and playlist edits change Rivu's records, not source files;
-audio processing writes separate outputs. The explicit offline
-link:02_library.adoc#source-file-tags[`library tags` command] can read source
-tags or normalize and write selected fields without an original-file backup.
+Ordinary Library, Queue, and playlist edits change Rivu's records, not source
+files; audio processing writes separate outputs. Source tags change only through
+an explicit file write, either in the running GUI's Track details or via the
+offline `rivu library tags` command. See
+link:02_library.adoc#source-file-tags[Source-file tags] for write and recovery behavior.
 
 [cols="1,2",options="header"]
 |===
