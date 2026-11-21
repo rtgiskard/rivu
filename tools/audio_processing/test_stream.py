@@ -139,13 +139,14 @@ class FramingTests(unittest.TestCase):
              patch.object(source, "window", side_effect=AssertionError("dry PCM window")), \
              patch.object(common, "check_packages", side_effect=AssertionError("dry model packages")), \
              patch.object(builtins, "__import__", side_effect=guarded_import):
-            worker._process_validated(request, source,
+            completion, report = worker._process_validated(request, source,
                 lambda *_: self.fail("dry stream wrote PCM"),
-                lambda kind, **fields: events.append((kind, fields)), collect_report=False)
+                lambda kind, **fields: events.append((kind, fields)), streaming=True)
         execution.assert_called_once()
-        self.assertEqual(events[-1][0], "complete")
-        self.assertEqual(events[-1][1]["outputs"], {"speech":"input"})
-        self.assertEqual(events[-1][1]["frames"], request["frames"])
+        self.assertIsNone(report)
+        self.assertNotIn("complete", [kind for kind, _ in events])
+        self.assertEqual(completion["outputs"], {"speech":"input"})
+        self.assertEqual(completion["frames"], request["frames"])
 
     def test_stream_core_skips_export_evidence_and_keeps_completion(self):
         import numpy as np
@@ -178,8 +179,8 @@ class FramingTests(unittest.TestCase):
                      patch.object(worker.json.JSONEncoder, "iterencode", side_effect=AssertionError("export report encoding")), \
                      patch.dict(os.environ):
                     source = worker.StreamInput(io.BytesIO(encode(worker.INPUT_END) if dry else input_stream_pcm(audio)), request)
-                    report = worker._process_validated(request, source, write,
-                        lambda kind, **fields: events.append((kind, fields)), collect_report=False)
+                    completion, report = worker._process_validated(request, source, write,
+                        lambda kind, **fields: events.append((kind, fields)), streaming=True)
                 self.assertIsNone(report)
                 self.assertIsNone(source.buffer)
                 if dry:
@@ -188,9 +189,10 @@ class FramingTests(unittest.TestCase):
                     np.testing.assert_array_equal(np.concatenate(outputs["speech" if operation == "speech" else "vocals"]), expected)
                     if operation == "separate":
                         np.testing.assert_array_equal(np.concatenate(outputs["accompaniment"]), audio-expected)
-                self.assertEqual(events[-1], ("complete", {
+                self.assertNotIn("complete", [kind for kind, _ in events])
+                self.assertEqual(completion, {
                     "outputs":{"speech":"input"} if dry else dict.fromkeys(outputs, True), "sample_rate":8000, "channels":2,
-                    "frames":len(audio), "model":{"id":manifest["id"], "sha256":"model-hash"}}))
+                    "frames":len(audio), "model":{"id":manifest["id"], "sha256":"model-hash"}})
 
 
 class StreamEntrypointTests(unittest.TestCase):

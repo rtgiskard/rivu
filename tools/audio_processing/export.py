@@ -114,21 +114,15 @@ def _export_admitted(request, emit, destination, source_input):
     common.require(shutil.disk_usage(destination.parent).free > output_bytes+256*1024**2, "disk_capacity", "insufficient explicit export disk reserve")
     output_format = "RF64" if info.frames*info.channels*4+1024 >= 2**32 else "WAV"
     outputs = {stem:str(destination/(stem+".wav")) for stem in stems}
-    completion = None
-    def capture(kind, **fields):
-        nonlocal completion
-        if kind == "complete":
-            completion = fields
-        else:
-            emit(kind, **fields)
     source_input.admit()
     destination.mkdir(mode=0o700)
     try:
         with ExitStack() as stack:
             writers = {stem:stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
                        channels=info.channels, format=output_format, subtype="FLOAT")) for stem, path in outputs.items()}
-            report = worker._process_validated(control, source_input, lambda stem, samples:writers[stem].write(samples),
-                                               capture, collect_report=True)
+            completion, report = worker._process_validated(
+                control, source_input, lambda stem, samples: writers[stem].write(samples),
+                emit, streaming=False)
         hashes = {}
         for stem, path in outputs.items():
             with Path(path).open("rb") as stream:
@@ -147,7 +141,6 @@ def _export_admitted(request, emit, destination, source_input):
                 common.require(size <= common.MAX_REPORT_BYTES, "report_capacity", "result report exceeds 8 MiB")
                 stream.write(text)
             stream.write("\n")
-        common.require(completion is not None, "protocol", "missing PCM completion")
         emit("complete", **completion)
         return report
     except BaseException:
@@ -164,7 +157,7 @@ def main():
         print(json.dumps({"version":worker.EVENT_VERSION, "task_id":task_id, "type":kind, **fields}, allow_nan=False), flush=True)
     try:
         request = common.read_json(args.request)
-        task_id = request.get("task_id", "")
+        task_id = worker.event_task_id(request)
         process_export(request, emit)
         return 0
     except Exception as exc:

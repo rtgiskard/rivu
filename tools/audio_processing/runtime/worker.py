@@ -45,6 +45,11 @@ JSON_FRAME, INPUT_PCM, INPUT_END = 0, 1, 2
 STEM_KINDS = {"speech":17, "vocals":18, "accompaniment":19}
 
 
+def event_task_id(request):
+    candidate = request.get("task_id") if isinstance(request, dict) else None
+    return candidate if isinstance(candidate, str) and 0 < len(candidate) <= 128 else ""
+
+
 def validate_request(request):
     common.require(isinstance(request, dict), "invalid_request", "request must be an object")
     allowed = {"version", "task_id", "operation", "sample_rate", "channels", "frames", "model_manifest", "device", "threads", "parameters"}
@@ -223,24 +228,24 @@ class StreamInput:
         self.buffer = None
 
 
-def _process_validated(request, source, write_pcm, emit, *, collect_report):
-    """Infer validated PCM; collect detailed evidence only for explicit export."""
+def _process_validated(request, source, write_pcm, emit, *, streaming):
+    """Return completion fields and, for file exports, detailed evidence."""
+    collect_report = not streaming
     rate, channels, frames = (request[key] for key in ("sample_rate", "channels", "frames"))
     manifest_path = Path(request["model_manifest"]).resolve()
     emit("progress", stage="inspect", completed=0, total=1)
     manifest = common.validate_manifest(manifest_path, request["operation"])
-    if not collect_report:
+    if streaming:
         validate_execution(manifest)
     model = {"id":manifest["id"], "sha256":common.canonical_digest(manifest)}
     emit("progress", stage="inspect", completed=1, total=1, model=model)
     controls = request.get("parameters", {})
     common.require("post_filter" not in controls or manifest["id"] == "DeepFilterNet3", "invalid_request", "post_filter is supported only by DeepFilterNet3")
     dry = request["operation"] == "speech" and controls.get("wet_mix", 1.0) == 0.0
-    if dry and not collect_report:
+    if streaming and source.reuse_input:
         source.finish()
-        emit("complete", outputs={"speech":"input"}, sample_rate=rate, channels=channels,
-             frames=frames, model=model)
-        return None
+        return dict(outputs={"speech":"input"}, sample_rate=rate, channels=channels,
+                    frames=frames, model=model), None
     if not dry:
         common.check_packages(manifest)
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
@@ -335,10 +340,10 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
         del audio, result, original
         emit("progress", stage="copy" if dry else "inference", completed=end, total=frames)
     source_hash = source.finish()
-    if not collect_report:
-        emit("complete", outputs=dict.fromkeys(stems, True), sample_rate=rate, channels=channels,
-             frames=frames, model=model)
-        return None
+    completion = dict(outputs=dict.fromkeys(stems, True), sample_rate=rate,
+                      channels=channels, frames=frames, model=model)
+    if streaming:
+        return completion, None
     import resource
     wall = time.perf_counter()-wall_start
     report = {"outputs":dict.fromkeys(stems, True), "sample_rate":rate, "channels":channels, "frames":frames,
@@ -365,8 +370,7 @@ def _process_validated(request, source, write_pcm, emit, *, collect_report):
                 "block_seconds":block_times,"peak_rss_kib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(frames*channels)),
                 "target_rms":math.sqrt(output_energy/(frames*channels))}}
-    emit("complete", outputs=report["outputs"], sample_rate=rate, channels=channels, frames=frames, model=model)
-    return report
+    return completion, report
 
 
 def main():
@@ -382,15 +386,15 @@ def main():
         kind, payload = read_frame(sys.stdin.buffer)
         common.require(kind == JSON_FRAME, "protocol", "first frame must be a JSON request")
         request = json.loads(payload)
-        candidate_id = request.get("task_id") if isinstance(request, dict) else None
-        task_id = candidate_id if isinstance(candidate_id, str) and 0 < len(candidate_id) <= 128 else ""
+        task_id = event_task_id(request)
         validate_request(request)
         source = StreamInput(sys.stdin.buffer, request)
         def write_pcm(stem, samples):
             write_frame(output, STEM_KINDS[stem], memoryview(samples).cast("B"))
         # Package diagnostics must never corrupt the binary stdout protocol.
         with redirect_stdout(sys.stderr):
-            _process_validated(request, source, write_pcm, emit, collect_report=False)
+            completion, _ = _process_validated(request, source, write_pcm, emit, streaming=True)
+        emit("complete", **completion)
         return 0
     except Exception as exc:
         # ASCII JSON can expand one character to 12 bytes. Keep the whole error frame bounded.

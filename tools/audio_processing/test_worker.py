@@ -62,8 +62,8 @@ class ProducerIdentityTests(unittest.TestCase):
                 source, replacement, original = self.make_sources(root)
                 output = root / "export"
                 request = {**export_request(), "input_path":str(source), "output_dir":str(output)}
-                def process(control, admitted, write, emit, *, collect_report):
-                    self.assertTrue(collect_report)
+                def process(control, admitted, write, emit, *, streaming):
+                    self.assertFalse(streaming)
                     if replace:
                         replacement.replace(source)
                         np.testing.assert_array_equal(admitted.window(0, 2), original)
@@ -672,13 +672,13 @@ class ExplicitExportTests(unittest.TestCase):
                     if path.name == "result.json":
                         report_files.append(handle)
                     return handle
-                def process(control, admitted, write, emit, *, collect_report):
-                    self.assertTrue(collect_report)
+                def process(control, admitted, write, emit, *, streaming):
+                    self.assertFalse(streaming)
                     write("speech", admitted.window(0, 2))
                     admitted.finish()
-                    emit("complete", outputs={"speech":True}, sample_rate=8000, channels=1, frames=2,
-                         model={"id":"fixture", "sha256":"fixture"})
-                    return {"outputs":{"speech":True}, "note":report["note"]}
+                    completion = dict(outputs={"speech":True}, sample_rate=8000, channels=1, frames=2,
+                                      model={"id":"fixture", "sha256":"fixture"})
+                    return completion, {"outputs":{"speech":True}, "note":report["note"]}
                 def emit(kind, **fields):
                     if kind == "complete":
                         self.assertTrue(writers and all(handle.closed for handle in writers))
