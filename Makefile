@@ -13,7 +13,7 @@ export CARGO_TARGET_DIR
 # Keep DESTDIR for application installation, not Cargo/CMake dependency builds.
 unexport DESTDIR
 
-.PHONY: build lint test test-rust test-python ui-demo clean install install-only package
+.PHONY: build lint test test-rust test-python test-model-speech test-model-kim ui-demo clean install install-only package
 
 build:
 	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --locked --workspace --release
@@ -43,8 +43,19 @@ test-rust:
 	cargo test --locked -p symphonia-metadata -p symphonia-format-ogg -p symphonia-format-mkv -p symphonia-format-isomp4 -p symphonia-format-riff -p symphonia-bundle-flac
 
 test-python:
-	$(PYTHON) -c 'import numpy, scipy, soundfile, jsonschema'
-	$(PYTHON) -m unittest discover -s tools/audio_processing -p 'test_*.py'
+	"$(PYTHON)" -c 'import numpy, scipy, soundfile, jsonschema'
+	env -u RIVU_SPEECH_MANIFEST -u RIVU_KIM_MANIFEST "$(PYTHON)" -m unittest discover -s tools/audio_processing -p 'test_*.py'
+
+test-model-speech:
+	@test -f "$${RIVU_SPEECH_MANIFEST:-}" || { echo 'Set RIVU_SPEECH_MANIFEST to a prepared manifest file' >&2; exit 1; }
+	RIVU_SPEECH_MANIFEST="$$(realpath "$$RIVU_SPEECH_MANIFEST")" PYTHONPATH=tools/audio_processing "$(PYTHON)" -m unittest \
+		test_worker.RealSpeechTests.test_full_strength_silence_exact_length_and_source_unchanged \
+		test_speech_backends.RealSpeechBackendTests.test_real_model_short_tails_and_state_reset
+
+test-model-kim:
+	@test -f "$${RIVU_KIM_MANIFEST:-}" || { echo 'Set RIVU_KIM_MANIFEST to a prepared manifest file' >&2; exit 1; }
+	RIVU_KIM_MANIFEST="$$(realpath "$$RIVU_KIM_MANIFEST")" PYTHONPATH=tools/audio_processing "$(PYTHON)" -m unittest \
+		test_worker.RealSeparationTests.test_kim_source_rate_stereo_boundary_and_exact_complement
 
 ui-demo:
 	cargo run -p rivu-ui --example showcase

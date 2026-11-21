@@ -49,7 +49,11 @@ jobs:
           make lint
 
       - name: Test workspace features, standalone crates, and Python workers
-        run: make test
+        run: |
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            export RIVU_TEST_REQUIRE_FFMPEG_EXPORT=1
+          fi
+          make test
 
       - name: Build release binaries
         if: github.ref_type != 'tag'

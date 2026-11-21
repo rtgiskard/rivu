@@ -56,11 +56,24 @@ buses and require no display server or audio device. Python tests additionally n
 sudo pacman -S --needed python python-numpy python-scipy python-soundfile python-jsonschema
 ----
 
-Select another interpreter with `PYTHON=/path/to/python`. Real-model checks need
-prepared environments and local manifests; synthetic tests do not establish model
-quality or runtime memory usage. See
-link:26_audio_processing.adoc#quality-acceptance[audio-processing acceptance].
-The link:../.github/workflows/build.yml[CI workflow] defines release checks.
+On `v*` tag pushes, the link:../.github/workflows/build.yml[release workflow]
+runs `RIVU_TEST_REQUIRE_FFMPEG_EXPORT=1 make test` before packaging. Missing
+FFmpeg conversion support or a required export encoder (FLAC, `libopus`,
+`libmp3lame`) fails the release tests. Leave the variable unset for ordinary
+development; even an empty value enables strict checks.
+
+To check a real model, select the matching prepared interpreter and local
+manifest. Run each command separately, substituting paths for that model:
+
+[source,sh]
+----
+make test-model-speech PYTHON=/path/to/speech/bin/python RIVU_SPEECH_MANIFEST=/path/to/speech/manifest.json
+make test-model-kim PYTHON=/path/to/kim/bin/python RIVU_KIM_MANIFEST=/path/to/kim/manifest.json
+----
+
+Neither target downloads models. `make test-python` ignores both manifest
+variables; the synthetic suite does not establish model quality or runtime
+memory usage. See link:26_audio_processing.adoc#quality-acceptance[audio-processing acceptance].
 
 .IPC test isolation
 [%collapsible]
