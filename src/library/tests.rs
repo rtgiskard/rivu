@@ -2115,6 +2115,59 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
 }
 
 #[test]
+fn import_charges_only_the_shared_sources_it_keeps() -> Result<()> {
+    futures::executor::block_on(async {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let kept = root.join("kept.wav");
+        wav(&kept, 75)?;
+        // audio.wav probes successfully, but track 02 starts beyond its end.
+        wav(&root.join("audio.wav"), 60)?;
+        two_track_sheet(&root.join("album.cue"))?;
+        let playlist = root.join("list.m3u8");
+        fs::write(&playlist, "kept.wav\nalbum.cue\n")?;
+        let workers = &crate::execution::BlockingExecutor::new(1);
+        let cancellation = ScanCancellation::default();
+        let roots = std::slice::from_ref(&root);
+        let prepared =
+            super::prepare_playlist_import(workers, &playlist, &cancellation, Some(roots)).await?;
+        let budget = prepared.sheets.budget.clone();
+        let before = budget.remaining();
+        let result = super::scan_paths_with_cues(
+            workers,
+            &prepared.paths,
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            super::ScanSettings {
+                ffmpeg_enabled: false,
+                library_roots: roots,
+                max_depth: 1,
+            },
+            (&cancellation, Some(prepared.sheets)),
+            |_, _, _, _, _| {},
+        )
+        .await?;
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("invalid boundaries"));
+        assert_eq!(result.track_count(), 1);
+        let source = result.records[0].as_ref();
+        assert_eq!(source.path, kept);
+        let media = &source.media;
+        let media_buffers = media.title.capacity()
+            + media.artist.capacity()
+            + media.album.capacity()
+            + media.codec.capacity()
+            + media.release_date.as_ref().map_or(0, String::capacity);
+        let retained = result.records.capacity() * std::mem::size_of_val(&result.records[0])
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of_val(source)
+            + source.path.capacity()
+            + media_buffers;
+        assert_eq!(before - budget.remaining(), retained);
+        Ok(())
+    })
+}
+
+#[test]
 fn import_retained_overflow_after_a_valid_sheet_aborts_the_whole_scan() -> Result<()> {
     futures::executor::block_on(async {
         let directory = tempfile::tempdir()?;
