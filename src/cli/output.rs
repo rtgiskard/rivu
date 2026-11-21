@@ -414,8 +414,8 @@ pub(super) fn show_task_ack(
     if !ids.iter().any(|(_, id)| id.is_some()) {
         return show_ack(i18n, ack, mode);
     }
-    let mut output = io::stdout().lock();
     let instance_id = super::tasks::instance_id(session)?;
+    let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
         let mut value = serde_json::to_value(ack)?;
         let fields = value
@@ -437,35 +437,31 @@ pub(super) fn show_task_ack(
             .collect();
         fields.insert("task_refs".into(), references.into());
         writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
-        if !ack.is_success() {
-            output.flush()?;
-            bail!(
-                "{:?}: {}",
-                ack.status,
-                ack.error.as_deref().unwrap_or("Command failed")
-            );
-        }
-    } else {
-        show_ack(i18n, ack, mode)?;
-        for (kind, id) in ids {
-            if let Some(id) = id {
-                writeln!(
-                    output,
-                    "{}",
-                    i18n.format(
-                        "core-task-accepted",
-                        &[
-                            ("kind", kind.into()),
-                            (
-                                "id",
-                                super::tasks::TaskReference { instance_id, id }
-                                    .to_string()
-                                    .into()
-                            )
-                        ]
-                    )
-                )?;
-            }
+        output.flush()?;
+        return check_ack(ack);
+    }
+    check_ack(ack)?;
+    if mode == OutputMode::Verbose {
+        write_ack_revision(&mut output, i18n, ack)?;
+    }
+    for (kind, id) in ids {
+        if let Some(id) = id {
+            writeln!(
+                output,
+                "{}",
+                i18n.format(
+                    "core-task-accepted",
+                    &[
+                        ("kind", kind.into()),
+                        (
+                            "id",
+                            super::tasks::TaskReference { instance_id, id }
+                                .to_string()
+                                .into()
+                        )
+                    ]
+                )
+            )?;
         }
     }
     output.flush()?;
@@ -477,31 +473,47 @@ pub(super) fn show_ack(
     ack: &rivu_protocol::response::Ack,
     mode: OutputMode,
 ) -> Result<()> {
+    if mode == OutputMode::Text {
+        return check_ack(ack);
+    }
     let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
         writeln!(output, "{}", serde_json::to_string_pretty(ack)?)?;
-    }
-    if !ack.is_success() {
         output.flush()?;
+        return check_ack(ack);
+    }
+    check_ack(ack)?;
+    write_ack_revision(&mut output, i18n, ack)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn check_ack(ack: &rivu_protocol::response::Ack) -> Result<()> {
+    if !ack.is_success() {
         bail!(
             "{:?}: {}",
             ack.status,
             ack.error.as_deref().unwrap_or("Command failed")
         );
     }
-    if mode == OutputMode::Verbose {
-        writeln!(
-            output,
-            "{}",
-            i18n.format(
-                "core-command-accepted",
-                &[("revision", ack.revision.to_string().into())]
-            )
-        )?;
-    }
-    output.flush()?;
     Ok(())
 }
+
+fn write_ack_revision(
+    output: &mut impl Write,
+    i18n: &Localizer,
+    ack: &rivu_protocol::response::Ack,
+) -> io::Result<()> {
+    writeln!(
+        output,
+        "{}",
+        i18n.format(
+            "core-command-accepted",
+            &[("revision", ack.revision.to_string().into())]
+        )
+    )
+}
+
 pub(super) fn show_state(
     i18n: &Localizer,
     response: &StateResponse,
