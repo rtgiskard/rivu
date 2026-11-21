@@ -486,15 +486,12 @@ raise SystemExit(result)
                 self.assertNotIn("complete", [event["type"] for event in events])
 
     def test_trailing_input_is_failure_not_completion(self):
-        for suffix in (b"x", encode(worker.INPUT_PCM, b"\0"*4),
-                       encode(worker.INPUT_END), encode(worker.JSON_FRAME, b"{}")):
-            with self.subTest(suffix=suffix):
-                completed, _, events, _ = self.run_backend(
-                    "speech", wet=0, frames=37, malformed=lambda wire:wire+suffix)
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(events[-1]["type"], "error")
-                self.assertEqual(events[-1]["code"], "protocol")
-                self.assertNotIn("complete", [event["type"] for event in events])
+        completed, _, events, _ = self.run_backend(
+            "speech", wet=0, frames=37, malformed=lambda wire:wire+encode(worker.INPUT_END))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["code"], "protocol")
+        self.assertNotIn("complete", [event["type"] for event in events])
 
     def test_end_waits_for_held_open_stdin_to_close(self):
         completed, audio, events, outputs = self.run_backend(

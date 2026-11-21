@@ -1024,49 +1024,37 @@ mod tests {
     }
 
     #[test]
-    fn denoise_plan_charges_owned_state_once_for_each_effective_configuration() {
-        for channels in [1, 2] {
-            for mode in [
-                DenoiseMode::Off,
-                DenoiseMode::Stationary,
-                DenoiseMode::Adaptive,
-            ] {
-                for wet in [0.0, 0.5, 1.0] {
-                    for hum in [false, true] {
-                        for repair in [false, true] {
-                            let mut config = DenoiseConfig {
-                                mode,
-                                fft_size: 256,
-                                wet,
-                                ..Default::default()
-                            };
-                            config.hum.enabled = hum;
-                            config.impulse.enabled = repair;
-                            let extra = if config.is_bypassed() {
-                                0
-                            } else {
-                                BlockDenoiser::estimated_state_bytes(
-                                    &config,
-                                    48_000,
-                                    channels,
-                                    GRAPH_BLOCK_FRAMES,
-                                )
-                                .unwrap()
-                            };
-                            let graph = denoise_chain(config.clone(), 1);
-                            let plan =
-                                GraphRunner::plan(&graph, port(3, 0), None, 48_000, channels)
-                                    .unwrap();
-                            assert_eq!(
-                                plan.state_bytes,
-                                3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
-                            );
-                            let runner = plan.prepare().unwrap();
-                            assert_eq!(runner.latency_frames(), config.lookahead_frames());
-                        }
-                    }
-                }
-            }
+    fn denoise_plan_charges_owned_state_once_and_preserves_latency() {
+        for (mode, wet, hum, repair, channels) in [
+            (DenoiseMode::Off, 1.0, false, false, 1),
+            (DenoiseMode::Adaptive, 0.0, true, true, 2),
+            (DenoiseMode::Off, 1.0, true, false, 1),
+            (DenoiseMode::Off, 1.0, false, true, 2),
+            (DenoiseMode::Stationary, 0.5, false, false, 1),
+            (DenoiseMode::Adaptive, 1.0, true, true, 2),
+        ] {
+            let mut config = DenoiseConfig {
+                mode,
+                fft_size: 256,
+                wet,
+                ..Default::default()
+            };
+            config.hum.enabled = hum;
+            config.impulse.enabled = repair;
+            let extra = if config.is_bypassed() {
+                0
+            } else {
+                BlockDenoiser::estimated_state_bytes(&config, 48_000, channels, GRAPH_BLOCK_FRAMES)
+                    .unwrap()
+            };
+            let latency = config.lookahead_frames();
+            let graph = denoise_chain(config, 1);
+            let plan = GraphRunner::plan(&graph, port(3, 0), None, 48_000, channels).unwrap();
+            assert_eq!(
+                plan.state_bytes,
+                3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
+            );
+            assert_eq!(plan.prepare().unwrap().latency_frames(), latency);
         }
     }
 

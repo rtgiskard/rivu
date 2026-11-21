@@ -1312,7 +1312,7 @@ mod tests {
         );
     }
 
-    use crate::tests::chain;
+    use crate::tests::{chain, samples};
 
     fn pcm(samples: &[f32], budget: &Arc<audio::PcmBudget>) -> audio::PcmAudio {
         let mut builder = audio::PcmBuilder::new(
@@ -1323,11 +1323,6 @@ mod tests {
         .unwrap();
         builder.push(samples).unwrap();
         builder.finish().unwrap()
-    }
-    fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
-        let mut samples = vec![0.0; pcm.frames() as usize];
-        assert_eq!(pcm.read_frames(0, &mut samples), samples.len());
-        samples
     }
     fn render(
         graph: &ProcessingGraph,
@@ -1861,43 +1856,27 @@ mod tests {
     }
 
     #[test]
-    fn source_short_reads_and_decoder_without_input_clear_active_prefix() {
-        let budget = audio::PcmBudget::new(MEMORY_LIMIT);
-        let input = pcm(&[1.0, 2.0], &budget);
-        let graph = chain(Vec::new());
-        for streaming in [false, true] {
-            let mut engine = if streaming {
-                Engine::for_decoder(48000, Arc::clone(input.layout()))
-            } else {
-                Engine::new(&input)
-            };
-            let target = engine
-                .compile(
-                    &graph,
-                    GraphPort { node: 2, port: 0 },
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
-            for node in &mut engine.nodes {
-                // Exercise the reader's short-read contract independently of
-                // the compiled source length and poison previously used data.
-                node.frames = 4;
-                node.input_frames = 4;
-                node.output.fill(f32::NAN);
-            }
-            engine
-                .round(0, 4, None, None, &AtomicBool::new(false))
-                .unwrap();
-            let expected = if streaming {
-                [0.0; 4]
-            } else {
-                [1.0, 2.0, 0.0, 0.0]
-            };
-            let physical = engine.nodes[target].output_node;
-            assert_eq!(&engine.nodes[physical].output[..4], &expected);
+    fn decoder_without_input_clears_active_prefix() {
+        let mut engine = Engine::for_decoder(48000, Arc::from([audio::Channel::FrontCenter]));
+        let target = engine
+            .compile(
+                &chain(Vec::new()),
+                GraphPort { node: 2, port: 0 },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        for node in &mut engine.nodes {
+            node.frames = 4;
+            node.input_frames = 4;
+            node.output.fill(f32::NAN);
         }
+        engine
+            .round(0, 4, None, None, &AtomicBool::new(false))
+            .unwrap();
+        let physical = engine.nodes[target].output_node;
+        assert_eq!(&engine.nodes[physical].output[..4], &[0.0; 4]);
     }
 
     #[test]

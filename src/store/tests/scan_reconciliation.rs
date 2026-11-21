@@ -625,6 +625,9 @@ fn ambiguous_cue_relocation_preserves_ids_and_user_data_on_both_sides() {
     let directory = tempfile::tempdir().unwrap();
     for (old_count, new_count) in [(2, 1), (1, 2), (2, 2)] {
         for reverse in [false, true] {
+            if reverse && new_count == 1 {
+                continue; // A single destination has no alternate scan order.
+            }
             let store = Store::open(Path::new(":memory:")).unwrap();
             let make = |prefix: &str, index| {
                 segment(
@@ -861,6 +864,8 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
     let id = all_tracks(&store)[0].id;
     store.enqueue_tracks(&[id, id]).unwrap();
     let before = store.queue_page(None, 0, 2).unwrap();
+    assert_eq!(before.total, 2);
+    assert_eq!(before.rows.len(), 2);
     for field in 0..3 {
         match field {
             0 => record.media.channels = 6,
@@ -871,8 +876,6 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
         assert!(impacts.library && impacts.queue);
         assert!(!impacts.structure);
         let after = store.queue_page(None, 0, 2).unwrap();
-        assert_eq!(before.total, 2);
-        assert_eq!(before.rows.len(), 2);
         assert_eq!(after.total, before.total);
         assert_eq!(after.rows.len(), before.rows.len());
         for (old, new) in before.rows.iter().zip(&after.rows) {

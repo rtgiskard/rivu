@@ -2845,32 +2845,6 @@ fn graph_exports_preserve_all_retained_runs_and_never_retain_export_scratch() {
 }
 
 #[test]
-fn graph_export_cancel_after_physical_completion_never_publishes_a_file() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
-        .unwrap();
-    complete(&mut core);
-    let destination = directory.path().join("cancelled export.wav");
-    core.processing_graph_export(1, graph_port(2, 0), destination.clone())
-        .unwrap();
-    let event = completion(&mut core);
-    core.cancel_processing(2).unwrap();
-    core.processing_event(event);
-    assert_eq!(
-        core.processing_status(2).unwrap().phase,
-        ProcessingPhase::Cancelled
-    );
-    assert!(!destination.exists());
-    assert!(
-        core.processing_status(2)
-            .unwrap()
-            .graph_exported_path
-            .is_none()
-    );
-}
-
-#[test]
 fn exporting_an_unrendered_port_executes_its_frozen_ancestor_closure() {
     let (directory, mut core) = fixture();
     let expected = source(directory.path());
@@ -4722,6 +4696,9 @@ fn export_failure_and_cancellation_keep_source_capabilities_until_directory_evic
         assert!(receipt.graph_actions_available);
         assert!(receipt.graph_outputs.is_empty());
         assert!(receipt.graph_exported_path.is_none());
+        if cancelled {
+            assert!(!destination.exists());
+        }
         assert!(
             receipt.graph_nodes.is_empty(),
             "cached export executed nodes"

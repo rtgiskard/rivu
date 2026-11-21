@@ -630,6 +630,12 @@ mod tests {
             config.impulse.enabled = true;
             config.impulse.max_width = 8;
             config.hum.enabled = true;
+            let mut adapter = BlockDenoiser::new(
+                Denoiser::new(48_000, 2, config.clone(), None).unwrap(),
+                BLOCK,
+            )
+            .unwrap();
+            let capacities = (adapter.output.capacity(), adapter.queue.capacity());
             for frames in [0, 1, 255, 256, 257, 1025] {
                 let input: Vec<_> = (0..frames * 2)
                     .map(|index| (index as f32 * 0.031).sin() * 0.2)
@@ -643,12 +649,6 @@ mod tests {
                         .unwrap();
                 }
                 reference.finish(&mut expected, &mut || false).unwrap();
-                let mut adapter = BlockDenoiser::new(
-                    Denoiser::new(48_000, 2, config.clone(), None).unwrap(),
-                    BLOCK,
-                )
-                .unwrap();
-                let capacities = (adapter.output.capacity(), adapter.queue.capacity());
                 for _ in 0..2 {
                     let mut actual = Vec::new();
                     let mut position = 0;
@@ -681,15 +681,15 @@ mod tests {
                     assert_eq!(actual, expected);
                     adapter.reset();
                 }
-                assert!(
-                    adapter
-                        .process(&mut [0.0; 2], 2, false, &mut || true)
-                        .is_err()
-                );
-                assert!(adapter.process(&mut [], 0, true, &mut || false).is_err());
-                adapter.reset();
-                adapter.process(&mut [], 0, true, &mut || false).unwrap();
             }
+            assert!(
+                adapter
+                    .process(&mut [0.0; 2], 2, false, &mut || true)
+                    .is_err()
+            );
+            assert!(adapter.process(&mut [], 0, true, &mut || false).is_err());
+            adapter.reset();
+            adapter.process(&mut [], 0, true, &mut || false).unwrap();
         }
     }
 

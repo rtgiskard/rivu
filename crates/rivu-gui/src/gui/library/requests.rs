@@ -842,9 +842,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn directory_and_flat_completions_reject_stale_bitrate(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser, _| {
-            for flat in [false, true] {
+    fn directory_reads_reject_stale_bitrate_and_source_revisions(cx: &mut gpui::TestAppContext) {
+        for (flat, stale_bitrate) in [(false, true), (true, true), (false, false)] {
+            with_library(cx, |browser, _| {
                 if flat {
                     browser.library.toggle_view();
                 }
@@ -856,7 +856,11 @@ mod tests {
                     .read
                     .unwrap();
                 let state = std::rc::Rc::make_mut(&mut browser.state);
-                state.library.bitrate_revision += 1;
+                if stale_bitrate {
+                    state.library.bitrate_revision += 1;
+                } else {
+                    state.library.revision += 1;
+                }
                 let latest = browser.state.query_revisions(None);
                 assert!(browser.library.sync_projection(latest));
                 assert!(
@@ -867,8 +871,8 @@ mod tests {
                 assert!(browser.library.tree().cached_row(&branch, 0).is_none());
                 assert!(browser.requests.directory_workers.is_empty());
                 assert!(browser.next_directory_demand(true).is_none());
-            }
-        });
+            });
+        }
     }
 
     #[gpui::test]
@@ -885,18 +889,6 @@ mod tests {
             let state = std::rc::Rc::make_mut(&mut browser.state);
             state.library.bitrate_revision += 1;
             let latest = browser.state.query_revisions(None);
-            assert!(
-                browser
-                    .publish_directory_read(&read, latest, track_response(baseline, false))
-                    .is_none()
-            );
-            assert!(
-                !browser
-                    .library
-                    .tree()
-                    .request_pending(&branch, read.generation)
-            );
-            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
             assert!(browser.requests.directory_workers.contains_key(&branch));
             assert!(
                 browser
@@ -905,7 +897,12 @@ mod tests {
                     .is_none()
             );
             assert_eq!(browser.requests.directory_queued.len(), 1);
-            browser.abandon_directory_read(&read);
+            assert!(
+                browser
+                    .complete_directory_read(&read, latest, track_response(baseline, false))
+                    .is_none()
+            );
+            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
             let (retry_branch, offset) = browser.next_directory_demand(true).unwrap();
             assert_eq!(retry_branch, branch);
             let retry = browser
@@ -979,31 +976,6 @@ mod tests {
                 browser.library.tree.requests_for_range(0..geometry),
                 vec![(branch, 0)]
             );
-        });
-    }
-
-    #[gpui::test]
-    fn source_revision_changes_reject_old_completions(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser, _| {
-            let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
-            let baseline = browser.state.query_revisions(None);
-            let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
-                .read
-                .unwrap();
-            let state = std::rc::Rc::make_mut(&mut browser.state);
-            state.library.revision += 1;
-            let latest = browser.state.query_revisions(None);
-            assert!(browser.library.sync_projection(latest));
-            assert!(
-                browser
-                    .complete_directory_read(&read, latest, track_response(baseline, false))
-                    .is_none()
-            );
-            assert!(browser.library.tree().cached_row(&branch, 0).is_none());
-            assert!(browser.requests.directory_workers.is_empty());
-            assert!(browser.next_directory_demand(true).is_none());
         });
     }
 
@@ -1292,7 +1264,6 @@ mod tests {
                 .prepare_directory_read(retry_branch, offset, 20, &roots, revisions)
                 .read
                 .unwrap();
-            browser.publish_directory_read(&read, revisions, track_response(revisions, false));
             assert!(
                 browser
                     .library

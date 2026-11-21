@@ -1,4 +1,4 @@
-//! Test-only PCM files written through one buffered RIFF writer.
+//! Test-only audio file fixtures.
 
 use std::path::Path;
 
@@ -80,4 +80,12 @@ pub(crate) fn float_wav_file(
     let file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
     write_float_wav(file.path(), channels, sample_rate, samples).unwrap();
     file
+}
+
+#[cfg(test)]
+pub(crate) fn matroska_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut bytes = id.to_vec();
+    bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
 }

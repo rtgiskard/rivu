@@ -1839,29 +1839,9 @@ mod tests {
 
     fn track(id: i64) -> Track {
         Track {
-            id,
-            path: PathBuf::from(format!("/music/{id}.flac")),
-            fingerprint: None,
-            cue: None,
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
             channels: 0,
             sample_rate: 0,
-            bitrate_bps: None,
-            bitrate_exact: false,
-            track_number: None,
-            disc_number: None,
-            bits_per_sample: None,
-            release_date: None,
-            replaygain_track_gain: None,
-            favorite: false,
-            decoder_hint: Default::default(),
-            missing: false,
-            play_count: 0,
-            last_played: None,
+            ..rivu_protocol::test_support::track(id, format!("/music/{id}.flac"))
         }
     }
 

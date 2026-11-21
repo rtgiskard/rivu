@@ -1125,22 +1125,26 @@ mod tests {
     }
 
     #[test]
-    fn radial_rate_rewind_and_gap_initialize_without_old_smoothing() {
-        for discontinuity in 0..3 {
+    fn radial_discontinuities_initialize_without_old_smoothing() {
+        for (rate, millis, generation) in [
+            (44_100, 1000, 1), // Rate change
+            (48_000, 900, 1),  // Rewind
+            (48_000, 1000, 2), // New generation at the same sample time
+            (48_000, 1501, 2), // Gap and new generation
+        ] {
             let mut radial = RadialRenderer::new();
             let mut audio = frame();
             accept(&mut radial, &audio);
-            match discontinuity {
-                0 => audio.sample_rate = 44_100,
-                1 => audio.sample_time -= Duration::from_millis(100),
-                _ => {
-                    audio.sample_time += Duration::from_millis(501);
-                    audio.generation += 1;
-                }
-            }
+            audio.sample_rate = rate;
+            audio.sample_time = Duration::from_millis(millis);
+            audio.generation = generation;
             audio.spectrum_db.fill(-70.0);
             radial.update(&audio, audio.sample_time);
-            assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
+            assert_eq!(
+                radial.data.borrow().displayed,
+                vec![0.0; 4],
+                "rate={rate}, millis={millis}, generation={generation}"
+            );
             assert!(!radial.animate(audio.sample_time));
         }
     }
@@ -1455,18 +1459,6 @@ mod tests {
             assert!((actual.1 - expected.1).abs() < 1e-6);
             assert_eq!(data.displayed, vec![0.0; 4]);
         }
-    }
-
-    #[test]
-    fn same_rate_new_generation_resets_radial_smoothing() {
-        let mut radial = RadialRenderer::new();
-        accept(&mut radial, &frame());
-        let mut next = frame();
-        // A reset must accept the same time, not just a later publication.
-        next.generation = 2;
-        next.spectrum_db.fill(-70.0);
-        accept(&mut radial, &next);
-        assert_eq!(radial.data.borrow().displayed, vec![0.0; 4]);
     }
 
     #[test]

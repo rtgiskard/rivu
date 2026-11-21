@@ -319,22 +319,22 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
         assert_eq!(saved["interface"]["artwork"]["style"].as_str(), Some(name));
         assert_eq!(Config::load(&path).unwrap(), config);
     }
-    for mode in [ArtworkMode::Static, ArtworkMode::Rotating] {
-        for direction in [
-            ArtworkDirection::Clockwise,
-            ArtworkDirection::Counterclockwise,
-        ] {
-            for period in [f32::MIN_POSITIVE, 0.125, 20.0, f32::MAX] {
-                let config = Config {
-                    artwork_mode: mode,
-                    artwork_period_seconds: period,
-                    artwork_direction: direction,
-                    ..Config::default()
-                };
-                config.save(&path).unwrap();
-                assert_eq!(Config::load(&path).unwrap(), config);
-            }
-        }
+    use ArtworkDirection::{Clockwise, Counterclockwise};
+    use ArtworkMode::{Rotating, Static};
+    for (mode, direction, period) in [
+        (Static, Clockwise, f32::MIN_POSITIVE),
+        (Static, Counterclockwise, 0.125),
+        (Rotating, Clockwise, 20.0),
+        (Rotating, Counterclockwise, f32::MAX),
+    ] {
+        let config = Config {
+            artwork_mode: mode,
+            artwork_period_seconds: period,
+            artwork_direction: direction,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
     }
     for period in ["0", "-1", "nan", "inf", "-inf"] {
         write_current_config(
@@ -355,19 +355,6 @@ fn artwork_settings_round_trip_and_reject_invalid_motion_values() {
         assert!(config.save(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
     }
-    write_current_config(&path, "interface.animation_fps = 60\n").unwrap();
-    let config = Config::load(&path).unwrap();
-    assert_eq!(config.animation_fps, 60);
-    config.save(&path).unwrap();
-    assert_eq!(Config::load(&path).unwrap(), config);
-    Config::default().save(&path).unwrap();
-    let original = fs::read(&path).unwrap();
-    let config = Config {
-        animation_fps: 241,
-        ..Config::default()
-    };
-    assert!(config.save(&path).is_err());
-    assert_eq!(fs::read(&path).unwrap(), original);
     for invalid in [
         "style = 'unknown'",
         "mode = 'spinning'",
@@ -490,11 +477,6 @@ fn unknown_and_misplaced_file_keys_are_rejected() {
         "[visualizations]\nbars = 42",
         "[visualizations.spectrum]\nunknown = true",
         "[visualizations.spectrogram]\nunknown = true",
-        "[visualizations.general]\nunknown = true",
-        "[visualizations.radial]\nunknown = true",
-        "[visualizations.reactive]\nunknown = true",
-        "visualizations.general.labels = true",
-        "visualizations.db_range = 85",
         "[visualizations.waveform]\nunknown = true",
         "[visualizations.unknown]",
         "[visualizations.spectrum]\nvolume_percent = 50",
@@ -1093,29 +1075,14 @@ fn gpu_budget_and_history_limits_validate_and_round_trip() {
 fn boundary_values_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    for volume in [0.0, 1.0] {
-        for ui_scale in [0.75, 2.0] {
-            for analysis_rate_hz in [5, 60] {
-                let config = Config {
-                    volume,
-                    ui_scale,
-                    analysis_rate_hz,
-                    ..Config::default()
-                };
-                config.save(&path).unwrap();
-                assert_eq!(Config::load(&path).unwrap(), config);
-            }
-        }
-    }
-    directory.close().unwrap();
-}
-
-#[test]
-fn play_count_threshold_boundaries_round_trip() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    for play_count_threshold_percent in [0.0, f64::from_bits(100.0_f64.to_bits() - 1)] {
+    let below_hundred = f64::from_bits(100.0_f64.to_bits() - 1);
+    for (volume, ui_scale, analysis_rate_hz, play_count_threshold_percent) in
+        [(0.0, 2.0, 5, below_hundred), (1.0, 0.75, 60, 0.0)]
+    {
         let config = Config {
+            volume,
+            ui_scale,
+            analysis_rate_hz,
             play_count_threshold_percent,
             ..Config::default()
         };

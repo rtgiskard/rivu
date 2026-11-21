@@ -1051,7 +1051,7 @@ mod tests {
         for index in 0..pointers.len() {
             let amplitude = 0.125 * (index + 1) as f32;
             for i in 0..32768 {
-                let sample = amplitude * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                let sample = amplitude * period_32_sample(i);
                 analyzer.push([sample, -sample]);
             }
             let rms = analyzer.transform();
@@ -1309,10 +1309,8 @@ mod tests {
     #[test]
     fn simultaneous_visualizer_payloads_share_one_accepted_window() {
         let settings = AnalysisSettings {
-            fps: 20,
             fft_size: 4096,
-            window: AnalysisWindow::None,
-            signal: VisualizationSignal::After,
+            ..visualizer_settings()
         };
         let mut combined = SpectrumAnalyzer::new(settings, 32768, true);
         combined.set_visualizer_demand(ALL_DEMAND);
@@ -1557,10 +1555,9 @@ mod tests {
             for (frequency, band) in [(128.0, 0), (1024.0, 1), (8192.0, 2)] {
                 let mut analyzer = SpectrumAnalyzer::new(
                     AnalysisSettings {
-                        fps: 20,
                         fft_size: 4096,
                         window,
-                        signal: VisualizationSignal::After,
+                        ..visualizer_settings()
                     },
                     32768,
                     true,
@@ -1586,16 +1583,7 @@ mod tests {
 
     #[test]
     fn band_energy_nyquist_is_not_doubled_and_silence_has_no_drive() {
-        let mut analyzer = SpectrumAnalyzer::new(
-            AnalysisSettings {
-                fps: 20,
-                fft_size: 512,
-                window: AnalysisWindow::None,
-                signal: VisualizationSignal::After,
-            },
-            8000,
-            true,
-        );
+        let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 8000, true);
         analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
         for i in 0..512 {
             analyzer.push([if i % 2 == 0 { 0.5 } else { -0.5 }, 0.0]);
@@ -1801,11 +1789,7 @@ mod tests {
             assert_eq!(frequencies.last().copied(), Some(rate as f32 * 0.5));
             assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
             assert!(frequencies.contains(&440.0));
-            assert!(
-                frequencies
-                    .iter()
-                    .all(|hz| *hz > 0.0 && *hz <= rate as f32 * 0.5)
-            );
+            assert!(frequencies[0] > 0.0);
         }
     }
 
@@ -1818,10 +1802,9 @@ mod tests {
                 AnalysisWindow::None,
             ] {
                 let settings = AnalysisSettings {
-                    fps: 20,
                     fft_size,
                     window,
-                    signal: VisualizationSignal::After,
+                    ..visualizer_settings()
                 };
                 // A1760 is both a musical center and FFT-bin aligned at every size.
                 let rate = 56_320;
@@ -1869,10 +1852,8 @@ mod tests {
     fn wrapped_window_preserves_asymmetric_nyquist_and_low_amplitudes() {
         for fft_size in [512, 8192, 32768] {
             let settings = AnalysisSettings {
-                fps: 20,
                 fft_size,
-                window: AnalysisWindow::None,
-                signal: VisualizationSignal::After,
+                ..visualizer_settings()
             };
             for amplitude in [0.5_f32, 1e-6, 1e-8, 0.0, 2.0] {
                 let mut analyzer = SpectrumAnalyzer::new(settings, 48_000, true);

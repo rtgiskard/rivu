@@ -665,15 +665,7 @@ mod tests {
 
     #[test]
     fn plotted_response_matches_independent_prewarped_prototypes() {
-        for kind in [
-            FilterKind::Peak,
-            FilterKind::LowShelf,
-            FilterKind::HighShelf,
-            FilterKind::LowPass,
-            FilterKind::HighPass,
-            FilterKind::BandPass,
-            FilterKind::Notch,
-        ] {
+        for kind in crate::equalizer::FILTER_KINDS {
             for gain in [-24.0, 6.0, 24.0] {
                 for q in [0.1, 0.707, 20.0] {
                     let mut settings = config(kind);
@@ -763,15 +755,7 @@ mod tests {
             .map(|n| (0.01 * (2.0 * PI * frequency * n as f64 / 48_000.0).sin()) as f32)
             .collect();
         let mut samples = Vec::with_capacity(tone.len());
-        for kind in [
-            FilterKind::Peak,
-            FilterKind::LowShelf,
-            FilterKind::HighShelf,
-            FilterKind::LowPass,
-            FilterKind::HighPass,
-            FilterKind::BandPass,
-            FilterKind::Notch,
-        ] {
+        for kind in crate::equalizer::FILTER_KINDS {
             let mut eq = Equalizer::new(&config(kind), 48_000, 1).unwrap();
             samples.clone_from(&tone);
             eq.process(&mut samples).unwrap();
@@ -994,15 +978,7 @@ mod tests {
 
     #[test]
     fn extreme_coefficients_and_impulses_remain_finite() {
-        for kind in [
-            FilterKind::Peak,
-            FilterKind::LowShelf,
-            FilterKind::HighShelf,
-            FilterKind::LowPass,
-            FilterKind::HighPass,
-            FilterKind::BandPass,
-            FilterKind::Notch,
-        ] {
+        for kind in crate::equalizer::FILTER_KINDS {
             for rate in [8_000, 44_100, 192_000, 768_000] {
                 for frequency in [
                     1.0,

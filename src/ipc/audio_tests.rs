@@ -49,34 +49,18 @@ async fn connect(directory: &Path) -> (Async<UnixStream>, Vec<u8>) {
 }
 fn track(path: std::path::PathBuf) -> Track {
     Track {
-        id: 9,
-        path,
-        fingerprint: None,
         cue: Some(CueSegment {
             sheet: "source.cue".into(),
             number: 1,
             start_frame: 75,
             end_frame: Some(150),
         }),
-        title: String::new(),
-        artist: String::new(),
-        album: String::new(),
         duration: Some(1.0),
         codec: "pcm".into(),
-        channels: 2,
         sample_rate: 8_000,
-        bitrate_bps: None,
-        bitrate_exact: false,
-        track_number: None,
-        disc_number: None,
         bits_per_sample: Some(32),
-        release_date: None,
-        replaygain_track_gain: None,
-        favorite: false,
         decoder_hint: DecoderHint::Native,
-        missing: false,
-        play_count: 0,
-        last_played: None,
+        ..rivu_protocol::test_support::track(9, path)
     }
 }
 

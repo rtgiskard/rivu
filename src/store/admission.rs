@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn source_observation_tolerates_malformed_fields_and_compares_effective_changes() {
+    fn scan_and_admission_detect_changes_to_the_current_source() {
         for scan in [false, true] {
             let store = Store::open(Path::new(":memory:")).unwrap();
             store
@@ -197,16 +197,14 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            store
-                .admit_external_queue(&admission(&["/current.wav"], vec![0]), None, None)
-                .unwrap();
+            let mut source = record("/current.wav");
+            source.media.duration = Some(123.5);
+            let initial = ExternalAdmission::from_test_records(vec![source.clone()], vec![0]);
+            store.admit_external_queue(&initial, None, None).unwrap();
             let current_entry = store.queue_ids().unwrap()[0];
             let current_track = store.queue_track_id(current_entry).unwrap();
             assert_ne!(current_track, current_entry as i64);
-            store.conn.execute(
-                "UPDATE tracks SET play_count='malformed',duration='malformed',title='User title' WHERE id=?1",
-                [current_track],
-            ).unwrap();
+            store.set_play_count(current_track, 1).unwrap();
             let apply = |source: ScanRecord| {
                 if scan {
                     store
@@ -235,36 +233,18 @@ mod tests {
             assert!(unrelated.changed);
             assert_eq!(unrelated.current_track, Some(false));
             assert!(store.known_source(Path::new("/new.wav")).unwrap().is_some());
-            store
-                .conn
-                .execute(
-                    "UPDATE tracks SET duration=?1 WHERE id=?2",
-                    params![record("/current.wav").media.duration, current_track],
-                )
-                .unwrap();
-            let mut source = record("/current.wav");
             source.media.title = "New tag title".into();
-            let hidden = apply(source.clone());
-            assert!(hidden.changed);
-            assert_eq!(hidden.current_track, Some(true));
+            let retitled = apply(source.clone());
+            assert!(retitled.changed);
+            assert_eq!(retitled.current_track, Some(true));
             source.media.codec = "flac".into();
-            let visible = apply(source);
-            assert_eq!(visible.current_track, Some(true));
-            assert_eq!(
-                store
-                    .conn
-                    .query_row(
-                        "SELECT title,codec,play_count FROM tracks WHERE id=?1",
-                        [current_track],
-                        |row| Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?
-                        )),
-                    )
-                    .unwrap(),
-                ("New tag title".into(), "flac".into(), "malformed".into()),
-            );
+            let recoded = apply(source);
+            assert_eq!(recoded.current_track, Some(true));
+            let track = store.track(current_track).unwrap().unwrap();
+            assert_eq!(track.title, "New tag title");
+            assert_eq!(track.codec, "flac");
+            assert_eq!(track.duration, Some(123.5));
+            assert_eq!(track.play_count, 1);
         }
     }
 

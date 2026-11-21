@@ -926,20 +926,14 @@ mod tests {
             vec!["library", "duplicates"],
             vec!["library", "other", "list"],
         ] {
-            for value in ["0", "256"] {
+            for (value, accepted) in [("0", true), ("256", true), ("257", false)] {
                 let argv = ["rivu"]
                     .into_iter()
                     .chain(command.iter().copied())
                     .chain(["--limit", value])
                     .collect::<Vec<_>>();
-                assert!(parse_and_validate(&argv).is_ok());
+                assert_eq!(parse_and_validate(&argv).is_ok(), accepted, "{argv:?}");
             }
-            let argv = ["rivu"]
-                .into_iter()
-                .chain(command.iter().copied())
-                .chain(["--limit", "257"])
-                .collect::<Vec<_>>();
-            assert!(parse_and_validate(&argv).is_err());
         }
     }
 

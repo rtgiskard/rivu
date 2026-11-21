@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_has_track_navigation_and_search_without_removal() {
+    fn recent_has_track_navigation_without_removal() {
         let context = Context::TuiRecent;
         for (key, action) in [
             ("up", Action::Up),
@@ -664,12 +664,10 @@ mod tests {
             ("end", Action::Last),
             ("pageup", Action::PageUp),
             ("pagedown", Action::PageDown),
-            ("tab", Action::Traverse),
             ("enter", Action::Activate),
             ("i", Action::Details),
             ("m", Action::Favorite),
             ("space", Action::Toggle),
-            ("/", Action::Search),
         ] {
             assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
         }
@@ -688,7 +686,6 @@ mod tests {
             ("enter", Action::Activate),
             ("escape", Action::Cancel),
             ("backspace", Action::Backspace),
-            ("tab", Action::Traverse),
             ("f1", Action::Help),
         ] {
             assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
@@ -715,7 +712,6 @@ mod tests {
             ("enter", Action::Activate),
             ("i", Action::Details),
             ("m", Action::Favorite),
-            ("tab", Action::Traverse),
         ] {
             assert_eq!(
                 resolve(key, Modifiers::default(), Context::TuiSearchResults),
@@ -788,10 +784,6 @@ mod tests {
             }
             assert_eq!(resolve("?", CTRL, context), None);
         }
-        assert_eq!(
-            resolve("?", Modifiers::default(), Context::TuiSearchQuery),
-            None
-        );
     }
 
     #[test]
@@ -916,6 +908,7 @@ mod tests {
             Context::TuiQueue,
             Context::TuiTree,
             Context::TuiSearchResults,
+            Context::TuiSearchQuery,
         ] {
             for (key, shift, action) in [
                 ("[", false, Action::VolumeDown),
@@ -929,8 +922,8 @@ mod tests {
                     shift,
                     ..Default::default()
                 };
-                assert_eq!(resolve(key, modifiers, context), Some(action));
-                assert_eq!(resolve(key, modifiers, Context::TuiSearchQuery), None);
+                let expected = (context != Context::TuiSearchQuery).then_some(action);
+                assert_eq!(resolve(key, modifiers, context), expected);
             }
             assert_eq!(resolve("{", CTRL, context), None);
         }

@@ -4,7 +4,7 @@ use super::*;
 use rivu_audio::test_support::write_float_wav;
 use std::time::Duration;
 
-fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
+pub(super) fn samples(pcm: &audio::PcmAudio) -> Vec<f32> {
     let mut samples = vec![0.0; pcm.frames() as usize * usize::from(pcm.channels())];
     assert_eq!(pcm.read_frames(0, &mut samples), pcm.frames() as usize);
     samples
@@ -1225,34 +1225,28 @@ fn offline_off_denoise_keeps_hum_and_impulse_active_but_wet_zero_bypasses_both()
 }
 
 #[test]
-fn offline_wet_zero_profile_still_rejects_out_of_source_selection() {
-    let (_directory, mut service, track, _) = fixture();
-    let config = graph_config(vec![GraphNodeKind::Denoise {
-        config: rivu_dsp::denoise::DenoiseConfig {
-            mode: rivu_dsp::denoise::DenoiseMode::Profile,
+fn offline_out_of_source_selection_reports_its_denoise_node_even_when_bypassed() {
+    use rivu_dsp::denoise::{DenoiseConfig, DenoiseMode};
+
+    for denoise in [
+        DenoiseConfig::default(),
+        DenoiseConfig {
+            mode: DenoiseMode::Profile,
             wet: 0.0,
             fft_size: 256,
             ..Default::default()
         },
-        profile: Some(NoiseSelection {
-            start_seconds: 0.0,
-            end_seconds: 1.0,
-        }),
-    }]);
-    assert_graph_failure(&mut service, &track, config, 3);
-}
-
-#[test]
-fn offline_non_profile_selection_failure_reports_its_node_after_decoding() {
-    let (_directory, mut service, track, _) = fixture();
-    let config = graph_config(vec![GraphNodeKind::Denoise {
-        config: Default::default(),
-        profile: Some(NoiseSelection {
-            start_seconds: 0.0,
-            end_seconds: 1.0,
-        }),
-    }]);
-    assert_graph_failure(&mut service, &track, config, 3);
+    ] {
+        let (_directory, mut service, track, _) = fixture();
+        let config = graph_config(vec![GraphNodeKind::Denoise {
+            config: denoise,
+            profile: Some(NoiseSelection {
+                start_seconds: 0.0,
+                end_seconds: 1.0,
+            }),
+        }]);
+        assert_graph_failure(&mut service, &track, config, 3);
+    }
 }
 
 #[test]

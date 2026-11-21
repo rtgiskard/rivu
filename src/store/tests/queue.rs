@@ -45,10 +45,10 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     );
     drop(store);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.queue_state().unwrap().current_id, Some(current));
-    assert_eq!(store.queue_state().unwrap().current_position, Some(199_999));
-    assert_eq!(store.queue_ids().unwrap().len(), 200_000);
     let before = store.queue_state().unwrap();
+    assert_eq!(before.current_id, Some(current));
+    assert_eq!(before.current_position, Some(199_999));
+    assert_eq!(before.total, 200_000);
     assert!(store.enqueue_tracks(&[1, 999_999]).is_err());
     assert_eq!(store.queue_state().unwrap(), before);
     assert!(store.queue_entries(None, &vec![current; 257]).is_err());
@@ -84,10 +84,13 @@ fn queue_interval_deletion_preserves_survivors_positions_and_current_identity() 
         if let Some(&id) = requested.first() {
             requested.push(id);
         }
-        let before = store.queue_state().unwrap();
-        assert!(store.remove_queue_entries(&[ids[0], 9999]).is_err());
-        assert_eq!(store.queue_state().unwrap(), before);
-        assert_eq!(store.queue_ids().unwrap(), ids);
+        if removed == [0] {
+            // Reject a mixed selection, then retry with just the valid occurrence.
+            let before = store.queue_state().unwrap();
+            assert!(store.remove_queue_entries(&[ids[0], 9999]).is_err());
+            assert_eq!(store.queue_state().unwrap(), before);
+            assert_eq!(store.queue_ids().unwrap(), ids);
+        }
         store.remove_queue_entries(&requested).unwrap();
         let expected: Vec<_> = ids
             .iter()
@@ -97,17 +100,10 @@ fn queue_interval_deletion_preserves_survivors_positions_and_current_identity() 
             .collect();
         let page = store.queue_page(None, 0, 9).unwrap();
         assert_eq!(page.total, expected.len());
-        assert_eq!(
-            page.rows
-                .iter()
-                .map(|row| (row.id, row.position))
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .enumerate()
-                .map(|(position, &id)| (id, position))
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(page.rows.len(), expected.len());
+        for (position, (row, &id)) in page.rows.iter().zip(&expected).enumerate() {
+            assert_eq!((row.id, row.position), (id, position));
+        }
         let state = store.queue_state().unwrap();
         assert_eq!(
             state.current_id,

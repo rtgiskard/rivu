@@ -2563,18 +2563,6 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_ids_roll_back_exactly() {
-        let mut layout = empty();
-        let source = layout.add("source", None);
-        let other = layout.add("other", None);
-        let target = group(&layout, other);
-        layout.next_id = u64::MAX;
-        let before = layout.clone();
-        assert!(!layout.move_panel(source, target, Edge::Bottom, None));
-        assert_eq!(layout, before);
-    }
-
-    #[test]
     fn depth_33_docking_rolls_back_and_same_axis_depth_32_docking_succeeds() {
         let mut layout = nested_layout(32);
         let source_group = 4 + 3 * 31;

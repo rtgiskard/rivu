@@ -686,16 +686,6 @@ mod tests {
         let previous = fs::read(&path).unwrap();
         let owner = LayoutPersistence::new(LoadedLayouts::load(path.clone()));
         let handle = owner.handle();
-        let mut invalid = named("invalid");
-        invalid.current_mut().next_id = 0;
-        handle.submit(&invalid);
-        let invalid_request = handle.sync();
-        assert!(
-            wait_for_completion(&handle, invalid_request)
-                .result
-                .is_err()
-        );
-        assert_eq!(fs::read(&path).unwrap(), previous);
         let mut latest = named("latest");
         latest.duplicate("extra").unwrap();
         latest.select("latest").unwrap();

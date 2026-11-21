@@ -1494,22 +1494,25 @@ fn scan_accepts_a_child_of_a_configured_root() {
 }
 
 #[test]
-fn scan_rejects_prefix_sibling_of_a_configured_root() {
+fn scan_rejects_prefix_siblings_and_logical_parent_escapes() {
     let (_directory, mut core) = fixture();
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("Music");
     let sibling = parent.path().join("Music-other");
     std::fs::create_dir(&root).unwrap();
     std::fs::create_dir(&sibling).unwrap();
+    let parent_escape = root.join("..");
     edit_preferences(&mut core, |config| config.library_roots = vec![root]);
-    assert!(
-        core.command(Command::Scan {
-            paths: vec![sibling],
-            force: false,
-        })
-        .is_err()
-    );
-    assert!(core.active_scan.is_none());
+    for path in [sibling, parent_escape] {
+        assert!(
+            core.command(Command::Scan {
+                paths: vec![path],
+                force: false,
+            })
+            .is_err()
+        );
+        assert!(core.active_scan.is_none());
+    }
 }
 
 #[test]
@@ -1652,25 +1655,6 @@ fn cue_scan_can_reference_another_configured_root() {
     let track = core.track(id).unwrap();
     assert_eq!(track.path, source);
     assert_eq!(track.cue.as_ref().unwrap().sheet, sheet);
-}
-
-#[test]
-fn scan_rejects_a_logical_parent_escape_even_when_the_path_exists() {
-    let (_directory, mut core) = fixture();
-    let parent = tempfile::tempdir().unwrap();
-    let root = parent.path().join("Music");
-    std::fs::create_dir(&root).unwrap();
-    edit_preferences(&mut core, |config| {
-        config.library_roots = vec![root.clone()]
-    });
-    assert!(
-        core.command(Command::Scan {
-            paths: vec![root.join("..")],
-            force: false,
-        })
-        .is_err()
-    );
-    assert!(core.active_scan.is_none());
 }
 
 #[test]

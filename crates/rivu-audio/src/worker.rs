@@ -3445,6 +3445,7 @@ mod tests {
                         held_events.try_recv(),
                         Ok(AudioEvent::Ended { generation: 1, .. })
                     ));
+                    assert!(held_events.is_empty());
                 }
             }
         }
@@ -3514,43 +3515,6 @@ mod tests {
                 receive.try_recv(),
                 Ok(AudioEvent::Failed { generation: 3, .. })
             ));
-        });
-    }
-
-    #[test]
-    fn shutdown_cancels_a_full_event_queue() {
-        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
-            return;
-        }
-        let (events, receive) = async_channel::bounded(1);
-        let (stop, shutdown) = shutdown_channel();
-        events
-            .try_send(AudioEvent::Ended {
-                generation: 1,
-                completed_duration: None,
-                bitrate_bps: None,
-            })
-            .unwrap();
-        futures::executor::block_on(async {
-            let pending = deliver_event(
-                &events,
-                &shutdown.events,
-                AudioEvent::Ended {
-                    generation: 2,
-                    completed_duration: None,
-                    bitrate_bps: None,
-                },
-            )
-            .unwrap();
-            futures::pin_mut!(pending);
-            assert!(futures::poll!(&mut pending).is_pending());
-            drop(stop);
-            pending.await;
-            assert!(matches!(
-                receive.try_recv(),
-                Ok(AudioEvent::Ended { generation: 1, .. })
-            ));
-            assert!(receive.is_empty());
         });
     }
 

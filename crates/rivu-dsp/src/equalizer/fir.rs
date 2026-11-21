@@ -798,15 +798,7 @@ mod tests {
 
     #[test]
     fn channel_kernel_sharing_ignores_only_kind_irrelevant_controls() {
-        for kind in [
-            FilterKind::Peak,
-            FilterKind::LowShelf,
-            FilterKind::HighShelf,
-            FilterKind::LowPass,
-            FilterKind::HighPass,
-            FilterKind::BandPass,
-            FilterKind::Notch,
-        ] {
+        for kind in crate::equalizer::FILTER_KINDS {
             let left = EqBand {
                 kind,
                 gain_db: 6.0,

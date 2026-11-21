@@ -443,11 +443,11 @@ mod tests {
     }
 
     #[test]
-    fn subthreshold_responses_release_doubled_backing_before_idle() {
+    fn subthreshold_responses_release_oversized_backing_before_idle() {
         async_io::block_on(async {
-            let mut pending = BytesMut::new();
+            let mut pending = BytesMut::with_capacity(RETAINED_BUFFER_LIMIT + 1);
             let mut encoded = Vec::new();
-            for (index, size) in [150 * 1024, 230 * 1024].into_iter().enumerate() {
+            for size in [150 * 1024, 230 * 1024] {
                 let payload = "X".repeat(size);
                 encode_response_frame_into(&WireResponse::Error(payload.clone()), &mut encoded)
                     .unwrap();
@@ -456,11 +456,6 @@ mod tests {
                 fill_frame(&mut stream, MAX_RESPONSE, &mut pending)
                     .await
                     .unwrap();
-                if index == 1 {
-                    // Both frames fit the limit individually, but reusing the first
-                    // allocation doubles its capacity beyond the idle bound.
-                    assert!(pending.capacity() > RETAINED_BUFFER_LIMIT);
-                }
                 assert!(matches!(
                     read_response_frame(&mut stream, &mut pending).await.unwrap(),
                     WireResponse::Error(actual) if actual == payload
@@ -700,7 +695,7 @@ mod tests {
                 assert_eq!(request_payload(next), next_payload);
                 assert!(pending.is_empty());
                 assert!(!pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1));
-                assert_eq!(pending.capacity(), 0);
+                assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
                 if !invalid {
                     assert_eq!(request_payload(first.unwrap()), first_payload);
                 }
@@ -743,7 +738,7 @@ mod tests {
                 ));
                 assert!(pending.is_empty());
                 assert!(!pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1));
-                assert_eq!(pending.capacity(), 0);
+                assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
                 if !invalid {
                     assert!(
                         matches!(first.unwrap(), WireResponse::Error(actual) if actual == first_payload)

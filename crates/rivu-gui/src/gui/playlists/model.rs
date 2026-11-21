@@ -558,16 +558,6 @@ mod tests {
         assert_eq!(playlists.entries().playlist_id, None);
         assert!(playlists.entries().rows.is_empty());
     }
-    #[test]
-    fn metadata_row_refresh_does_not_invalidate_occurrence_identity() {
-        let mut playlists = PlaylistBrowser::default();
-        playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
-        playlists.select_entry(41, 3);
-        playlists.prepare_entries(1);
-        assert_eq!(playlists.selected_entry(), Some(41));
-        assert!(playlists.entry_ready());
-    }
 
     #[test]
     fn playlist_reorder_refresh_is_scoped_and_preserves_catalog_payload() {
@@ -717,12 +707,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_entry_clears_selection_not_an_unloaded_page() {
+    fn row_refresh_preserves_selection_until_location_lookup_confirms_removal() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
         playlists.prepare_entries(1);
         playlists.select_entry(41, 3);
         playlists.prepare_entries(1);
+        assert_eq!(playlists.selected_entry(), Some(41));
+        assert!(playlists.entry_ready());
+
         playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         assert_eq!(playlists.selected_entry(), Some(41));

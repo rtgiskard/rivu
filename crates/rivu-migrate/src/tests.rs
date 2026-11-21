@@ -56,7 +56,7 @@ fn replaygain_migration_preserves_schema_six_user_state_and_initializes_absent_t
     assert_eq!(track_snapshot(&backup), tracks);
     let mut expected = tracks;
     for track in &mut expected {
-        track.extend(std::iter::repeat_n(rusqlite::types::Value::Null, 1));
+        track.push(rusqlite::types::Value::Null);
     }
     assert_eq!(track_snapshot(&conn), expected);
     assert_eq!(occurrence_snapshot(&conn), occurrences);
