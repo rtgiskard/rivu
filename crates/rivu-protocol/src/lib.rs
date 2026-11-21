@@ -9,6 +9,9 @@ pub mod response;
 pub mod transport;
 pub mod wire;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 #[cfg(test)]
 mod tests;
 

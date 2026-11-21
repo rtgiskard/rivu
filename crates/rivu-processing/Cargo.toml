@@ -34,3 +34,5 @@ ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, fea
 blake3 = "1"
 futures = "0.3"
 rivu-audio = { path = "../rivu-audio", default-features = false, features = ["test-support"] }
+rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }

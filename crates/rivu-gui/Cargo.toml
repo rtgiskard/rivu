@@ -42,6 +42,8 @@ image = { version = "0.25", default-features = false, features = ["png", "gif", 
 [dev-dependencies]
 rivu = { path = "../..", default-features = false, features = ["test-support"] }
 rivu-metadata = { path = "../rivu-metadata", features = ["test-support"] }
+rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
 rivu-visuals = { path = "../rivu-visuals", features = ["test-support"] }
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 libc = "0.2"

@@ -20,4 +20,6 @@ unicode-segmentation = "1.13.3"
 
 [dev-dependencies]
 rivu = { path = "../..", default-features = false, features = ["test-support"] }
+rivu-protocol = { path = "../rivu-protocol", features = ["test-support"] }
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }
 tempfile = "3.27"

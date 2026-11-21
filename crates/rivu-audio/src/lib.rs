@@ -157,6 +157,8 @@ pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
 pub use speed::PlaybackSpeed;
 mod render;
 mod source;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod worker;
 
 pub use channels::Channel;

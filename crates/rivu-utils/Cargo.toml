@@ -8,6 +8,7 @@ description = "General-purpose filesystem and optional diagnostic utilities for 
 default = []
 logging = ["dep:anyhow", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-appender", "dep:tracing-subscriber"]
 terminal = ["dep:clap"]
+test-support = ["dep:tempfile"]
 
 [dependencies]
 libc = "0.2"
@@ -16,6 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"], opti
 clap = { version = "4", optional = true }
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
+tempfile = { version = "3.27", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-appender = { version = "0.2", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

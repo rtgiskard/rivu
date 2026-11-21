@@ -25,3 +25,4 @@ url = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }

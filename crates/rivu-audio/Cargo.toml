@@ -8,8 +8,8 @@ description = "Rivu audio decoding, playback, rendering and PCM capture engine"
 default = ["ffmpeg"]
 ffmpeg = ["dep:bindgen", "dep:libloading"]
 midi = ["dep:midly", "dep:rustysynth"]
-# Application fixtures exercise command admission and PCM ownership.
-test-support = []
+# Application fixtures exercise command admission, PCM ownership, and WAV input.
+test-support = ["dep:hound"]
 
 [dependencies]
 rivu-analysis = { path = "../rivu-analysis" }
@@ -24,6 +24,7 @@ async-channel = "2"
 async-io = "2"
 crossbeam-channel = "0.5"
 futures = "0.3"
+hound = { version = "3.5", optional = true }
 libc = "0.2"
 libloading = { version = "0.9", optional = true }
 midly = { version = "0.5.3", default-features = false, features = ["std", "strict"], optional = true }
@@ -43,6 +44,7 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 [dev-dependencies]
 hound = "3.5"
 tempfile = "3.27"
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }
 
 [build-dependencies]
 bindgen = { version = "0.73.2", default-features = false, features = ["runtime"], optional = true }

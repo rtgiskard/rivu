@@ -17,3 +17,4 @@ tracing = "0.1"
 
 [dev-dependencies]
 libc = "0.2"
+rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }

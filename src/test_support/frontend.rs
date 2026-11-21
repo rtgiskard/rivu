@@ -47,6 +47,11 @@ impl FrontendFixture {
     pub fn executor(&self) -> &std::sync::Arc<async_executor::Executor<'static>> {
         self.runtime.test_executor()
     }
+
+    /// The Core instance every client of this fixture binds to.
+    pub fn instance_id(&self) -> u32 {
+        self._owner.instance_id()
+    }
 }
 
 impl Drop for FrontendFixture {

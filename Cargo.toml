@@ -71,6 +71,8 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
 rivu-metadata = { path = "crates/rivu-metadata", features = ["test-support"] }
 rivu-processing = { path = "crates/rivu-processing", default-features = false, features = ["test-support"] }
+rivu-protocol = { path = "crates/rivu-protocol", features = ["test-support"] }
+rivu-utils = { path = "crates/rivu-utils", default-features = false, features = ["test-support"] }
 toml = "1.1.8"
 
 [build-dependencies]

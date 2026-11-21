@@ -5558,6 +5558,7 @@ dependencies = [
  "rivu-format",
  "rivu-presentation",
  "rivu-protocol",
+ "rivu-utils",
  "signal-hook 0.4.6",
  "tempfile",
  "unicode-segmentation",
