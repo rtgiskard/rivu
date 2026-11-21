@@ -864,10 +864,9 @@ impl Service {
             .as_deref()
             .map(|destination| self.export_destination(destination))
             .transpose()?;
-        config.validate()?;
-        let graph_order = target
-            .map(|target| config.processing_graph.ancestors(target))
-            .transpose()?;
+        config.validate_settings()?;
+        let graph = config.processing_graph.validated()?;
+        let graph_order = target.map(|target| graph.ancestors(target)).transpose()?;
         if let Some(selection) = profile {
             ensure!(
                 selection.start_seconds.is_finite()
