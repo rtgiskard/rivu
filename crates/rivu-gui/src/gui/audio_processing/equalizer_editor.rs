@@ -1655,20 +1655,17 @@ impl EqualizerEditor {
                 *frequency = minimum * (self.maximum_frequency / minimum).powf(index as f64 / 256.);
             }
         }
-        let config = if let Some(drag) = &self.drag {
+        if let Some(drag) = &self.drag {
             if let Some(band) = self.preview_config.bands.get_mut(drag.band) {
                 band.frequency_hz = drag.frequency;
                 band.gain_db = drag.gain;
             }
-            &self.preview_config
-        } else if self.released_band.is_some() {
-            // A released drag keeps its final response until the snapshot takes over.
-            &self.preview_config
-        } else if let Some(FieldDrag {
-            key: EqField::Band(index, field),
-            value: Some(value),
-            ..
-        }) = &self.field_drag
+        } else if self.released_band.is_none()
+            && let Some(FieldDrag {
+                key: EqField::Band(index, field),
+                value: Some(value),
+                ..
+            }) = &self.field_drag
         {
             let _ = EqualizerEdit::BandField {
                 index: *index,
@@ -1676,6 +1673,8 @@ impl EqualizerEditor {
             }
             .apply_config(&mut self.preview_config, Some(sample_rate))
             .expect("slider preview band still exists");
+        }
+        let config = if self.uses_response_preview() {
             &self.preview_config
         } else {
             &self.config
@@ -1754,18 +1753,31 @@ impl EqualizerEditor {
         }));
     }
 
+    fn uses_response_preview(&self) -> bool {
+        self.drag.is_some()
+            // A released node keeps its final response until the snapshot takes over.
+            || self.released_band.is_some()
+            || matches!(
+                self.field_drag,
+                Some(FieldDrag {
+                    key: EqField::Band(..),
+                    value: Some(_),
+                    ..
+                })
+            )
+    }
+
     fn realized_inputs(&self) -> Option<(&EqualizerConfig, u32, usize, usize, usize)> {
         let taps = target_fir_taps(&self.state, self.target)?;
         if !self.active || self.response_error.is_some() || self.response.is_empty() {
             return None;
         }
         let format = self.format?;
-        let config =
-            if self.drag.is_some() || self.field_drag.is_some() || self.released_band.is_some() {
-                &self.preview_config
-            } else {
-                &self.config
-            };
+        let config = if self.uses_response_preview() {
+            &self.preview_config
+        } else {
+            &self.config
+        };
         Some((
             config,
             format.known_sample_rate()?,
