@@ -160,9 +160,9 @@ impl Core {
             .graph
             .clone()
             .context("Not a graph run")?;
-        graph.ancestors(node)?;
         let track = self.processing_source(&result.track, result.stamp)?;
         if let Some(output) = result.graph_outputs.get(&node) {
+            graph.ancestors(node)?;
             let pcm = output.pcm.clone();
             self.establish_processing_source_context(&track)?;
             self.select_cached_processing_audition(id, pcm, Some(node))
@@ -301,7 +301,6 @@ impl Core {
                     config.processing_graph.revision == revision,
                     "Processing graph changed before export admission"
                 );
-                config.processing_graph.ancestors(target)?;
                 (self.track(track_id)?, target, None, None)
             }
             AudioExportSource::Frozen { id, target } => {
@@ -319,7 +318,6 @@ impl Core {
                     .graph
                     .clone()
                     .context("Not a graph run")?;
-                config.processing_graph.ancestors(target)?;
                 let track = self.processing_source(&result.track, result.stamp)?;
                 let cached = result.graph_outputs.get(&target).map(|output| {
                     rivu_processing::CachedGraphOutput {
