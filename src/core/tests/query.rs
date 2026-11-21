@@ -186,9 +186,11 @@ fn retained_query_waits_for_physical_reply_or_disconnect() {
 #[test]
 fn query_timeout_does_not_wait_for_physical_retirement() {
     let (handle, _analysis, requests) = pcm_fixture();
-    let result = futures::executor::block_on(
-        handle.query_with_timeout(Query::Track { track_id: 1 }, Duration::ZERO),
-    );
+    let result = futures::executor::block_on(handle.submit_query(
+        Query::Track { track_id: 1 },
+        None,
+        Some(Duration::ZERO),
+    ));
     assert!(matches!(result.result, Err(QueryError::Message(_))));
     let request = requests.try_recv().unwrap();
     assert!(

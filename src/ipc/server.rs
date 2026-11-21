@@ -3,7 +3,7 @@ use crate::core::CoreHandle;
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
 use async_io::Async;
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use futures::{
     FutureExt, StreamExt,
     io::{AsyncRead, AsyncReadExt},
@@ -11,8 +11,8 @@ use futures::{
 };
 use rand::RngExt;
 use rivu_protocol::transport::{
-    bridge_timeout, read_request_frame, timeout, timeout_at, write_error_frame,
-    write_frame_buffered,
+    bridge_timeout, consume_request_frame, decode_frame_length, read_into_pending, timeout,
+    timeout_at, write_error_frame, write_frame_buffered,
 };
 use rivu_protocol::wire::{
     HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, RequestTag, SessionState,
@@ -156,9 +156,9 @@ impl RequestReader {
         while self.complete == 0 {
             self.read_ahead(stream).await?;
         }
-        let before = self.pending.len();
-        let frame = read_request_frame(stream, &mut self.pending).await?;
-        self.complete -= before - self.pending.len();
+        let length = decode_frame_length(self.pending[..4].try_into().unwrap(), MAX_REQUEST)?;
+        let frame = consume_request_frame(&mut self.pending, length);
+        self.complete -= 4 + length;
         Ok(frame)
     }
 
@@ -195,14 +195,12 @@ impl RequestReader {
         let need = if tail < 4 {
             4 - tail
         } else {
-            let length = u32::from_le_bytes(
+            let length = decode_frame_length(
                 self.pending[self.complete..self.complete + 4]
                     .try_into()
                     .unwrap(),
-            ) as usize;
-            if length > MAX_REQUEST {
-                bail!("IPC frame exceeds maximum size");
-            }
+                MAX_REQUEST,
+            )?;
             4 + length - tail
         };
         let available = 4 + MAX_REQUEST - self.pending.len();
@@ -230,22 +228,9 @@ impl RequestReader {
                 self.pending.extend_from_slice(&prefix[..read]);
                 read
             } else {
-                self.pending.reserve(count);
-                let spare = self.pending.chunk_mut();
-                // SAFETY: reserve supplies count writable bytes. AsyncRead requires
-                // initialized memory; Pending reads do not advance visible length.
-                let bytes = unsafe {
-                    std::ptr::write_bytes(spare.as_mut_ptr(), 0, count);
-                    std::slice::from_raw_parts_mut(spare.as_mut_ptr(), count)
-                };
-                let read = stream.read(bytes).await.context("Reading IPC frame")?;
-                assert!(
-                    read <= count,
-                    "AsyncRead returned more bytes than its buffer"
-                );
-                // SAFETY: the count check bounds these initialized received bytes.
-                unsafe { self.pending.advance_mut(read) };
-                read
+                read_into_pending(stream, &mut self.pending, count)
+                    .await
+                    .context("Reading IPC frame")?
             };
             if read == 0 {
                 bail!("IPC connection closed while reading frame");
@@ -258,14 +243,12 @@ impl RequestReader {
             }
             let tail = self.pending.len() - self.complete;
             if tail >= 4 {
-                let length = u32::from_le_bytes(
+                let length = decode_frame_length(
                     self.pending[self.complete..self.complete + 4]
                         .try_into()
                         .unwrap(),
-                ) as usize;
-                if length > MAX_REQUEST {
-                    bail!("IPC frame exceeds maximum size");
-                }
+                    MAX_REQUEST,
+                )?;
                 if tail == 4 + length {
                     self.complete = self.pending.len();
                     self.deadline = None;
