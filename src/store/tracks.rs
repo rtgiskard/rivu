@@ -67,9 +67,12 @@ pub(super) const SOURCE_FILTER: &str = "tracks.id IN (
     SELECT tracks.id FROM json_each(?1,'$.directories') AS whole
     CROSS JOIN tracks WHERE whole.value=''
     UNION ALL
-    SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(
-        SELECT 1 FROM json_each(?1,'$.roots') AS root
-        WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0'))
+    SELECT id FROM tracks WHERE json_extract(?1,'$.all_other')=1
+    UNION ALL SELECT id FROM tracks WHERE path<json_extract(?1,'$.other[0]')
+    UNION ALL SELECT id FROM tracks WHERE path>=json_extract(?1,'$.other[1]')
+    UNION ALL SELECT t.id FROM json_each(json_extract(?1,'$.other[2]')) AS g
+    CROSS JOIN tracks AS t INDEXED BY tracks_path
+    WHERE t.path>=json_extract(g.value,'$[0]') AND t.path<json_extract(g.value,'$[1]')
 )";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
@@ -248,30 +251,70 @@ pub(crate) struct PlaybackSource {
     fingerprint: Option<blake3::Hash>,
 }
 
+// Root prefixes end in '/', so replacing it with '0' gives the exclusive
+// BINARY upper bound. Drop nested/duplicate roots before building the gaps.
+fn other_path_bounds(mut prefixes: Vec<String>) -> Result<Option<(String, String, String)>> {
+    prefixes.sort_unstable();
+    let mut roots = prefixes.into_iter();
+    let Some(first) = roots.next() else {
+        return Ok(None);
+    };
+    let upper = |prefix: &str| format!("{}0", prefix.trim_end_matches('/'));
+    let mut end = upper(&first);
+    let mut gaps = Vec::new();
+    for start in roots {
+        if start >= end {
+            let next_end = upper(&start);
+            if start != end {
+                gaps.push((end, start));
+            }
+            end = next_end;
+        }
+    }
+    Ok(Some((first, end, serde_json::to_string(&gaps)?)))
+}
+
 impl Store {
     /// Select each registered physical source once, in stable path order.
     pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
-        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
-        let mut statement = self.conn.prepare_cached(&format!(
-            "SELECT DISTINCT path FROM tracks WHERE 1=1{} ORDER BY path",
-            OTHER_SCOPE.replace("?4", "?1")
-        ))?;
-        Ok(statement
-            .query_map([roots], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
+        let bounds = other_path_bounds(other_root_prefixes(roots)?)?;
+        let (sql, bindings): (&str, &[&dyn rusqlite::ToSql]) = match &bounds {
+            Some((first, end, gaps)) => (
+                "SELECT DISTINCT path FROM tracks WHERE path<?1
+                 UNION ALL SELECT DISTINCT t.path FROM json_each(?3) AS g
+                 CROSS JOIN tracks AS t INDEXED BY tracks_path
+                 WHERE t.path>=json_extract(g.value,'$[0]') AND t.path<json_extract(g.value,'$[1]')
+                 UNION ALL SELECT DISTINCT path FROM tracks WHERE path>=?2 ORDER BY path",
+                &[first, end, gaps],
+            ),
+            None => ("SELECT DISTINCT path FROM tracks ORDER BY path", &[]),
+        };
+        Ok(self
+            .conn
+            .prepare_cached(sql)?
+            .query_map(bindings, |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub(crate) fn other_tracks_count(&self, roots: &[PathBuf]) -> Result<usize> {
-        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
-        self.cached_count(super::CountDomain::Other, &[&roots, "", "", ""], || {
-            Ok(self
-                .conn
-                .prepare_cached(&format!(
-                    "SELECT COUNT(*) FROM tracks WHERE 1=1{}",
-                    OTHER_SCOPE.replace("?4", "?1")
-                ))?
-                .query_row([&roots], |row| row.get::<_, i64>(0))? as usize)
+        let prefixes = other_root_prefixes(roots)?;
+        let key = serde_json::to_string(&prefixes)?;
+        self.cached_count(super::CountDomain::Other, &[&key, "", "", ""], || {
+            self.count_other_paths(prefixes)
         })
+    }
+
+    fn count_other_paths(&self, prefixes: Vec<String>) -> Result<usize> {
+        let Some((first, end, gaps)) = other_path_bounds(prefixes)? else {
+            return self.track_count();
+        };
+        Ok(self.conn.prepare_cached(
+            "SELECT (SELECT COUNT(*) FROM tracks WHERE path<?1)
+                  + (SELECT COUNT(*) FROM tracks WHERE path>=?2)
+                  + COALESCE((SELECT SUM((SELECT COUNT(*) FROM tracks
+                        WHERE path>=json_extract(g.value,'$[0]') AND path<json_extract(g.value,'$[1]')))
+                      FROM json_each(?3) AS g),0)"
+        )?.query_row(params![first, end, gaps], |row| row.get::<_, i64>(0))? as usize)
     }
 
     #[expect(
@@ -288,7 +331,8 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
-        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
+        let prefixes = other_root_prefixes(roots)?;
+        let roots = serde_json::to_string(&prefixes)?;
         let query = search_query(query);
         let total = self.cached_count(
             super::CountDomain::Other,
@@ -299,6 +343,9 @@ impl Store {
                 bool_key(missing),
             ],
             || {
+                if query.is_none() && favorite.is_none() && missing.is_none() {
+                    return self.count_other_paths(prefixes);
+                }
                 Ok(self
                     .conn
                     .prepare_cached(&format!(
@@ -960,16 +1007,21 @@ impl Store {
             .iter()
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
-        let roots = other_roots.map(other_root_prefixes).transpose()?;
+        let other = other_roots
+            .map(|roots| other_path_bounds(other_root_prefixes(roots)?))
+            .transpose()?
+            .flatten();
         #[derive(serde::Serialize)]
         struct Scope {
             directories: Vec<String>,
-            roots: Option<Vec<String>>,
+            all_other: bool,
+            other: Option<(String, String, String)>,
         }
         Ok((
             serde_json::to_string(&Scope {
                 directories: prefixes,
-                roots,
+                all_other: other_roots.is_some() && other.is_none(),
+                other,
             })?,
             ids,
         ))
