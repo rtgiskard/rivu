@@ -68,9 +68,9 @@ pub(super) const SOURCE_FILTER: &str = "tracks.id IN (
     CROSS JOIN tracks WHERE whole.value=''
     UNION ALL
     SELECT id FROM tracks WHERE json_extract(?1,'$.all_other')=1
-    UNION ALL SELECT id FROM tracks WHERE path<json_extract(?1,'$.other[0]')
-    UNION ALL SELECT id FROM tracks WHERE path>=json_extract(?1,'$.other[1]')
-    UNION ALL SELECT t.id FROM json_each(json_extract(?1,'$.other[2]')) AS g
+    UNION ALL SELECT id FROM tracks WHERE path<json_extract(?1,'$.other.first')
+    UNION ALL SELECT id FROM tracks WHERE path>=json_extract(?1,'$.other.end')
+    UNION ALL SELECT t.id FROM json_each(?1,'$.other.gaps') AS g
     CROSS JOIN tracks AS t INDEXED BY tracks_path
     WHERE t.path>=json_extract(g.value,'$[0]') AND t.path<json_extract(g.value,'$[1]')
 )";
@@ -263,14 +263,19 @@ pub(crate) struct PlaybackSource {
     fingerprint: Option<blake3::Hash>,
 }
 
+#[derive(serde::Serialize)]
+struct OtherPathBounds {
+    first: String,
+    end: String,
+    gaps: Vec<(String, String)>,
+}
+
 // Root prefixes end in '/', so replacing it with '0' gives the exclusive
 // BINARY upper bound. Drop nested/duplicate roots before building the gaps.
-fn other_path_bounds(mut prefixes: Vec<String>) -> Result<Option<(String, String, String)>> {
+fn other_path_bounds(mut prefixes: Vec<String>) -> Option<OtherPathBounds> {
     prefixes.sort_unstable();
     let mut roots = prefixes.into_iter();
-    let Some(first) = roots.next() else {
-        return Ok(None);
-    };
+    let first = roots.next()?;
     let upper = |prefix: &str| format!("{}0", prefix.trim_end_matches('/'));
     let mut end = upper(&first);
     let mut gaps = Vec::new();
@@ -283,22 +288,26 @@ fn other_path_bounds(mut prefixes: Vec<String>) -> Result<Option<(String, String
             end = next_end;
         }
     }
-    Ok(Some((first, end, serde_json::to_string(&gaps)?)))
+    Some(OtherPathBounds { first, end, gaps })
 }
 
 impl Store {
     /// Select each registered physical source once, in stable path order.
     pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
-        let bounds = other_path_bounds(other_root_prefixes(roots)?)?;
+        let bounds = other_path_bounds(other_root_prefixes(roots)?);
+        let encoded;
         let (sql, bindings): (&str, &[&dyn rusqlite::ToSql]) = match &bounds {
-            Some((first, end, gaps)) => (
-                "SELECT DISTINCT path FROM tracks WHERE path<?1
+            Some(OtherPathBounds { first, end, gaps }) => {
+                encoded = serde_json::to_string(gaps)?;
+                (
+                    "SELECT DISTINCT path FROM tracks WHERE path<?1
                  UNION ALL SELECT DISTINCT t.path FROM json_each(?3) AS g
                  CROSS JOIN tracks AS t INDEXED BY tracks_path
                  WHERE t.path>=json_extract(g.value,'$[0]') AND t.path<json_extract(g.value,'$[1]')
                  UNION ALL SELECT DISTINCT path FROM tracks WHERE path>=?2 ORDER BY path",
-                &[first, end, gaps],
-            ),
+                    &[first, end, &encoded],
+                )
+            }
             None => ("SELECT DISTINCT path FROM tracks ORDER BY path", &[]),
         };
         Ok(self
@@ -317,7 +326,7 @@ impl Store {
     }
 
     fn count_other_paths(&self, prefixes: Vec<String>) -> Result<usize> {
-        let Some((first, end, gaps)) = other_path_bounds(prefixes)? else {
+        let Some(OtherPathBounds { first, end, gaps }) = other_path_bounds(prefixes) else {
             return self.track_count();
         };
         Ok(self.conn.prepare_cached(
@@ -326,7 +335,7 @@ impl Store {
                   + COALESCE((SELECT SUM((SELECT COUNT(*) FROM tracks
                         WHERE path>=json_extract(g.value,'$[0]') AND path<json_extract(g.value,'$[1]')))
                       FROM json_each(?3) AS g),0)"
-        )?.query_row(params![first, end, gaps], |row| row.get::<_, i64>(0))? as usize)
+        )?.query_row(params![first, end, serde_json::to_string(&gaps)?], |row| row.get::<_, i64>(0))? as usize)
     }
 
     #[expect(
@@ -1063,14 +1072,14 @@ impl Store {
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
         let other = other_roots
-            .map(|roots| other_path_bounds(other_root_prefixes(roots)?))
+            .map(other_root_prefixes)
             .transpose()?
-            .flatten();
+            .and_then(other_path_bounds);
         #[derive(serde::Serialize)]
         struct Scope {
             directories: Vec<String>,
             all_other: bool,
-            other: Option<(String, String, String)>,
+            other: Option<OtherPathBounds>,
         }
         Ok((
             serde_json::to_string(&Scope {

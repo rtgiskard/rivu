@@ -203,13 +203,10 @@ fn other_bulk_sources_union_with_directories_and_ids_without_duplicate_members()
     let other = store.create_playlist("Subset").unwrap();
     assert!(
         store
-            .insert_playlist_sources(other, &[], &[], Some(&roots), 0)
+            .insert_playlist_sources(other, &[], &[], Some(&["/music".into(), "/音楽".into()]), 0)
             .unwrap()
     );
-    assert_eq!(
-        store.playlist_track_ids(other, 100).unwrap(),
-        [3, 4, 5, 6, 7]
-    );
+    assert_eq!(store.playlist_track_ids(other, 100).unwrap(), [3, 5, 6, 7]);
 }
 
 #[cfg(unix)]
