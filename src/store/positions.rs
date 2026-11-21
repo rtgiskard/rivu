@@ -25,7 +25,7 @@ pub(super) fn insert_tracks(
     tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
     if let Some(directories) = directories {
         tx.execute(&format!(
-            "INSERT INTO insertion_tracks SELECT row_number() OVER (ORDER BY tracks.id)-1,tracks.id FROM tracks WHERE {} ORDER BY tracks.id",
+            "INSERT INTO insertion_tracks SELECT tracks.id,tracks.id FROM tracks WHERE {} ORDER BY tracks.id",
             super::tracks::SOURCE_FILTER,
         ), params![directories, ids])?;
     } else {

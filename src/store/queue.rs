@@ -467,7 +467,13 @@ impl Store {
         // Removed slots are the original non-first occurrences, even when the
         // playing occurrence is relocated to replace its track's first one.
         let positions = tx
-            .prepare("WITH ranked AS (SELECT position,row_number() OVER (PARTITION BY track_id ORDER BY position,id) AS occurrence FROM playlist_entries WHERE playlist_id=0) SELECT position FROM ranked WHERE occurrence>1 ORDER BY position")?
+            .prepare("WITH repeated AS (
+                SELECT track_id,MIN(position) AS first FROM playlist_entries INDEXED BY playlist_order
+                WHERE playlist_id=0 GROUP BY track_id HAVING COUNT(*)>1
+             ) SELECT e.position FROM repeated
+             CROSS JOIN playlist_entries AS e INDEXED BY playlist_track_lookup
+             WHERE e.playlist_id=0 AND e.track_id=repeated.track_id AND e.position>repeated.first
+             ORDER BY e.position")?
             .query_map([], |row| row.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if positions.is_empty() {
