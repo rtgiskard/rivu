@@ -33,6 +33,7 @@
 
 - Permanent tests MUST be deterministic, isolated, independently runnable, and full-suite-safe
 - Make environment dependencies explicit and do not rely on developer data or incidental timing
+- Base permanent tests on supported inputs, reachable event sequences, or explicit integrity and resource guarantees. Assert the required outcome, not an incidental implementation choice.
 
 ## Commits
 
