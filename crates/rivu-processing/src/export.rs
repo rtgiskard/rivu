@@ -59,19 +59,19 @@ pub(super) fn prepare_encoded_export(
         request,
         cancel,
         |writer| {
-            let mut block = vec![0.0; 8192 * usize::from(source.channels())];
+            let channels = usize::from(source.channels());
+            let total = source.frames();
             let mut position = 0;
-            progress(0, source.frames());
-            while position < source.frames() {
-                check_cancel(cancel)?;
-                let frames = source.read_frames(position, &mut block);
+            progress(0, total);
+            while position < total {
+                let block = source.frame_block(position);
                 ensure!(
-                    frames > 0,
+                    !block.is_empty(),
                     "Export PCM ended before its declared frame count"
                 );
-                writer.write_frames(&block[..frames * usize::from(source.channels())])?;
-                position += frames as u64;
-                progress(position, source.frames());
+                writer.write_frames(block)?;
+                position += (block.len() / channels) as u64;
+                progress(position, total);
             }
             Ok(())
         },

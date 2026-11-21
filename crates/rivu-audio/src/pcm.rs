@@ -122,6 +122,22 @@ impl PcmAudio {
                 .sum::<u64>()
     }
 
+    /// Borrows contiguous complete frames from `start`, bounded by this PCM view.
+    /// Returns an empty slice at or beyond the end; block lengths may vary.
+    pub fn frame_block(&self, start: u64) -> &[f32] {
+        if start >= self.frames {
+            return &[];
+        }
+        let channels = self.storage.layout.len();
+        let sample = (self.start + start) as usize * channels;
+        let block = self.storage_block(sample, CHUNK_FRAMES * channels);
+        &block[..block.len().min((self.frames - start) as usize * channels)]
+    }
+
+    fn storage_block(&self, sample: usize, chunk_samples: usize) -> &[f32] {
+        &self.storage.chunks[sample / chunk_samples].samples[sample % chunk_samples..]
+    }
+
     /// Copies complete frames into caller-owned storage, without allocating.
     pub fn read_frames(&self, start: u64, output: &mut [f32]) -> usize {
         let channels = self.storage.layout.len();
@@ -134,10 +150,9 @@ impl PcmAudio {
         let mut written = 0;
         let count_samples = count * channels;
         while written < count_samples {
-            let chunk = &self.storage.chunks[sample / chunk_samples].samples;
-            let offset = sample % chunk_samples;
-            let take = (count_samples - written).min(chunk.len() - offset);
-            output[written..written + take].copy_from_slice(&chunk[offset..offset + take]);
+            let block = self.storage_block(sample, chunk_samples);
+            let take = (count_samples - written).min(block.len());
+            output[written..written + take].copy_from_slice(&block[..take]);
             sample += take;
             written += take;
         }

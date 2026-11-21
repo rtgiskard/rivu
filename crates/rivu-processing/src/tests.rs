@@ -1875,6 +1875,44 @@ fn explicit_wav_export_is_atomic_and_no_clobber() {
 }
 
 #[test]
+fn retained_wav_export_respects_pcm_slice_across_blocks() {
+    use audio::Channel::{FrontLeft, FrontRight};
+
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("slice.wav");
+    let cancel = AtomicBool::new(false);
+    let input: Vec<_> = (0..20_000).map(|sample| sample as f32 / 32768.0).collect();
+    let mut builder = audio::PcmBuilder::new(
+        48_000,
+        Arc::from([FrontLeft, FrontRight]),
+        audio::PcmBudget::new(128 * 1024),
+    )
+    .unwrap();
+    builder.push(&input).unwrap();
+    let pcm = builder.finish().unwrap();
+    for (start, frames) in [(4079, 4200), (10_000, 0)] {
+        let view = pcm.slice_frames(start, frames).unwrap();
+        let mut progress = 0;
+        let (temporary, _) = prepare_export(&view, &destination, &cancel, |done, total| {
+            assert_eq!(total, frames);
+            assert!((progress..=total).contains(&done));
+            progress = done;
+        })
+        .unwrap();
+        assert_eq!(progress, frames);
+        let decoded = hound::WavReader::open(temporary.path())
+            .unwrap()
+            .samples::<f32>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            decoded,
+            input[(start * 2) as usize..((start + frames) * 2) as usize]
+        );
+    }
+}
+
+#[test]
 fn wav_export_preserves_side_speakers_and_reorders_custom_frames() {
     use audio::Channel::*;
     let directory = tempfile::tempdir().unwrap();
